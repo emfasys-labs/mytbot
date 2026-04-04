@@ -1,0 +1,74 @@
+# docker-compose.yml
+# ===================
+# Start everything: docker-compose up -d
+# Stop everything:  docker-compose down
+
+services:
+
+  # ── PostgreSQL + TimescaleDB ─────────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: mytbot_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mytbot}
+      POSTGRES_USER: ${POSTGRES_USER:-mytbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mytbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mytbot_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Trading Bot ──────────────────────────────────────────────────────────────
+  bot:
+    build: .
+    container_name: mytbot_bot
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    command: python main.py
+
+  # ── Dashboard API ────────────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: mytbot_api
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    command: uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
+  redis_data:

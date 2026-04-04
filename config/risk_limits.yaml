@@ -1,0 +1,39 @@
+# config/risk_limits.yaml
+# ========================
+# All risk thresholds in one place.
+# Edit this file to adjust limits — no code changes needed.
+# Risk engine reads this at startup and on reload.
+
+# ── Position limits ───────────────────────────────────────────────────────────
+max_position_pct: 0.10          # Max 10% of portfolio in any single position
+max_concentration_pct: 0.20     # Max 20% in any single asset across all positions
+max_gross_exposure_pct: 0.80    # Max 80% of portfolio deployed at once
+
+# ── Loss limits ───────────────────────────────────────────────────────────────
+max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio
+max_drawdown_pct: 0.10          # Stop trading if drawdown from HWM > 10%
+max_loss_per_trade_pct: 0.01    # Max 1% loss per individual trade
+
+# ── Consecutive losses ────────────────────────────────────────────────────────
+max_consecutive_losses: 3       # Enter cooldown after 3 losses in a row
+cooldown_minutes: 60            # Wait 60 minutes before trading again
+
+# ── Signal quality ────────────────────────────────────────────────────────────
+min_signal_confidence: 0.55     # Minimum confidence score to proceed (0.0-1.0)
+max_trades_per_day: 20          # Hard cap on daily trade count
+
+# ── Asset class limits ────────────────────────────────────────────────────────
+max_crypto_pct: 0.30            # Max 30% of portfolio in crypto
+max_single_stock_pct: 0.10      # Max 10% in any single stock
+max_bond_pct: 0.50              # Max 50% in bonds
+
+# ── Execution limits ──────────────────────────────────────────────────────────
+max_slippage_pct: 0.005         # Reject if expected slippage > 0.5%
+min_liquidity_usd: 1000000      # Only trade assets with > $1M daily volume
+max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
+
+# ── Kill switch ───────────────────────────────────────────────────────────────
+# Kill switch is activated programmatically or via dashboard.
+# It can only be reset manually. Never auto-reset.
+auto_kill_on_api_failure: true
+auto_kill_on_reconciliation_failure: true
