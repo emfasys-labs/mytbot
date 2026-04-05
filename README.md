@@ -55,6 +55,10 @@ docker compose up -d
 
 **Postgres via Docker:** `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` in `.env` must match what Compose passes into the container (defaults in `docker-compose.yml` are `mytbot` / `changeme` / `mytbot`). The app connects to `localhost` on `POSTGRES_PORT` (default `5432`).
 
+**Migrations:** Alembic uses the same `POSTGRES_*` vars (sync `psycopg2` URL). From repo root: `alembic upgrade head`. See `docs/M2_READINESS.md` for stamp vs upgrade on an existing DB.
+
+**Tests:** `pytest` (smoke tests under `tests/`). Requires `pip install -r requirements.txt`.
+
 ## Build Plan
 
 | Milestone | Focus | Status |

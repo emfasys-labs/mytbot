@@ -31,6 +31,9 @@ Everything is logged. AI (Claude API) classifies news and generates rationale �
 - `storage/models.py`        — database schema
 - `config/risk_limits.yaml`  — all risk thresholds (editable without code change)
 - `docs/DECISIONS.md`        — architectural decision log
+- `docs/M2_READINESS.md`     — M1 verification summary + M2 prep checklist
+- `alembic/`                 — DB migrations (URL from POSTGRES_* in env.py)
+- `tests/`                   — pytest smoke tests
 - `.cursorrules`             — Cursor AI alignment rules
 
 ## CURRENT STATE

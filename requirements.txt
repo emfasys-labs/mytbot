@@ -39,8 +39,11 @@ anthropic==0.28.0               # Claude API for news classification
 # 2.0.30 breaks on Python 3.13 (__firstlineno__ vs FastIntFlag); use 2.0.36+.
 sqlalchemy>=2.0.36,<3
 asyncpg>=0.30.0                 # Async PostgreSQL driver (0.29 lacks cp313 wheels on Windows)
+psycopg2-binary>=2.9.9,<3       # Sync driver for Alembic CLI (migrations)
 redis==5.0.4
 alembic==1.13.1                 # Database migrations
+pytest>=8.0,<9                  # Test runner (M2+ CI)
+pytest-asyncio>=0.24,<1        # Async tests (storage.db, brokers)
 
 # ── API & Dashboard ───────────────────────────────────────────────────────────
 fastapi==0.111.0
