@@ -30,6 +30,9 @@ logs/
 *.db
 *.sqlite
 
+# Claude / local worktrees (do not commit nested copies)
+.claude/
+
 # IDE
 .vscode/
 .idea/

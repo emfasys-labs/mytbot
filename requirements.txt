@@ -1,10 +1,13 @@
 # requirements.txt
 # =================
 # Install: pip install -r requirements.txt
+#
+# Python 3.12+ supported; 3.13 needs wheels for pydantic-core / asyncpg (see Core + Storage).
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
-pydantic==2.7.1
+# pydantic 2.7.x pulls pydantic-core that builds from source and fails on Python 3.13 without Rust/PyO3 fixes.
+pydantic>=2.10.0,<3
 loguru==0.7.2
 pyyaml==6.0.1
 aiohttp==3.9.5
@@ -16,23 +19,26 @@ python-binance==1.0.19          # Binance
 alpaca-py==0.25.0               # Alpaca
 
 # ── Data & Features ───────────────────────────────────────────────────────────
-pandas==2.2.2
-numpy==1.26.4
-pandas-ta==0.3.14b              # Technical indicators
-yfinance==0.2.40                # Historical data (research/backtest)
+# pandas-ta 0.3.14b was removed from PyPI; 0.4.71b0 pulls numpy>=2.2.6, pandas>=2.3.2 (OK on Py3.13).
+numpy>=2.2.6,<3
+pandas>=2.3.2,<4
+pandas-ta==0.4.71b0             # Technical indicators (pre-release wheel on PyPI)
+yfinance>=0.2.40                # Historical data (research/backtest)
 
 # ── ML & Strategy ─────────────────────────────────────────────────────────────
-scikit-learn==1.5.0
-xgboost==2.0.3
-lightgbm==4.3.0
-vectorbt==0.26.1                # Backtesting
+# Relaxed for Python 3.13 + numpy 2.x compatibility (vectorbt may lag; install if resolver allows).
+scikit-learn>=1.6.0
+xgboost>=2.1.0
+lightgbm>=4.5.0
+vectorbt>=0.26.1
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 anthropic==0.28.0               # Claude API for news classification
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-sqlalchemy==2.0.30
-asyncpg==0.29.0                 # Async PostgreSQL driver
+# 2.0.30 breaks on Python 3.13 (__firstlineno__ vs FastIntFlag); use 2.0.36+.
+sqlalchemy>=2.0.36,<3
+asyncpg>=0.30.0                 # Async PostgreSQL driver (0.29 lacks cp313 wheels on Windows)
 redis==5.0.4
 alembic==1.13.1                 # Database migrations
 

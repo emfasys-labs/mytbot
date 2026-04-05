@@ -1,7 +1,19 @@
 # docker-compose.yml
 # ===================
-# Start everything: docker-compose up -d
-# Stop everything:  docker-compose down
+# Local Postgres (TimescaleDB image) + Redis. Compose reads `.env` in this folder
+# for ${POSTGRES_*:-defaults} — keep POSTGRES_PASSWORD in `.env` in sync with the app.
+#
+# Typical dev (database only — recommended for M1 / test_ibkr.py on the host):
+#   docker compose up -d
+#
+# Same thing, explicit:
+#   docker compose up -d db redis
+#
+# Stop and remove containers (keeps volumes / data):
+#   docker compose down
+#
+# Optional: run bot + API in containers when the stack is ready:
+#   docker compose --profile app up -d --build
 
 services:
 
@@ -14,12 +26,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-mytbot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mytbot}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mytbot} -d ${POSTGRES_DB:-mytbot}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -29,7 +41,7 @@ services:
     image: redis:7-alpine
     container_name: mytbot_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -39,8 +51,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Trading Bot ──────────────────────────────────────────────────────────────
+  # ── Trading Bot (optional — not started by default) ─────────────────────────
   bot:
+    profiles: [app]
     build: .
     container_name: mytbot_bot
     env_file: .env
@@ -54,8 +67,9 @@ services:
     restart: unless-stopped
     command: python main.py
 
-  # ── Dashboard API ────────────────────────────────────────────────────────────
+  # ── Dashboard API (optional — not started by default) ───────────────────────
   api:
+    profiles: [app]
     build: .
     container_name: mytbot_api
     env_file: .env

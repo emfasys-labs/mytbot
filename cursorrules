@@ -1,0 +1,121 @@
+# .cursorrules
+# =============
+# This file is read by Cursor AI on every interaction.
+# It defines the architecture, patterns, and rules for this codebase.
+# Never delete or contradict these rules in generated code.
+
+## PROJECT
+This is `mytbot` — a personal autonomous multi-asset trading system.
+It trades stocks, bonds, ETFs, forex, and crypto across multiple brokers.
+It is not a public product. It is built for one user (the owner).
+
+## LANGUAGE & RUNTIME
+- Python 3.12+ only
+- Async/await throughout — all broker calls, all I/O must be async
+- Type hints on every function signature, always
+- dataclasses for data models, never plain dicts for structured data
+- Decimal (not float) for all prices, quantities, and monetary values
+
+## THE MOST IMPORTANT RULE — BROKER ADAPTER PATTERN
+Every broker (IBKR, Kraken, Binance, Alpaca, Bybit, etc.) implements
+the abstract interface defined in `brokers/base.py`. This interface
+is FROZEN — never change it. New brokers adapt to it.
+
+When writing broker code:
+- All broker-specific logic stays INSIDE the adapter file
+- Nothing outside `brokers/` should import from a specific adapter
+- Always import from `brokers/registry.py`, never from adapter files directly
+- To add a new broker: copy `brokers/_template/adapter.py`, implement 6 methods,
+  add one line to `brokers/registry.py`. Zero other files change.
+
+## RISK ENGINE IS LAW
+- `risk/engine.py` has veto power over every trade
+- No order EVER bypasses the risk engine
+- Never add a parameter, flag, or shortcut that skips risk checks
+- Risk decisions are always logged — approved AND rejected
+
+## EXECUTION RULES
+- All orders use idempotency keys (client_order_id = UUID)
+- Never place an order without a client_order_id
+- Retry logic must check for existing order before retrying
+- In paper_mode=True, log orders but never send to broker API
+
+## AI LAYER (ai/)
+- Claude API is used for news classification and trade rationale only
+- AI never places orders, never has direct access to execution engine
+- AI output is always a score/classification that feeds INTO the signal engine
+- AI output is always validated and bounded before use
+
+## DATA MODELS
+- Prices, quantities, fees: always `Decimal`, never `float`
+- Timestamps: always UTC, always ISO 8601 string or datetime with timezone
+- Symbols: use broker-native symbols inside adapters, standardised symbols everywhere else
+- All database writes go through SQLAlchemy models in `storage/models.py`
+
+## LOGGING
+- Use `loguru` for all logging, never `print()`
+- Every signal generated → log it
+- Every risk decision → log it (approved AND rejected)
+- Every order placed → log it
+- Every fill received → log it
+- Every error → log it with full context
+- Format: `logger.info(f"ACTION | symbol | key=value | key=value")`
+
+## SECRETS & SECURITY
+- API keys ONLY from environment variables via `os.getenv()`
+- Never hardcode credentials, tokens, or secrets anywhere
+- Never log API keys, secrets, or account numbers
+- `.env` is gitignored — always use `.env.example` for new variables
+
+## PAPER MODE
+- `paper_mode: bool` is a parameter on every broker adapter
+- When paper_mode=True: simulate fills, never call broker order endpoints
+- The system starts in paper mode by default
+- `APP_ENV=live` in `.env` is the only way to enable live trading
+
+## BUILD PLAN — CURRENT MILESTONE
+The project follows 8 milestones. **M1 — Foundation is complete.** Current focus: **M2 — Data pipeline**.
+
+M1 deliverable (implemented):
+- `main.py` — concurrent IBKR + Kraken streams, terminal output, optional Postgres (`storage/db.py` → `price_history`)
+- Optional IBKR paper crypto order + `orders` row: `M1_IBKR_PLACE_ORDER=1` or `python test_ibkr.py`
+
+Proceed with M2 tasks per `docs/BUILD_PLAN.md` (ingestion loops, feature store, validation).
+
+## FOLDER STRUCTURE RULES
+- `brokers/`     — adapter layer only. No business logic.
+- `strategies/`  — signal generation only. No broker calls.
+- `risk/`        — risk checks only. No order placement.
+- `execution/`   — order management only. No strategy logic.
+- `ai/`          — Claude API calls only. No trading decisions.
+- `storage/`     — database models and queries only.
+- `api/`         — FastAPI endpoints only. No business logic.
+- `config/`      — configuration files only.
+- `docs/`        — documentation only.
+
+Cross-layer imports are only allowed in this direction:
+data → features → strategies → signals → risk → execution → portfolio
+
+Never import "upward" (e.g. risk importing from strategies).
+
+## TESTING
+- Every adapter method gets a unit test in `tests/brokers/`
+- Risk engine checks each get an individual test
+- Use pytest + pytest-asyncio
+- Mock broker API calls — never hit real APIs in tests
+- Paper mode must be tested separately from live mode simulation
+
+## CODE STYLE
+- Black formatting
+- Max line length: 100
+- Docstrings on every class and every public method
+- No commented-out code in commits
+- TODO comments must include milestone: `# TODO M2: implement this`
+
+## WHAT NOT TO BUILD (yet)
+- No options strategies (M8+)
+- No leverage or margin (M8+)
+- No RL/online learning agents
+- No self-modifying strategies
+- No automated withdrawals or fund transfers
+- No public-facing features — this is a private system

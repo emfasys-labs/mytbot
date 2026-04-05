@@ -1,0 +1,12 @@
+# requirements-ibkr-test.txt
+# =========================
+# Smallest set of packages to run:  python test_ibkr.py
+# Use when you do not need the full ML / FastAPI stack yet (especially on Python 3.13).
+#
+#   pip install -r requirements-ibkr-test.txt
+
+python-dotenv>=1.0.1
+loguru>=0.7.2
+ib_insync==0.9.86
+sqlalchemy>=2.0.36
+asyncpg>=0.30.0
