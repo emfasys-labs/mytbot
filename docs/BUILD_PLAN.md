@@ -21,6 +21,30 @@
 
 ---
 
+## Research Integration (2026-04)
+
+The external research package is now tracked in:
+- `docs/trading_research.md`
+- `docs/requirements_research.txt`
+- `docs/TECH_STACK.md`
+
+Plan impact:
+- Milestone ordering **unchanged** (M1 -> M8).
+- Architecture layers **unchanged**.
+- Scope depth increases inside milestones:
+  - **M2:** add fractional differencing, Hurst, GARCH, and funding-rate features.
+  - **M3:** enforce purged CV + anti-overfitting gates (DSR/PBO/triple barrier).
+  - **M4:** add half-Kelly/CVaR-oriented risk math.
+  - **M5:** add square-root impact + execution cost realism.
+  - **M6+:** evolve to hybrid local/API AI routing when justified by volume/cost.
+
+Mandatory gates from research:
+1. Fractional differencing in M2 before ML model training.
+2. Purged/combinatorial CV in M3 before strategy acceptance.
+3. Square-root impact model in M5 before live capital scale-up.
+
+---
+
 ## M1 — Foundation
 **Duration:** Weeks 1–3
 **Goal:** Connect to IBKR and Kraken. Read live data. Place a paper order. Prove the adapter pattern works.

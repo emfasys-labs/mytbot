@@ -17,6 +17,24 @@ brokers — all without human intervention.
 
 ---
 
+## Research-Driven Architecture Notes (2026-04)
+
+The research package does **not** change the top-level system architecture.
+It strengthens implementation details within existing layers:
+
+- Data/Feature layer: add fractional differencing, Hurst, GARCH, VPIN, funding-rate features.
+- Strategy/Validation layer: add purged CV, triple-barrier labels, DSR/PBO gates.
+- Risk layer: add half-Kelly/CVaR methods alongside existing hard limits.
+- Execution layer: add square-root impact and Almgren-Chriss style scheduling.
+- AI layer: move gradually to hybrid local/API routing as token volume grows.
+
+Reference docs:
+- `docs/trading_research.md`
+- `docs/TECH_STACK.md`
+- `docs/requirements_research.txt`
+
+---
+
 ## System Layers (top to bottom)
 
 ```

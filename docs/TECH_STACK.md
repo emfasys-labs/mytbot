@@ -1,8 +1,8 @@
 # TECH_STACK.md
 # ==============
 # Every technology choice with justification.
-# Before adding a new library, check here first.
-# If something isn't listed, it probably shouldn't be added yet.
+# Updated to incorporate: "Predictive and decision-making technologies
+# for multi-asset algorithmic trading" research report.
 
 ---
 
@@ -10,9 +10,9 @@
 
 | Technology | Version | Why |
 |-----------|---------|-----|
-| Python | 3.12+ | Best quant/finance ecosystem. pandas, numpy, TA-Lib all native. Async support for WebSocket streams. |
-| asyncio | stdlib | All broker API calls are async. Concurrent WebSocket streams without threading complexity. |
-| aiohttp | 3.9+ | Async HTTP client for REST API calls to brokers and news feeds. |
+| Python | 3.12+ | Best quant/finance ecosystem. All statistical, ML, broker libraries native. Async for WebSocket. |
+| asyncio | stdlib | All broker calls async. Concurrent WebSocket streams without threading. |
+| aiohttp | 3.9+ | Async HTTP client for REST API calls. |
 
 ---
 
@@ -20,61 +20,218 @@
 
 | Library | Broker | Why |
 |---------|--------|-----|
-| ib_insync | IBKR | Best IBKR Python library. Wraps TWS API cleanly with async support. Widely used in quant community. |
-| python-kraken-sdk | Kraken | Official Kraken Python SDK. REST + WebSocket. Maintained by Kraken team. |
-| python-binance | Binance | Most mature Binance library. Handles rate limits, reconnection automatically. |
-| alpaca-py | Alpaca | Official Alpaca SDK. Clean async API, paper/live toggle built in. |
-
-**Adding a new broker SDK:** install it, import it inside the adapter file only.
-Never import a broker SDK outside its adapter folder.
+| ib_insync | IBKR | Best IBKR Python library. Async support. Note: research report mentions `ib_async` as potential rename — monitor. |
+| python-kraken-sdk | Kraken | Official Kraken SDK. REST + WebSocket. |
+| python-binance | Binance | Most mature Binance library. Rate limit handling built in. |
+| alpaca-py | Alpaca | Official Alpaca SDK. Paper/live toggle. Best paper trading environment. |
+| ccxt | Multi-exchange | 107+ crypto exchanges unified. Essential for funding rate data and cross-exchange arbitrage. |
 
 ---
 
-## Data & Feature Engineering
+## Data & Market Data
 
 | Library | Why |
 |---------|-----|
-| pandas | Core data manipulation. OHLCV processing, feature engineering, rolling windows. |
-| numpy | Numerical operations. Used internally by pandas and TA-Lib. |
-| pandas-ta | Technical indicators — RSI, MACD, ATR, Bollinger Bands, momentum, 150+ indicators. |
-| yfinance | Historical price data for backtesting and model training. Free, reliable for research. |
-| Polygon.io (API) | Professional-grade market data. Used when yfinance isn't sufficient for production. |
-| FRED API | Free Federal Reserve macro data — interest rates, CPI, employment. Essential for bonds/forex signals. |
-| NewsAPI | Real-time news ingestion. Reuters, Bloomberg headlines, earnings calendars. |
+| pandas + numpy | Core data manipulation. OHLCV, feature engineering, rolling windows. |
+| yfinance | Historical data for research/backtest only. Not production. |
+| fredapi | Free Federal Reserve macro data. Interest rates, CPI, GDP, employment. Essential for bond/forex signals. |
+| edgartools | SEC EDGAR filings. Year-over-year text similarity in risk factors correlates with future returns (M6). |
+| praw | Reddit sentiment. Best used as contrarian indicator — extreme bullish precedes corrections (M6). |
+
+**Data provider hierarchy (from research):**
+- Polygon.io (rebranded "Massive") — developer-friendly, SIP feed, tiered pricing starting free
+- Databento — modern standard for systematic trading, 60+ venues, usage-based from $125
+- FRED — free macro data
+- Benzinga — accessible news, free basic tier (130-160 articles/day)
+- Bloomberg/RavenPack — enterprise only, not needed at our scale
 
 ---
 
-## Strategy & Machine Learning
-
-| Library | When to use | Why |
-|---------|------------|-----|
-| scikit-learn | Classical ML signals | Random Forest, SVM, regression for signal scoring. Deterministic and auditable. |
-| XGBoost | Return prediction | Best performing on tabular financial data. Faster than neural nets for this use case. |
-| LightGBM | Alternative to XGBoost | Slightly faster training. Use when XGBoost is too slow. |
-| PyTorch | Time-series patterns | LSTM/transformer for sequence modelling. Only introduce when classical ML hits ceiling. |
-| vectorbt | Backtesting | Fast, vectorised. Handles realistic fees, slippage, and position sizing. |
-
-**Important:** Don't introduce PyTorch until scikit-learn/XGBoost strategies are proven.
-Complexity is the enemy early on.
-
----
-
-## AI Intelligence Layer
+## Technical Indicators
 
 | Library | Why |
 |---------|-----|
-| anthropic | Official Claude API SDK. Used for news classification, event scoring, trade rationale. |
+| pandas-ta | 150+ indicators. Pure Python, easiest install. Good for development. |
+| TA-Lib | C-based, 200+ indicators, fastest. Use in production. Requires system install. |
 
-**Claude API is used for:**
-- Classifying news headlines by event type and affected assets
-- Scoring directional sentiment (-1.0 to +1.0)
-- Generating plain-English trade rationale for audit log
-- Detecting unusual narrative patterns
+**Evidence ratings from research (use as features in ML, not standalone signals):**
+- RSI (14-period): moderate-strong evidence as mean-reversion signal
+- ATR: strong evidence for position sizing and stops — weak as standalone signal
+- VWAP: strong for intraday institutional support/resistance
+- MACD alone: poor — use combined with momentum indicators
+- Bollinger Bands: ~14.7% feature importance in Random Forest — generates false signals in trends
+- Best MA crossover: 13-day and 48.5-day EMA (300 years of data, 16 global indices)
 
-**Claude API is NOT used for:**
-- Placing orders
-- Portfolio allocation decisions
-- Overriding risk engine
+---
+
+## Statistical Models (M2) — from research report
+
+| Library | Method | Evidence | Use case |
+|---------|--------|----------|----------|
+| statsmodels | ARIMA/SARIMA | Weak equities, moderate macro | Macro series only — interest rates, CPI, not equity returns |
+| pmdarima | auto_arima | Same | Automatic order selection |
+| statsmodels | Cointegration (Johansen) | ★★★ moderate | Pairs trading ETF pairs: TLT/IEI, EWA/EWC. Half-life 5-10 days. |
+| arch | GARCH family | ★★★★★ strong | Volatility forecasting 1-10 days. VaR estimation. |
+| pykalman | Kalman filter | ★★★ moderate | Dynamic hedge ratios for pairs. Real-time spread tracking via Redis pub/sub. |
+| fracdiff | Fractional differencing | ★★★★★ CRITICAL | MANDATORY for all ML features. d≈0.12-0.43, preserves >90% correlation with original. |
+| nolds | Hurst exponent (DFA) | ★★★★ strong | Regime classification: H<0.5=mean-revert, H=0.5=random walk, H>0.5=trending |
+
+**GARCH variant by asset class:**
+| Asset | Variant | Rationale |
+|-------|---------|-----------|
+| Equities/indices | GJR-GARCH(1,1) | Captures leverage effect |
+| Forex | EGARCH or GARCH(1,1) | Moderate asymmetry |
+| Commodities | EGARCH | Asymmetric supply shocks |
+| Crypto | EGARCH | Extreme asymmetry, rapid regimes |
+| Multi-asset portfolio | DCC-GARCH | Time-varying correlations |
+
+---
+
+## ML & Strategy (M3) — enhanced from research report
+
+| Library | Why |
+|---------|-----|
+| catboost | Best accuracy on tabular financial data. CatBoost ≈ XGBoost > LightGBM > Random Forest. |
+| xgboost | Strong performer. Standard for tabular financial data. |
+| lightgbm | Fastest training. Use when XGBoost too slow at scale. |
+| scikit-learn | Baseline. Random Forest recommended first — variance (overfitting) more dangerous than bias in finance. |
+| optuna | Bayesian hyperparameter optimisation. Sample from log-uniform distributions. |
+| shap | Feature importance. Use MDI + MDA + SHAP combined. Never rely on one method alone. |
+| mlfinlab | López de Prado: triple barrier labeling, meta-labeling, VPIN, sample uniqueness weighting. |
+| timeseriescv | **MANDATORY.** Purged + Combinatorial CV. Standard k-fold massively overstates performance. |
+
+**Critical hyperparameters (aggressive regularisation required in finance):**
+- Learning rate: 0.01–0.05, never >0.1
+- Max depth: 3–6 (shallow trees for low signal-to-noise)
+- Subsample/feature fraction: 0.5–0.8
+- L1/L2 regularisation: 0.01–10.0 (log-uniform search)
+- Early stopping: 50–100 rounds on purged validation
+
+**Meta-labeling pattern (research-validated):**
+1. High-recall primary model predicts direction (momentum rules)
+2. Secondary ML model predicts whether to take the trade
+3. Meta-model predicted probability = bet size
+4. This is how ML adds real value — filtering false positives, not raw prediction
+
+**Triple barrier method for labels:**
+- Profit-taking barrier: 1.5–3.0× daily vol
+- Stop-loss barrier: 1.0–2.0× daily vol
+- Time expiration: 5–21 business days
+- More economically meaningful than fixed-horizon returns
+
+---
+
+## Backtesting (M3) — enhanced
+
+| Library | When | Why |
+|---------|------|-----|
+| vectorbt | Research | Vectorised, fastest for parameter sweeps and walk-forward |
+| backtrader | Strategy dev | Event-driven, realistic broker simulation |
+
+**Mandatory validation requirements from research:**
+- Purged k-fold CV with embargo period — never standard k-fold
+- Deflated Sharpe Ratio test for multiple testing correction
+- Probability of Backtest Overfitting (PBO) — >50% = likely overfitting
+- Walk-forward validation with realistic costs
+- Include delisted securities — survivorship bias is severe
+
+**Realistic cost model (mandatory from day one):**
+- Half-spread + commission + square-root market impact + borrowing costs
+- Rule of thumb: 1–3 bps per trade for liquid equities, much higher for small-caps/altcoins
+
+---
+
+## Portfolio Optimisation (M4) — new from research report
+
+| Library | Why |
+|---------|-----|
+| riskfolio-lib | Most comprehensive. HRP, HERC, CVaR, 24 risk measures, Black-Litterman, factor models. |
+| pypfopt | Black-Litterman with Idzorek method. Minimum variance outperforms max-Sharpe out-of-sample. |
+| cvxpy | Convex optimisation. CVaR minimisation via linear programming. Kelly criterion. |
+
+**Key findings:**
+- **HRP** — no matrix inversion, handles singular matrices, lower out-of-sample variance. Use as default over mean-variance.
+- **CVaR** (Expected Shortfall) replaces VaR — Basel III standard, sub-additive, captures tail severity.
+- **Half-Kelly** — Ed Thorp's recommendation. 75% of full Kelly growth, dramatically lower variance. Full Kelly too sensitive to estimation errors.
+- **Volatility targeting** — scale positions inversely to realised volatility. EWMA λ=0.94. Improves risk-adjusted returns across all asset classes.
+- **Ledoit-Wolf shrinkage** — optimal intensity ~80%. Reduces estimation error in covariance matrix.
+
+---
+
+## Execution (M5) — new from research report
+
+| Library | Why |
+|---------|-----|
+| almgren-chriss | Optimal execution. Minimises E[Cost] + λ·Var[Cost]. Closed-form trajectory. |
+
+**Square-root impact law — universal across all markets:**
+```
+Impact ≈ c × σ_daily × √(Q/V_daily)
+```
+
+| Asset | c value | Typical spread |
+|-------|---------|---------------|
+| Large-cap equities | 0.5–1.0 | ~1 bps |
+| Small-cap equities | 1.0–2.0 | ~10+ bps |
+| FX majors | ~0.2 | ~0.5 bps |
+| BTC | ~1.0 | ~2 bps |
+| Altcoins | 1.5–3.0 | ~20+ bps |
+
+**Critical:** Naive vs optimal execution consumes 50-100% of gross alpha for medium-frequency strategies. Model this from day one.
+
+**Funding rate arbitrage (crypto) — from research:**
+- Long spot + short perpetual = collect positive funding, zero price risk
+- Typical annualised returns: 10-15% normal markets, 100%+ during euphoria
+- Monitor via `ccxt.fetch_funding_rate()`
+- Key risks: margin depletion if funding reverses, execution slippage
+
+---
+
+## Deep Learning (M6) — from research report
+
+| Library | Model | Use case |
+|---------|-------|----------|
+| darts | TCN | TCN outperforms LSTM on 10/11 benchmarks. Trains 3-10x faster. Use for price forecasting. |
+| darts | TFT | Temporal Fusion Transformer — handles static covariates, interpretable. |
+| transformers | FinBERT | `ProsusAI/finbert` — 5-20ms per sentence GPU. Standard for financial sentiment. |
+| stable-baselines3 | PPO | RL for execution optimisation — not directional prediction (M8+). |
+
+**When to use deep learning (evidence-based):**
+- Limit order book prediction (DeepLOB) ✅
+- Multi-scale time-series (TCN, TFT) ✅
+- NLP sentiment extraction ✅
+- Raw return prediction vs gradient boosting — gradient boosting wins for daily frequency ❌
+
+---
+
+## AI & NLP (M6) — hybrid local/API architecture
+
+### Task routing (from research cost analysis):
+
+| Task | Route | Model | Latency |
+|------|-------|-------|---------|
+| News headline classification | Local | Qwen3 8B Q4_K_M | <100ms |
+| Sentiment scoring | Local | Fine-tuned 7B LoRA | <100ms |
+| SEC filing summarisation | Local | 30B+ Q4 | seconds |
+| Complex regime analysis | Claude API | claude-sonnet-4-6 | 1-3s |
+| Trade rationale >£10K | Claude API | claude-sonnet-4-6 | 1-3s |
+| Real-time signals | Local | 7B via vLLM | <50ms |
+
+**Trade-value routing:**
+- Sub-£10K → local models only
+- £10K-£100K → local + API verification
+- >£100K → API flagship + human oversight
+
+**Production serving:** vLLM (793 TPS, 80ms P99) vs Ollama (41 TPS, 673ms P99). Use Ollama for dev, vLLM for production.
+
+**Break-even:** Local RTX 4090 breaks even vs API in 6-8 weeks at >£400/month API spend. Start M6 with pure Claude API. Add local routing in M8 when justified.
+
+**Quantisation guide:**
+- Q4_K_M: within ~3% perplexity — use for classification
+- Q5_K_M or Q8: numerical reasoning
+- Avoid Q3 and below
+
+**LoRA fine-tuning:** rank r=16, alpha=32. QLoRA (4-bit NF4) fits 7B model on RTX 4090 at 8-10GB VRAM. 500 high-quality examples beats 5,000 noisy ones.
 
 ---
 
@@ -82,11 +239,11 @@ Complexity is the enemy early on.
 
 | Technology | Why |
 |-----------|-----|
-| PostgreSQL | Primary database. ACID compliant — critical for financial data. Orders, fills, P&L, audit log. |
-| TimescaleDB | PostgreSQL extension for time-series data. 10-100x faster for OHLCV queries vs plain PostgreSQL. |
-| Redis | In-memory cache for live prices, active signals, broker state. Sub-millisecond reads. |
-| SQLAlchemy | ORM layer. Database-agnostic models — swap PostgreSQL later without rewriting queries. |
-| Alembic | Database migrations. Schema changes tracked and versioned. |
+| PostgreSQL | Primary database. ACID. Orders, fills, P&L, signals, audit log. |
+| TimescaleDB | PostgreSQL extension. 10-100x faster for time-series queries. |
+| Redis | In-memory. Live prices, active signals, Kalman filter state, GARCH estimates. |
+| SQLAlchemy | ORM layer. Database-agnostic. |
+| Alembic | Schema migrations versioned. |
 
 ---
 
@@ -94,11 +251,10 @@ Complexity is the enemy early on.
 
 | Technology | Why |
 |-----------|-----|
-| Docker | Containerise every component. Reproducible across machines. |
-| Docker Compose | Orchestrate all containers (bot, api, db, redis) with one command. |
-| python-dotenv | Secure secrets management. API keys in .env files, never in code. |
-| Celery + Redis | Task queue for scheduled jobs — daily rebalancing, model retraining, reports. |
-| VPS (Hetzner/DigitalOcean) | €5–15/mo. Always-on server. Low latency to exchange APIs. |
+| Docker + Compose | Containerise all components. One command startup. |
+| python-dotenv | Secrets management. Keys never in code. |
+| Celery + Redis | Scheduled jobs — daily GARCH refitting, model retraining, rebalancing. |
+| VPS (Hetzner/DigitalOcean) | €5-15/mo always-on. Low latency to exchange APIs. |
 
 ---
 
@@ -106,31 +262,9 @@ Complexity is the enemy early on.
 
 | Technology | Why |
 |-----------|-----|
-| FastAPI | REST API backend for dashboard. WebSocket support for real-time updates. Fast, async native. |
-| uvicorn | ASGI server for FastAPI. Production-grade. |
-| React | Dashboard frontend. Component-based, good charting ecosystem. |
-| Recharts | P&L charts, position tables, signal logs. Composable, React-native. |
-| Grafana (optional) | Operational metrics — API latency, error rates, system health. Plugs into PostgreSQL. |
-
----
-
-## Monitoring & Logging
-
-| Library | Why |
-|---------|-----|
-| Loguru | Structured Python logging. Replaces stdlib logging. Every decision searchable and queryable. |
-| httpx | HTTP client for alert webhooks (Telegram, email). |
-
----
-
-## Development Tools
-
-| Tool | Why |
-|------|-----|
-| pytest | Testing framework. |
-| pytest-asyncio | Async test support — needed for broker adapter tests. |
-| Black | Code formatter. 100 char line length. |
-| Cursor | Primary IDE with AI assistance. Reads `.cursorrules` for project alignment. |
+| FastAPI | REST + WebSocket for dashboard. Async native. |
+| React + Recharts | P&L charts, positions, signals, Sharpe/drawdown display. |
+| Grafana (optional) | Operational metrics — API latency, error rates. |
 
 ---
 
@@ -138,10 +272,13 @@ Complexity is the enemy early on.
 
 | Technology | Why excluded |
 |-----------|-------------|
-| Celery (initially) | Overkill for M1-M5. Simple asyncio loops are enough early on. Add in M6+. |
-| Kafka/RabbitMQ | Overkill. Redis queues are sufficient for this scale. |
-| Kubernetes | Way too early. Docker Compose on a VPS is the right level. |
-| TensorFlow | PyTorch is the standard in quant finance. No reason to use both. |
-| MongoDB | Financial data is relational. PostgreSQL is the right choice. |
-| WebSockets (custom) | Each broker SDK handles WebSocket internally. Don't reinvent. |
-| HFT libraries | Not targeting millisecond execution. Retail algo speed is fine. |
+| Kafka/RabbitMQ | Overkill. Redis queues sufficient. |
+| Kubernetes | Too early. Docker Compose on VPS is right level. |
+| TensorFlow | PyTorch is quant finance standard. |
+| MongoDB | Financial data is relational. PostgreSQL correct. |
+| Bloomberg Terminal | $24K/year. Polygon.io + FRED + Benzinga instead. |
+| RavenPack | $50-200K/year. FinBERT + Claude API instead. |
+| Full Kelly criterion | Too sensitive to estimation errors. Half-Kelly always. |
+| Standard k-fold CV | Massively overstates performance. Purged CV only. |
+| Float for prices | Rounding errors compound over thousands of trades. Decimal always. |
+| SMOTE for imbalance | Violates temporal structure. Use cost-sensitive learning instead. |
