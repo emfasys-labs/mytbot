@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from brokers.registry import get_broker
+from control.runtime import set_execution_engine
 from brokers.base import Order, OrderSide, OrderType, OrderResult
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
@@ -35,6 +36,7 @@ class ExecutionEngine:
         self.broker_configs = broker_configs
         self._brokers = {}          # lazy-loaded broker adapters
         self._open_orders = {}      # client_order_id → OrderResult
+        set_execution_engine(self)
 
     async def execute(
         self,

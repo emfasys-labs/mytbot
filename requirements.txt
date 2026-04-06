@@ -50,7 +50,9 @@ pytest-asyncio>=0.24,<1        # Async tests (storage.db, brokers)
 testcontainers[postgres]>=4.8.2,<5  # Disposable Postgres for integration tests
 
 # ── API & Dashboard ───────────────────────────────────────────────────────────
-fastapi==0.111.0
+fastapi==0.135.3
+starlette==1.0.0
+python-multipart>=0.0.20
 uvicorn==0.30.1
 # yfinance 0.2.x imports websockets.asyncio (requires websockets >= 13)
 websockets>=13.0,<16

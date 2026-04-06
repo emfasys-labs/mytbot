@@ -11,9 +11,9 @@
 | ID | Name | Duration | Status |
 |----|------|----------|--------|
 | M1 | Foundation | Weeks 1–3 | ✅ Complete (run `main.py` + Postgres to verify) |
-| M2 | Data Pipeline | Weeks 4–5 | ⏳ Not started |
-| M3 | First Strategy + Signal Engine | Weeks 6–8 | ⏳ Not started |
-| M4 | Risk Engine | Weeks 9–10 | ⏳ Not started |
+| M2 | Data Pipeline | Weeks 4–5 | ✅ Complete |
+| M3 | First Strategy + Signal Engine | Weeks 6–8 | ✅ Complete |
+| M4 | Risk Engine | Weeks 9–10 | ✅ Complete |
 | M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ⏳ Not started |
 | M6 | AI Intelligence Layer | Weeks 13–15 | ⏳ Not started |
 | M7 | Dashboard + Control | Weeks 16–17 | ⏳ Not started |
@@ -104,14 +104,14 @@ Mandatory gates from research:
 **Goal:** First live signal generated. Momentum breakout on IBKR US equities.
 
 **Tasks:**
-- [ ] Implement momentum breakout strategy (`strategies/momentum.py`) ✅ skeleton done
-- [ ] Implement mean reversion strategy (`strategies/mean_reversion.py`)
-- [ ] Build signal engine — normalise output to standard Signal object ✅ skeleton done
-- [ ] Backtesting harness — test strategies on 2yr history with realistic fees
-- [ ] Walk-forward validation — prevent overfitting
-- [ ] Signal logging — every signal stored with full feature snapshot
-- [ ] Paper mode toggle — signals generated but orders not placed
-- [ ] Strategy config file — parameters editable without code change
+- [x] Implement momentum breakout strategy (`strategies/momentum.py`)
+- [x] Implement mean reversion strategy (`strategies/mean_reversion.py`)
+- [x] Build signal engine — normalise output to standard Signal object
+- [x] Backtesting harness — test strategies on 2yr history with realistic fees
+- [x] Walk-forward validation — prevent overfitting
+- [x] Signal logging — every signal stored with full feature snapshot
+- [x] Paper mode toggle — signals generated but orders not placed
+- [x] Strategy config file — parameters editable without code change
 
 **Deliverable:**
 > System generating real signals in paper mode on live data.
@@ -130,15 +130,15 @@ Mandatory gates from research:
 **Goal:** Nothing trades without passing risk. Built before live execution.
 
 **Tasks:**
-- [ ] Pre-trade checks — position size, notional limit, concentration limit
-- [ ] Portfolio checks — max gross exposure, drawdown from HWM
-- [ ] Asset class limits — max crypto %, max single stock %
-- [ ] Daily circuit breaker — stop all trading if daily loss > threshold
-- [ ] Consecutive loss cooldown — pause after N losses in a row
-- [ ] Kill switch — instant halt all trading, cancel all open orders
-- [ ] Risk config file — all thresholds in `config/risk_limits.yaml` ✅ done
-- [ ] Risk veto logging — every rejection stored with reason
-- [ ] Unit tests for every risk check
+- [x] Pre-trade checks — position size, notional limit, concentration limit
+- [x] Portfolio checks — max gross exposure, drawdown from HWM
+- [x] Asset class limits — max crypto %, max single stock %
+- [x] Daily circuit breaker — stop all trading if daily loss > threshold
+- [x] Consecutive loss cooldown — pause after N losses in a row
+- [x] Kill switch — instant halt all trading, cancel all open orders
+- [x] Risk config file — all thresholds in `config/risk_limits.yaml`
+- [x] Risk veto logging — every rejection stored with reason
+- [x] Unit tests for every risk check
 
 **Deliverable:**
 > Every signal routes through risk engine before execution.

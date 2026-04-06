@@ -40,9 +40,9 @@ Everything is logged. AI (Claude API) classifies news and generates rationale �
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M2 — Data pipeline ✅ (deliverable: `alembic upgrade head`, then `python run_pipeline.py --backfill`)
-- Last completed task: M2 — `feature_snapshots`, `news_headlines`, `macro_observations`; `data/` validation + pandas-ta + yfinance/NewsAPI/FRED; `run_pipeline.py`
-- Next task: M3 — First strategy + signal engine (backtest on 2yr feature store)
+- Milestone: M4 — Risk engine ✅ (deliverable: all signals risk-gated, RiskLog persistence, kill-switch tested)
+- Last completed task: M4 — numeric limits (position, exposure, concentration, drawdown, asset-class), circuit breaker + cooldown, DB-backed portfolio-state checks in `run_m3.py`, API kill/reset wired to runtime risk/execution services
+- Next task: M5 — Execution engine + full pipeline (fills, reconciliation, long-running autonomous paper loop)
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken stream needs API keys; NewsAPI/FRED keys optional for those feeds
 - Notes: .env not committed — use .env.example; `M1_*` env vars documented there
 
