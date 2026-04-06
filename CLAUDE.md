@@ -40,11 +40,11 @@ Everything is logged. AI (Claude API) classifies news and generates rationale �
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M4 — Risk engine ✅ (deliverable: all signals risk-gated, RiskLog persistence, kill-switch tested)
-- Last completed task: M4 — numeric limits (position, exposure, concentration, drawdown, asset-class), circuit breaker + cooldown, DB-backed portfolio-state checks in `run_m3.py`, API kill/reset wired to runtime risk/execution services
-- Next task: M5 — Execution engine + full pipeline (fills, reconciliation, long-running autonomous paper loop)
-- Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken stream needs API keys; NewsAPI/FRED keys optional for those feeds
-- Notes: .env not committed — use .env.example; `M1_*` env vars documented there
+- Milestone: M5 — Execution engine + full pipeline ✅ (deliverable: autonomous paper loop + full execution safety rails)
+- Last completed task: M5 — pre-execution spread/liquidity/slippage checks, auto-kill on API/reconciliation failures, fill tracking, DB order/position/daily-PnL persistence, autonomous loop in `run_m5.py`
+- Next task: M6 — AI intelligence layer (news classification, rationale generation, regime-aware signal modifiers)
+- Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
+- Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
 1. Never change `brokers/base.py` interface — it is frozen

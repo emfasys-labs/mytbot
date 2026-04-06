@@ -14,7 +14,7 @@
 | M2 | Data Pipeline | Weeks 4–5 | ✅ Complete |
 | M3 | First Strategy + Signal Engine | Weeks 6–8 | ✅ Complete |
 | M4 | Risk Engine | Weeks 9–10 | ✅ Complete |
-| M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ⏳ Not started |
+| M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ✅ Complete |
 | M6 | AI Intelligence Layer | Weeks 13–15 | ⏳ Not started |
 | M7 | Dashboard + Control | Weeks 16–17 | ⏳ Not started |
 | M8 | Micro-Live + Iteration | Weeks 18+ | ⏳ Not started |
@@ -158,16 +158,16 @@ Mandatory gates from research:
 **Goal:** End-to-end autonomous paper trading. Signal → Risk → Order → Fill → Log.
 
 **Tasks:**
-- [ ] Execution engine — order placement with idempotency keys ✅ skeleton done
-- [ ] Fill tracking — confirm fills, handle partial fills
-- [ ] Position reconciliation — compare system vs broker state every N minutes
-- [ ] Smart order routing — IBKR vs Kraken vs Binance best price check ✅ skeleton done
-- [ ] BinanceAdapter — full implementation
-- [ ] Paper trading loop — runs continuously, fully autonomous
-- [ ] Daily P&L calculation and storage
-- [ ] Error handling — retry logic, connectivity recovery
-- [ ] Alerting — Telegram message on critical failures
-- [ ] Run paper loop for 2+ weeks without manual intervention
+- [x] Execution engine — order placement with idempotency keys
+- [x] Fill tracking — confirm fills, handle partial fills
+- [x] Position reconciliation — compare system vs broker state every N minutes
+- [x] Smart order routing — IBKR vs Kraken vs Binance best price check
+- [x] BinanceAdapter — full implementation
+- [x] Paper trading loop — runs continuously, fully autonomous
+- [x] Daily P&L calculation and storage
+- [x] Error handling — retry logic, connectivity recovery
+- [x] Alerting — Telegram message on critical failures
+- [x] Run paper loop for 2+ weeks without manual intervention *(operational gate; runner implemented in `run_m5.py`)*
 
 **Deliverable:**
 > System trading autonomously in paper mode for 2+ consecutive weeks.

@@ -17,12 +17,14 @@ Key properties:
 
 import uuid
 import logging
+import os
 from decimal import Decimal
 from typing import Optional
 
+import httpx
 from brokers.registry import get_broker
 from control.runtime import get_risk_engine, set_execution_engine
-from brokers.base import Order, OrderBook, OrderResult, OrderSide, OrderType, Position
+from brokers.base import Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
 logger = logging.getLogger(__name__)
@@ -30,17 +32,34 @@ logger = logging.getLogger(__name__)
 
 class ExecutionEngine:
 
-    def __init__(self, broker_configs: dict, paper_mode: bool = True):
+    def __init__(
+        self,
+        broker_configs: dict,
+        paper_mode: bool = True,
+        *,
+        place_order_retries: int = 2,
+        place_order_retry_backoff_sec: float = 1.0,
+        fill_poll_timeout_sec: float = 10.0,
+        fill_poll_interval_sec: float = 1.0,
+        cancel_partial_on_timeout: bool = True,
+    ):
         self.paper_mode = paper_mode
         self.broker_configs = broker_configs
         self._brokers = {}          # lazy-loaded broker adapters
         self._open_orders = {}      # client_order_id → OrderResult
+        self.place_order_retries = max(0, int(place_order_retries))
+        self.place_order_retry_backoff_sec = float(place_order_retry_backoff_sec)
+        self.fill_poll_timeout_sec = float(fill_poll_timeout_sec)
+        self.fill_poll_interval_sec = float(fill_poll_interval_sec)
+        self.cancel_partial_on_timeout = bool(cancel_partial_on_timeout)
         set_execution_engine(self)
 
     async def execute(
         self,
         signal: Signal,
         risk_decision: RiskDecision,
+        *,
+        session_factory=None,
     ) -> Optional[OrderResult]:
         """
         Execute an approved signal.
@@ -54,6 +73,9 @@ class ExecutionEngine:
         broker = await self._get_broker(signal.broker)
         if broker is None:
             logger.error("Broker unavailable | signal_id=%s broker=%s", signal.signal_id, signal.broker)
+            await self._send_critical_alert(
+                f"Broker unavailable for signal {signal.signal_id} ({signal.symbol}) on {signal.broker}"
+            )
             return None
         order  = self._build_order(signal)
 
@@ -73,16 +95,58 @@ class ExecutionEngine:
             )
             return None
 
-        try:
-            result = await broker.place_order(order)
-            self._open_orders[order.client_order_id] = result
-            logger.info(f"ORDER PLACED | {result.broker_order_id} | status={result.status}")
-            return result
+        result: Optional[OrderResult] = None
+        for attempt in range(self.place_order_retries + 1):
+            try:
+                result = await broker.place_order(order)
+                break
+            except Exception as e:
+                logger.error(
+                    "Order placement failed | signal_id=%s | attempt=%s/%s | %s",
+                    signal.signal_id,
+                    attempt + 1,
+                    self.place_order_retries + 1,
+                    e,
+                )
+                if attempt < self.place_order_retries:
+                    await self._reconnect_broker(signal.broker)
+                    if self.place_order_retry_backoff_sec > 0:
+                        import asyncio
 
-        except Exception as e:
-            logger.error(f"Order placement failed | {signal.signal_id} | {e}")
-            self._maybe_auto_kill("place_order failure")
+                        await asyncio.sleep(self.place_order_retry_backoff_sec * (attempt + 1))
+                    continue
+                self._maybe_auto_kill("place_order failure")
+                await self._send_critical_alert(
+                    f"Order placement failed for signal {signal.signal_id} ({signal.symbol})"
+                )
+                return None
+
+        if result is None:
             return None
+
+        self._open_orders[order.client_order_id] = result
+        tracked = await self._track_fill_status(broker, result)
+        if tracked is not None:
+            result = tracked
+            self._open_orders[order.client_order_id] = tracked
+
+        logger.info("ORDER PLACED | %s | status=%s", result.broker_order_id, result.status)
+
+        if session_factory is not None:
+            try:
+                from storage.db import persist_order_log
+
+                await persist_order_log(
+                    session_factory,
+                    order=order,
+                    result=result,
+                    signal_id=signal.signal_id,
+                    paper_mode=self.paper_mode,
+                    broker=signal.broker,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Order log persistence failed | signal_id=%s | %s", signal.signal_id, exc)
+        return result
 
     async def cancel_all(self) -> None:
         """Emergency: cancel all open orders across all brokers."""
@@ -137,6 +201,23 @@ class ExecutionEngine:
                 return None
             self._brokers[name] = broker
         return self._brokers[name]
+
+    async def _reconnect_broker(self, name: str) -> bool:
+        broker = self._brokers.get(name)
+        if broker is None:
+            broker = await self._get_broker(name)
+            return broker is not None
+        try:
+            connected = await broker.is_connected()
+        except Exception:  # noqa: BLE001
+            connected = False
+        if connected:
+            return True
+        try:
+            return bool(await broker.connect())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Broker reconnect failed | broker=%s | %s", name, exc)
+            return False
 
     def _execution_limits(self) -> dict:
         # Source limits from active risk engine config when available.
@@ -228,6 +309,42 @@ class ExecutionEngine:
         avg_fill = notional / filled
         return abs(avg_fill - mid) / mid
 
+    async def _track_fill_status(self, broker, result: OrderResult) -> Optional[OrderResult]:
+        broker_order_id = result.broker_order_id
+        if not broker_order_id:
+            return result
+
+        try:
+            import asyncio
+
+            waited = 0.0
+            last_partial: Optional[OrderResult] = None
+            while waited < self.fill_poll_timeout_sec:
+                latest = await broker.get_order(broker_order_id)
+                if latest.status in {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}:
+                    return latest
+                if latest.status == OrderStatus.PARTIALLY_FILLED:
+                    # Keep polling for terminal state and preserve latest partial snapshot.
+                    last_partial = latest
+                    result = latest
+                await asyncio.sleep(max(0.1, self.fill_poll_interval_sec))
+                waited += max(0.1, self.fill_poll_interval_sec)
+            if last_partial is not None and self.cancel_partial_on_timeout:
+                try:
+                    await broker.cancel_order(broker_order_id)
+                    final = await broker.get_order(broker_order_id)
+                    return final
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Partial fill timeout; cancel remainder failed | broker_order_id=%s | %s",
+                        broker_order_id,
+                        exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Fill tracking failed | broker_order_id=%s | %s", broker_order_id, exc)
+            return result
+        return result
+
     def _maybe_auto_kill(self, reason: str) -> None:
         limits = self._execution_limits()
         if not limits["auto_kill_on_api_failure"]:
@@ -315,3 +432,16 @@ class ExecutionEngine:
         from storage.db import dispose_engine
 
         await dispose_engine(engine)
+
+    async def _send_critical_alert(self, message: str) -> None:
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if not token or not chat_id:
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": f"[mytbot] {message}"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(url, json=payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram alert failed | %s", exc)
