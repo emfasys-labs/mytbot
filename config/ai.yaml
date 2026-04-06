@@ -1,0 +1,16 @@
+enabled: true
+
+pipeline:
+  news_lookback_hours: 24
+  news_limit: 200
+  macro_series:
+    - FEDFUNDS
+    - CPIAUCSL
+
+sources:
+  news:
+    enabled: true
+  sec_edgar:
+    enabled: false
+  reddit:
+    enabled: false

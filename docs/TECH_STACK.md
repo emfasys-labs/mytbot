@@ -204,27 +204,28 @@ Impact ≈ c × σ_daily × √(Q/V_daily)
 
 ---
 
-## AI & NLP (M6) — hybrid local/API architecture
+## AI & NLP (M6) — Claude-first now, hybrid later
 
-### Task routing (from research cost analysis):
+### Current production route (implemented in M6 pass):
 
 | Task | Route | Model | Latency |
 |------|-------|-------|---------|
-| News headline classification | Local | Qwen3 8B Q4_K_M | <100ms |
-| Sentiment scoring | Local | Fine-tuned 7B LoRA | <100ms |
-| SEC filing summarisation | Local | 30B+ Q4 | seconds |
-| Complex regime analysis | Claude API | claude-sonnet-4-6 | 1-3s |
-| Trade rationale >£10K | Claude API | claude-sonnet-4-6 | 1-3s |
-| Real-time signals | Local | 7B via vLLM | <50ms |
+| News headline classification | Claude API | `claude-sonnet-4-5` (configurable) | ~1-3s |
+| Sentiment/event/direction scoring | Claude API | `claude-sonnet-4-5` (configurable) | ~1-3s |
+| Macro regime labeling | Local deterministic logic over FRED data | n/a | <100ms |
+| Trade rationale generation | Claude API | `claude-sonnet-4-5` (configurable) | ~1-3s |
+| SEC/Reddit ingestion | Scaffold only | n/a | n/a |
 
-**Trade-value routing:**
-- Sub-£10K → local models only
-- £10K-£100K → local + API verification
-- >£100K → API flagship + human oversight
+### Persistence/audit additions (implemented):
+- `storage.models.AIOutputLog` (`ai_outputs`) stores AI news, macro, and rationale outputs.
+- Alembic migration `f27c0a1b9e10_add_ai_outputs_table.py` creates auditable AI output storage.
+- `run_m3.py` and `run_m5.py` persist AI-linked metadata and signal-linked rationale rows.
 
-**Production serving:** vLLM (793 TPS, 80ms P99) vs Ollama (41 TPS, 673ms P99). Use Ollama for dev, vLLM for production.
+### Planned evolution (kept from research):
+- Move to hybrid local/API routing when throughput or cost profile justifies it.
+- Use local model serving for sub-second high-volume classification if needed.
 
-**Break-even:** Local RTX 4090 breaks even vs API in 6-8 weeks at >£400/month API spend. Start M6 with pure Claude API. Add local routing in M8 when justified.
+**Break-even note:** Local RTX 4090 can break even vs API in 6-8 weeks at >£400/month spend. Current choice remains pure Claude API for M6.
 
 **Quantisation guide:**
 - Q4_K_M: within ~3% perplexity — use for classification

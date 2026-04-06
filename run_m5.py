@@ -18,6 +18,8 @@ import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from ai.news_classifier import NewsClassifier
+from ai.pipeline import AIPipeline
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
@@ -32,6 +34,7 @@ from run_m3 import (
 )
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
+from storage.models import AIOutputLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -152,6 +155,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
     risk_cfg = _load_yaml(args.risk_config)
+    ai_cfg = _load_yaml(args.ai_config)
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]
     if not symbols:
         logger.error("run_m5 | no symbols configured")
@@ -176,6 +180,9 @@ async def _run_loop(args: argparse.Namespace) -> int:
     sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
     risk_engine = RiskEngine(risk_cfg)
     set_risk_engine(risk_engine)
+    ai_enabled = bool(ai_cfg.get("enabled", True))
+    ai_classifier = NewsClassifier() if ai_enabled else None
+    ai_pipeline = AIPipeline(ai_cfg.get("pipeline", {}), classifier=ai_classifier) if ai_enabled else None
     strat_cfg = strategies_cfg.get("strategies", {})
     momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
     mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
@@ -201,6 +208,10 @@ async def _run_loop(args: argparse.Namespace) -> int:
             try:
                 generated = 0
                 executed = 0
+                ai_result = None
+                if ai_pipeline is not None:
+                    ai_result = await ai_pipeline.compute(session_factory, symbols)
+                    await ai_pipeline.persist(session_factory, ai_result)
                 for symbol in symbols:
                     df, feature_ts = await _load_recent_features(
                         session_factory,
@@ -226,10 +237,16 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     signal = sig_engine.process(
                         raw,
                         portfolio_value=Decimal(str(args.portfolio_value)),
-                        news_score=None,
+                        news_score=(
+                            ai_result.news_scores.get(symbol) if ai_result is not None else None
+                        ),
                     )
                     if signal is None:
                         continue
+                    if ai_result is not None:
+                        signal.metadata["ai_macro_regime"] = ai_result.macro_regime
+                        signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                        signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
 
                     routed = router.route(signal.asset_class, signal.symbol)
                     if routed is None:
@@ -253,6 +270,44 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     )
                     if risk_decision.verdict != RiskVerdict.APPROVED:
                         continue
+
+                    if ai_result is not None and ai_classifier is not None:
+                        rationale = await ai_classifier.generate_rationale(
+                            {
+                                "symbol": signal.symbol,
+                                "strategy": signal.strategy,
+                                "confidence": signal.confidence,
+                                "news_score": signal.news_score,
+                                "macro_regime": ai_result.macro_regime,
+                                "asset_class": signal.asset_class,
+                            }
+                        )
+                        signal.metadata["ai_rationale"] = rationale
+                        async with session_factory() as session:
+                            session.add(
+                                AIOutputLog(
+                                    symbol=signal.symbol[:32],
+                                    context_type="rationale",
+                                    score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
+                                    confidence=Decimal(str(signal.confidence)),
+                                    event_type=str(
+                                        ai_result.news_details.get(symbol, {}).get("event_type", "other")
+                                    ),
+                                    regime_label=ai_result.macro_regime,
+                                    decay_hours=int(
+                                        ai_result.news_details.get(symbol, {}).get("decay_hours", 24)
+                                    ),
+                                    rationale=rationale[:4000],
+                                    payload={
+                                        "headline": ai_result.news_details.get(symbol, {}).get("headline"),
+                                        "sample_count": ai_result.news_details.get(symbol, {}).get("sample_count", 0),
+                                        "macro_confidence": ai_result.macro_confidence,
+                                    },
+                                    source="claude",
+                                    signal_id=signal.signal_id,
+                                )
+                            )
+                            await session.commit()
 
                     await _persist_signal(
                         session_factory,
@@ -319,6 +374,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strategies-config", default="config/strategies.yaml")
     p.add_argument("--pipeline-config", default="config/data_pipeline.yaml")
     p.add_argument("--risk-config", default="config/risk_limits.yaml")
+    p.add_argument("--ai-config", default="config/ai.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
     p.add_argument("--available-brokers", default="ibkr,kraken,binance,alpaca")
     p.add_argument("--timeframe", default="1d")

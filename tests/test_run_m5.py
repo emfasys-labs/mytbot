@@ -25,6 +25,12 @@ def test_parser_supports_reconcile_only_flag():
     assert args.reconcile_only is True
 
 
+def test_parser_supports_ai_config_flag():
+    p = _build_parser()
+    args = p.parse_args(["--ai-config", "config/ai.yaml"])
+    assert args.ai_config == "config/ai.yaml"
+
+
 def test_apply_filled_result_uses_actual_fill_quantity_and_price():
     state = {
         "positions": {},

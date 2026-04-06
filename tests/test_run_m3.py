@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from run_m3 import _pick_best_signal, _rows_to_features_frame
+from run_m3 import _pick_best_signal, _rows_to_features_frame, main
 from signals.engine import RawSignal
 
 
@@ -45,4 +45,21 @@ def test_pick_best_signal_returns_highest_confidence():
 
 def test_pick_best_signal_none_for_empty():
     assert _pick_best_signal([]) is None
+
+
+def test_main_parser_accepts_ai_config(monkeypatch):
+    async def _fake_run_once(_args):  # noqa: ANN001
+        return 0
+
+    def _fake_asyncio_run(coro):  # noqa: ANN001
+        coro.close()
+        return 0
+
+    monkeypatch.setattr("sys.argv", ["run_m3.py", "--ai-config", "config/ai.yaml"])
+    monkeypatch.setattr("run_m3._run_once", _fake_run_once)
+    monkeypatch.setattr("run_m3.asyncio.run", _fake_asyncio_run)
+    try:
+        main()
+    except SystemExit as exc:
+        assert exc.code == 0
 

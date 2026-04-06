@@ -15,7 +15,7 @@
 | M3 | First Strategy + Signal Engine | Weeks 6–8 | ✅ Complete |
 | M4 | Risk Engine | Weeks 9–10 | ✅ Complete |
 | M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ✅ Complete |
-| M6 | AI Intelligence Layer | Weeks 13–15 | ⏳ Not started |
+| M6 | AI Intelligence Layer | Weeks 13–15 | ⏳ In progress (Claude-first core implemented) |
 | M7 | Dashboard + Control | Weeks 16–17 | ⏳ Not started |
 | M8 | Micro-Live + Iteration | Weeks 18+ | ⏳ Not started |
 
@@ -184,14 +184,16 @@ Mandatory gates from research:
 **Goal:** Claude API reads news, scores sentiment, explains every trade.
 
 **Tasks:**
-- [ ] News classifier — feed headlines to Claude API, get structured JSON ✅ skeleton done
-- [ ] Event tagger — identify affected assets, directional bias, confidence
-- [ ] Signal modifier — news score boosts or vetoes quant signals
-- [ ] Trade rationale generator — plain English explanation for every trade
-- [ ] Macro regime classifier — bull/bear/volatile/ranging
+- [x] News classifier — feed headlines to Claude API, get structured JSON
+- [x] Event tagger — identify affected assets, directional bias, confidence
+- [x] Signal modifier — news score boosts or vetoes quant signals
+- [x] Trade rationale generator — plain English explanation for every trade
+- [x] Macro regime classifier — computed from persisted FRED observations
 - [ ] Regime gates strategy selection (e.g. no momentum in bear regime)
 - [ ] Anomaly detector — flag unusual narrative patterns
-- [ ] News score logged alongside every signal
+- [x] News score logged alongside every signal
+- [x] AI audit persistence — `ai_outputs` table + migration + signal-linked rationale rows
+- [x] SEC/Reddit scaffolding — source interfaces and disabled-by-default config toggles
 
 **Deliverable:**
 > Every trade has an AI-generated rationale stored in audit log.

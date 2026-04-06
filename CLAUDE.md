@@ -37,7 +37,10 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 - `config/fundamentals.yaml` — parameter defaults, absolute bounds, AI policy
 - `config/broker_permissions.yaml` — runtime broker permission/fallback map
 - `config/data_pipeline.yaml` — M2 symbols, intervals, News/FRED toggles
+- `config/ai.yaml`          — M6 AI toggles and pipeline settings
 - `run_pipeline.py`          — M2: yfinance → features → Postgres; NewsAPI + FRED
+- `ai/news_classifier.py`    — Claude-first news scoring + rationale generation
+- `ai/pipeline.py`           — M6 orchestration: symbol news score + macro regime
 - `docs/DECISIONS.md`        — architectural decision log
 - `docs/M2_READINESS.md`     — M1 verification summary + M2 prep checklist
 - `alembic/`                 — DB migrations (URL from POSTGRES_* in env.py)
@@ -46,10 +49,10 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M5 — Execution engine + full pipeline ✅ (deliverable: autonomous paper loop + full execution safety rails)
-- Last completed task: Added autonomous parameter-management foundation (`config/fundamentals.yaml`, `risk/parameters.py`, `parameter_log` table + migration), plus capital-tier allocator support
-- Last completed task: Added autonomous parameter-management foundation (`config/fundamentals.yaml`, `risk/parameters.py`, `parameter_log` table + migration), plus proportionality-based asset gating (no capital tiers)
-- Next task: M6 — AI intelligence layer (news classification, rationale generation, regime-aware signal modifiers)
+- Milestone: M6 — AI Intelligence Layer ⏳ In progress (Claude-first core implemented)
+- Last completed task: Implemented production `ai/news_classifier.py` (Claude API calls, retries, parsing/validation/fallbacks) and `ai/pipeline.py` (per-symbol news score + macro regime from persisted FRED data)
+- Last completed task: Wired AI flow into `run_m3.py` and `run_m5.py` with signal metadata enrichment + `ai_outputs` audit persistence (`storage.models.AIOutputLog`, Alembic migration `f27c0a1b9e10_add_ai_outputs_table.py`)
+- Next task: Complete remaining M6 items (regime-gated strategy selection and anomaly detection), then move to M7 dashboard control-plane depth
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 

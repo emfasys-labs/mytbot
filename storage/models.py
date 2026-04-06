@@ -208,3 +208,23 @@ class ParameterLog(Base):
     confidence = Column(Numeric(5, 4), nullable=True)
     expiry_time = Column(DateTime(timezone=True), nullable=True)
     evidence = Column(JSON, nullable=True)
+
+
+class AIOutputLog(Base):
+    """Audit log for AI news/macro outputs used in signaling."""
+
+    __tablename__ = "ai_outputs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now())
+    symbol = Column(String(32), nullable=True, index=True)
+    context_type = Column(String(20), nullable=False, index=True)  # news | macro | rationale
+    score = Column(Numeric(10, 6), nullable=True)
+    confidence = Column(Numeric(10, 6), nullable=True)
+    event_type = Column(String(32), nullable=True)
+    regime_label = Column(String(64), nullable=True)
+    decay_hours = Column(Integer, nullable=True)
+    rationale = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    source = Column(String(32), nullable=False, default="system")
+    signal_id = Column(String(128), nullable=True, index=True)

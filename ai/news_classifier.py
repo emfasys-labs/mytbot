@@ -1,26 +1,21 @@
 """
-ai/news_classifier.py
-======================
 AI News Intelligence Layer (M6).
 
-Uses Claude API to:
-1. Classify news events by type and affected assets
-2. Score sentiment and directional bias (-1.0 to +1.0)
-3. Assign confidence and time-decay (news fades)
-4. Generate plain-English trade rationale
-
+Uses Claude API to classify headline impact and generate rationale.
 The AI NEVER places orders. It only scores and explains.
-The risk engine and strategy engine make the actual decisions.
 """
 
-import os
-import json
-import logging
-from dataclasses import dataclass
-from typing import Optional
-from datetime import datetime, timezone, timedelta
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import asyncio
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+
+from anthropic import AsyncAnthropic
+from loguru import logger
 
 
 @dataclass
@@ -76,7 +71,15 @@ Rules:
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
-        self._client = None
+        self.model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        self.max_retries = int(os.getenv("AI_NEWS_MAX_RETRIES", "2"))
+        self.timeout_sec = float(os.getenv("AI_NEWS_TIMEOUT_SEC", "20"))
+        self._client: AsyncAnthropic | None = None
+
+    def _client_or_init(self) -> AsyncAnthropic:
+        if self._client is None:
+            self._client = AsyncAnthropic(api_key=self.api_key, timeout=self.timeout_sec)
+        return self._client
 
     async def score(self, news_item: NewsItem) -> Optional[NewsScore]:
         """
@@ -90,17 +93,18 @@ Rules:
         try:
             response = await self._call_claude(news_item)
             return self._parse_response(news_item, response)
-        except Exception as e:
-            logger.error(f"News classification failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("news_classifier | score failed | {}", e)
             return None
 
     async def score_batch(self, items: list[NewsItem]) -> list[Optional[NewsScore]]:
         """Score multiple news items."""
-        results = []
+        if not items:
+            return []
+        out: list[Optional[NewsScore]] = []
         for item in items:
-            score = await self.score(item)
-            results.append(score)
-        return results
+            out.append(await self.score(item))
+        return out
 
     def get_symbol_score(
         self,
@@ -119,7 +123,7 @@ Rules:
         relevant = [
             s for s in scores
             if symbol in s.affected_symbols
-            and datetime.fromisoformat(s.scored_at) > cutoff
+            and self._parse_iso(s.scored_at) > cutoff
         ]
 
         if not relevant:
@@ -156,37 +160,149 @@ Key features: {signal_context.get('metadata', {})}
 Respond with ONE sentence only. Plain English. No jargon."""
 
         try:
-            # TODO M6: implement actual API call
-            return f"Momentum breakout detected on {signal_context.get('symbol')} with confirming volume."
-        except Exception as e:
-            logger.error(f"Rationale generation failed: {e}")
+            raw = await self._call_text(
+                system_prompt=(
+                    "You are an execution-side auditor for a trading system. "
+                    "Return exactly one plain-English sentence. "
+                    "No markdown, no bullet points, no prefacing."
+                ),
+                user_prompt=prompt,
+                max_tokens=120,
+            )
+            one_line = " ".join(raw.strip().split())
+            return one_line[:280] if one_line else "Rationale unavailable"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("news_classifier | rationale generation failed | {}", e)
             return "Rationale generation failed"
 
     async def _call_claude(self, news_item: NewsItem) -> str:
         """Call Claude API for news classification."""
-        # TODO M6: implement using anthropic SDK
-        # import anthropic
-        # client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        # message = await client.messages.create(
-        #     model="claude-sonnet-4-6",
-        #     max_tokens=500,
-        #     system=self.SYSTEM_PROMPT,
-        #     messages=[{"role": "user", "content": f"Headline: {news_item.headline}"}]
-        # )
-        # return message.content[0].text
-        raise NotImplementedError("Implement in M6")
+        body_preview = (news_item.body or "").strip()[:1200]
+        user = (
+            f"Headline: {news_item.headline}\n"
+            f"Source: {news_item.source}\n"
+            f"PublishedAt: {news_item.published_at}\n"
+            f"BodyPreview: {body_preview}\n"
+            "Return JSON only."
+        )
+        return await self._call_text(self.SYSTEM_PROMPT, user, max_tokens=500)
 
     def _parse_response(self, news_item: NewsItem, raw: str) -> NewsScore:
         """Parse Claude's JSON response into a NewsScore."""
-        data = json.loads(raw)
+        data = self._extract_json(raw)
+        sentiment = self._bounded_float(data.get("sentiment"), lo=-1.0, hi=1.0, default=0.0)
+        confidence = self._bounded_float(data.get("confidence"), lo=0.0, hi=1.0, default=0.0)
+        event_type = self._safe_event_type(str(data.get("event_type", "other")))
+        directional_bias = self._safe_bias(str(data.get("directional_bias", "neutral")))
+        rationale = str(data.get("rationale", "")).strip() or "No rationale returned."
+        decay_hours = self._bounded_int(data.get("decay_hours"), lo=1, hi=168, default=24)
+
+        affected_raw = data.get("affected_symbols", [])
+        affected: list[str] = []
+        if isinstance(affected_raw, list):
+            for x in affected_raw[:20]:
+                s = str(x).strip().upper()
+                if s:
+                    affected.append(s)
+        affected = sorted(set(affected))
+
         return NewsScore(
             headline=news_item.headline,
-            sentiment=float(data["sentiment"]),
-            confidence=float(data["confidence"]),
-            affected_symbols=data["affected_symbols"],
-            event_type=data["event_type"],
-            directional_bias=data["directional_bias"],
-            rationale=data["rationale"],
+            sentiment=sentiment,
+            confidence=confidence,
+            affected_symbols=affected,
+            event_type=event_type,
+            directional_bias=directional_bias,
+            rationale=rationale,
             scored_at=datetime.now(timezone.utc).isoformat(),
-            decay_hours=int(data["decay_hours"]),
+            decay_hours=decay_hours,
         )
+
+    async def _call_text(self, system_prompt: str, user_prompt: str, *, max_tokens: int) -> str:
+        client = self._client_or_init()
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = await client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+                text_chunks: list[str] = []
+                for block in resp.content:
+                    t = getattr(block, "text", None)
+                    if t:
+                        text_chunks.append(str(t))
+                joined = "\n".join(text_chunks).strip()
+                if joined:
+                    return joined
+                raise ValueError("Claude returned empty response")
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= self.max_retries:
+                    break
+                await asyncio.sleep(0.5 * (2**attempt))
+        raise RuntimeError(f"Claude API call failed after retries: {last_exc}")
+
+    @staticmethod
+    def _extract_json(raw: str) -> dict[str, Any]:
+        text = raw.strip()
+        try:
+            return json.loads(text)
+        except Exception:  # noqa: BLE001
+            pass
+        # recover fenced or wrapped output
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise ValueError("No JSON object found in Claude response")
+
+    @staticmethod
+    def _bounded_float(v: Any, *, lo: float, hi: float, default: float) -> float:
+        try:
+            x = float(v)
+        except Exception:  # noqa: BLE001
+            return default
+        return max(lo, min(hi, x))
+
+    @staticmethod
+    def _bounded_int(v: Any, *, lo: int, hi: int, default: int) -> int:
+        try:
+            x = int(v)
+        except Exception:  # noqa: BLE001
+            return default
+        return max(lo, min(hi, x))
+
+    @staticmethod
+    def _safe_event_type(v: str) -> str:
+        allowed = {
+            "earnings",
+            "macro",
+            "regulatory",
+            "geopolitical",
+            "sector",
+            "company",
+            "crypto",
+            "other",
+        }
+        val = v.strip().lower()
+        return val if val in allowed else "other"
+
+    @staticmethod
+    def _safe_bias(v: str) -> str:
+        allowed = {"bullish", "bearish", "neutral"}
+        val = v.strip().lower()
+        return val if val in allowed else "neutral"
+
+    @staticmethod
+    def _parse_iso(v: str) -> datetime:
+        txt = v.strip()
+        if txt.endswith("Z"):
+            txt = txt[:-1] + "+00:00"
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
