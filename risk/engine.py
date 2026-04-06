@@ -16,6 +16,7 @@ All thresholds live in config/risk_limits.yaml — editable without code changes
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Optional
@@ -111,6 +112,12 @@ class RiskEngine:
             checks_failed=[],
         )
 
+    async def evaluate_and_persist(self, session_factory, signal: Signal, portfolio_state: dict) -> RiskDecision:
+        """Evaluate a signal and persist the risk decision when DB is available."""
+        decision = self.evaluate(signal, portfolio_state)
+        await self.persist_decision(session_factory, signal, decision)
+        return decision
+
     def kill(self) -> None:
         """Activate kill switch. Halts all new orders immediately."""
         self._is_killed = True
@@ -144,20 +151,51 @@ class RiskEngine:
         return (not self._in_cooldown, "cooldown")
 
     def _check_daily_loss_limit(self, signal, portfolio) -> tuple[bool, str]:
-        # TODO M4: compare _daily_loss against config["max_daily_loss_pct"] * portfolio value
-        return (True, "daily_loss_limit")
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "daily_loss_limit")
+        max_daily_loss_pct = Decimal(str(self.config.get("max_daily_loss_pct", 0.02)))
+        # Use whichever loss tracker is worse: runtime or provided portfolio state.
+        stated_pnl = self._decimal_from_portfolio(portfolio, "daily_realized_pnl", Decimal("0"))
+        state_loss = abs(stated_pnl) if stated_pnl < 0 else Decimal("0")
+        observed_loss = max(self._daily_loss, state_loss)
+        allowed_loss = portfolio_value * max_daily_loss_pct
+        return (observed_loss <= allowed_loss, "daily_loss_limit")
 
     def _check_position_size(self, signal, portfolio) -> tuple[bool, str]:
-        # TODO M4: signal.suggested_quantity * price <= config["max_position_pct"] * portfolio value
-        return (True, "position_size")
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "position_size")
+        max_position_pct = Decimal(str(self.config.get("max_position_pct", 0.10)))
+        price = self._resolve_signal_price(signal)
+        if price <= 0:
+            return (False, "position_size")
+        requested_notional = abs(signal.suggested_quantity) * price
+        allowed_notional = portfolio_value * max_position_pct
+        return (requested_notional <= allowed_notional, "position_size")
 
     def _check_max_exposure(self, signal, portfolio) -> tuple[bool, str]:
-        # TODO M4: total open notional <= config["max_gross_exposure_pct"] * portfolio value
-        return (True, "max_exposure")
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "max_exposure")
+        max_gross_pct = Decimal(str(self.config.get("max_gross_exposure_pct", 0.80)))
+        current_gross = self._decimal_from_portfolio(portfolio, "current_gross_exposure", Decimal("0"))
+        projected_gross = current_gross + self._requested_notional(signal)
+        allowed_gross = portfolio_value * max_gross_pct
+        return (projected_gross <= allowed_gross, "max_exposure")
 
     def _check_concentration(self, signal, portfolio) -> tuple[bool, str]:
-        # TODO M4: single asset not > config["max_concentration_pct"] of portfolio
-        return (True, "concentration")
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "concentration")
+        max_concentration_pct = Decimal(str(self.config.get("max_concentration_pct", 0.20)))
+        symbol_exposure_raw = portfolio.get("symbol_exposure", {})
+        symbol_exposure = Decimal("0")
+        if isinstance(symbol_exposure_raw, dict):
+            symbol_exposure = Decimal(str(symbol_exposure_raw.get(signal.symbol, "0")))
+        projected_symbol_exposure = symbol_exposure + self._requested_notional(signal)
+        allowed_symbol_exposure = portfolio_value * max_concentration_pct
+        return (projected_symbol_exposure <= allowed_symbol_exposure, "concentration")
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = self.config.get("max_consecutive_losses", 3)
@@ -180,3 +218,64 @@ class RiskEngine:
             checks_passed=passed,
             checks_failed=failed,
         )
+
+    @staticmethod
+    def _decimal_from_portfolio(portfolio: dict, key: str, default: Decimal) -> Decimal:
+        try:
+            return Decimal(str(portfolio.get(key, default)))
+        except Exception:  # noqa: BLE001
+            return default
+
+    @staticmethod
+    def _resolve_signal_price(signal: Signal) -> Decimal:
+        if signal.suggested_price is not None and signal.suggested_price > 0:
+            return signal.suggested_price
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        for key in ("close", "last_price", "price"):
+            if key not in metadata:
+                continue
+            try:
+                price = Decimal(str(metadata[key]))
+            except Exception:  # noqa: BLE001
+                continue
+            if price > 0:
+                return price
+        return Decimal("0")
+
+    def _requested_notional(self, signal: Signal) -> Decimal:
+        return abs(signal.suggested_quantity) * self._resolve_signal_price(signal)
+
+    async def persist_decision(self, session_factory, signal: Signal, decision: RiskDecision) -> None:
+        """Persist every risk decision for audit; no-op if DB/session factory is missing."""
+        if session_factory is None:
+            return
+        try:
+            from storage.models import RiskLog
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Risk decision not persisted; failed to import RiskLog: %s", exc)
+            return
+
+        ts = datetime.now(timezone.utc)
+        try:
+            raw_ts = getattr(signal, "timestamp", None)
+            if isinstance(raw_ts, str):
+                ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:  # noqa: BLE001
+            pass
+
+        row = RiskLog(
+            signal_id=decision.signal_id[:128],
+            timestamp=ts,
+            verdict=decision.verdict.value[:10],
+            reason=decision.reason,
+            checks_passed=decision.checks_passed,
+            checks_failed=decision.checks_failed,
+        )
+        try:
+            async with session_factory() as session:
+                session.add(row)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Risk decision persistence failed | signal_id=%s | %s", decision.signal_id, exc)

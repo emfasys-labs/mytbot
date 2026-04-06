@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from sqlalchemy import select
 
+from risk.engine import RiskEngine, RiskVerdict
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.models import FeatureSnapshot, SignalLog
@@ -111,6 +112,7 @@ async def _persist_signal(session_factory, signal, *, paper_mode: bool, timefram
 async def _run_once(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
+    risk_cfg = _load_yaml(args.risk_config)
 
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]
     if not symbols:
@@ -124,6 +126,7 @@ async def _run_once(args: argparse.Namespace) -> int:
 
     try:
         sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
+        risk_engine = RiskEngine(risk_cfg)
         strat_cfg = strategies_cfg.get("strategies", {})
         momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
         mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
@@ -160,6 +163,27 @@ async def _run_once(args: argparse.Namespace) -> int:
             )
             if signal is None:
                 logger.info("run_m3 | vetoed | {} {}", symbol, raw.strategy)
+                continue
+
+            # M3/M4 bridge: evaluate and audit every risk decision before persistence.
+            portfolio_state = {
+                "portfolio_value": Decimal(str(args.portfolio_value)),
+                "daily_realized_pnl": Decimal("0"),
+                "current_gross_exposure": Decimal("0"),
+                "symbol_exposure": {},
+            }
+            risk_decision = await risk_engine.evaluate_and_persist(
+                session_factory,
+                signal,
+                portfolio_state,
+            )
+            if risk_decision.verdict != RiskVerdict.APPROVED:
+                logger.info(
+                    "run_m3 | risk_rejected | {} {} | reason={}",
+                    signal.symbol,
+                    signal.strategy,
+                    risk_decision.reason,
+                )
                 continue
 
             await _persist_signal(
@@ -200,6 +224,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="M3 signal generation runner")
     p.add_argument("--strategies-config", default="config/strategies.yaml")
     p.add_argument("--pipeline-config", default="config/data_pipeline.yaml")
+    p.add_argument("--risk-config", default="config/risk_limits.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
     p.add_argument("--timeframe", default="1d")
     p.add_argument("--lookback-bars", type=int, default=200)

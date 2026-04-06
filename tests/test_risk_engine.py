@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+import pytest
+
+from risk.engine import RiskEngine, RiskVerdict, Signal
+
+
+def _risk_cfg() -> dict:
+    return {
+        "max_position_pct": 0.10,
+        "max_concentration_pct": 0.20,
+        "max_gross_exposure_pct": 0.80,
+        "max_daily_loss_pct": 0.02,
+        "max_consecutive_losses": 3,
+        "min_signal_confidence": 0.55,
+    }
+
+
+def _signal(*, qty: str = "1", price: str = "100", confidence: float = 0.9) -> Signal:
+    return Signal(
+        signal_id="s-1",
+        symbol="SPY",
+        side="buy",
+        strategy="momentum_breakout",
+        confidence=confidence,
+        suggested_quantity=Decimal(qty),
+        suggested_price=Decimal(price),
+        broker="ibkr",
+        asset_class="equity",
+        timestamp="2026-04-06T12:00:00+00:00",
+        metadata={},
+    )
+
+
+def test_rejects_on_daily_loss_limit() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal()
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("-2500"),  # 2.5% > 2%
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["daily_loss_limit"]
+
+
+def test_rejects_on_position_size_limit() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="20", price="1000")  # 20k notional on 100k > 10%
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["position_size"]
+
+
+def test_rejects_on_max_exposure_limit() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="5", price="1000")  # 5k
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("79000"),  # projected 84k > 80k max
+        "symbol_exposure": {},
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_exposure"]
+
+
+def test_rejects_on_concentration_limit() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="5", price="1000")  # 5k
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {"SPY": Decimal("19000")},  # projected 24k > 20k max
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["concentration"]
+
+
+@dataclass
+class _FakeSession:
+    rows: list
+    committed: bool = False
+
+    def add(self, row) -> None:
+        self.rows.append(row)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class _FakeSessionFactory:
+    def __init__(self):
+        self.rows = []
+        self.last_session = _FakeSession(self.rows)
+
+    def __call__(self):
+        session = self.last_session
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return session
+
+            async def __aexit__(self_inner, exc_type, exc, tb):
+                return False
+
+        return _CM()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_and_persist_writes_risklog_row() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal()
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+    }
+    sf = _FakeSessionFactory()
+    decision = await engine.evaluate_and_persist(sf, sig, portfolio)
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert len(sf.rows) == 1
+    row = sf.rows[0]
+    assert row.signal_id == sig.signal_id
+    assert row.verdict == "approved"
+    assert sf.last_session.committed is True
+
