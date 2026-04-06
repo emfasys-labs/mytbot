@@ -1,95 +1,311 @@
-"""
-api/server.py
-==============
-FastAPI backend for the control dashboard.
+"""FastAPI backend for M7 control plane + dashboard."""
 
-Endpoints:
-    GET  /status          — system health and mode
-    GET  /positions       — all open positions
-    GET  /orders          — recent orders
-    GET  /signals         — recent signals with rationale
-    GET  /pnl             — P&L summary
-    POST /kill            — activate kill switch
-    POST /kill/reset      — deactivate kill switch
-    POST /strategy/{name}/toggle  — enable/disable a strategy
+from __future__ import annotations
 
-Run: uvicorn api.server:app --host 0.0.0.0 --port 8000
-"""
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import os
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any
 
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
+
+from control.command_bus import CommandBus
 from control.runtime import get_execution_engine, get_risk_engine
+from risk.parameters import ParameterManager
+from storage.db import dispose_engine, init_async_database
+from storage.models import DailyPnL, OrderLog, PositionLog, SignalLog
 
-app = FastAPI(
-    title="mytbot Control API",
-    description="Autonomous trading system dashboard API",
-    version="0.1.0",
-)
+APP_ENV = os.getenv("APP_ENV", "paper")
+MUTATION_TOKEN = os.getenv("API_CONTROL_TOKEN", "").strip()
+ALLOWED_ORIGINS = [x.strip() for x in os.getenv("API_ALLOWED_ORIGINS", "*").split(",") if x.strip()]
 
+app = FastAPI(title="mytbot Control API", description="Autonomous trading system dashboard API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # lock this down in production
+    allow_origins=ALLOWED_ORIGINS or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-APP_ENV = os.getenv("APP_ENV", "paper")
+
+@app.on_event("startup")
+async def _startup() -> None:
+    engine, session_factory = await init_async_database()
+    app.state.db_engine = engine
+    app.state.db_session_factory = session_factory
+    app.state.command_bus = CommandBus(session_factory) if session_factory is not None else None
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await dispose_engine(getattr(app.state, "db_engine", None))
+
+
+def _require_mutation_token(x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> None:
+    if not MUTATION_TOKEN:
+        return
+    if x_control_token != MUTATION_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid control token")
+
+
+def _session_factory():
+    sf = getattr(app.state, "db_session_factory", None)
+    if sf is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    return sf
+
+
+def _command_bus() -> CommandBus:
+    bus = getattr(app.state, "command_bus", None)
+    if bus is None:
+        raise HTTPException(status_code=503, detail="Command bus unavailable")
+    return bus
+
+
+def _decimal_str(v: Any) -> str:
+    if v is None:
+        return "0"
+    return str(Decimal(str(v)))
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True, "service": "api", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/readyz")
+async def readyz():
+    sf = getattr(app.state, "db_session_factory", None)
+    return {"ok": sf is not None, "db": sf is not None}
 
 
 @app.get("/status")
 async def get_status():
     risk_engine = get_risk_engine()
     execution_engine = get_execution_engine()
-    connected_brokers = []
-    if execution_engine is not None:
-        connected_brokers = list(getattr(execution_engine, "_brokers", {}).keys())
+    connected_brokers = list(getattr(execution_engine, "_brokers", {}).keys()) if execution_engine is not None else []
+    bus = getattr(app.state, "command_bus", None)
+    runtime = {}
+    strategies: dict[str, bool] = {}
+    if bus is not None:
+        runtime = await bus.get_state("runtime.heartbeat", {}) or {}
+        state_map = await bus.get_state_prefix("strategy.enabled.")
+        strategies = {k.replace("strategy.enabled.", "", 1): bool(v) for k, v in state_map.items()}
+
     return {
         "status": "running",
         "mode": APP_ENV,
         "paper_mode": APP_ENV != "live",
         "kill_switch": bool(getattr(risk_engine, "is_killed", False)),
         "connected_brokers": connected_brokers,
-        "active_strategies": [],        # TODO M7: read from strategy registry
+        "active_strategies": strategies,
+        "runtime": runtime,
     }
 
 
 @app.get("/positions")
-async def get_positions():
-    # TODO M7: query from database
-    return {"positions": []}
-
-
-@app.get("/orders")
-async def get_orders(limit: int = 50):
-    # TODO M7: query from database
-    return {"orders": []}
-
-
-@app.get("/signals")
-async def get_signals(limit: int = 50):
-    # TODO M7: query from database
-    return {"signals": []}
-
-
-@app.get("/pnl")
-async def get_pnl():
-    # TODO M7: query from database
+async def get_positions(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
+        latest_ts = latest_ts_q.scalar_one_or_none()
+        if latest_ts is None:
+            return {"positions": []}
+        q = await session.execute(
+            select(PositionLog)
+            .where(PositionLog.timestamp == latest_ts)
+            .order_by(PositionLog.symbol.asc())
+            .limit(limit)
+        )
+        rows = list(q.scalars().all())
     return {
-        "today": {"realised": 0, "unrealised": 0, "fees": 0, "trades": 0},
-        "all_time": {"realised": 0, "unrealised": 0, "fees": 0, "trades": 0},
+        "positions": [
+            {
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "symbol": r.symbol,
+                "broker": r.broker,
+                "quantity": _decimal_str(r.quantity),
+                "avg_entry_price": _decimal_str(r.avg_entry_price),
+                "current_price": _decimal_str(r.current_price),
+                "unrealised_pnl": _decimal_str(r.unrealised_pnl),
+                "asset_class": r.asset_class,
+            }
+            for r in rows
+        ]
     }
 
 
+@app.get("/orders")
+async def get_orders(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        q = await session.execute(select(OrderLog).order_by(OrderLog.timestamp.desc()).limit(limit))
+        rows = list(q.scalars().all())
+    return {
+        "orders": [
+            {
+                "id": r.id,
+                "signal_id": r.signal_id,
+                "broker_order_id": r.broker_order_id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "symbol": r.symbol,
+                "side": r.side,
+                "order_type": r.order_type,
+                "quantity": _decimal_str(r.quantity),
+                "limit_price": _decimal_str(r.limit_price) if r.limit_price is not None else None,
+                "broker": r.broker,
+                "status": r.status,
+                "filled_quantity": _decimal_str(r.filled_quantity) if r.filled_quantity is not None else None,
+                "avg_fill_price": _decimal_str(r.avg_fill_price) if r.avg_fill_price is not None else None,
+                "fee": _decimal_str(r.fee) if r.fee is not None else None,
+                "paper_mode": bool(r.paper_mode),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/signals")
+async def get_signals(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        q = await session.execute(select(SignalLog).order_by(SignalLog.timestamp.desc()).limit(limit))
+        rows = list(q.scalars().all())
+    return {
+        "signals": [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "symbol": r.symbol,
+                "side": r.side,
+                "strategy": r.strategy,
+                "confidence": _decimal_str(r.confidence),
+                "asset_class": r.asset_class,
+                "broker": r.broker,
+                "news_score": _decimal_str(r.news_score) if r.news_score is not None else None,
+                "news_veto": bool(r.news_veto),
+                "metadata": r.metadata_ or {},
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/pnl")
+async def get_pnl(session_factory=Depends(_session_factory)):
+    today = date.today().isoformat()
+    async with session_factory() as session:
+        today_q = await session.execute(select(DailyPnL).where(DailyPnL.date == today).limit(1))
+        today_row = today_q.scalars().first()
+        agg_q = await session.execute(
+            select(
+                func.coalesce(func.sum(DailyPnL.realised_pnl), 0),
+                func.coalesce(func.sum(DailyPnL.unrealised_pnl), 0),
+                func.coalesce(func.sum(DailyPnL.total_fees), 0),
+                func.coalesce(func.sum(DailyPnL.trade_count), 0),
+            )
+        )
+        agg = agg_q.one()
+    return {
+        "today": {
+            "realised": _decimal_str(today_row.realised_pnl if today_row else 0),
+            "unrealised": _decimal_str(today_row.unrealised_pnl if today_row else 0),
+            "fees": _decimal_str(today_row.total_fees if today_row else 0),
+            "trades": int(today_row.trade_count if today_row else 0),
+            "portfolio_value": _decimal_str(today_row.portfolio_value if today_row else 0),
+        },
+        "all_time": {
+            "realised": _decimal_str(agg[0]),
+            "unrealised": _decimal_str(agg[1]),
+            "fees": _decimal_str(agg[2]),
+            "trades": int(agg[3] or 0),
+        },
+    }
+
+
+@app.get("/pnl/history")
+async def get_pnl_history(
+    limit: int = Query(90, ge=1, le=365),
+    session_factory=Depends(_session_factory),
+):
+    async with session_factory() as session:
+        q = await session.execute(select(DailyPnL).order_by(DailyPnL.date.desc()).limit(limit))
+        rows = list(q.scalars().all())
+    rows.reverse()
+    return {
+        "history": [
+            {
+                "date": r.date,
+                "realised": _decimal_str(r.realised_pnl),
+                "unrealised": _decimal_str(r.unrealised_pnl),
+                "fees": _decimal_str(r.total_fees),
+                "trades": int(r.trade_count or 0),
+                "portfolio_value": _decimal_str(r.portfolio_value),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/control/commands")
+async def get_control_commands(limit: int = Query(50, ge=1, le=500), bus: CommandBus = Depends(_command_bus)):
+    rows = await bus.get_recent_commands(limit=limit)
+    return {
+        "commands": [
+            {
+                "id": r.id,
+                "type": r.command_type,
+                "payload": r.payload or {},
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "claimed_at": r.claimed_at.isoformat() if r.claimed_at else None,
+                "processed_at": r.processed_at.isoformat() if r.processed_at else None,
+                "error": r.error,
+                "source": r.source,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/risk/parameters")
+async def get_risk_parameters():
+    pm = ParameterManager(enable_db_logging=False)
+    out: dict[str, str] = {}
+    for name in pm._cfg.get("risk_parameters", {}).keys():  # noqa: SLF001
+        out[name] = str(pm.get_value(name))
+    return {"parameters": out}
+
+
+@app.post("/risk/parameters/{name}")
+async def set_risk_parameter(
+    name: str,
+    payload: dict[str, Any],
+    _: None = Depends(_require_mutation_token),
+    bus: CommandBus = Depends(_command_bus),
+):
+    value = payload.get("value")
+    reason = str(payload.get("reason", "api override"))
+    if value is None:
+        raise HTTPException(status_code=400, detail="value required")
+    cmd_id = await bus.enqueue("set_parameter", {"name": name, "value": value, "reason": reason}, source="api")
+    return {"command_id": cmd_id, "parameter": name, "value": value}
+
+
 @app.post("/kill")
-async def activate_kill_switch():
-    """Immediately halt all trading. Cancel all open orders."""
+async def activate_kill_switch(
+    _: None = Depends(_require_mutation_token),
+):
+    """Immediately halt all trading."""
+    bus = getattr(app.state, "command_bus", None)
+    if bus is not None:
+        cmd_id = await bus.enqueue("kill", {}, source="api")
+        return {"kill_switch": True, "command_id": cmd_id, "message": "Kill command enqueued"}
+    # fallback for single-process mode
     risk_engine = get_risk_engine()
     execution_engine = get_execution_engine()
     if risk_engine is None:
         raise HTTPException(status_code=503, detail="Risk engine not registered")
-
     risk_engine.kill()
     if execution_engine is not None:
         await execution_engine.cancel_all()
@@ -97,8 +313,14 @@ async def activate_kill_switch():
 
 
 @app.post("/kill/reset")
-async def reset_kill_switch():
-    """Re-enable trading after kill switch. Deliberate action required."""
+async def reset_kill_switch(
+    _: None = Depends(_require_mutation_token),
+):
+    """Re-enable trading after kill switch."""
+    bus = getattr(app.state, "command_bus", None)
+    if bus is not None:
+        cmd_id = await bus.enqueue("reset_kill", {}, source="api")
+        return {"kill_switch": False, "command_id": cmd_id, "message": "Reset command enqueued"}
     risk_engine = get_risk_engine()
     if risk_engine is None:
         raise HTTPException(status_code=503, detail="Risk engine not registered")
@@ -107,7 +329,26 @@ async def reset_kill_switch():
 
 
 @app.post("/strategy/{name}/toggle")
-async def toggle_strategy(name: str):
-    """Enable or disable a strategy by name."""
-    # TODO M7: toggle in strategy registry
-    return {"strategy": name, "message": f"Strategy {name} toggled"}
+async def toggle_strategy(
+    name: str,
+    payload: dict[str, Any],
+    _: None = Depends(_require_mutation_token),
+    bus: CommandBus = Depends(_command_bus),
+):
+    enabled = bool(payload.get("enabled", True))
+    state_key = f"strategy.enabled.{name}"
+    await bus.set_state(state_key, enabled)
+    cmd_id = await bus.enqueue("toggle_strategy", {"name": name, "enabled": enabled}, source="api")
+    return {"strategy": name, "enabled": enabled, "command_id": cmd_id}
+
+
+@app.websocket("/ws")
+async def ws_updates(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            status = await get_status()
+            await ws.send_json({"type": "status", "payload": status, "ts": datetime.now(timezone.utc).isoformat()})
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        return

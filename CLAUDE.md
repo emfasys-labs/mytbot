@@ -49,10 +49,10 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M6 — AI Intelligence Layer ✅ Complete
-- Last completed task: Added regime-gated strategy selection (config-driven via `config/ai.yaml`) in `run_m3.py` and `run_m5.py`
-- Last completed task: Added narrative anomaly detection in `ai/pipeline.py` and anomaly persistence to `ai_outputs`
-- Next task: M7 — Dashboard + control-plane visibility (risk/runtime/AI state endpoints and UI wiring)
+- Milestone: M7 — Dashboard + Control ✅ Complete
+- Last completed task: Added DB-backed control plane (`control_commands`, `control_state`) with API command enqueue + runner command polling/ack in `run_m3.py` and `run_m5.py`
+- Last completed task: Implemented M7 FastAPI endpoints + websocket and React dashboard scaffold under `dashboard/` (status, logs, controls, risk editor, trade detail, pnl chart)
+- Next task: M8 — Micro-live rollout and iterative scaling safeguards
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 

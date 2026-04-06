@@ -21,6 +21,8 @@ from sqlalchemy import func, select
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
 from ai.regime import filter_by_allowed_strategies
+from control.command_bus import CommandBus
+from control.runner_control import apply_control_commands, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from risk.engine import RiskEngine, RiskVerdict
 from signals.engine import RawSignal, SignalEngine
@@ -408,6 +410,16 @@ async def _run_once(args: argparse.Namespace) -> int:
         strat_cfg = strategies_cfg.get("strategies", {})
         momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
         mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
+        strategies = {
+            momentum.name: momentum,
+            mean_rev.name: mean_rev,
+        }
+        bus = CommandBus(session_factory)
+        for name, strategy in strategies.items():
+            state_v = await bus.get_state(f"strategy.enabled.{name}", None)
+            if state_v is not None:
+                strategy.enabled = bool(state_v)
+        await apply_control_commands(bus, risk_engine=risk_engine, execution_engine=None, strategies=strategies)
         generated = 0
         ai_result = None
         if ai_pipeline is not None:
@@ -529,6 +541,14 @@ async def _run_once(args: argparse.Namespace) -> int:
             )
 
         logger.info("run_m3 | done | generated_signals={}", generated)
+        await publish_runner_heartbeat(
+            bus,
+            runner_name="run_m3",
+            symbols=symbols,
+            generated=generated,
+            executed=0,
+            extra={"paper_mode": not args.live},
+        )
         return 0
     finally:
         await dispose_engine(engine)

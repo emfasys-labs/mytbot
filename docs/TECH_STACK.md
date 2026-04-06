@@ -279,8 +279,12 @@ Policy summary:
 | Technology | Why |
 |-----------|-----|
 | FastAPI | REST + WebSocket for dashboard. Async native. |
-| React + Recharts | P&L charts, positions, signals, Sharpe/drawdown display. |
+| React + Vite | M7 dashboard UI with control-plane actions and realtime status updates. |
 | Grafana (optional) | Operational metrics — API latency, error rates. |
+
+M7 control-plane implementation notes:
+- Postgres-backed command/state bus (`control_commands`, `control_state`) for API-to-runner control actions across processes.
+- FastAPI mutating endpoints support env-token auth (`API_CONTROL_TOKEN`) and configurable CORS origins (`API_ALLOWED_ORIGINS`).
 
 ---
 

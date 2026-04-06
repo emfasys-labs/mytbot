@@ -16,7 +16,7 @@
 | M4 | Risk Engine | Weeks 9–10 | ✅ Complete |
 | M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ✅ Complete |
 | M6 | AI Intelligence Layer | Weeks 13–15 | ✅ Complete |
-| M7 | Dashboard + Control | Weeks 16–17 | ⏳ Not started |
+| M7 | Dashboard + Control | Weeks 16–17 | ✅ Complete |
 | M8 | Micro-Live + Iteration | Weeks 18+ | ⏳ Not started |
 
 ---
@@ -207,14 +207,14 @@ Mandatory gates from research:
 **Goal:** Full visibility and control. See everything, stop anything.
 
 **Tasks:**
-- [ ] FastAPI backend — REST endpoints for all system state ✅ skeleton done
-- [ ] React dashboard — live positions, P&L, open orders, signal log
-- [ ] Strategy control panel — enable/disable each strategy individually
-- [ ] Risk threshold editor — adjust limits without restarting system
-- [ ] Kill switch UI — one button to halt everything
-- [ ] Trade detail view — full decision trail for every trade
-- [ ] Performance charts — Sharpe ratio, drawdown curve, strategy attribution
-- [ ] WebSocket for real-time dashboard updates
+- [x] FastAPI backend — REST endpoints for all system state ✅ skeleton done
+- [x] React dashboard — live positions, P&L, open orders, signal log
+- [x] Strategy control panel — enable/disable each strategy individually
+- [x] Risk threshold editor — adjust limits without restarting system
+- [x] Kill switch UI — one button to halt everything
+- [x] Trade detail view — full decision trail for every trade
+- [x] Performance charts — Sharpe ratio, drawdown curve, strategy attribution
+- [x] WebSocket for real-time dashboard updates
 
 **Deliverable:**
 > Full control dashboard accessible from browser.

@@ -21,6 +21,8 @@ from loguru import logger
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
 from ai.regime import filter_by_allowed_strategies
+from control.command_bus import CommandBus
+from control.runner_control import apply_control_commands, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
@@ -187,6 +189,15 @@ async def _run_loop(args: argparse.Namespace) -> int:
     strat_cfg = strategies_cfg.get("strategies", {})
     momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
     mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
+    strategies = {
+        momentum.name: momentum,
+        mean_rev.name: mean_rev,
+    }
+    bus = CommandBus(session_factory)
+    for name, strategy in strategies.items():
+        state_v = await bus.get_state(f"strategy.enabled.{name}", None)
+        if state_v is not None:
+            strategy.enabled = bool(state_v)
 
     next_reconcile_at = datetime.now(timezone.utc).timestamp()
 
@@ -209,6 +220,12 @@ async def _run_loop(args: argparse.Namespace) -> int:
             try:
                 generated = 0
                 executed = 0
+                await apply_control_commands(
+                    bus,
+                    risk_engine=risk_engine,
+                    execution_engine=execution,
+                    strategies=strategies,
+                )
                 ai_result = None
                 if ai_pipeline is not None:
                     ai_result = await ai_pipeline.compute(session_factory, symbols)
@@ -357,6 +374,14 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     logger.info("run_m5 | reconcile | ok={}", ok)
                     next_reconcile_at = now_ts + max(10, int(args.reconcile_interval_sec))
 
+                await publish_runner_heartbeat(
+                    bus,
+                    runner_name="run_m5",
+                    symbols=symbols,
+                    generated=generated,
+                    executed=executed,
+                    extra={"paper_mode": not args.live},
+                )
                 logger.info("run_m5 | iteration | generated={} executed={}", generated, executed)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("run_m5 | iteration failed | {}", exc)
@@ -370,6 +395,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                 if session_factory is None:
                     await asyncio.sleep(max(5, int(args.loop_interval_sec)))
                     continue
+                bus = CommandBus(session_factory)
             await asyncio.sleep(max(1, int(args.loop_interval_sec)))
     finally:
         await dispose_engine(engine)

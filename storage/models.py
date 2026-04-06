@@ -228,3 +228,29 @@ class AIOutputLog(Base):
     payload = Column(JSON, nullable=True)
     source = Column(String(32), nullable=False, default="system")
     signal_id = Column(String(128), nullable=True, index=True)
+
+
+class ControlCommand(Base):
+    """Cross-process control command queue for API -> runners."""
+
+    __tablename__ = "control_commands"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    command_type = Column(String(64), nullable=False, index=True)  # kill | reset_kill | toggle_strategy | set_parameter
+    payload = Column(JSON, nullable=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)  # pending | processing | done | failed
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now())
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    error = Column(Text, nullable=True)
+    source = Column(String(32), nullable=False, default="api")
+
+
+class ControlState(Base):
+    """Key/value control plane state and runner heartbeats."""
+
+    __tablename__ = "control_state"
+
+    key = Column(String(128), primary_key=True)
+    value = Column(JSON, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now(), onupdate=func.now())
