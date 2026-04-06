@@ -36,6 +36,10 @@ BROKER_ASSET_MAP = {
     "binance": {
         "crypto"
     },
+    "bybit": {
+        "crypto",
+        "future",
+    },
     "alpaca": {
         "equity", "etf", "crypto"
     },
@@ -49,6 +53,7 @@ BROKER_FEE_MAP = {
     "ibkr":    Decimal("0.0018"),   # ~0.18% crypto, ~$0.005/share equities
     "kraken":  Decimal("0.0040"),   # 0.40% taker base
     "binance": Decimal("0.0010"),   # 0.10% base
+    "bybit":   Decimal("0.00055"),  # typical taker ~0.055% linear (tiered)
     "alpaca":  Decimal("0.0000"),   # zero commission equities
 }
 
@@ -97,6 +102,10 @@ class SmartOrderRouter:
         # IBKR is preferred for non-crypto (regulatory safety, multi-asset)
         if asset_class != "crypto" and "ibkr" in permitted:
             return "ibkr"
+
+        # Crypto perps / shorts: prefer Bybit when listed and permitted
+        if asset_class == "future" and "bybit" in permitted:
+            return "bybit"
 
         chosen = permitted[0]
         logger.debug("Routing %s (%s) -> %s", symbol, asset_class, chosen)

@@ -17,7 +17,7 @@
 | M5 | Execution Engine + Full Pipeline | Weeks 11–12 | ✅ Complete |
 | M6 | AI Intelligence Layer | Weeks 13–15 | ✅ Complete |
 | M7 | Dashboard + Control | Weeks 16–17 | ✅ Complete |
-| M8 | Micro-Live + Iteration | Weeks 18+ | ⏳ In progress (foundation: `config/m8_micro_live.yaml` + risk gates + runbooks) |
+| M8 | Micro-Live + Iteration | Weeks 18+ | ✅ Complete (code); ongoing ops: soak, scale capital slowly |
 
 ---
 
@@ -239,11 +239,11 @@ Mandatory gates from research:
 - [x] Switch IBKR from paper to live account — operational: `APP_ENV=live`, IBKR port 7496, `run_m5 --live` (see `docs/M8_MICRO_LIVE.md`)
 - [x] Start with single strategy, single asset, tight notional — enforced when `m8_micro_live.enabled: true` + `APP_ENV=live` (`config/m8_micro_live.yaml`)
 - [x] Weekly review template — `docs/M8_WEEKLY_REVIEW.md`
-- [ ] Add second exchange adapter (Binance live or Bybit) — proves plug-in pattern
-- [ ] Expand asset universe gradually as confidence builds
-- [ ] Add second strategy sleeve with separate capital allocation
-- [ ] Add Bybit adapter for crypto futures/shorts
-- [ ] Refine position sizing — move from fixed fraction to volatility-adjusted
+- [x] Add second exchange adapter — Binance (existing) + **Bybit** (`brokers/bybit/adapter.py`, `pybit`, registry/router/permissions)
+- [x] Expand asset universe gradually — `config/data_pipeline.yaml` + M8 whitelist patterns (e.g. IWM, QQQ alongside SPY; tighten live whitelist manually)
+- [x] Add second strategy sleeve with separate capital allocation — `strategy_sleeve_caps` per strategy under M8 live (`risk/engine.py`)
+- [x] Add Bybit adapter for crypto futures/shorts — USDT **linear** (default `BYBIT_CATEGORY=linear`) + spot via category
+- [x] Refine position sizing — ATR-based **volatility scaling** on top of fixed fraction (`config/strategies.yaml` → `signal_engine.volatility_sizing`)
 
 **Deliverable:**
 > Live trading system with real capital.
@@ -251,9 +251,11 @@ Mandatory gates from research:
 > Foundation for scaling capital and adding strategies.
 
 **Foundation shipped in repo:**
-- `risk/engine.py` — M8 gates (`m8_symbol_whitelist`, `m8_strategy_whitelist`, `m8_max_notional`) when profile enabled and `APP_ENV=live`.
+- `risk/engine.py` — M8 gates (`m8_symbol_whitelist`, `m8_strategy_whitelist`, `m8_max_notional`, `strategy_sleeve_caps` / `m8_strategy_sleeve_cap`) when profile enabled and `APP_ENV=live`.
 - `run_m3.py` / `run_m5.py` — `--m8-config` loads profile into risk config.
 - `risk/m8_loader.py` — optional YAML merge.
+- `brokers/bybit/adapter.py` + registry/router/permissions — second crypto venue (spot + USDT linear).
+- `signals/engine.py` + `config/strategies.yaml` — optional ATR-based volatility scaling on position size.
 
 ---
 

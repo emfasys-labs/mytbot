@@ -8,13 +8,23 @@
 
 enabled: false
 
-# Only these symbols may generate orders (US tickers as used by strategies)
+# Only these symbols may generate orders (align with data_pipeline / --symbols).
+# Expand gradually (e.g. add QQQ, IWM) after stable micro-live runs.
 symbol_whitelist:
   - SPY
+  - QQQ
 
 # Only these strategy names (must match Strategy.name)
 strategy_whitelist:
   - momentum_breakout
+  - mean_reversion
+
+# Per-strategy order cap as % of portfolio (M8 “sleeves” — separate allocation knobs).
+strategy_sleeve_caps:
+  momentum_breakout:
+    max_order_notional_pct_of_portfolio: 0.04
+  mean_reversion:
+    max_order_notional_pct_of_portfolio: 0.04
 
 # Hard cap on order notional in USD (US equity). ~£100 ≈ 125 USD — adjust for FX.
 max_notional_usd_per_order: 125.0

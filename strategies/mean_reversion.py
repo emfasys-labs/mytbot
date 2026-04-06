@@ -68,6 +68,8 @@ class MeanReversionStrategy(Strategy):
         center = (bb_lower + bb_upper) / 2.0
         stretch = abs(close - center) / center if center > 0 else 0.0
         confidence = min(0.55 + stretch * 5.0, 0.95)
+        atr = self._calculate_atr(df, lookback)
+        atr_pct = float(atr / close) if close > 0 else 0.0
 
         return RawSignal(
             strategy=self.name,
@@ -82,8 +84,20 @@ class MeanReversionStrategy(Strategy):
                 "bb_lower": bb_lower,
                 "bb_upper": bb_upper,
                 "stretch": stretch,
+                "atr_pct": atr_pct,
             },
         )
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int) -> float:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+        return float(tr.rolling(period).mean().iloc[-1])
 
     @staticmethod
     def _to_float(value: object) -> Optional[float]:

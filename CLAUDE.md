@@ -25,6 +25,7 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 ## KEY FILES
 - `brokers/base.py`          — the adapter interface (FROZEN, never change)
 - `brokers/registry.py`      — add new brokers here (one line)
+- `brokers/bybit/adapter.py` — Bybit V5 (spot / USDT linear)
 - `brokers/_template/`       — copy this to add any new exchange
 - `risk/engine.py`           — risk checks, kill switch
 - `risk/parameters.py`       — parameter manager (defaults + overrides + expiry)
@@ -50,10 +51,10 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M8 — Micro-Live + Iteration ⏳ (foundation in repo; live capital is operational)
-- Last completed task: M8 foundation — `config/m8_micro_live.yaml` + `risk/m8_loader.py`, risk engine M8 gates when `enabled` + `APP_ENV=live`, `--m8-config` on `run_m3`/`run_m5`, docs `docs/M8_MICRO_LIVE.md` + `docs/M8_WEEKLY_REVIEW.md`
-- Next task: M8 iteration — optional second exchange adapter, volatility sizing; operational: enable profile + IBKR live + soak
-- Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
+- Milestone: M8 — Micro-Live + Iteration ✅ (code deliverables; live soak remains operational)
+- Last completed task: Bybit adapter + registry/router; M8 `strategy_sleeve_caps`; ATR-based volatility sizing in `signal_engine`; expanded pipeline symbols (IWM); `run_m5` wires `BYBIT_*` env
+- Next task: Operational — enable `m8_micro_live.enabled` only with checklist; IBKR/Binance/Bybit live keys; weekly reviews
+- Blockers: IBKR stream/order need local IB Gateway/TWS; exchange live keys; 2+ week paper soak is an operational validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT

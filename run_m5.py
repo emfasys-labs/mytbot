@@ -65,6 +65,12 @@ def _build_broker_configs() -> dict[str, dict[str, Any]]:
             "api_secret": os.getenv("BINANCE_API_SECRET", "").strip(),
             "testnet": os.getenv("BINANCE_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
         },
+        "bybit": {
+            "api_key": os.getenv("BYBIT_API_KEY", "").strip(),
+            "api_secret": os.getenv("BYBIT_API_SECRET", "").strip(),
+            "testnet": os.getenv("BYBIT_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
+            "category": (os.getenv("BYBIT_CATEGORY", "linear") or "linear").strip().lower(),
+        },
         "alpaca": {
             "api_key": os.getenv("ALPACA_API_KEY", "").strip(),
             "api_secret": os.getenv("ALPACA_API_SECRET", "").strip(),
@@ -486,7 +492,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--ai-config", default="config/ai.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
-    p.add_argument("--available-brokers", default="ibkr,kraken,binance,alpaca")
+    p.add_argument("--available-brokers", default="ibkr,kraken,binance,bybit,alpaca")
     p.add_argument(
         "--timeframe",
         default="1h",

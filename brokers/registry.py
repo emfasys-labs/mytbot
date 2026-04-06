@@ -4,19 +4,16 @@ brokers/registry.py
 The broker registry. The ONLY place in the codebase you touch when
 adding a new exchange.
 
-To add Bybit:   1. Create brokers/bybit/adapter.py
-                2. Add "bybit": BybitAdapter  below
-                3. Done. Nothing else changes.
-
 To add Deribit: 1. Create brokers/deribit/adapter.py
                 2. Add "deribit": DeribitAdapter  below
-                3. Done.
+                3. Done. Nothing else changes.
 """
 
 from brokers.base import BrokerAdapter
 from brokers.ibkr.adapter import IBKRAdapter
 from brokers.kraken.adapter import KrakenAdapter
 from brokers.binance.adapter import BinanceAdapter
+from brokers.bybit.adapter import BybitAdapter
 from brokers.alpaca.adapter import AlpacaAdapter
 
 # ─── Registry ─────────────────────────────────────────────────────────────────
@@ -26,8 +23,8 @@ BROKER_REGISTRY: dict[str, type[BrokerAdapter]] = {
     "ibkr":    IBKRAdapter,
     "kraken":  KrakenAdapter,
     "binance": BinanceAdapter,
+    "bybit":   BybitAdapter,
     "alpaca":  AlpacaAdapter,
-    # "bybit":   BybitAdapter,      ← uncomment when ready
     # "deribit": DeribitAdapter,    ← uncomment when ready
     # "okx":     OKXAdapter,        ← uncomment when ready
 }

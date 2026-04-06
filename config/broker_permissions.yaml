@@ -43,6 +43,16 @@ binance:
     reason: null
     restored_after: null
 
+bybit:
+  crypto:
+    enabled: true
+    reason: null
+    restored_after: null
+  future:
+    enabled: true
+    reason: null
+    restored_after: null
+
 alpaca:
   equity:
     enabled: true

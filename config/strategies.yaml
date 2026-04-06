@@ -6,6 +6,12 @@ signal_engine:
   news_confidence_weight: 0.15
   min_quantity: 0.0001
   quantity_decimals: 8
+  # Scale base size vs ATR% (from strategy metadata). Higher vol -> smaller size.
+  volatility_sizing:
+    enabled: true
+    target_atr_pct: 0.02
+    min_scale: 0.25
+    max_scale: 2.0
 
 backtest:
   starting_cash: 100000

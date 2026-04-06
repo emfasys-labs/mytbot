@@ -17,6 +17,7 @@ def test_build_broker_configs_has_expected_brokers():
     assert "ibkr" in cfg
     assert "kraken" in cfg
     assert "binance" in cfg
+    assert "bybit" in cfg
     assert "alpaca" in cfg
 
 

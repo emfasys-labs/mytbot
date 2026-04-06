@@ -23,6 +23,7 @@
 | ib_insync | IBKR | Best IBKR Python library. Async support. Note: research report mentions `ib_async` as potential rename — monitor. |
 | python-kraken-sdk | Kraken | Official Kraken SDK. REST + WebSocket. |
 | python-binance | Binance | Most mature Binance library. Rate limit handling built in. |
+| pybit | Bybit | Official-style V5 unified trading REST/WebSocket client. |
 | alpaca-py | Alpaca | Official Alpaca SDK. Paper/live toggle. Best paper trading environment. |
 | ccxt | Multi-exchange | 107+ crypto exchanges unified. Essential for funding rate data and cross-exchange arbitrage. |
 

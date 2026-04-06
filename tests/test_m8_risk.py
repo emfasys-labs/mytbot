@@ -104,6 +104,24 @@ def test_m8_rejects_strategy_when_live(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "m8_strategy_whitelist" in decision.checks_failed
 
 
+def test_m8_rejects_strategy_sleeve_when_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "live")
+    cfg = _base_risk_cfg()
+    cfg["m8_micro_live"] = {
+        "enabled": True,
+        "symbol_whitelist": ["SPY"],
+        "strategy_whitelist": ["momentum_breakout"],
+        "max_notional_usd_per_order": 1_000_000.0,
+        "strategy_sleeve_caps": {
+            "momentum_breakout": {"max_order_notional_pct_of_portfolio": 0.001},
+        },
+    }
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(_sig(qty="10", price="100"), _portfolio_ok())
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert "m8_strategy_sleeve_cap" in decision.checks_failed
+
+
 def test_m8_rejects_notional_when_live(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "live")
     cfg = _base_risk_cfg()

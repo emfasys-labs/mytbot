@@ -86,7 +86,7 @@ class SignalEngine:
             adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
             adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
 
-        # Size the position (simple fixed-fraction for now — M4 risk engine refines this)
+        # Size the position (fixed fraction; optional ATR scaling; M4 risk refines further)
         position_pct = self.config.get("default_position_pct", 0.05)
         last_price = self._extract_last_price(raw.metadata)
         suggested_quantity = self._calculate_quantity(
@@ -95,6 +95,24 @@ class SignalEngine:
             raw.symbol,
             last_price=last_price,
         )
+        qty_decimals = int(self.config.get("quantity_decimals", 8))
+        tick = Decimal("1").scaleb(-qty_decimals)
+        vs = self.config.get("volatility_sizing")
+        if isinstance(vs, dict) and vs.get("enabled"):
+            md = raw.metadata or {}
+            atr_pct = md.get("atr_pct")
+            if atr_pct is not None:
+                try:
+                    ap = float(atr_pct)
+                    if ap > 0:
+                        target = float(vs.get("target_atr_pct", 0.02))
+                        scale = target / ap
+                        mn = float(vs.get("min_scale", 0.25))
+                        mx = float(vs.get("max_scale", 2.0))
+                        scale = max(mn, min(mx, scale))
+                        suggested_quantity = (suggested_quantity * Decimal(str(scale))).quantize(tick)
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
 
         signal = Signal(
             signal_id=str(uuid.uuid4()),

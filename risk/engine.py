@@ -100,6 +100,7 @@ class RiskEngine:
             self._check_m8_symbol_whitelist,
             self._check_m8_strategy_whitelist,
             self._check_m8_max_notional,
+            self._check_m8_strategy_sleeve_cap,
             self._check_cooldown,
             self._check_asset_proportionality,
             self._check_minimum_order_size,
@@ -260,6 +261,37 @@ class RiskEngine:
             return (True, "m8_max_notional")
         limit = min(caps)
         return (n <= limit, "m8_max_notional")
+
+    def _check_m8_strategy_sleeve_cap(self, signal, portfolio) -> tuple[bool, str]:
+        """
+        Optional per-strategy order caps under M8 (separate sleeves / allocation).
+        See config/m8_micro_live.yaml strategy_sleeve_caps.
+        """
+        if not self._m8_guards_active():
+            return (True, "m8_strategy_sleeve_cap")
+        m8 = self.config["m8_micro_live"]
+        caps = m8.get("strategy_sleeve_caps")
+        if not isinstance(caps, dict):
+            return (True, "m8_strategy_sleeve_cap")
+        st = str(getattr(signal, "strategy", "") or "").strip()
+        entry = caps.get(st)
+        if not isinstance(entry, dict):
+            return (True, "m8_strategy_sleeve_cap")
+        pct = entry.get("max_order_notional_pct_of_portfolio")
+        if pct is None:
+            return (True, "m8_strategy_sleeve_cap")
+        try:
+            p = Decimal(str(pct))
+        except Exception:  # noqa: BLE001
+            return (True, "m8_strategy_sleeve_cap")
+        if p <= 0:
+            return (True, "m8_strategy_sleeve_cap")
+        pv = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if pv <= 0:
+            return (False, "m8_strategy_sleeve_cap")
+        limit = pv * p
+        n = self._requested_notional(signal)
+        return (n <= limit, "m8_strategy_sleeve_cap")
 
     def _check_cooldown(self, signal, portfolio) -> tuple[bool, str]:
         if self._cooldown_until is None:
