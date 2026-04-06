@@ -44,6 +44,7 @@ redis==5.0.4
 alembic==1.13.1                 # Database migrations
 pytest>=8.0,<9                  # Test runner (M2+ CI)
 pytest-asyncio>=0.24,<1        # Async tests (storage.db, brokers)
+testcontainers[postgres]>=4.8.2,<5  # Disposable Postgres for integration tests
 
 # ── API & Dashboard ───────────────────────────────────────────────────────────
 fastapi==0.111.0

@@ -23,6 +23,13 @@ from storage.db import dispose_engine, init_async_database
 
 async def _amain(args: argparse.Namespace) -> int:
     cfg = load_pipeline_config(args.config)
+    if args.symbols:
+        symbols = [s.strip() for s in str(args.symbols).split(",") if s.strip()]
+        if not symbols:
+            logger.error("run_pipeline | --symbols provided but no valid symbols parsed")
+            return 2
+        cfg["symbols"] = symbols
+        logger.info("run_pipeline | symbols override | {}", symbols)
     engine, session_factory = await init_async_database()
     if session_factory is None:
         logger.error("run_pipeline | no database | fix POSTGRES_* and ensure Postgres is up")
@@ -45,6 +52,11 @@ def main() -> None:
     load_dotenv()
     p = argparse.ArgumentParser(description="M2 data pipeline")
     p.add_argument("--config", default=None, help="Path to data_pipeline.yaml")
+    p.add_argument(
+        "--symbols",
+        default=None,
+        help="Comma-separated symbol override (e.g. SPY,QQQ,BTC-USD)",
+    )
     g = p.add_mutually_exclusive_group()
     g.add_argument(
         "--loop",

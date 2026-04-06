@@ -44,6 +44,10 @@ def compute_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     x["atr_14"] = ta.atr(high, low, close, length=14)
     x["mom_10"] = ta.mom(close, length=10)
     x["vol_sma_20"] = ta.sma(vol, length=20)
+    bb = ta.bbands(close, length=20, std=2.0)
+    if bb is not None and not bb.empty:
+        for c in bb.columns:
+            x[c] = bb[c]
     x["vol_ratio"] = np.where(
         (x["vol_sma_20"].isna()) | (x["vol_sma_20"] == 0),
         np.nan,

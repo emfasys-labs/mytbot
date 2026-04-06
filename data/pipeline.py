@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -65,13 +66,48 @@ def _stale_from_section(section: dict[str, Any], *, daily: bool) -> timedelta | 
     return timedelta(hours=int(h))
 
 
+async def _to_thread_with_retry(
+    fn,
+    *args,
+    op_name: str,
+    attempts: int = 5,
+    min_delay_sec: float = 2.0,
+    max_delay_sec: float = 60.0,
+    **kwargs,
+):
+    """
+    Retry blocking external calls with exponential backoff + jitter.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            delay = min(max_delay_sec, min_delay_sec * (2 ** (attempt - 1)))
+            delay += random.uniform(0, min(1.0, delay * 0.1))
+            logger.warning(
+                "data | retry | {} | attempt={}/{} | next_sleep_sec={:.1f} | error={}",
+                op_name,
+                attempt,
+                attempts,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 async def ingest_symbol_yfinance(
     session_factory: async_sessionmaker[AsyncSession],
     cfg: dict[str, Any],
     symbol: str,
     *,
     backfill: bool,
-) -> int:
+) -> dict[str, Any]:
     section = cfg["backfill"] if backfill else cfg["incremental"]
     interval = str(section["interval"])
     period = str(section["period"])
@@ -79,15 +115,22 @@ async def ingest_symbol_yfinance(
     stale = _stale_from_section(section, daily=backfill)
     max_gap = float(cfg.get("validation", {}).get("max_gap_multiplier", 7.0))
 
-    df = await asyncio.to_thread(
+    df = await _to_thread_with_retry(
         fetch_history,
         symbol,
+        op_name=f"yfinance:{symbol}:{interval}",
         interval=interval,
         period=period,
     )
     if df.empty:
         logger.warning("data | yfinance | empty | {} | {}", symbol, interval)
-        return 0
+        return {
+            "symbol": symbol,
+            "timeframe": interval,
+            "upserted": 0,
+            "bars_total": 0,
+            "rows_with_full_features": 0,
+        }
 
     feat = compute_feature_columns(df)
     v = validate_ohlcv_frame(
@@ -135,7 +178,30 @@ async def ingest_symbol_yfinance(
         n = await upsert_feature_snapshots(session, rows)
         await session.commit()
     logger.info("data | features | upserted | {} | {} | bars={}", symbol, interval, n)
-    return n
+    core = ["rsi_14", "atr_14", "mom_10", "vol_ratio"]
+    bb_cols = [c for c in feat.columns if str(c).startswith(("BBL_", "BBM_", "BBU_", "BBB_", "BBP_"))]
+    core += bb_cols
+    present = [c for c in core if c in feat.columns]
+    if present:
+        full_rows = int(feat[present].notna().all(axis=1).sum())
+    else:
+        full_rows = 0
+    total = int(len(feat))
+    logger.info(
+        "data | completeness | {} | {} | full_features={}/{} ({:.1f}%)",
+        symbol,
+        interval,
+        full_rows,
+        total,
+        (100.0 * full_rows / total) if total else 0.0,
+    )
+    return {
+        "symbol": symbol,
+        "timeframe": interval,
+        "upserted": n,
+        "bars_total": total,
+        "rows_with_full_features": full_rows,
+    }
 
 
 async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: dict[str, Any]) -> None:
@@ -150,9 +216,10 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
     page_size = int(block.get("page_size", 100))
     language = str(block.get("language", "en"))
     try:
-        articles = await asyncio.to_thread(
+        articles = await _to_thread_with_retry(
             fetch_everything,
             key,
+            op_name="newsapi:everything",
             q=q,
             language=language,
             page_size=page_size,
@@ -197,10 +264,11 @@ async def ingest_fred(session_factory: async_sessionmaker[AsyncSession], cfg: di
         if not sid:
             continue
         try:
-            obs = await asyncio.to_thread(
+            obs = await _to_thread_with_retry(
                 fetch_series_observations,
                 key,
                 sid,
+                op_name=f"fred:{sid}",
                 observation_start=start,
             )
         except Exception as exc:  # noqa: BLE001
@@ -229,11 +297,25 @@ async def run_once(
     *,
     backfill: bool,
 ) -> None:
+    stats: list[dict[str, Any]] = []
     for sym in cfg.get("symbols") or []:
         sym = str(sym).strip()
         if not sym:
             continue
-        await ingest_symbol_yfinance(session_factory, cfg, sym, backfill=backfill)
+        stat = await ingest_symbol_yfinance(session_factory, cfg, sym, backfill=backfill)
+        stats.append(stat)
+    if backfill and stats:
+        for s in stats:
+            total = int(s["bars_total"])
+            full = int(s["rows_with_full_features"])
+            logger.info(
+                "data | backfill_summary | {} | {} | full_feature_rows={}/{} ({:.1f}%)",
+                s["symbol"],
+                s["timeframe"],
+                full,
+                total,
+                (100.0 * full / total) if total else 0.0,
+            )
     await ingest_news(session_factory, cfg)
     await ingest_fred(session_factory, cfg)
 
