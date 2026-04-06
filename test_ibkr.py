@@ -14,6 +14,7 @@ Requires: IB Gateway on IBKR_HOST:IBKR_PORT, optional PostgreSQL for pipeline te
 from __future__ import annotations
 
 import asyncio
+import argparse
 import os
 import time
 import uuid
@@ -118,6 +119,16 @@ def _log_order_outcome(
                 "this, check IB minimum notional and market data. IB text: {}",
                 diag or "(no diagnostic text)",
             )
+        elif crypto and (
+            "not enough withdrawable cash" in diag.lower()
+            or "available, [0.00 usd]" in diag.lower()
+        ):
+            logger.error(
+                "test_ibkr | order | Rejected — insufficient **withdrawable USD** for crypto "
+                "order settlement. Fund/convert USD in this account segment before retrying. "
+                "IB text: {}",
+                diag or "(no diagnostic text)",
+            )
         elif (
             crypto
             and st == OrderStatus.CANCELLED
@@ -159,11 +170,39 @@ def _log_order_outcome(
     )
 
 
-async def main() -> None:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="IBKR integration smoke test")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Force live session (paper_mode=False, default port 7496 unless IBKR_PORT set).",
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Force paper session (paper_mode=True, default port 7497 unless IBKR_PORT set).",
+    )
+    args = parser.parse_args()
+    if args.live and args.paper:
+        raise SystemExit("Use only one of --live or --paper")
+    return args
+
+
+async def main(args: argparse.Namespace) -> None:
     load_dotenv()
 
     host = os.getenv("IBKR_HOST", "127.0.0.1")
-    port = int(os.getenv("IBKR_PORT", "7497"))
+    app_env = (os.getenv("APP_ENV", "paper") or "paper").strip().lower()
+    force_live = args.live or app_env == "live"
+    force_paper = args.paper or app_env == "paper"
+    if args.live:
+        paper_mode = False
+    elif args.paper:
+        paper_mode = True
+    else:
+        paper_mode = not force_live and force_paper
+    default_port = "7497" if paper_mode else "7496"
+    port = int(os.getenv("IBKR_PORT", default_port))
     client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
     account_id = os.getenv("IBKR_ACCOUNT_ID", "").strip()
 
@@ -172,7 +211,7 @@ async def main() -> None:
         port=port,
         client_id=client_id,
         account_id=account_id,
-        paper_mode=True,
+        paper_mode=paper_mode,
     )
 
     engine, session_factory = await init_async_database()
@@ -182,8 +221,9 @@ async def main() -> None:
     except Exception as exc:  # noqa: BLE001 — should not escape adapter.connect, but be safe
         logger.error(
             "test_ibkr | IBKR connect raised | {} | host={} port={} | "
-            "start **IB Gateway (paper)** or TWS, enable API (Configure → Settings → API → "
-            "Enable ActiveX and Socket Clients), confirm port matches IBKR_PORT (paper 7497).",
+            "start IB Gateway/TWS, enable API (Configure → Settings → API → "
+            "Enable ActiveX and Socket Clients), confirm port matches IBKR_PORT "
+            "(paper 7497 / live 7496).",
             exc,
             host,
             port,
@@ -256,8 +296,9 @@ async def main() -> None:
             client_order_id=cid,
             time_in_force="IOC",
         )
+        mode_label = "live" if not adapter.paper_mode else "paper"
         print(
-            f"\nPlacing paper MARKET BUY {ORDER_QTY} {ORDER_SYMBOL} "
+            f"\nPlacing {mode_label} MARKET BUY {ORDER_QTY} {ORDER_SYMBOL} "
             f"(IOC — IBKR PAXOS crypto MKT requires IOC)..."
         )
         result = await adapter.place_order(order)
@@ -280,4 +321,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(parse_args()))

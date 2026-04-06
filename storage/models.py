@@ -6,11 +6,18 @@ Every signal, order, fill, position, and decision is stored here.
 This is the immutable audit log.
 """
 
-from datetime import datetime, timezone
-from decimal import Decimal
 from sqlalchemy import (
-    Column, String, Numeric, DateTime, Boolean,
-    Integer, JSON, Text, Index
+    Column,
+    String,
+    Numeric,
+    DateTime,
+    Boolean,
+    Integer,
+    JSON,
+    Text,
+    Index,
+    UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -117,3 +124,69 @@ class DailyPnL(Base):
     trade_count     = Column(Integer, nullable=False, default=0)
     portfolio_value = Column(Numeric(20, 8), nullable=False, default=0)
     strategy_breakdown = Column(JSON, nullable=True)
+
+
+class FeatureSnapshot(Base):
+    """
+    M2 feature store: one row per OHLCV bar with computed technical features (JSON).
+    Upsert on (symbol, timeframe, bar_timestamp).
+    """
+
+    __tablename__ = "feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "timeframe",
+            "bar_timestamp",
+            name="uq_feature_snapshots_symbol_tf_bar_ts",
+        ),
+        Index("ix_feature_symbol_tf_ts", "symbol", "timeframe", "bar_timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False)
+    timeframe = Column(String(8), nullable=False)
+    bar_timestamp = Column(DateTime(timezone=True), nullable=False)
+    open = Column(Numeric(20, 8), nullable=False)
+    high = Column(Numeric(20, 8), nullable=False)
+    low = Column(Numeric(20, 8), nullable=False)
+    close = Column(Numeric(20, 8), nullable=False)
+    volume = Column(Numeric(30, 8), nullable=False)
+    features = Column(JSON, nullable=False)
+    validation = Column(JSON, nullable=True)
+    data_source = Column(String(20), nullable=False, default="yfinance")
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class NewsHeadline(Base):
+    """M2 NewsAPI headlines; primary key = dedupe hash."""
+
+    __tablename__ = "news_headlines"
+
+    content_hash = Column(String(64), primary_key=True)
+    url = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    source_name = Column(String(120), nullable=False)
+    published_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    fetched_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MacroObservation(Base):
+    """M2 FRED series observations (e.g. FEDFUNDS, CPIAUCSL)."""
+
+    __tablename__ = "macro_observations"
+    __table_args__ = (
+        UniqueConstraint("series_id", "obs_date", name="uq_macro_series_date"),
+        Index("ix_macro_series_date", "series_id", "obs_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    series_id = Column(String(32), nullable=False)
+    obs_date = Column(String(10), nullable=False)
+    value = Column(Numeric(24, 10), nullable=False)
+    fetched_at = Column(DateTime(timezone=True), nullable=False)

@@ -55,14 +55,14 @@
 **Goal:** Reliable feature store. Technical indicators computing in real time. News ingesting.
 
 **Tasks:**
-- [ ] Build market data ingestion loop (OHLCV every 1min, 5min, 1hr)
-- [ ] Implement technical feature engine — RSI, MACD, ATR, momentum, volume
-- [ ] Connect NewsAPI for headline ingestion
-- [ ] Connect FRED API for macro data (interest rates, CPI)
-- [ ] Build news deduplication pipeline
-- [ ] Feature store schema — store computed features alongside raw prices
-- [ ] Backfill 2 years of historical data for target assets (SPY, QQQ, BTC, ETH)
-- [ ] Data validation — detect gaps, bad timestamps, stale data
+- [x] Build market data ingestion loop (OHLCV every 1min, 5min, 1hr)
+- [x] Implement technical feature engine — RSI, MACD, ATR, momentum, volume
+- [x] Connect NewsAPI for headline ingestion
+- [x] Connect FRED API for macro data (interest rates, CPI)
+- [x] Build news deduplication pipeline
+- [x] Feature store schema — store computed features alongside raw prices
+- [x] Backfill 2 years of historical data for target assets (SPY, QQQ, BTC, ETH)
+- [x] Data validation — detect gaps, bad timestamps, stale data
 
 **Deliverable:**
 > Feature store populating in real time with OHLCV + indicators.

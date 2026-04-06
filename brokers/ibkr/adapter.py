@@ -494,7 +494,7 @@ class IBKRAdapter(BrokerAdapter):
             # Windows: WinError 1225 connection refused; POSIX: errno 111, etc.
             logger.warning(
                 "connect | IBKR | unreachable | host={} | port={} | error={} | "
-                "start IB Gateway or TWS with API enabled on this port (paper=7497)",
+                "start IB Gateway or TWS with API enabled on this port (paper=7497, live=7496)",
                 self.host,
                 self.port,
                 exc,

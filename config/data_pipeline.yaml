@@ -1,0 +1,41 @@
+# M2 data pipeline — yfinance OHLCV, technical features, NewsAPI, FRED.
+# Run: python run_pipeline.py --once
+# Backfill ~2y daily: python run_pipeline.py --backfill
+
+data_source: yfinance
+
+symbols:
+  - SPY
+  - QQQ
+  - BTC-USD
+  - ETH-USD
+
+backfill:
+  interval: "1d"
+  period: "2y"
+  expected_interval_seconds: 86400
+  stale_after_days: 14
+
+incremental:
+  interval: "1h"
+  period: "5d"
+  expected_interval_seconds: 3600
+  stale_after_hours: 72
+
+loop_interval_seconds: 3600
+
+validation:
+  max_gap_multiplier: 7.0
+
+news:
+  enabled: true
+  query: "(SPY OR QQQ OR bitcoin OR ethereum) AND (market OR stocks OR crypto)"
+  page_size: 100
+  language: en
+
+fred:
+  enabled: true
+  observation_lookback_years: 3
+  series:
+    - FEDFUNDS
+    - CPIAUCSL

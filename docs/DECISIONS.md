@@ -102,3 +102,11 @@ Routes to Kraken/Binance for crypto not available on IBKR.
 **Reason:** IBKR has regulatory clarity, superior execution for traditional assets,
 and lowest effective cost for equities ($0.005/share vs % fees on crypto exchanges).
 **Status:** Implemented in `execution/router.py`.
+
+---
+
+## D011 — M2 feature store table + yfinance research feed
+**Date:** 2026-04-05
+**Decision:** Store OHLCV plus JSON feature payloads in `feature_snapshots` (unique on symbol, timeframe, bar timestamp). Ingest historical and incremental bars via yfinance into Postgres; NewsAPI and FRED are optional parallel feeds with dedupe (headline hash) and macro upsert.
+**Reason:** Single queryable store for backtests and live features; yfinance is sufficient for milestone research data before paid market-data vendors. Validation metadata attaches to the latest bar per ingest batch to limit row bloat.
+**Status:** Implemented in M2 (`storage/models.py`, `data/`, `run_pipeline.py`).

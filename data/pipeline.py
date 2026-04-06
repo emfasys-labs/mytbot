@@ -1,0 +1,253 @@
+"""
+Orchestrate M2 ingestion: yfinance → features → validation → Postgres;
+NewsAPI + FRED when API keys are set.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import yaml
+from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from data.features import compute_feature_columns, row_features_to_json_dict
+from data.fred_client import fetch_series_observations, fred_fetch_wallclock
+from data.newsapi_client import fetch_everything
+from data.persist import (
+    insert_news_ignore_duplicates,
+    upsert_feature_snapshots,
+    upsert_macro_observations,
+)
+from data.validation import validate_ohlcv_frame
+from data.yfinance_fetch import fetch_history
+
+
+def _clean_api_key(raw: str | None) -> str:
+    """
+    Treat blank/comment placeholders as unset to avoid hard failures when
+    .env contains copied inline comments.
+    """
+    v = (raw or "").strip()
+    if not v or v.startswith("#"):
+        return ""
+    return v
+
+
+def load_pipeline_config(path: str | Path | None = None) -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[1]
+    p = Path(path) if path else root / "config" / "data_pipeline.yaml"
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _interval_from_section(section: dict[str, Any]) -> timedelta | None:
+    sec = section.get("expected_interval_seconds")
+    if sec is None:
+        return None
+    return timedelta(seconds=int(sec))
+
+
+def _stale_from_section(section: dict[str, Any], *, daily: bool) -> timedelta | None:
+    if daily:
+        d = section.get("stale_after_days")
+        if d is None:
+            return None
+        return timedelta(days=int(d))
+    h = section.get("stale_after_hours")
+    if h is None:
+        return None
+    return timedelta(hours=int(h))
+
+
+async def ingest_symbol_yfinance(
+    session_factory: async_sessionmaker[AsyncSession],
+    cfg: dict[str, Any],
+    symbol: str,
+    *,
+    backfill: bool,
+) -> int:
+    section = cfg["backfill"] if backfill else cfg["incremental"]
+    interval = str(section["interval"])
+    period = str(section["period"])
+    expected = _interval_from_section(section)
+    stale = _stale_from_section(section, daily=backfill)
+    max_gap = float(cfg.get("validation", {}).get("max_gap_multiplier", 7.0))
+
+    df = await asyncio.to_thread(
+        fetch_history,
+        symbol,
+        interval=interval,
+        period=period,
+    )
+    if df.empty:
+        logger.warning("data | yfinance | empty | {} | {}", symbol, interval)
+        return 0
+
+    feat = compute_feature_columns(df)
+    v = validate_ohlcv_frame(
+        feat,
+        expected_interval=expected,
+        max_gap_multiplier=max_gap,
+        stale_after=stale,
+    )
+    vdict = v.to_json_dict()
+    if not v.ok:
+        logger.warning(
+            "data | validation | {} | {} | issues={}",
+            symbol,
+            interval,
+            v.issues,
+        )
+
+    rows: list[dict[str, Any]] = []
+    last_ts = feat.index[-1]
+    for ts, row in feat.iterrows():
+        is_last = ts == last_ts
+        ts_utc = ts.to_pydatetime()
+        if ts_utc.tzinfo is None:
+            ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+        else:
+            ts_utc = ts_utc.astimezone(timezone.utc)
+        feats = row_features_to_json_dict(row)
+        rows.append(
+            {
+                "symbol": symbol[:32],
+                "timeframe": interval[:8],
+                "bar_timestamp": ts_utc,
+                "open": Decimal(str(row["open"])),
+                "high": Decimal(str(row["high"])),
+                "low": Decimal(str(row["low"])),
+                "close": Decimal(str(row["close"])),
+                "volume": Decimal(str(row["volume"])),
+                "features": feats,
+                "validation": vdict if is_last else None,
+                "data_source": str(cfg.get("data_source", "yfinance"))[:20],
+            }
+        )
+
+    async with session_factory() as session:
+        n = await upsert_feature_snapshots(session, rows)
+        await session.commit()
+    logger.info("data | features | upserted | {} | {} | bars={}", symbol, interval, n)
+    return n
+
+
+async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: dict[str, Any]) -> None:
+    block = cfg.get("news") or {}
+    if not block.get("enabled", False):
+        return
+    key = _clean_api_key(os.getenv("NEWS_API_KEY"))
+    if not key:
+        logger.info("data | news | skipped | NEWS_API_KEY unset")
+        return
+    q = str(block.get("query", "market"))
+    page_size = int(block.get("page_size", 100))
+    language = str(block.get("language", "en"))
+    try:
+        articles = await asyncio.to_thread(
+            fetch_everything,
+            key,
+            q=q,
+            language=language,
+            page_size=page_size,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data | news | skipped | fetch failed | {}", exc)
+        return
+    now = datetime.now(timezone.utc)
+    rows = [
+        {
+            "content_hash": a.content_hash,
+            "url": a.url,
+            "title": a.title,
+            "description": a.description,
+            "source_name": a.source_name,
+            "published_at": a.published_at,
+            "fetched_at": now,
+        }
+        for a in articles
+    ]
+    async with session_factory() as session:
+        await insert_news_ignore_duplicates(session, rows)
+        await session.commit()
+    logger.info("data | news | batch | articles={}", len(rows))
+
+
+async def ingest_fred(session_factory: async_sessionmaker[AsyncSession], cfg: dict[str, Any]) -> None:
+    block = cfg.get("fred") or {}
+    if not block.get("enabled", False):
+        return
+    key = _clean_api_key(os.getenv("FRED_API_KEY"))
+    if not key:
+        logger.info("data | fred | skipped | FRED_API_KEY unset")
+        return
+    years = int(block.get("observation_lookback_years", 3))
+    start = date.today() - timedelta(days=365 * years + 10)
+    series_ids = list(block.get("series") or [])
+    fetched_at = fred_fetch_wallclock()
+    all_rows: list[dict[str, Any]] = []
+    for sid in series_ids:
+        sid = str(sid).strip()[:32]
+        if not sid:
+            continue
+        try:
+            obs = await asyncio.to_thread(
+                fetch_series_observations,
+                key,
+                sid,
+                observation_start=start,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("data | fred | skipped series | {} | {}", sid, exc)
+            continue
+        for o in obs:
+            all_rows.append(
+                {
+                    "series_id": sid,
+                    "obs_date": o.obs_date,
+                    "value": o.value,
+                    "fetched_at": fetched_at,
+                }
+            )
+    if not all_rows:
+        return
+    async with session_factory() as session:
+        await upsert_macro_observations(session, all_rows)
+        await session.commit()
+    logger.info("data | fred | upserted | observations={}", len(all_rows))
+
+
+async def run_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    cfg: dict[str, Any],
+    *,
+    backfill: bool,
+) -> None:
+    for sym in cfg.get("symbols") or []:
+        sym = str(sym).strip()
+        if not sym:
+            continue
+        await ingest_symbol_yfinance(session_factory, cfg, sym, backfill=backfill)
+    await ingest_news(session_factory, cfg)
+    await ingest_fred(session_factory, cfg)
+
+
+async def run_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    cfg: dict[str, Any],
+    *,
+    backfill_first: bool,
+) -> None:
+    if backfill_first:
+        await run_once(session_factory, cfg, backfill=True)
+    interval = int(cfg.get("loop_interval_seconds", 3600))
+    while True:
+        await run_once(session_factory, cfg, backfill=False)
+        logger.info("data | loop | sleep | {}s", interval)
+        await asyncio.sleep(interval)

@@ -30,6 +30,8 @@ Everything is logged. AI (Claude API) classifies news and generates rationale �
 - `execution/router.py`      — smart order routing
 - `storage/models.py`        — database schema
 - `config/risk_limits.yaml`  — all risk thresholds (editable without code change)
+- `config/data_pipeline.yaml` — M2 symbols, intervals, News/FRED toggles
+- `run_pipeline.py`          — M2: yfinance → features → Postgres; NewsAPI + FRED
 - `docs/DECISIONS.md`        — architectural decision log
 - `docs/M2_READINESS.md`     — M1 verification summary + M2 prep checklist
 - `alembic/`                 — DB migrations (URL from POSTGRES_* in env.py)
@@ -38,10 +40,10 @@ Everything is logged. AI (Claude API) classifies news and generates rationale �
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M1 — Foundation ✅ (deliverable: run `docker compose up -d`, then `python main.py`)
-- Last completed task: M1 — `main.py` dual-broker streams, Postgres tick persistence (`storage/db.py`), optional IBKR paper order + `orders` row
-- Next task: M2 — Data pipeline (ingestion loops, feature store, validation)
-- Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken stream needs API keys
+- Milestone: M2 — Data pipeline ✅ (deliverable: `alembic upgrade head`, then `python run_pipeline.py --backfill`)
+- Last completed task: M2 — `feature_snapshots`, `news_headlines`, `macro_observations`; `data/` validation + pandas-ta + yfinance/NewsAPI/FRED; `run_pipeline.py`
+- Next task: M3 — First strategy + signal engine (backtest on 2yr feature store)
+- Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken stream needs API keys; NewsAPI/FRED keys optional for those feeds
 - Notes: .env not committed — use .env.example; `M1_*` env vars documented there
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT

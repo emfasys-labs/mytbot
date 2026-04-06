@@ -46,6 +46,7 @@
 3. Check "Enable ActiveX and Socket Clients"
 4. Paper trading port: **7497**
 5. Live trading port: **7496**
+6. Keep "Allow connections from localhost only" enabled (recommended)
 
 **Python SDK:** `ib_insync`
 **Docs:** https://interactivebrokers.github.io/tws-api/
@@ -57,6 +58,12 @@ IBKR_PORT=7497
 IBKR_CLIENT_ID=1
 IBKR_ACCOUNT_ID=DU1234567   ← your paper account ID
 ```
+
+**Smoke tests:**
+- Paper: `.\test-ibkr.ps1`
+- Live: `.\test-ibkr.ps1 -Live`
+
+`test_ibkr.py` now respects `APP_ENV` (`paper`/`live`) and supports explicit flags `--paper` / `--live`.
 
 **Limitations:**
 - TWS must be running on your machine (or IB Gateway on server)

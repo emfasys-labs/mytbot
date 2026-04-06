@@ -22,6 +22,7 @@ The foundation milestone meets the intended bar:
 1. **Alembic** — `alembic.ini`, `alembic/env.py` (URL from `POSTGRES_*`), initial revision `b611a4f88c2b` (creates schema on empty DB; no-op if tables exist).
 2. **Pytest** — `pytest.ini`, `tests/conftest.py`, `tests/test_smoke.py`; deps: `pytest`, `pytest-asyncio`, `psycopg2-binary` (Alembic CLI).
 3. **Typing markers** — `brokers/py.typed`, `storage/py.typed` (PEP 561 hooks for checkers).
+4. **M2 data pipeline** — revision `d4e8f1a20002` adds `feature_snapshots`, `news_headlines`, `macro_observations` when missing; `config/data_pipeline.yaml`, `data/*`, `run_pipeline.py`; `websockets>=13` for yfinance compatibility.
 
 **Commands**
 

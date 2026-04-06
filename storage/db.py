@@ -59,18 +59,32 @@ async def _try_create_price_hypertable(conn: AsyncConnection) -> None:
         "'price_history', 'timestamp', if_not_exists => TRUE, migrate_data => TRUE);"
     )
     try:
-        await conn.execute(sql_simple)
+        async with conn.begin_nested():
+            await conn.execute(sql_simple)
         logger.info("storage | TimescaleDB | price_history hypertable ready")
+        return
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()
         if "not empty" in msg and "migrate_data" in msg:
             try:
-                await conn.execute(sql_migrate)
+                async with conn.begin_nested():
+                    await conn.execute(sql_migrate)
                 logger.info(
                     "storage | TimescaleDB | price_history hypertable ready (migrated existing rows)"
                 )
                 return
             except Exception as exc2:  # noqa: BLE001
+                msg2 = str(exc2).lower()
+                if (
+                    "cannot create a unique index without the column" in msg2
+                    and "timestamp" in msg2
+                ):
+                    logger.info(
+                        "storage | TimescaleDB hypertable skipped | "
+                        "existing unique index/primary key on price_history is incompatible "
+                        "with partition key timestamp"
+                    )
+                    return
                 logger.warning(
                     "storage | TimescaleDB hypertable migrate retry failed | {}",
                     exc2,

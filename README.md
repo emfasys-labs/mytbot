@@ -57,6 +57,8 @@ docker compose up -d
 
 **Migrations:** Alembic uses the same `POSTGRES_*` vars (sync `psycopg2` URL). From repo root: `alembic upgrade head`. See `docs/M2_READINESS.md` for stamp vs upgrade on an existing DB.
 
+**M2 data pipeline:** `alembic upgrade head`, then `.\.venv\Scripts\python.exe run_pipeline.py --backfill` (2y daily bars + features for symbols in `config/data_pipeline.yaml`). Incremental: `run_pipeline.py` or `run_pipeline.py --loop`. Set `NEWS_API_KEY` / `FRED_API_KEY` in `.env` for news and macro rows.
+
 **Tests:** `pytest` (smoke tests under `tests/`). Requires `pip install -r requirements.txt`.
 
 ## Build Plan
@@ -64,7 +66,7 @@ docker compose up -d
 | Milestone | Focus | Status |
 |-----------|-------|--------|
 | M1 | Broker connectivity, adapter pattern | ✅ |
-| M2 | Data pipeline, feature store | ⏳ |
+| M2 | Data pipeline, feature store | ✅ |
 | M3 | First strategy, signal engine | ⏳ |
 | M4 | Risk engine | ⏳ |
 | M5 | Execution engine, full paper loop | ⏳ |
