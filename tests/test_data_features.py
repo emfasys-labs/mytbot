@@ -23,6 +23,10 @@ def test_compute_features_adds_indicators():
     assert "mom_10" in out.columns
     assert any(c.startswith("BBL_") for c in out.columns)
     assert any(c.startswith("BBU_") for c in out.columns)
+    assert "fracdiff_0_4" in out.columns
+    assert "hurst_dfa_128" in out.columns
+    assert "garch_vol_1d" in out.columns
+    assert "vpin_proxy_50" in out.columns
     last = out.iloc[-1]
     js = row_features_to_json_dict(last)
     assert "rsi_14" in js or any(k.startswith("MACD") for k in js)

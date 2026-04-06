@@ -27,6 +27,12 @@ loop_interval_seconds: 3600
 validation:
   max_gap_multiplier: 7.0
 
+research_features:
+  fracdiff_d: 0.4
+  hurst_window: 128
+  vpin_window: 50
+  garch_min_history: 64
+
 news:
   enabled: true
   query: "(SPY OR QQQ OR bitcoin OR ethereum) AND (market OR stocks OR crypto)"

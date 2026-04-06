@@ -31,6 +31,9 @@ scikit-learn>=1.6.0
 xgboost>=2.1.0
 lightgbm>=4.5.0
 vectorbt>=0.26.1
+timeseriescv>=0.2               # Purged / combinatorial time-series CV (M3)
+# mlfinlab is currently unavailable on this Python environment; M3 includes in-repo fallback
+# for triple-barrier/meta-labeling. Re-enable strict dependency when a compatible build is available.
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 anthropic==0.28.0               # Claude API for news classification

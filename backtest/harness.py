@@ -12,6 +12,7 @@ import pandas as pd
 
 from signals.engine import SignalEngine
 from strategies.base import Strategy
+from backtest.validation import combinatorial_purged_splits
 
 
 @dataclass
@@ -33,6 +34,13 @@ class WalkForwardResult:
     aggregate_net_pnl: Decimal
     average_win_rate: float
     window_results: list[BacktestResult]
+
+
+@dataclass
+class PurgedCvResult:
+    symbol: str
+    folds: int
+    fold_results: list[BacktestResult]
 
 
 def run_backtest_on_features(
@@ -199,4 +207,49 @@ def run_walk_forward_backtest(
         average_win_rate=avg_wr,
         window_results=results,
     )
+
+
+def run_purged_cv_backtest(
+    *,
+    symbol: str,
+    features: pd.DataFrame,
+    strategy: Strategy,
+    signal_engine: SignalEngine,
+    starting_cash: Decimal,
+    fee_bps: Decimal,
+    slippage_bps: Decimal,
+    n_splits: int,
+    n_test_splits: int,
+    embargo_bars: int,
+    max_hold_bars: int = 20,
+) -> PurgedCvResult:
+    if features is None or features.empty:
+        return PurgedCvResult(symbol=symbol, folds=0, fold_results=[])
+    df = features.sort_index().copy()
+    splits = combinatorial_purged_splits(
+        len(df),
+        n_splits=n_splits,
+        n_test_splits=n_test_splits,
+        embargo_bars=embargo_bars,
+    )
+    out: list[BacktestResult] = []
+    for _train_idx, test_idx in splits:
+        if not test_idx:
+            continue
+        test_slice = df.iloc[test_idx]
+        if test_slice.empty:
+            continue
+        out.append(
+            run_backtest_on_features(
+                symbol=symbol,
+                features=test_slice,
+                strategy=strategy,
+                signal_engine=signal_engine,
+                starting_cash=starting_cash,
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
+                max_hold_bars=max_hold_bars,
+            )
+        )
+    return PurgedCvResult(symbol=symbol, folds=len(out), fold_results=out)
 
