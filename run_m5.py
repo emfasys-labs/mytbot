@@ -18,11 +18,11 @@ import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
 from risk.engine import RiskEngine, RiskVerdict
 from run_m3 import (
-    _apply_signal_to_portfolio_state,
     _load_portfolio_state,
     _load_recent_features,
     _persist_position_snapshot,
@@ -66,6 +66,88 @@ def _build_broker_configs() -> dict[str, dict[str, Any]]:
     }
 
 
+def _apply_filled_result_to_portfolio_state(portfolio_state: dict[str, Any], signal, result) -> None:
+    positions = dict(portfolio_state.get("positions", {}))
+    try:
+        filled_qty = Decimal(str(result.filled_quantity))
+    except Exception:  # noqa: BLE001
+        filled_qty = Decimal("0")
+    if filled_qty <= 0:
+        return
+    fill_px = Decimal(str(result.avg_fill_price or signal.suggested_price or "0"))
+    if fill_px <= 0:
+        return
+
+    symbol = signal.symbol
+    side_mult = Decimal("1") if signal.side == "buy" else Decimal("-1")
+    qty_delta = filled_qty * side_mult
+    row = positions.get(symbol)
+    if row is None:
+        row = {
+            "quantity": Decimal("0"),
+            "avg_entry_price": fill_px,
+            "current_price": fill_px,
+            "asset_class": (signal.asset_class or "").strip().lower(),
+            "broker": (signal.broker or "").strip()[:20],
+        }
+    prev_qty = Decimal(str(row["quantity"]))
+    new_qty = prev_qty + qty_delta
+    if new_qty == 0:
+        positions.pop(symbol, None)
+    else:
+        row["quantity"] = new_qty
+        row["current_price"] = fill_px
+        if prev_qty == 0:
+            row["avg_entry_price"] = fill_px
+        elif (prev_qty > 0 and qty_delta > 0) or (prev_qty < 0 and qty_delta < 0):
+            old_notional = abs(prev_qty) * Decimal(str(row["avg_entry_price"]))
+            add_notional = abs(qty_delta) * fill_px
+            row["avg_entry_price"] = (old_notional + add_notional) / abs(new_qty)
+        positions[symbol] = row
+
+    symbol_exposure: dict[str, Decimal] = {}
+    asset_class_exposure: dict[str, Decimal] = {}
+    gross = Decimal("0")
+    for sym, p in positions.items():
+        qty = abs(Decimal(str(p["quantity"])))
+        px = Decimal(str(p["current_price"]))
+        notional = qty * px
+        gross += notional
+        symbol_exposure[sym] = symbol_exposure.get(sym, Decimal("0")) + notional
+        asset = str(p.get("asset_class", "")).strip().lower()
+        if asset:
+            asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+
+    portfolio_state["positions"] = positions
+    portfolio_state["symbol_exposure"] = symbol_exposure
+    portfolio_state["asset_class_exposure"] = asset_class_exposure
+    portfolio_state["current_gross_exposure"] = gross
+    portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
+
+
+def _estimate_realized_pnl_from_fill(portfolio_state: dict[str, Any], signal, result) -> Decimal:
+    positions = portfolio_state.get("positions", {})
+    row = positions.get(signal.symbol)
+    if row is None:
+        return Decimal("0")
+    prev_qty = Decimal(str(row.get("quantity", "0")))
+    avg_entry = Decimal(str(row.get("avg_entry_price", "0")))
+    fill_px = Decimal(str(result.avg_fill_price or signal.suggested_price or "0"))
+    if fill_px <= 0 or prev_qty == 0:
+        return Decimal("0")
+    fill_qty = Decimal(str(result.filled_quantity or "0"))
+    if fill_qty <= 0:
+        return Decimal("0")
+    # Realized PnL only when reducing an existing position.
+    if signal.side == "sell" and prev_qty > 0:
+        close_qty = min(fill_qty, prev_qty)
+        return (fill_px - avg_entry) * close_qty
+    if signal.side == "buy" and prev_qty < 0:
+        close_qty = min(fill_qty, abs(prev_qty))
+        return (avg_entry - fill_px) * close_qty
+    return Decimal("0")
+
+
 async def _run_loop(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
@@ -93,6 +175,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
     )
     sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
     risk_engine = RiskEngine(risk_cfg)
+    set_risk_engine(risk_engine)
     strat_cfg = strategies_cfg.get("strategies", {})
     momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
     mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
@@ -188,13 +271,19 @@ async def _run_loop(args: argparse.Namespace) -> int:
                         continue
                     executed += 1
 
-                    _apply_signal_to_portfolio_state(portfolio_state, signal)
+                    realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
+                    if realized < 0:
+                        risk_engine.record_loss(abs(realized))
+                    elif realized > 0:
+                        risk_engine.record_win()
+
+                    _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
                     await _persist_position_snapshot(session_factory, portfolio_state)
                     await _upsert_daily_pnl(session_factory, portfolio_state)
 
                 now_ts = datetime.now(timezone.utc).timestamp()
                 if now_ts >= next_reconcile_at:
-                    ok = await execution.reconcile_positions()
+                    ok = await execution.reconcile_positions(session_factory=session_factory)
                     logger.info("run_m5 | reconcile | ok={}", ok)
                     next_reconcile_at = now_ts + max(10, int(args.reconcile_interval_sec))
 

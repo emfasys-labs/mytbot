@@ -160,13 +160,21 @@ class ExecutionEngine:
             except Exception as e:
                 logger.error(f"Failed to cancel orders on {broker_name}: {e}")
 
-    async def reconcile_positions(self, *, max_quantity_diff: Decimal = Decimal("0.000001")) -> bool:
+    async def reconcile_positions(
+        self,
+        *,
+        session_factory=None,
+        max_quantity_diff: Decimal = Decimal("0.000001"),
+    ) -> bool:
         """
         Compare broker-reported positions against latest local snapshot.
         Returns True when consistent; False when mismatch/failure.
         """
         try:
-            ok = await self._reconcile_positions_internal(max_quantity_diff=max_quantity_diff)
+            ok = await self._reconcile_positions_internal(
+                session_factory=session_factory,
+                max_quantity_diff=max_quantity_diff,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Position reconciliation failed | %s", exc)
             self._maybe_auto_kill_reconciliation("reconciliation exception")
@@ -358,17 +366,20 @@ class ExecutionEngine:
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to auto-kill risk engine: %s", exc)
 
-    async def _reconcile_positions_internal(self, *, max_quantity_diff: Decimal) -> bool:
+    async def _reconcile_positions_internal(self, *, session_factory=None, max_quantity_diff: Decimal) -> bool:
         from sqlalchemy import func, select
         from storage.models import PositionLog
 
-        engine, session_factory = await self._init_db()
-        if session_factory is None:
+        own_engine = None
+        sf = session_factory
+        if sf is None:
+            own_engine, sf = await self._init_db()
+        if sf is None:
             logger.warning("Position reconciliation skipped | DB unavailable")
             return True
         try:
             local: dict[tuple[str, str], Decimal] = {}
-            async with session_factory() as session:
+            async with sf() as session:
                 latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
                 latest_ts = latest_ts_q.scalar_one_or_none()
                 if latest_ts is not None:
@@ -406,7 +417,8 @@ class ExecutionEngine:
                     return False
             return True
         finally:
-            await self._dispose_db(engine)
+            if own_engine is not None:
+                await self._dispose_db(own_engine)
 
     def _maybe_auto_kill_reconciliation(self, reason: str) -> None:
         limits = self._execution_limits()

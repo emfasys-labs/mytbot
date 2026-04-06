@@ -78,9 +78,6 @@ class RiskEngine:
         Returns a RiskDecision with APPROVED or REJECTED verdict.
         """
 
-        if self._is_killed:
-            return self._reject(signal, "KILL SWITCH ACTIVE", [], ["kill_switch"])
-
         checks_passed = []
         checks_failed = []
 
