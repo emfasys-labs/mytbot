@@ -1,0 +1,37 @@
+# M3 strategy + signal engine configuration.
+
+signal_engine:
+  default_position_pct: 0.05
+  news_veto_threshold: -0.70
+  news_confidence_weight: 0.15
+  min_quantity: 0.0001
+  quantity_decimals: 8
+
+backtest:
+  starting_cash: 100000
+  fee_bps: 10
+  slippage_bps: 5
+  max_hold_bars: 20
+  walk_forward_train_bars: 252
+  walk_forward_test_bars: 63
+  walk_forward_step_bars: 63
+
+strategies:
+  momentum_breakout:
+    enabled: true
+    preferred_broker: ibkr
+    asset_class: equity
+    lookback_periods: 20
+    volume_multiplier: 1.5
+    atr_min: 0.005
+    atr_max: 0.05
+    momentum_threshold: 0.002
+
+  mean_reversion:
+    enabled: true
+    preferred_broker: ibkr
+    asset_class: equity
+    lookback_periods: 30
+    rsi_buy_threshold: 30
+    rsi_sell_threshold: 70
+    band_epsilon: 0.0

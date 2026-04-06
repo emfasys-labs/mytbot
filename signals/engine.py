@@ -11,7 +11,7 @@ Flow:
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 import uuid
 from datetime import datetime, timezone
@@ -88,8 +88,12 @@ class SignalEngine:
 
         # Size the position (simple fixed-fraction for now — M4 risk engine refines this)
         position_pct = self.config.get("default_position_pct", 0.05)
+        last_price = self._extract_last_price(raw.metadata)
         suggested_quantity = self._calculate_quantity(
-            portfolio_value, position_pct, raw.symbol
+            portfolio_value,
+            position_pct,
+            raw.symbol,
+            last_price=last_price,
         )
 
         signal = Signal(
@@ -99,7 +103,7 @@ class SignalEngine:
             strategy=raw.strategy,
             confidence=adjusted_confidence,
             suggested_quantity=suggested_quantity,
-            suggested_price=None,           # market order by default
+            suggested_price=last_price,
             broker=raw.broker,
             asset_class=raw.asset_class,
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -122,11 +126,36 @@ class SignalEngine:
         portfolio_value: Decimal,
         position_pct: float,
         symbol: str,
+        *,
+        last_price: Optional[Decimal],
     ) -> Decimal:
         """
         Calculate position size as a fraction of portfolio.
         TODO M4: replace with Kelly Criterion or volatility-adjusted sizing.
         """
         notional = portfolio_value * Decimal(str(position_pct))
-        # Placeholder — real implementation fetches current price and divides
-        return notional
+        min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
+        qty_decimals = int(self.config.get("quantity_decimals", 8))
+        tick = Decimal("1").scaleb(-qty_decimals)
+
+        if last_price is None or last_price <= 0:
+            # Fallback remains notional-denominated until pricing is known.
+            return notional.quantize(tick)
+
+        quantity = (notional / last_price).quantize(tick)
+        if quantity < min_qty:
+            quantity = min_qty
+        return quantity
+
+    @staticmethod
+    def _extract_last_price(metadata: dict) -> Optional[Decimal]:
+        for key in ("close", "last_price", "price"):
+            if key not in metadata:
+                continue
+            try:
+                price = Decimal(str(metadata[key]))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if price > 0:
+                return price
+        return None
