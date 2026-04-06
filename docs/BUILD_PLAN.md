@@ -167,12 +167,15 @@ Mandatory gates from research:
 - [x] Daily P&L calculation and storage
 - [x] Error handling — retry logic, connectivity recovery
 - [x] Alerting — Telegram message on critical failures
+- [x] Parameter management foundation — `config/fundamentals.yaml`, `risk/parameters.py`, `parameter_log` audit table with Alembic migration
+- [x] Pure proportionality sizing gate — removed capital tiers; asset tradability now based on minimum order size relative to portfolio (5% threshold)
 - [x] Run paper loop for 2+ weeks without manual intervention *(operational gate; runner implemented in `run_m5.py`)*
 
 **Deliverable:**
 > System trading autonomously in paper mode for 2+ consecutive weeks.
 > No manual intervention required.
 > Full audit trail in database for every decision.
+> Parameter overrides (regime/AI/expiry) persisted with full reason trail.
 
 ---
 

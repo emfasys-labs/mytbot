@@ -23,6 +23,9 @@ from enum import Enum
 from typing import Optional
 import logging
 
+from risk.parameters import ParameterManager
+from risk.provider import ParameterProvider
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +67,15 @@ class RiskEngine:
 
     def __init__(self, config: dict):
         self.config = config
+        self._parameters = ParameterManager(
+            config_path=str(config.get("fundamentals_path", "config/fundamentals.yaml")),
+            enable_db_logging=False,
+        )
+        self._provider = ParameterProvider(
+            parameter_manager=self._parameters,
+            operational_config=self.config,
+            staleness_seconds=int(config.get("parameter_staleness_seconds", 300)),
+        )
         self._daily_loss = Decimal("0")
         self._consecutive_losses = 0
         self._cooldown_until: Optional[datetime] = None
@@ -80,10 +92,13 @@ class RiskEngine:
 
         checks_passed = []
         checks_failed = []
+        self._last_signal_symbol = str(getattr(signal, "symbol", "")).strip().upper()
 
         checks = [
             self._check_kill_switch,
             self._check_cooldown,
+            self._check_asset_proportionality,
+            self._check_minimum_order_size,
             self._check_daily_loss_limit,
             self._check_max_trades_per_day,
             self._check_drawdown_limit,
@@ -198,7 +213,7 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "daily_loss_limit")
-        max_daily_loss_pct = Decimal(str(self.config.get("max_daily_loss_pct", 0.02)))
+        max_daily_loss_pct = self._provider.get_decimal("max_daily_loss_pct", fallback=Decimal("0"))
         # Use whichever loss tracker is worse: runtime or provided portfolio state.
         stated_pnl = self._decimal_from_portfolio(portfolio, "daily_realized_pnl", Decimal("0"))
         state_loss = abs(stated_pnl) if stated_pnl < 0 else Decimal("0")
@@ -217,13 +232,30 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "position_size")
-        max_position_pct = Decimal(str(self.config.get("max_position_pct", 0.10)))
+        max_position_pct = self._effective_max_position_pct()
         price = self._resolve_signal_price(signal)
         if price <= 0:
             return (False, "position_size")
         requested_notional = abs(signal.suggested_quantity) * price
         allowed_notional = portfolio_value * max_position_pct
         return (requested_notional <= allowed_notional, "position_size")
+
+    def _check_asset_proportionality(self, signal, portfolio) -> tuple[bool, str]:
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "asset_proportionality")
+        threshold_pct = self._provider.get_decimal("proportionality_threshold_pct", fallback=Decimal("0"))
+        minimum = self._minimum_order_size(signal.asset_class)
+        if minimum <= 0:
+            return (True, "asset_proportionality")
+        return (minimum < (portfolio_value * threshold_pct), "asset_proportionality")
+
+    def _check_minimum_order_size(self, signal, portfolio) -> tuple[bool, str]:
+        notional = self._requested_notional(signal)
+        minimum = self._minimum_order_size(signal.asset_class)
+        if minimum <= 0:
+            return (True, "minimum_order_size")
+        return (notional >= minimum, "minimum_order_size")
 
     def _check_drawdown_limit(self, signal, portfolio) -> tuple[bool, str]:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
@@ -235,7 +267,7 @@ class RiskEngine:
         if self._high_watermark <= 0:
             self._high_watermark = portfolio_value
             return (True, "drawdown_limit")
-        max_drawdown_pct = Decimal(str(self.config.get("max_drawdown_pct", 0.10)))
+        max_drawdown_pct = self._provider.get_decimal("max_drawdown_pct", fallback=Decimal("0"))
         drawdown = (self._high_watermark - portfolio_value) / self._high_watermark
         return (drawdown <= max_drawdown_pct, "drawdown_limit")
 
@@ -243,7 +275,7 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "max_loss_per_trade_pct")
-        max_loss_pct = Decimal(str(self.config.get("max_loss_per_trade_pct", 0.01)))
+        max_loss_pct = self._provider.get_decimal("max_loss_per_trade_pct", fallback=Decimal("0"))
         requested_notional = self._requested_notional(signal)
         expected_loss_pct = self._infer_expected_loss_pct(signal)
         if expected_loss_pct is None:
@@ -257,7 +289,7 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "max_exposure")
-        max_gross_pct = Decimal(str(self.config.get("max_gross_exposure_pct", 0.80)))
+        max_gross_pct = self._provider.get_decimal("max_gross_exposure_pct", fallback=Decimal("0"))
         current_gross = self._decimal_from_portfolio(portfolio, "current_gross_exposure", Decimal("0"))
         projected_gross = current_gross + self._requested_notional(signal)
         allowed_gross = portfolio_value * max_gross_pct
@@ -267,7 +299,7 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "concentration")
-        max_concentration_pct = Decimal(str(self.config.get("max_concentration_pct", 0.20)))
+        max_concentration_pct = self._provider.get_decimal("max_concentration_pct", fallback=Decimal("0"))
         symbol_exposure_raw = portfolio.get("symbol_exposure", {})
         symbol_exposure = Decimal("0")
         if isinstance(symbol_exposure_raw, dict):
@@ -301,20 +333,20 @@ class RiskEngine:
             )
             return (True, "asset_class_limit")
 
-        pct = Decimal(str(self.config.get(config_key, "1.0")))
+        pct = self._cfg_decimal(config_key, fallback=Decimal("1.0"))
         allowed = portfolio_value * pct
         return (projected <= allowed, "asset_class_limit")
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
-        max_losses = self.config.get("max_consecutive_losses", 3)
+        max_losses = int(self.config.get("max_consecutive_losses", 0))
         if self._consecutive_losses >= max_losses:
-            cooldown_minutes = int(self.config.get("cooldown_minutes", 60))
+            cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
             self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
             return (False, "consecutive_losses")
         return (True, "consecutive_losses")
 
     def _check_confidence_threshold(self, signal, portfolio) -> tuple[bool, str]:
-        min_confidence = self.config.get("min_signal_confidence", 0.5)
+        min_confidence = float(self.config.get("min_signal_confidence", 1.0))
         return (signal.confidence >= min_confidence, "confidence_threshold")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -380,6 +412,45 @@ class RiskEngine:
                 return atr / price
         return None
 
+    def _minimum_order_size(self, asset_class: str) -> Decimal:
+        asset = (asset_class or "").strip().lower()
+        symbol = ""
+        # symbol-aware key is set by execution engine when available.
+        # pull from provider live/derived/default layers first.
+        try:
+            symbol = str(getattr(self, "_last_signal_symbol", "")).strip().upper()
+        except Exception:  # noqa: BLE001
+            symbol = ""
+        if symbol:
+            v = self._provider.get_decimal(
+                f"minimum_order_size.symbol.{symbol}",
+                fallback=Decimal("-1"),
+            )
+            if v >= 0:
+                return v
+        if asset:
+            v = self._provider.get_decimal(
+                f"minimum_order_size.asset_class.{asset}",
+                fallback=Decimal("-1"),
+            )
+            if v >= 0:
+                return v
+        minimums = self.config.get("minimum_order_sizes_gbp", {})
+        return Decimal(str(minimums.get(asset, 0)))
+
+    def _effective_max_position_pct(self) -> Decimal:
+        param_cap = self._provider.get_decimal("max_single_position_pct", fallback=Decimal("1.0"))
+        cfg_cap = self._cfg_decimal("max_position_pct", fallback=Decimal("1.0"))
+        return min(param_cap, cfg_cap)
+
+    def _cfg_decimal(self, key: str, fallback: Decimal = Decimal("0")) -> Decimal:
+        if key in self.config:
+            try:
+                return Decimal(str(self.config[key]))
+            except Exception:  # noqa: BLE001
+                return fallback
+        return fallback
+
     async def persist_decision(self, session_factory, signal: Signal, decision: RiskDecision) -> None:
         """Persist every risk decision for audit; no-op if DB/session factory is missing."""
         if session_factory is None:
@@ -414,3 +485,7 @@ class RiskEngine:
                 await session.commit()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Risk decision persistence failed | signal_id=%s | %s", decision.signal_id, exc)
+
+    def set_live_parameter(self, key: str, value: Decimal | str | float | int) -> None:
+        """Allow execution/runtime services to inject fresh live parameter values."""
+        self._provider.set_live(key, value)

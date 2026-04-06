@@ -38,43 +38,32 @@ max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
 auto_kill_on_api_failure: true
 auto_kill_on_reconciliation_failure: true
 
-# ── Capital tiers (allocator) ────────────────────────────────────────────────
-capital_tiers:
-  micro:
-    min: 0
-    max: 1000
-    assets_allowed: ["crypto"]
-    max_positions: 2
-    max_position_pct: 0.20
-    strategies_enabled: ["momentum_breakout"]
-    notes: "Crypto only — no minimums, fractional amounts"
+# ── Proportionality gate (no capital tiers) ─────────────────────────────────
+# Asset class is tradable iff:
+#   minimum_order_sizes_gbp[asset] < portfolio_value * proportionality_threshold_pct
+proportionality_threshold_pct: 0.05
 
-  small:
-    min: 1000
-    max: 10000
-    assets_allowed: ["crypto", "etf", "equity"]
-    max_positions: 5
-    max_position_pct: 0.15
-    strategies_enabled: ["momentum_breakout", "mean_reversion"]
-    notes: "Add US equities via Alpaca zero commission"
+# ── Dynamic sizing scalars (config-driven, no code constants) ───────────────
+volatility_scaling:
+  min_scalar: 0.20
+  max_scalar: 1.00
 
-  medium:
-    min: 10000
-    max: 50000
-    assets_allowed: ["crypto", "equity", "etf", "bond", "forex"]
-    max_positions: 10
-    max_position_pct: 0.10
-    strategies_enabled: ["momentum_breakout", "mean_reversion", "funding_rate_arb"]
-    notes: "Full multi-asset"
+drawdown_scaling:
+  thresholds:
+    - drawdown: 0.20
+      scalar: 0.00
+    - drawdown: 0.15
+      scalar: 0.25
+    - drawdown: 0.10
+      scalar: 0.50
+    - drawdown: 0.05
+      scalar: 0.75
+  default_scalar: 1.00
 
-  full:
-    min: 50000
-    max: 999999999
-    assets_allowed: ["crypto", "equity", "etf", "bond", "forex", "future", "option"]
-    max_positions: 20
-    max_position_pct: 0.08
-    strategies_enabled: ["all"]
-    notes: "Complete system"
+correlation_scaling:
+  high_correlation_threshold: 0.70
+  high_correlation_scalar: 0.60
+  normal_scalar: 1.00
 
 minimum_order_sizes_gbp:
   crypto: 10

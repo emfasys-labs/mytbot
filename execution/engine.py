@@ -20,6 +20,7 @@ import logging
 import os
 from decimal import Decimal
 from typing import Optional
+import asyncio
 
 import httpx
 from brokers.registry import get_broker
@@ -78,6 +79,7 @@ class ExecutionEngine:
             )
             return None
         order  = self._build_order(signal)
+        await self._publish_symbol_constraints(signal, broker)
 
         logger.info(
             f"EXECUTING | {signal.symbol} {signal.side} "
@@ -287,6 +289,98 @@ class ExecutionEngine:
                 return False
 
         return True
+
+    async def _publish_symbol_constraints(self, signal: Signal, broker) -> None:
+        """
+        Best-effort runtime symbol minimum notional inference.
+        Uses adapter internals where available, without changing the frozen broker interface.
+        """
+        risk_engine = get_risk_engine()
+        if risk_engine is None or not hasattr(risk_engine, "set_live_parameter"):
+            return
+        asset = (signal.asset_class or "").strip().lower()
+        symbol = (signal.symbol or "").strip().upper()
+        inferred = await self._infer_min_order_notional(symbol, asset, broker)
+        if inferred is None or inferred <= 0:
+            return
+        try:
+            risk_engine.set_live_parameter(f"minimum_order_size.symbol.{symbol}", inferred)
+            risk_engine.set_live_parameter(f"minimum_order_size.asset_class.{asset}", inferred)
+            logger.debug(
+                "Published live minimum order | symbol=%s asset=%s min_notional=%s",
+                symbol,
+                asset,
+                inferred,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to publish live minimum order | symbol=%s | %s", symbol, exc)
+
+    async def _infer_min_order_notional(self, symbol: str, asset_class: str, broker) -> Optional[Decimal]:
+        name = getattr(broker, "broker_name", "").strip().lower()
+        try:
+            if name == "binance":
+                return await self._infer_binance_min_notional(symbol, broker)
+            if name == "kraken":
+                return await self._infer_kraken_min_notional(symbol, broker)
+            if name == "alpaca":
+                return await self._infer_alpaca_min_notional(symbol, broker)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Symbol minimum inference failed | broker=%s symbol=%s | %s", name, symbol, exc)
+        return None
+
+    async def _infer_binance_min_notional(self, symbol: str, broker) -> Optional[Decimal]:
+        client = getattr(broker, "_client", None)
+        if client is None:
+            return None
+        sym = symbol.replace("/", "").upper()
+        info = await asyncio.to_thread(lambda: client.get_symbol_info(sym))
+        if not isinstance(info, dict):
+            return None
+        filters = info.get("filters", [])
+        for f in filters:
+            if not isinstance(f, dict):
+                continue
+            t = str(f.get("filterType", "")).upper()
+            if t in {"NOTIONAL", "MIN_NOTIONAL"}:
+                val = f.get("minNotional") or f.get("notional")
+                if val:
+                    return Decimal(str(val))
+        return None
+
+    async def _infer_kraken_min_notional(self, symbol: str, broker) -> Optional[Decimal]:
+        market = getattr(broker, "_market", None)
+        if market is None:
+            return None
+        pair = symbol.replace("BTC/", "XBT").replace("/", "")
+        data = await asyncio.to_thread(lambda: market.get_asset_pairs(pair=pair))
+        if not isinstance(data, dict) or not data:
+            return None
+        row = next(iter(data.values()))
+        if not isinstance(row, dict):
+            return None
+        ordemin = row.get("ordermin")
+        if not ordemin:
+            return None
+        qty = Decimal(str(ordemin))
+        px = await broker.get_last_price(symbol)
+        if px <= 0:
+            return None
+        return qty * px
+
+    async def _infer_alpaca_min_notional(self, symbol: str, broker) -> Optional[Decimal]:
+        trading = getattr(broker, "_trading", None)
+        if trading is None:
+            return None
+        asset = await asyncio.to_thread(lambda: trading.get_asset(symbol))
+        min_order = getattr(asset, "min_order_size", None)
+        if min_order is None:
+            # Alpaca often has no hard per-symbol minimum on equities; leave fallback in place.
+            return None
+        qty = Decimal(str(min_order))
+        px = await broker.get_last_price(symbol)
+        if px <= 0:
+            return None
+        return qty * px
 
     @staticmethod
     def _book_liquidity_usd(order_book: OrderBook) -> Decimal:

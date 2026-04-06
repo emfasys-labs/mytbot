@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from portfolio.allocator import CapitalAllocator, DynamicScalars
 from risk.parameters import ParameterManager, ParameterRecommendation
+from risk.provider import ParameterProvider
 
 
 def _assert_close(a: Decimal, b: Decimal, tol: Decimal = Decimal("0.00000001")) -> None:
@@ -96,8 +97,8 @@ def run() -> None:
         fundamentals_path="config/fundamentals.yaml",
     )
     tier = allocator.get_current_tier(Decimal("100"))
-    assert tier["name"] == "micro"
-    assert allocator.is_asset_allowed("crypto", Decimal("100")) is True
+    assert tier["name"] == "proportional"
+    assert allocator.is_asset_allowed("crypto", Decimal("500")) is True
     assert allocator.is_asset_allowed("bond", Decimal("100")) is False
 
     size_base = allocator.get_position_size(Decimal("10000"), "crypto")
@@ -107,6 +108,17 @@ def run() -> None:
         Decimal("10000"), "crypto", DynamicScalars(volatility_scalar=high_vol_scalar)
     )
     assert size_hv.final_size <= size_base.final_size
+
+    # 10) provider precedence and staleness fallback
+    provider = ParameterProvider(pm, {"max_position_pct": 0.12}, staleness_seconds=60)
+    assert provider.get_decimal("max_single_position_pct") == Decimal("0.25")
+    provider.set_live("max_single_position_pct", Decimal("0.30"))
+    assert provider.get_decimal("max_single_position_pct") == Decimal("0.30")
+    snap = provider._live["max_single_position_pct"]  # noqa: SLF001
+    provider._live["max_single_position_pct"] = replace(  # noqa: SLF001
+        snap, updated_at=datetime.now(timezone.utc) - timedelta(minutes=10)
+    )
+    assert provider.get_decimal("max_single_position_pct") == Decimal("0.25")
 
     print("All parameter/allocator tests passed.")
 

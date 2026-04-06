@@ -67,9 +67,9 @@ docker compose up -d
 |-----------|-------|--------|
 | M1 | Broker connectivity, adapter pattern | ✅ |
 | M2 | Data pipeline, feature store | ✅ |
-| M3 | First strategy, signal engine | ⏳ |
-| M4 | Risk engine | ⏳ |
-| M5 | Execution engine, full paper loop | ⏳ |
+| M3 | First strategy, signal engine | ✅ |
+| M4 | Risk engine | ✅ |
+| M5 | Execution engine, full paper loop | ✅ |
 | M6 | AI intelligence layer | ⏳ |
 | M7 | Dashboard & control | ⏳ |
 | M8 | Micro-live trading | ⏳ |

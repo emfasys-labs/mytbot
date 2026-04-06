@@ -12,6 +12,7 @@ import yaml
 from loguru import logger
 
 from risk.parameters import ParameterManager
+from risk.provider import ParameterProvider
 
 
 @dataclass
@@ -44,51 +45,46 @@ class CapitalAllocator:
     ):
         with open(risk_limits_path, encoding="utf-8") as f:
             self.risk_limits = yaml.safe_load(f) or {}
-        self.parameters = ParameterManager(fundamentals_path)
+        self.parameters = ParameterManager(fundamentals_path, enable_db_logging=False)
+        self.provider = ParameterProvider(self.parameters, self.risk_limits)
         self._hwm = Decimal("0")
         self._current_tier: Optional[dict] = None
 
     def get_current_tier(self, portfolio_value: Decimal) -> dict:
-        tiers = self.risk_limits.get("capital_tiers", {})
-        if not tiers:
-            # Compatibility fallback when tiers are absent.
-            default = {
-                "name": "default",
-                "min": 0,
-                "max": 10**18,
-                "assets_allowed": ["crypto", "equity", "etf", "bond", "forex", "future", "option"],
-                "max_positions": 20,
-                "max_position_pct": float(self.parameters.get_value("max_single_position_pct")),
-                "strategies_enabled": ["all"],
-            }
-            self._current_tier = default
-            return default
+        # Backward-compatible API: no tiers in proportionality mode.
+        return {
+            "name": "proportional",
+            "min": 0,
+            "max": 10**18,
+            "assets_allowed": ["dynamic_by_minimum_order"],
+            "max_positions": None,
+            "max_position_pct": float(
+                self.provider.get_decimal("max_single_position_pct", config_fallback_key="max_position_pct")
+            ),
+            "strategies_enabled": ["all"],
+        }
 
-        for name, cfg in tiers.items():
-            lo = Decimal(str(cfg.get("min", 0)))
-            hi = Decimal(str(cfg.get("max", 10**18)))
-            if lo <= portfolio_value < hi:
-                tier = {"name": name, **cfg}
-                if self._current_tier and self._current_tier.get("name") != name:
-                    logger.warning(
-                        "Portfolio tier changed: {} -> {} | value={}",
-                        self._current_tier.get("name"),
-                        name,
-                        portfolio_value,
-                    )
-                self._current_tier = tier
-                return tier
-        raise ValueError(f"No tier found for portfolio value {portfolio_value}")
+    def _minimum_order(self, asset_class: str) -> Decimal:
+        minimums = self.risk_limits.get("minimum_order_sizes_gbp", {})
+        return Decimal(str(minimums.get(asset_class, 0)))
 
     def is_asset_allowed(self, asset_class: str, portfolio_value: Decimal) -> bool:
-        tier = self.get_current_tier(portfolio_value)
-        allowed = asset_class in tier.get("assets_allowed", [])
+        # Pure proportionality rule:
+        # allow an asset iff minimum order < 5% of portfolio.
+        threshold_pct = self.provider.get_decimal(
+            "proportionality_threshold_pct",
+            config_fallback_key="proportionality_threshold_pct",
+            fallback=Decimal("0"),
+        )
+        min_order = self._minimum_order(asset_class)
+        allowed = min_order < (portfolio_value * threshold_pct)
         if not allowed:
             logger.warning(
-                "Asset class '{}' not available at {} tier ({} portfolio).",
+                "Asset class '{}' blocked by proportionality | min_order={} | portfolio={} | threshold_pct={}",
                 asset_class,
-                tier["name"],
+                min_order,
                 portfolio_value,
+                threshold_pct,
             )
         return allowed
 
@@ -116,15 +112,14 @@ class CapitalAllocator:
                 block_reason="asset class blocked by tier",
             )
 
-        tier_pct = Decimal(str(tier.get("max_position_pct", self.parameters.get_value("max_single_position_pct"))))
-        fundamental_cap = self.parameters.get_value("max_single_position_pct")
-        base_ceiling = portfolio_value * min(tier_pct, fundamental_cap)
+        base_ceiling = portfolio_value * self.provider.get_decimal(
+            "max_single_position_pct", config_fallback_key="max_position_pct"
+        )
         combined = min(scalars.volatility_scalar, scalars.drawdown_scalar, scalars.correlation_scalar)
         combined = max(0.0, min(1.0, combined))
         final = base_ceiling * Decimal(str(combined))
 
-        minimums = self.risk_limits.get("minimum_order_sizes_gbp", {})
-        min_order = Decimal(str(minimums.get(asset_class, 0)))
+        min_order = self._minimum_order(asset_class)
         if final < min_order:
             return PositionSizeResult(
                 asset_class=asset_class,
@@ -155,53 +150,55 @@ class CapitalAllocator:
         )
 
     def compute_volatility_scalar(self, current_vol: float) -> float:
-        target = float(self.parameters.get_value("target_annual_vol"))
+        target = float(self.provider.get_decimal("target_annual_vol", fallback=Decimal("0")))
         if current_vol <= 0:
             return 1.0
-        return max(0.20, min(1.0, target / current_vol))
+        cfg = self.risk_limits.get("volatility_scaling", {})
+        min_scalar = float(cfg.get("min_scalar", 0.0))
+        max_scalar = float(cfg.get("max_scalar", 1.0))
+        return max(min_scalar, min(max_scalar, target / current_vol))
 
     def compute_drawdown_scalar(self, current_value: Decimal) -> float:
         if current_value > self._hwm:
             self._hwm = current_value
         if self._hwm <= 0:
-            return 1.0
+            return float(self.risk_limits.get("drawdown_scaling", {}).get("default_scalar", 1.0))
         dd = float((self._hwm - current_value) / self._hwm)
-        if dd >= 0.20:
-            return 0.0
-        if dd >= 0.15:
-            return 0.25
-        if dd >= 0.10:
-            return 0.50
-        if dd >= 0.05:
-            return 0.75
-        return 1.0
+        cfg = self.risk_limits.get("drawdown_scaling", {})
+        thresholds = cfg.get("thresholds", [])
+        for row in sorted(thresholds, key=lambda x: x.get("drawdown", 0), reverse=True):
+            if dd >= float(row.get("drawdown", 1)):
+                return float(row.get("scalar", 0))
+        return float(cfg.get("default_scalar", 1.0))
 
     def compute_correlation_scalar(self, avg_correlation: float) -> float:
-        return 0.60 if avg_correlation >= 0.70 else 1.0
+        cfg = self.risk_limits.get("correlation_scaling", {})
+        threshold = float(cfg.get("high_correlation_threshold", 1.0))
+        return float(cfg.get("high_correlation_scalar", 1.0)) if avg_correlation >= threshold else float(
+            cfg.get("normal_scalar", 1.0)
+        )
 
     def on_balance_change(self, old_value: Decimal, new_value: Decimal, trigger: str = "unknown") -> dict:
-        old_tier = self.get_current_tier(old_value)
-        new_tier = self.get_current_tier(new_value)
-        old_strats = set(old_tier.get("strategies_enabled", []))
-        new_strats = set(new_tier.get("strategies_enabled", []))
+        minimums = self.risk_limits.get("minimum_order_sizes_gbp", {})
+        assets = sorted(minimums.keys())
+        old_allowed = {a for a in assets if self.is_asset_allowed(a, old_value)}
+        new_allowed = {a for a in assets if self.is_asset_allowed(a, new_value)}
         out = {
             "trigger": trigger,
             "old_value": old_value,
             "new_value": new_value,
-            "old_tier": old_tier["name"],
-            "new_tier": new_tier["name"],
-            "tier_changed": old_tier["name"] != new_tier["name"],
-            "strategies_unlocked": sorted(new_strats - old_strats),
-            "strategies_locked": sorted(old_strats - new_strats),
-            "assets_unlocked": sorted(set(new_tier.get("assets_allowed", [])) - set(old_tier.get("assets_allowed", []))),
-            "assets_locked": sorted(set(old_tier.get("assets_allowed", [])) - set(new_tier.get("assets_allowed", []))),
+            "old_tier": "proportional",
+            "new_tier": "proportional",
+            "tier_changed": False,
+            "strategies_unlocked": [],
+            "strategies_locked": [],
+            "assets_unlocked": sorted(new_allowed - old_allowed),
+            "assets_locked": sorted(old_allowed - new_allowed),
         }
         logger.info(
-            "Balance change | trigger={} | {} -> {} | tier {} -> {}",
+            "Balance change | trigger={} | {} -> {} | proportional mode",
             trigger,
             old_value,
             new_value,
-            old_tier["name"],
-            new_tier["name"],
         )
         return out

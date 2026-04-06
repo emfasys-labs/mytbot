@@ -247,6 +247,21 @@ Impact ≈ c × σ_daily × √(Q/V_daily)
 
 ---
 
+## Parameter Orchestration (M5.2+)
+
+| Component | Why |
+|-----------|-----|
+| `config/fundamentals.yaml` | Risk parameter defaults with absolute safety bounds and source rationale. |
+| `risk/parameters.py` | Layered `ParameterManager`: regime override > AI recommendation > proven default. |
+| `storage.models.ParameterLog` + Alembic | Durable audit trail for every parameter change, rejection, and expiry reversion. |
+
+Policy summary:
+- AI recommendations apply only above confidence threshold and within absolute bounds.
+- Regime overrides have precedence over AI recommendations.
+- Expired overrides auto-revert and are logged for auditability.
+
+---
+
 ## Infrastructure
 
 | Technology | Why |

@@ -11,6 +11,7 @@ from risk.engine import RiskEngine, RiskVerdict, Signal
 
 def _risk_cfg() -> dict:
     return {
+        "fundamentals_path": "config/fundamentals.yaml",
         "max_position_pct": 0.10,
         "max_concentration_pct": 0.20,
         "max_gross_exposure_pct": 0.80,
@@ -20,7 +21,18 @@ def _risk_cfg() -> dict:
         "max_single_stock_pct": 0.10,
         "max_bond_pct": 0.50,
         "max_consecutive_losses": 3,
+        "cooldown_minutes": 60,
         "min_signal_confidence": 0.55,
+        "proportionality_threshold_pct": 0.05,
+        "minimum_order_sizes_gbp": {
+            "crypto": 10,
+            "equity": 50,
+            "etf": 50,
+            "bond": 1000,
+            "forex": 1000,
+            "future": 5000,
+            "option": 500,
+        },
     }
 
 
@@ -72,6 +84,42 @@ def test_rejects_on_position_size_limit() -> None:
     decision = engine.evaluate(sig, portfolio)
     assert decision.verdict == RiskVerdict.REJECTED
     assert decision.checks_failed == ["position_size"]
+
+
+def test_rejects_on_asset_proportionality() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="1", price="100")
+    sig.asset_class = "bond"
+    decision = engine.evaluate(
+        sig,
+        {
+            "portfolio_value": Decimal("10000"),  # 5% threshold=500; bond min=1000
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["asset_proportionality"]
+
+
+def test_rejects_on_minimum_order_size() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="0.1", price="100")
+    sig.asset_class = "equity"  # notional 10 < min 50
+    decision = engine.evaluate(
+        sig,
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["minimum_order_size"]
 
 
 def test_rejects_on_max_exposure_limit() -> None:
