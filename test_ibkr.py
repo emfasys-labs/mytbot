@@ -6,9 +6,12 @@ crypto paper order (24/7). Loads IBKR and Postgres settings from .env.
 
 Run from the repo root:
 
-    python test_ibkr.py
+    python test_ibkr.py --paper
 
-Requires: IB Gateway on IBKR_HOST:IBKR_PORT, optional PostgreSQL for pipeline test.
+`--paper` connects to port **7497** by default (ignores `IBKR_PORT=7496` in `.env`).
+Override with `IBKR_PAPER_PORT` if your Gateway uses a different paper socket.
+
+Requires: IB Gateway on IBKR_HOST and the paper/live port, optional PostgreSQL for pipeline test.
 """
 
 from __future__ import annotations
@@ -202,7 +205,13 @@ async def main(args: argparse.Namespace) -> None:
     else:
         paper_mode = not force_live and force_paper
     default_port = "7497" if paper_mode else "7496"
-    port = int(os.getenv("IBKR_PORT", default_port))
+    # IBKR_PORT in .env is often 7496 for live; explicit --paper must not pick that up.
+    if args.paper:
+        port = int(os.getenv("IBKR_PAPER_PORT", "7497"))
+    elif args.live:
+        port = int(os.getenv("IBKR_LIVE_PORT", os.getenv("IBKR_PORT", "7496")))
+    else:
+        port = int(os.getenv("IBKR_PORT", default_port))
     client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
     account_id = os.getenv("IBKR_ACCOUNT_ID", "").strip()
 
@@ -216,6 +225,17 @@ async def main(args: argparse.Namespace) -> None:
 
     engine, session_factory = await init_async_database()
 
+    try:
+        sync_timeout_s = float(os.getenv("IBKR_CONNECT_TIMEOUT", "15"))
+    except ValueError:
+        sync_timeout_s = 15.0
+    logger.info(
+        "test_ibkr | connecting to IBKR | host={} port={} | "
+        "ib_insync uses {}s per sync step — brief pause is normal",
+        host,
+        port,
+        sync_timeout_s,
+    )
     try:
         connected = await adapter.connect()
     except Exception as exc:  # noqa: BLE001 — should not escape adapter.connect, but be safe

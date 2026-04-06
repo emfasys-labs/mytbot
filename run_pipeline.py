@@ -4,6 +4,7 @@ M2 data pipeline entrypoint: yfinance OHLCV + features, NewsAPI, FRED.
 
 Examples:
   python run_pipeline.py              # one incremental pass (default)
+  python run_pipeline.py --once       # same as above (explicit)
   python run_pipeline.py --backfill   # ~2y daily bars per config/data_pipeline.yaml
   python run_pipeline.py --loop       # hourly loop (see loop_interval_seconds)
 """
@@ -57,11 +58,16 @@ def main() -> None:
         default=None,
         help="Comma-separated symbol override (e.g. SPY,QQQ,BTC-USD)",
     )
-    g = p.add_mutually_exclusive_group()
-    g.add_argument(
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
         "--loop",
         action="store_true",
         help="Run incremental ingest on loop_interval_seconds forever",
+    )
+    mode.add_argument(
+        "--once",
+        action="store_true",
+        help="Single pass (incremental unless --backfill) then exit; default when --loop is not used",
     )
     p.add_argument(
         "--backfill",

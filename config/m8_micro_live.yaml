@@ -1,0 +1,23 @@
+# M8 — Micro-live profile (optional)
+# ===================================
+# When `enabled: true` AND `APP_ENV=live`, the risk engine enforces extra gates:
+#   symbol_whitelist, strategy_whitelist, max_notional_* per order.
+#
+# Keep `enabled: false` until you are ready for real-capital testing.
+# Pair with: IBKR live port (7496), TWS/Gateway, small account, kill switch tested.
+
+enabled: false
+
+# Only these symbols may generate orders (US tickers as used by strategies)
+symbol_whitelist:
+  - SPY
+
+# Only these strategy names (must match Strategy.name)
+strategy_whitelist:
+  - momentum_breakout
+
+# Hard cap on order notional in USD (US equity). ~£100 ≈ 125 USD — adjust for FX.
+max_notional_usd_per_order: 125.0
+
+# Alternative: cap in GBP (converted using M8_GBP_USD_RATE in .env, default 1.25 USD per GBP)
+# max_notional_gbp_per_order: 100.0

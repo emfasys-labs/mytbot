@@ -290,6 +290,7 @@ M7 control-plane implementation notes:
 - `GET /control/commands/{id}` for polling command status.
 - `run_m5` `--control-poll-interval-sec` (default 5) applies `control_commands` frequently outside the main iteration.
 - `ParameterManager` loads/persists regime overrides to `config/risk_parameter_overrides.yaml` (`RISK_PARAMETER_OVERRIDES_PATH`); mirrors effective values in `control_state` for API display.
+- **M8 micro-live:** `config/m8_micro_live.yaml` merged into risk config; extra gates in `RiskEngine` when `enabled` and `APP_ENV=live` (symbol/strategy whitelist, max notional per order).
 
 ---
 

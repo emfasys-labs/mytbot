@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from storage.models import ControlCommand, ControlState
 
@@ -69,6 +69,18 @@ class CommandBus:
             row.processed_at = datetime.now(timezone.utc)
             row.error = error[:4000]
             await session.commit()
+
+    async def delete_pending_commands_of_type(self, command_type: str) -> int:
+        """Remove queued control rows so runners do not execute stale kills (local recovery)."""
+        async with self._session_factory() as session:
+            r = await session.execute(
+                delete(ControlCommand).where(
+                    ControlCommand.command_type == command_type,
+                    ControlCommand.status.in_(["pending", "processing"]),
+                )
+            )
+            await session.commit()
+            return int(r.rowcount or 0)
 
     async def get_recent_commands(self, *, limit: int = 50) -> list[ControlCommand]:
         async with self._session_factory() as session:

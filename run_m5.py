@@ -27,6 +27,7 @@ from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
 from risk.engine import RiskEngine, RiskVerdict
+from risk.m8_loader import merge_m8_into_risk_cfg
 from run_m3 import (
     _load_portfolio_state,
     _load_recent_features,
@@ -158,11 +159,21 @@ async def _run_loop(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
     risk_cfg = _load_yaml(args.risk_config)
+    merge_m8_into_risk_cfg(risk_cfg, args.m8_config)
     ai_cfg = _load_yaml(args.ai_config)
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]
     if not symbols:
         logger.error("run_m5 | no symbols configured")
         return 2
+
+    m8 = risk_cfg.get("m8_micro_live") or {}
+    if isinstance(m8, dict) and m8.get("enabled") and os.getenv("APP_ENV", "paper").strip().lower() == "live":
+        logger.warning(
+            "run_m5 | M8 micro-live gates ACTIVE | symbols={} strategies={} max_notional_usd={}",
+            m8.get("symbol_whitelist"),
+            m8.get("strategy_whitelist"),
+            m8.get("max_notional_usd_per_order"),
+        )
 
     engine, session_factory = await init_async_database()
     if session_factory is None:
@@ -199,6 +210,13 @@ async def _run_loop(args: argparse.Namespace) -> int:
         if state_v is not None:
             strategy.enabled = bool(state_v)
     await hydrate_risk_parameters_from_bus(bus, risk_engine)
+    if args.clear_pending_kill_commands:
+        n = await bus.delete_pending_commands_of_type("kill")
+        risk_engine.reset_kill()
+        logger.warning(
+            "run_m5 | recovery | removed {} pending kill command(s); kill switch reset for this process",
+            n,
+        )
 
     next_reconcile_at = datetime.now(timezone.utc).timestamp()
 
@@ -263,6 +281,13 @@ async def _run_loop(args: argparse.Namespace) -> int:
                             lookback_bars=args.lookback_bars,
                         )
                         if df.empty:
+                            logger.warning(
+                                "run_m5 | no features | {} | timeframe={} | "
+                                "no rows in feature_snapshots — run `python run_pipeline.py --once` "
+                                "(1h bars) or `--backfill` (1d bars), and use --timeframe matching the DB",
+                                symbol,
+                                args.timeframe,
+                            )
                             continue
 
                         raw_candidates = []
@@ -286,6 +311,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
 
                         raw = _pick_best_signal(raw_candidates)
                         if raw is None:
+                            logger.info("run_m5 | no strategy signal | {} | {}", symbol, args.timeframe)
                             continue
 
                         signal = sig_engine.process(
@@ -296,6 +322,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                             ),
                         )
                         if signal is None:
+                            logger.info("run_m5 | signal engine veto | {} | {}", symbol, raw.strategy)
                             continue
                         if ai_result is not None:
                             signal.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -324,6 +351,12 @@ async def _run_loop(args: argparse.Namespace) -> int:
                             portfolio_state,
                         )
                         if risk_decision.verdict != RiskVerdict.APPROVED:
+                            logger.info(
+                                "run_m5 | risk rejected | {} | {} | failed={}",
+                                signal.symbol,
+                                signal.signal_id,
+                                risk_decision.checks_failed,
+                            )
                             continue
 
                         if ai_result is not None and ai_classifier is not None:
@@ -446,13 +479,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strategies-config", default="config/strategies.yaml")
     p.add_argument("--pipeline-config", default="config/data_pipeline.yaml")
     p.add_argument("--risk-config", default="config/risk_limits.yaml")
+    p.add_argument(
+        "--m8-config",
+        default="config/m8_micro_live.yaml",
+        help="Optional M8 micro-live profile merged into risk config",
+    )
     p.add_argument("--ai-config", default="config/ai.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
     p.add_argument("--available-brokers", default="ibkr,kraken,binance,alpaca")
-    p.add_argument("--timeframe", default="1d")
+    p.add_argument(
+        "--timeframe",
+        default="1h",
+        help="Must match rows in feature_snapshots (default 1h = incremental in config/data_pipeline.yaml; use 1d if you only ran run_pipeline.py --backfill)",
+    )
     p.add_argument("--lookback-bars", type=int, default=200)
     p.add_argument("--portfolio-value", type=float, default=100000.0)
-    p.add_argument("--live", action="store_true")
+    _mode = p.add_mutually_exclusive_group()
+    _mode.add_argument(
+        "--paper",
+        action="store_true",
+        help="Paper / sandbox trading (default if neither --paper nor --live)",
+    )
+    _mode.add_argument(
+        "--live",
+        action="store_true",
+        help="Live broker orders (real money when brokers are in live mode)",
+    )
     p.add_argument("--loop-interval-sec", type=int, default=120)
     p.add_argument(
         "--control-poll-interval-sec",
@@ -466,6 +518,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fill-poll-timeout-sec", type=float, default=10.0)
     p.add_argument("--fill-poll-interval-sec", type=float, default=1.0)
     p.add_argument("--reconcile-only", action="store_true", help="Run one reconciliation cycle then exit")
+    p.add_argument(
+        "--clear-pending-kill-commands",
+        action="store_true",
+        help="Delete pending/processing 'kill' rows in control_commands and reset kill switch "
+        "(use if a dashboard/API kill was left queued and blocks trading)",
+    )
     return p
 
 

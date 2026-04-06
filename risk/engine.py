@@ -22,6 +22,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 import logging
+import os
 
 from risk.parameters import ParameterManager
 from risk.provider import ParameterProvider
@@ -96,6 +97,9 @@ class RiskEngine:
 
         checks = [
             self._check_kill_switch,
+            self._check_m8_symbol_whitelist,
+            self._check_m8_strategy_whitelist,
+            self._check_m8_max_notional,
             self._check_cooldown,
             self._check_asset_proportionality,
             self._check_minimum_order_size,
@@ -200,6 +204,62 @@ class RiskEngine:
 
     def _check_kill_switch(self, signal, portfolio) -> tuple[bool, str]:
         return (not self._is_killed, "kill_switch")
+
+    def _m8_guards_active(self) -> bool:
+        m8 = self.config.get("m8_micro_live")
+        if not isinstance(m8, dict) or not m8.get("enabled"):
+            return False
+        return os.getenv("APP_ENV", "paper").strip().lower() == "live"
+
+    def _check_m8_symbol_whitelist(self, signal, portfolio) -> tuple[bool, str]:
+        if not self._m8_guards_active():
+            return (True, "m8_symbol_whitelist")
+        m8 = self.config["m8_micro_live"]
+        wl = m8.get("symbol_whitelist") or []
+        if not wl:
+            return (True, "m8_symbol_whitelist")
+        sym = str(getattr(signal, "symbol", "") or "").strip().upper()
+        allowed = {str(x).strip().upper() for x in wl}
+        return (sym in allowed, "m8_symbol_whitelist")
+
+    def _check_m8_strategy_whitelist(self, signal, portfolio) -> tuple[bool, str]:
+        if not self._m8_guards_active():
+            return (True, "m8_strategy_whitelist")
+        m8 = self.config["m8_micro_live"]
+        wl = m8.get("strategy_whitelist") or []
+        if not wl:
+            return (True, "m8_strategy_whitelist")
+        st = str(getattr(signal, "strategy", "") or "").strip()
+        allowed = {str(x).strip() for x in wl}
+        return (st in allowed, "m8_strategy_whitelist")
+
+    def _check_m8_max_notional(self, signal, portfolio) -> tuple[bool, str]:
+        if not self._m8_guards_active():
+            return (True, "m8_max_notional")
+        m8 = self.config["m8_micro_live"]
+        n = self._requested_notional(signal)
+        caps: list[Decimal] = []
+        cap_usd = m8.get("max_notional_usd_per_order")
+        if cap_usd is not None:
+            try:
+                d = Decimal(str(cap_usd))
+                if d > 0:
+                    caps.append(d)
+            except Exception:  # noqa: BLE001
+                pass
+        cap_gbp = m8.get("max_notional_gbp_per_order")
+        if cap_gbp is not None:
+            try:
+                gbp = Decimal(str(cap_gbp))
+                fx = Decimal(str(os.getenv("M8_GBP_USD_RATE", "1.25")))
+                if gbp > 0 and fx > 0:
+                    caps.append(gbp * fx)
+            except Exception:  # noqa: BLE001
+                pass
+        if not caps:
+            return (True, "m8_max_notional")
+        limit = min(caps)
+        return (n <= limit, "m8_max_notional")
 
     def _check_cooldown(self, signal, portfolio) -> tuple[bool, str]:
         if self._cooldown_until is None:

@@ -18,6 +18,7 @@ Setup:
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -469,14 +470,44 @@ class IBKRAdapter(BrokerAdapter):
             if self._ib.isConnected():
                 logger.info("connect | IBKR | already connected")
                 return True
-            acct = self.account_id or ""
-            await self._ib.connectAsync(
-                self.host,
-                self.port,
-                clientId=self.client_id,
-                timeout=15,
-                account=acct,
+            # ib_insync runs reqAccountUpdatesMultiAsync per account when len(accounts) <= MaxSyncedSubAccounts.
+            # That often triggers IB Error 321 ("Group name cannot be null") on simple paper logins.
+            # Default 0 skips the multi-account sync block; set IBKR_MAX_SYNCED_SUB_ACCOUNTS=50 if you need FA-style subaccounts.
+            try:
+                IB.MaxSyncedSubAccounts = int(os.getenv("IBKR_MAX_SYNCED_SUB_ACCOUNTS", "0"))
+            except ValueError:
+                IB.MaxSyncedSubAccounts = 0
+            # ib_insync uses ONE timeout for: TCP/API handshake, each parallel sync task
+            # (positions, account updates, orders), and reqExecutionsAsync.
+            #
+            # Repo default was always timeout=15 (snappy). Raising it to "fix" timeout *logs*
+            # does not speed up IB — it raises the ceiling so slow sync can *finish*, which
+            # increases wall-clock time when Gateway is slow (e.g. 2151 positions delay).
+            # Default 15 keeps prior behavior; set IBKR_CONNECT_TIMEOUT=120+ if you prefer
+            # to wait for full sync instead of ib_insync failing those tasks fast.
+            try:
+                connect_timeout = float(os.getenv("IBKR_CONNECT_TIMEOUT", "15"))
+            except ValueError:
+                connect_timeout = 15.0
+            connect_readonly = os.getenv("IBKR_CONNECT_READONLY", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
             )
+            # Only pass account when set; empty string can confuse IB on some Gateway builds
+            # (Error 321 / account sync). ib_insync auto-picks the sole managed account when omitted.
+            acct = (self.account_id or "").strip()
+            connect_kw: dict = {
+                "host": self.host,
+                "port": self.port,
+                "clientId": self.client_id,
+                "timeout": connect_timeout,
+                "readonly": connect_readonly,
+            }
+            if acct:
+                connect_kw["account"] = acct
+            await self._ib.connectAsync(**connect_kw)
             if self.paper_mode:
                 logger.info(
                     "connect | IBKR | session=paper | host={} | port={}",

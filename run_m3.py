@@ -25,6 +25,7 @@ from control.command_bus import CommandBus
 from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from risk.engine import RiskEngine, RiskVerdict
+from risk.m8_loader import merge_m8_into_risk_cfg
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, PositionLog, SignalLog
@@ -388,6 +389,7 @@ async def _run_once(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
     risk_cfg = _load_yaml(args.risk_config)
+    merge_m8_into_risk_cfg(risk_cfg, args.m8_config)
     ai_cfg = _load_yaml(args.ai_config)
 
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]
@@ -571,9 +573,18 @@ def main() -> None:
     p.add_argument("--strategies-config", default="config/strategies.yaml")
     p.add_argument("--pipeline-config", default="config/data_pipeline.yaml")
     p.add_argument("--risk-config", default="config/risk_limits.yaml")
+    p.add_argument(
+        "--m8-config",
+        default="config/m8_micro_live.yaml",
+        help="Optional M8 micro-live profile merged into risk config",
+    )
     p.add_argument("--ai-config", default="config/ai.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
-    p.add_argument("--timeframe", default="1d")
+    p.add_argument(
+        "--timeframe",
+        default="1h",
+        help="Must match feature_snapshots timeframe (incremental pipeline default is 1h)",
+    )
     p.add_argument("--lookback-bars", type=int, default=200)
     p.add_argument("--portfolio-value", type=float, default=100000.0)
     p.add_argument("--live", action="store_true", help="Mark generated signals as live-mode context")

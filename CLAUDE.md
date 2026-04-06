@@ -34,6 +34,7 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 - `execution/router.py`      — smart order routing
 - `storage/models.py`        — database schema
 - `config/risk_limits.yaml`  — all risk thresholds (editable without code change)
+- `config/m8_micro_live.yaml` — optional micro-live profile (symbol/strategy/notional caps when `APP_ENV=live`)
 - `config/fundamentals.yaml` — parameter defaults, absolute bounds, AI policy
 - `config/broker_permissions.yaml` — runtime broker permission/fallback map
 - `config/data_pipeline.yaml` — M2 symbols, intervals, News/FRED toggles
@@ -49,9 +50,9 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M7 — Dashboard + Control ✅ Complete (hardened + UX pass)
-- Last completed task: M7+ — WS tick events (signals/orders + runner `dashboard.events`), `GET /control/commands/{id}`, dashboard read-token auth + optional login, risk overrides persisted to `control_state` + YAML (`config/risk_parameter_overrides.yaml`), `run_m5` control poll every ~5s, live CORS warning, drawdown overlay + WS reconnect + command polling in UI
-- Next task: M8 — Micro-live rollout and iterative scaling safeguards
+- Milestone: M8 — Micro-Live + Iteration ⏳ (foundation in repo; live capital is operational)
+- Last completed task: M8 foundation — `config/m8_micro_live.yaml` + `risk/m8_loader.py`, risk engine M8 gates when `enabled` + `APP_ENV=live`, `--m8-config` on `run_m3`/`run_m5`, docs `docs/M8_MICRO_LIVE.md` + `docs/M8_WEEKLY_REVIEW.md`
+- Next task: M8 iteration — optional second exchange adapter, volatility sizing; operational: enable profile + IBKR live + soak
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 
