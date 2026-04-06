@@ -285,6 +285,11 @@ Policy summary:
 M7 control-plane implementation notes:
 - Postgres-backed command/state bus (`control_commands`, `control_state`) for API-to-runner control actions across processes.
 - FastAPI mutating endpoints support env-token auth (`API_CONTROL_TOKEN`) and configurable CORS origins (`API_ALLOWED_ORIGINS`).
+- Optional read-path auth: `DASHBOARD_READ_TOKEN` (header `X-Dashboard-Token` or `Authorization: Bearer`) on HTTP routes; WebSocket `?token=`; optional `POST /auth/dashboard/login` with `DASHBOARD_PASSWORD` returning the read token.
+- WebSocket pushes `tick` messages with `status` plus `events` (runner `dashboard.events` tail + new `signals` / filled `orders` rows).
+- `GET /control/commands/{id}` for polling command status.
+- `run_m5` `--control-poll-interval-sec` (default 5) applies `control_commands` frequently outside the main iteration.
+- `ParameterManager` loads/persists regime overrides to `config/risk_parameter_overrides.yaml` (`RISK_PARAMETER_OVERRIDES_PATH`); mirrors effective values in `control_state` for API display.
 
 ---
 

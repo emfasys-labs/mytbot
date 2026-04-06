@@ -53,7 +53,55 @@ class ParameterManager:
         self._db_logging_enabled = enable_db_logging
         self._db_persist_warned = False
         self._engine = self._init_engine() if enable_db_logging else None
+        self._merge_overrides_file()
         logger.info("parameters | loaded fundamentals from {}", self.config_path)
+
+    def _merge_overrides_file(self) -> None:
+        """Apply persisted regime overrides from config/risk_parameter_overrides.yaml (if present)."""
+        path = os.getenv("RISK_PARAMETER_OVERRIDES_PATH", "config/risk_parameter_overrides.yaml")
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            return
+        try:
+            with p.open(encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except OSError as exc:
+            logger.warning("parameters | overrides file unreadable | {} | {}", p, exc)
+            return
+        for name, val in (data.get("overrides") or {}).items():
+            if name not in self._cfg["risk_parameters"]:
+                logger.warning("parameters | skip unknown override key | {}", name)
+                continue
+            try:
+                v = self._validate_bounded(name, Decimal(str(val)))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("parameters | skip invalid override | {}={} | {}", name, val, exc)
+                continue
+            self._regime_overrides[name] = _Override(
+                value=v,
+                layer="regime",
+                reason="persisted override file",
+                source="disk",
+            )
+        logger.info("parameters | merged {} regime overrides from {}", len(self._regime_overrides), p)
+
+    def persist_regime_overrides_to_yaml(self) -> None:
+        """Write current regime overrides for restart survival (runner-only)."""
+        path = os.getenv("RISK_PARAMETER_OVERRIDES_PATH", "config/risk_parameter_overrides.yaml")
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            overrides = {k: float(v.value) for k, v in self._regime_overrides.items()}
+            with p.open("w", encoding="utf-8") as f:
+                f.write("# Auto-generated — regime overrides from dashboard/API. Safe to edit.\n")
+                yaml.safe_dump({"overrides": overrides}, f, sort_keys=True, default_flow_style=False)
+            logger.info("parameters | persisted {} overrides to {}", len(overrides), p)
+        except OSError as exc:
+            logger.warning("parameters | overrides file write failed | {}", exc)
 
     def load_fundamentals(self) -> dict[str, Any]:
         with self.config_path.open(encoding="utf-8") as f:

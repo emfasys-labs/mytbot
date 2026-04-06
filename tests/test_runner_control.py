@@ -12,6 +12,7 @@ class _Bus:
         self._rows = rows
         self.done = []
         self.failed = []
+        self.events = []
 
     async def claim_pending(self, limit=20):  # noqa: ANN001
         _ = limit
@@ -23,20 +24,30 @@ class _Bus:
     async def mark_failed(self, command_id: int, error: str):
         self.failed.append((command_id, error))
 
+    async def append_dashboard_event(self, event_type: str, payload=None):  # noqa: ANN001
+        self.events.append((event_type, payload))
+
+    async def merge_risk_override_state(self, *args, **kwargs):  # noqa: ANN001
+        pass
+
 
 class _Risk:
     def __init__(self):
         self.killed = False
         self.reset = False
+        self.is_killed = False
         self._parameters = SimpleNamespace(
-            apply_regime_override=lambda name, value, reason, source: (name, value, reason, source)
+            apply_regime_override=lambda name, value, reason, source: (name, value, reason, source),
+            persist_regime_overrides_to_yaml=lambda: None,
         )
 
     def kill(self):
         self.killed = True
+        self.is_killed = True
 
     def reset_kill(self):
         self.reset = True
+        self.is_killed = False
 
 
 class _Exec:

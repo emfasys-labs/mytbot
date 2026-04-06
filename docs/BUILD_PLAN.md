@@ -221,6 +221,14 @@ Mandatory gates from research:
 > Every system decision visible and queryable.
 > Kill switch tested from dashboard.
 
+**Post-M7 enhancements (done):**
+- WebSocket sends `tick` payloads with `status` + `events` (runner events + new `signals` / `orders` rows).
+- `GET /control/commands/{id}` for command acknowledgement; UI polls until `done`/`failed`.
+- `run_m5` applies control commands on a fast interval (default 5s) in addition to each main loop iteration.
+- Optional `DASHBOARD_READ_TOKEN` / `DASHBOARD_PASSWORD` for read-path auth; live CORS warning when `APP_ENV=live` and origins are `*`.
+- Risk regime overrides persisted to `control_state` and `config/risk_parameter_overrides.yaml` (gitignored).
+- Dashboard: drawdown overlay on PnL chart, WebSocket reconnect with backoff, recent event strip.
+
 ---
 
 ## M8 — Micro-Live + Iteration

@@ -17,8 +17,13 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import func, select
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from api.dashboard_layer import gather_ws_events, log_cors_live_warning, merge_risk_parameters_for_api, verify_dashboard_token
 from control.command_bus import CommandBus
 from control.runtime import get_execution_engine, get_risk_engine
 from risk.parameters import ParameterManager
@@ -29,17 +34,50 @@ APP_ENV = os.getenv("APP_ENV", "paper")
 MUTATION_TOKEN = os.getenv("API_CONTROL_TOKEN", "").strip()
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv("API_ALLOWED_ORIGINS", "*").split(",") if x.strip()]
 
-app = FastAPI(title="mytbot Control API", description="Autonomous trading system dashboard API", version="0.2.0")
+_EXEMPT_READ_AUTH = frozenset(
+    {
+        "/healthz",
+        "/openapi.json",
+        "/docs",
+        "/redoc",
+        "/favicon.ico",
+    }
+)
+
+
+class _DashboardReadMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # noqa: ANN001
+        if request.scope.get("type") == "websocket":
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path in _EXEMPT_READ_AUTH or path.startswith("/docs") or path.startswith("/redoc"):
+            return await call_next(request)
+        if path == "/auth/dashboard/login" and request.method == "POST":
+            return await call_next(request)
+        if not os.getenv("DASHBOARD_READ_TOKEN", "").strip():
+            return await call_next(request)
+        hdr = request.headers.get("x-dashboard-token")
+        auth = request.headers.get("authorization")
+        if not verify_dashboard_token(hdr, auth):
+            return JSONResponse({"detail": "dashboard read unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+app = FastAPI(title="mytbot Control API", description="Autonomous trading system dashboard API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(_DashboardReadMiddleware)
 
 
 @app.on_event("startup")
 async def _startup() -> None:
+    log_cors_live_warning()
     engine, session_factory = await init_async_database()
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
@@ -254,34 +292,57 @@ async def get_pnl_history(
     }
 
 
+def _command_row_dict(r) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "type": r.command_type,
+        "payload": r.payload or {},
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "claimed_at": r.claimed_at.isoformat() if r.claimed_at else None,
+        "processed_at": r.processed_at.isoformat() if r.processed_at else None,
+        "error": r.error,
+        "source": r.source,
+    }
+
+
 @app.get("/control/commands")
 async def get_control_commands(limit: int = Query(50, ge=1, le=500), bus: CommandBus = Depends(_command_bus)):
     rows = await bus.get_recent_commands(limit=limit)
-    return {
-        "commands": [
-            {
-                "id": r.id,
-                "type": r.command_type,
-                "payload": r.payload or {},
-                "status": r.status,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "claimed_at": r.claimed_at.isoformat() if r.claimed_at else None,
-                "processed_at": r.processed_at.isoformat() if r.processed_at else None,
-                "error": r.error,
-                "source": r.source,
-            }
-            for r in rows
-        ]
-    }
+    return {"commands": [_command_row_dict(r) for r in rows]}
+
+
+@app.get("/control/commands/{command_id}")
+async def get_control_command(command_id: int, bus: CommandBus = Depends(_command_bus)):
+    row = await bus.get_command(command_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="command not found")
+    return _command_row_dict(row)
 
 
 @app.get("/risk/parameters")
 async def get_risk_parameters():
     pm = ParameterManager(enable_db_logging=False)
-    out: dict[str, str] = {}
-    for name in pm._cfg.get("risk_parameters", {}).keys():  # noqa: SLF001
-        out[name] = str(pm.get_value(name))
+    bus = getattr(app.state, "command_bus", None)
+    out = await merge_risk_parameters_for_api(pm, bus)
     return {"parameters": out}
+
+
+class _DashboardLoginBody(BaseModel):
+    password: str
+
+
+@app.post("/auth/dashboard/login")
+async def dashboard_login(body: _DashboardLoginBody):
+    pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
+    tok = os.getenv("DASHBOARD_READ_TOKEN", "").strip()
+    if not pwd:
+        raise HTTPException(status_code=503, detail="DASHBOARD_PASSWORD not configured")
+    if body.password != pwd:
+        raise HTTPException(status_code=401, detail="invalid password")
+    if not tok:
+        raise HTTPException(status_code=503, detail="DASHBOARD_READ_TOKEN not configured")
+    return {"ok": True, "token": tok}
 
 
 @app.post("/risk/parameters/{name}")
@@ -351,11 +412,28 @@ async def toggle_strategy(
 
 @app.websocket("/ws")
 async def ws_updates(ws: WebSocket):
+    token = ws.query_params.get("token") or ws.query_params.get("dashboard_token")
+    read_tok = os.getenv("DASHBOARD_READ_TOKEN", "").strip()
+    if read_tok and token != read_tok:
+        await ws.close(code=4401)
+        return
     await ws.accept()
+    bus = getattr(app.state, "command_bus", None)
+    sf = getattr(app.state, "db_session_factory", None)
     try:
         while True:
             status = await get_status()
-            await ws.send_json({"type": "status", "payload": status, "ts": datetime.now(timezone.utc).isoformat()})
+            events = await gather_ws_events(bus, sf)
+            await ws.send_json(
+                {
+                    "type": "tick",
+                    "payload": {
+                        "status": status,
+                        "events": events,
+                    },
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         return

@@ -1,5 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { getJson, postJson, wsUrl } from "./api";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  getJson,
+  postJson,
+  postDashboardLogin,
+  wsUrl,
+  LS_DASH,
+  LS_CONTROL,
+} from "./api";
 
 function Card({ title, value }) {
   return (
@@ -40,19 +47,66 @@ function PnlMiniChart({ history }) {
   const min = Math.min(...vals);
   const max = Math.max(...vals);
   const w = 600;
-  const h = 120;
-  const points = vals
+  const h = 140;
+  const pad = 8;
+  const innerW = w - pad * 2;
+  const innerH = h - pad * 2;
+  let peak = vals[0];
+  const dd = vals.map((v) => {
+    peak = Math.max(peak, v);
+    return peak > 0 ? ((v - peak) / peak) * 100 : 0;
+  });
+  const ddMin = Math.min(...dd, 0);
+  const ddMax = Math.max(...dd, 0);
+  const linePoints = vals
     .map((v, i) => {
-      const x = (i / Math.max(1, vals.length - 1)) * w;
-      const y = max === min ? h / 2 : h - ((v - min) / (max - min)) * h;
+      const x = pad + (i / Math.max(1, vals.length - 1)) * innerW;
+      const y = pad + (max === min ? innerH / 2 : innerH - ((v - min) / (max - min)) * innerH);
       return `${x},${y}`;
     })
     .join(" ");
+  const ddPoints = dd
+    .map((d, i) => {
+      const x = pad + (i / Math.max(1, dd.length - 1)) * innerW;
+      const y =
+        pad +
+        (ddMax === ddMin ? innerH / 2 : innerH - ((d - ddMin) / (ddMax - ddMin + 1e-9)) * innerH);
+      return `${x},${y}`;
+    })
+    .join(" ");
+  const zeroY =
+    pad +
+    (ddMax === ddMin ? innerH / 2 : innerH - ((0 - ddMin) / (ddMax - ddMin + 1e-9)) * innerH);
+  const areaPoints = `${pad},${zeroY} ${ddPoints} ${pad + innerW},${zeroY}`;
+
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-      <polyline fill="none" stroke="#6aa6ff" strokeWidth="2" points={points} />
-    </svg>
+    <div>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <polygon fill="rgba(255,100,100,0.15)" stroke="none" points={areaPoints} />
+        <polyline fill="none" stroke="#ff6666" strokeWidth="1.5" points={ddPoints} opacity={0.9} />
+        <line x1={pad} x2={w - pad} y1={zeroY} y2={zeroY} stroke="#555" strokeDasharray="4 4" />
+        <polyline fill="none" stroke="#6aa6ff" strokeWidth="2" points={linePoints} />
+      </svg>
+      <p className="muted small">
+        Blue: portfolio value. Red: drawdown % from running peak (shaded below 0%).
+      </p>
+    </div>
   );
+}
+
+async function pollCommandUntilDone(commandId, onUpdate, maxSec = 120) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < maxSec * 1000) {
+    try {
+      const row = await getJson(`/control/commands/${commandId}`);
+      onUpdate(row);
+      if (row.status === "done" || row.status === "failed") return row;
+    } catch {
+      /* ignore */
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
 }
 
 export default function App() {
@@ -70,7 +124,14 @@ export default function App() {
   const [paramValue, setParamValue] = useState("0.2");
   const [paramReason, setParamReason] = useState("dashboard update");
   const [msg, setMsg] = useState("");
-  const [token, setToken] = useState(localStorage.getItem("controlToken") || "");
+  const [token, setToken] = useState(localStorage.getItem(LS_CONTROL) || "");
+  const [dashToken, setDashToken] = useState(localStorage.getItem(LS_DASH) || "");
+  const [loginPwd, setLoginPwd] = useState("");
+  const [needsLogin, setNeedsLogin] = useState(false);
+  const [commandStatus, setCommandStatus] = useState(null);
+  const [recentEvents, setRecentEvents] = useState([]);
+  const wsRef = useRef(null);
+  const reconnectAttempt = useRef(0);
 
   const cards = useMemo(
     () => [
@@ -82,7 +143,7 @@ export default function App() {
     [status]
   );
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const [s, sig, ord, pos, p, rp, ph] = await Promise.all([
         getJson("/status"),
@@ -101,61 +162,193 @@ export default function App() {
       setParams(rp.parameters || {});
       setPnlHistory(ph.history || []);
       setSelectedSignal((sig.signals || [])[0] || null);
+      setNeedsLogin(false);
     } catch (e) {
-      setMsg(`Refresh error: ${e.message}`);
+      if (e.status === 401 || String(e.message).includes("401")) {
+        setNeedsLogin(true);
+        setMsg("Dashboard read token required — login or paste token.");
+      } else {
+        setMsg(`Refresh error: ${e.message}`);
+      }
     }
-  }
+  }, []);
 
   useEffect(() => {
     refresh();
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
+  }, [refresh]);
+
+  const connectWs = useCallback(() => {
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      const socket = new WebSocket(wsUrl());
+      wsRef.current = socket;
+      socket.onmessage = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.type === "tick" && m.payload) {
+          if (m.payload.status) setStatus(m.payload.status);
+          if (Array.isArray(m.payload.events) && m.payload.events.length) {
+            setRecentEvents((prev) => [...(m.payload.events || []), ...prev].slice(0, 30));
+          }
+        } else if (m.type === "status") {
+          setStatus(m.payload);
+        }
+      };
+      socket.onopen = () => {
+        reconnectAttempt.current = 0;
+      };
+      socket.onclose = () => {
+        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt.current);
+        reconnectAttempt.current += 1;
+        setTimeout(() => connectWs(), delay);
+      };
+    } catch {
+      /* polling fallback */
+    }
   }, []);
 
   useEffect(() => {
-    let socket;
-    try {
-      socket = new WebSocket(wsUrl());
-      socket.onmessage = (ev) => {
-        const m = JSON.parse(ev.data);
-        if (m.type === "status") setStatus(m.payload);
-      };
-    } catch {
-      // fallback polling already active
-    }
+    localStorage.setItem(LS_DASH, dashToken);
+    connectWs();
     return () => {
-      if (socket) socket.close();
+      if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [dashToken, connectWs]);
+
+  async function doLogin() {
+    try {
+      const r = await postDashboardLogin(loginPwd);
+      if (r.token) {
+        setDashToken(r.token);
+        localStorage.setItem(LS_DASH, r.token);
+        setNeedsLogin(false);
+        setMsg("Logged in.");
+        refresh();
+        connectWs();
+      }
+    } catch (e) {
+      setMsg(`Login failed: ${e.message}`);
+    }
+  }
+
+  async function runWithCommandWatch(promiseFn) {
+    setCommandStatus(null);
+    const r = await promiseFn();
+    const cid = r.command_id;
+    if (cid != null) {
+      setMsg(`${r.message || "command"} — id ${cid} (waiting…)`);
+      void pollCommandUntilDone(cid, setCommandStatus);
+    } else {
+      setMsg(r.message || JSON.stringify(r));
+    }
+    await refresh();
+  }
 
   async function doKill() {
-    const r = await postJson("/kill", {});
-    setMsg(`Kill command accepted (${r.command_id ?? "local"})`);
-    refresh();
+    await runWithCommandWatch(() => postJson("/kill", {}));
   }
   async function doResetKill() {
-    const r = await postJson("/kill/reset", {});
-    setMsg(`Reset command accepted (${r.command_id ?? "local"})`);
-    refresh();
+    await runWithCommandWatch(() => postJson("/kill/reset", {}));
   }
   async function doToggle() {
-    const r = await postJson(`/strategy/${strategyName}/toggle`, { enabled: strategyEnabled });
-    setMsg(`Strategy toggle enqueued (${r.command_id})`);
-    refresh();
+    await runWithCommandWatch(() => postJson(`/strategy/${strategyName}/toggle`, { enabled: strategyEnabled }));
   }
   async function doParamUpdate() {
-    const r = await postJson(`/risk/parameters/${paramName}`, {
-      value: paramValue,
-      reason: paramReason,
-    });
-    setMsg(`Parameter update enqueued (${r.command_id})`);
-    refresh();
+    await runWithCommandWatch(() =>
+      postJson(`/risk/parameters/${paramName}`, {
+        value: paramValue,
+        reason: paramReason,
+      })
+    );
+  }
+
+  if (needsLogin) {
+    return (
+      <div className="page">
+        <h1>mytbot Dashboard</h1>
+        <div className="panel">
+          <h3>Authenticate</h3>
+          <p className="muted">
+            Set <code>DASHBOARD_PASSWORD</code> and <code>DASHBOARD_READ_TOKEN</code> on the API, or paste the read token
+            below.
+          </p>
+          <div className="row">
+            <input
+              type="password"
+              placeholder="Dashboard password (if configured)"
+              value={loginPwd}
+              onChange={(e) => setLoginPwd(e.target.value)}
+            />
+            <button type="button" onClick={doLogin}>
+              Login
+            </button>
+          </div>
+          <div className="row">
+            <input
+              placeholder="Or paste DASHBOARD_READ_TOKEN"
+              value={dashToken}
+              onChange={(e) => {
+                setDashToken(e.target.value);
+                localStorage.setItem(LS_DASH, e.target.value);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                refresh();
+                connectWs();
+              }}
+            >
+              Apply token
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="page">
       <h1>mytbot M7 Dashboard</h1>
       <p className="muted">{msg}</p>
+      {commandStatus && (
+        <p className="muted">
+          Command {commandStatus.id}: <strong>{commandStatus.status}</strong>
+          {commandStatus.error ? ` — ${commandStatus.error}` : ""}
+        </p>
+      )}
+      {recentEvents.length > 0 && (
+        <div className="panel">
+          <h3>Recent events (WebSocket)</h3>
+          <ul className="event-list">
+            {recentEvents.slice(0, 12).map((ev, i) => (
+              <li key={i}>
+                <code>{ev.type}</code> {ev.ts ? `— ${ev.ts}` : ""}{" "}
+                {ev.payload ? JSON.stringify(ev.payload).slice(0, 120) : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="token">
+        <label>Dashboard read token:</label>
+        <input
+          value={dashToken}
+          onChange={(e) => {
+            const v = e.target.value;
+            setDashToken(v);
+            localStorage.setItem(LS_DASH, v);
+          }}
+          placeholder="X-Dashboard-Token (if API requires)"
+        />
+      </div>
       <div className="token">
         <label>Control Token:</label>
         <input
@@ -163,7 +356,7 @@ export default function App() {
           onChange={(e) => {
             const v = e.target.value;
             setToken(v);
-            localStorage.setItem("controlToken", v);
+            localStorage.setItem(LS_CONTROL, v);
           }}
           placeholder="optional if API_CONTROL_TOKEN unset"
         />
@@ -177,15 +370,21 @@ export default function App() {
 
       <div className="panel controls">
         <h3>Control Actions</h3>
-        <button onClick={doKill}>Activate Kill</button>
-        <button onClick={doResetKill}>Reset Kill</button>
+        <button type="button" onClick={doKill}>
+          Activate Kill
+        </button>
+        <button type="button" onClick={doResetKill}>
+          Reset Kill
+        </button>
         <div className="row">
           <input value={strategyName} onChange={(e) => setStrategyName(e.target.value)} />
           <select value={String(strategyEnabled)} onChange={(e) => setStrategyEnabled(e.target.value === "true")}>
             <option value="true">enabled</option>
             <option value="false">disabled</option>
           </select>
-          <button onClick={doToggle}>Toggle Strategy</button>
+          <button type="button" onClick={doToggle}>
+            Toggle Strategy
+          </button>
         </div>
       </div>
 
@@ -195,7 +394,9 @@ export default function App() {
           <input value={paramName} onChange={(e) => setParamName(e.target.value)} />
           <input value={paramValue} onChange={(e) => setParamValue(e.target.value)} />
           <input value={paramReason} onChange={(e) => setParamReason(e.target.value)} />
-          <button onClick={doParamUpdate}>Apply</button>
+          <button type="button" onClick={doParamUpdate}>
+            Apply
+          </button>
         </div>
         <pre>{JSON.stringify(params, null, 2)}</pre>
       </div>
@@ -220,7 +421,7 @@ export default function App() {
         <pre>{JSON.stringify(pnl, null, 2)}</pre>
       </div>
       <div className="panel">
-        <h3>Performance Chart (Portfolio Value)</h3>
+        <h3>Performance Chart (Portfolio Value + Drawdown)</h3>
         <PnlMiniChart history={pnlHistory} />
       </div>
     </div>

@@ -22,7 +22,7 @@ from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
 from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
-from control.runner_control import apply_control_commands, publish_runner_heartbeat
+from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
@@ -198,6 +198,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
         state_v = await bus.get_state(f"strategy.enabled.{name}", None)
         if state_v is not None:
             strategy.enabled = bool(state_v)
+    await hydrate_risk_parameters_from_bus(bus, risk_engine)
 
     next_reconcile_at = datetime.now(timezone.utc).timestamp()
 
@@ -216,187 +217,219 @@ async def _run_loop(args: argparse.Namespace) -> int:
             logger.info("run_m5 | reconcile-only | ok={}", ok)
             return 0 if ok else 3
 
-        while True:
-            try:
-                generated = 0
-                executed = 0
-                await apply_control_commands(
-                    bus,
-                    risk_engine=risk_engine,
-                    execution_engine=execution,
-                    strategies=strategies,
-                )
-                ai_result = None
-                if ai_pipeline is not None:
-                    ai_result = await ai_pipeline.compute(session_factory, symbols)
-                    await ai_pipeline.persist(session_factory, ai_result)
-                for symbol in symbols:
-                    df, feature_ts = await _load_recent_features(
-                        session_factory,
-                        symbol=symbol,
-                        timeframe=args.timeframe,
-                        lookback_bars=args.lookback_bars,
-                    )
-                    if df.empty:
-                        continue
+        control_ctx = {
+            "bus": bus,
+            "risk_engine": risk_engine,
+            "execution": execution,
+            "strategies": strategies,
+        }
+        poll_sec = max(3, int(args.control_poll_interval_sec))
 
-                    raw_candidates = []
-                    m_sig = momentum.generate_signal(symbol, df)
-                    if m_sig is not None:
-                        raw_candidates.append(m_sig)
-                    r_sig = mean_rev.generate_signal(symbol, df)
-                    if r_sig is not None:
-                        raw_candidates.append(r_sig)
-                    if ai_result is not None and ai_pipeline is not None:
-                        allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                        filtered = filter_by_allowed_strategies(raw_candidates, allowed)
-                        if not filtered and raw_candidates:
-                            logger.info(
-                                "run_m5 | regime_gate_block | {} regime={} candidates={}",
-                                symbol,
-                                ai_result.macro_regime,
-                                [r.strategy for r in raw_candidates],
-                            )
-                        raw_candidates = filtered
-
-                    raw = _pick_best_signal(raw_candidates)
-                    if raw is None:
-                        continue
-
-                    signal = sig_engine.process(
-                        raw,
-                        portfolio_value=Decimal(str(args.portfolio_value)),
-                        news_score=(
-                            ai_result.news_scores.get(symbol) if ai_result is not None else None
-                        ),
-                    )
-                    if signal is None:
-                        continue
-                    if ai_result is not None:
-                        signal.metadata["ai_macro_regime"] = ai_result.macro_regime
-                        signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
-                        signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
-                        signal.metadata["ai_anomalies"] = [a for a in ai_result.anomalies if a.get("symbol") == symbol]
-
-                    routed = router.route(signal.asset_class, signal.symbol)
-                    if routed is None:
-                        logger.warning("run_m5 | no_route | {} {}", signal.symbol, signal.asset_class)
-                        continue
-                    signal.broker = routed
-
-                    portfolio_state = await _load_portfolio_state(
-                        session_factory,
-                        fallback_portfolio_value=Decimal(str(args.portfolio_value)),
-                        signal_price_fallback=signal.suggested_price,
-                    )
-                    risk_engine.update_high_watermark(
-                        Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
-                    )
-                    risk_engine.restore_runtime_state(portfolio_state)
-                    risk_decision = await risk_engine.evaluate_and_persist(
-                        session_factory,
-                        signal,
-                        portfolio_state,
-                    )
-                    if risk_decision.verdict != RiskVerdict.APPROVED:
-                        continue
-
-                    if ai_result is not None and ai_classifier is not None:
-                        rationale = await ai_classifier.generate_rationale(
-                            {
-                                "symbol": signal.symbol,
-                                "strategy": signal.strategy,
-                                "confidence": signal.confidence,
-                                "news_score": signal.news_score,
-                                "macro_regime": ai_result.macro_regime,
-                                "asset_class": signal.asset_class,
-                            }
-                        )
-                        signal.metadata["ai_rationale"] = rationale
-                        async with session_factory() as session:
-                            session.add(
-                                AIOutputLog(
-                                    symbol=signal.symbol[:32],
-                                    context_type="rationale",
-                                    score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
-                                    confidence=Decimal(str(signal.confidence)),
-                                    event_type=str(
-                                        ai_result.news_details.get(symbol, {}).get("event_type", "other")
-                                    ),
-                                    regime_label=ai_result.macro_regime,
-                                    decay_hours=int(
-                                        ai_result.news_details.get(symbol, {}).get("decay_hours", 24)
-                                    ),
-                                    rationale=rationale[:4000],
-                                    payload={
-                                        "headline": ai_result.news_details.get(symbol, {}).get("headline"),
-                                        "sample_count": ai_result.news_details.get(symbol, {}).get("sample_count", 0),
-                                        "macro_confidence": ai_result.macro_confidence,
-                                    },
-                                    source="claude",
-                                    signal_id=signal.signal_id,
-                                )
-                            )
-                            await session.commit()
-
-                    await _persist_signal(
-                        session_factory,
-                        signal,
-                        paper_mode=not args.live,
-                        timeframe=args.timeframe,
-                        feature_ts=feature_ts,
-                    )
-                    generated += 1
-
-                    result = await execution.execute(
-                        signal,
-                        risk_decision,
-                        session_factory=session_factory,
-                    )
-                    if result is None:
-                        continue
-                    executed += 1
-
-                    realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
-                    if realized < 0:
-                        risk_engine.record_loss(abs(realized))
-                    elif realized > 0:
-                        risk_engine.record_win()
-                    portfolio_state.update(risk_engine.snapshot_runtime_state())
-
-                    _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
-                    await _persist_position_snapshot(session_factory, portfolio_state)
-                    await _upsert_daily_pnl(session_factory, portfolio_state)
-
-                now_ts = datetime.now(timezone.utc).timestamp()
-                if now_ts >= next_reconcile_at:
-                    ok = await execution.reconcile_positions(session_factory=session_factory)
-                    logger.info("run_m5 | reconcile | ok={}", ok)
-                    next_reconcile_at = now_ts + max(10, int(args.reconcile_interval_sec))
-
-                await publish_runner_heartbeat(
-                    bus,
-                    runner_name="run_m5",
-                    symbols=symbols,
-                    generated=generated,
-                    executed=executed,
-                    extra={"paper_mode": not args.live},
-                )
-                logger.info("run_m5 | iteration | generated={} executed={}", generated, executed)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("run_m5 | iteration failed | {}", exc)
-                await execution._send_critical_alert(f"run_m5 iteration failure: {exc}")
-                # Attempt DB recovery to avoid prolonged persistence outages.
+        async def _control_poll_loop() -> None:
+            while True:
+                await asyncio.sleep(poll_sec)
                 try:
-                    await dispose_engine(engine)
-                except Exception:  # noqa: BLE001
-                    pass
-                engine, session_factory = await _reconnect_db()
-                if session_factory is None:
-                    await asyncio.sleep(max(5, int(args.loop_interval_sec)))
-                    continue
-                bus = CommandBus(session_factory)
-            await asyncio.sleep(max(1, int(args.loop_interval_sec)))
+                    await apply_control_commands(
+                        control_ctx["bus"],
+                        risk_engine=control_ctx["risk_engine"],
+                        execution_engine=control_ctx["execution"],
+                        strategies=control_ctx["strategies"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("run_m5 | control poll failed | {}", exc)
+
+        poll_task = asyncio.create_task(_control_poll_loop())
+
+        try:
+            while True:
+                try:
+                    generated = 0
+                    executed = 0
+                    await apply_control_commands(
+                        bus,
+                        risk_engine=risk_engine,
+                        execution_engine=execution,
+                        strategies=strategies,
+                    )
+                    ai_result = None
+                    if ai_pipeline is not None:
+                        ai_result = await ai_pipeline.compute(session_factory, symbols)
+                        await ai_pipeline.persist(session_factory, ai_result)
+                    for symbol in symbols:
+                        df, feature_ts = await _load_recent_features(
+                            session_factory,
+                            symbol=symbol,
+                            timeframe=args.timeframe,
+                            lookback_bars=args.lookback_bars,
+                        )
+                        if df.empty:
+                            continue
+
+                        raw_candidates = []
+                        m_sig = momentum.generate_signal(symbol, df)
+                        if m_sig is not None:
+                            raw_candidates.append(m_sig)
+                        r_sig = mean_rev.generate_signal(symbol, df)
+                        if r_sig is not None:
+                            raw_candidates.append(r_sig)
+                        if ai_result is not None and ai_pipeline is not None:
+                            allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
+                            filtered = filter_by_allowed_strategies(raw_candidates, allowed)
+                            if not filtered and raw_candidates:
+                                logger.info(
+                                    "run_m5 | regime_gate_block | {} regime={} candidates={}",
+                                    symbol,
+                                    ai_result.macro_regime,
+                                    [r.strategy for r in raw_candidates],
+                                )
+                            raw_candidates = filtered
+
+                        raw = _pick_best_signal(raw_candidates)
+                        if raw is None:
+                            continue
+
+                        signal = sig_engine.process(
+                            raw,
+                            portfolio_value=Decimal(str(args.portfolio_value)),
+                            news_score=(
+                                ai_result.news_scores.get(symbol) if ai_result is not None else None
+                            ),
+                        )
+                        if signal is None:
+                            continue
+                        if ai_result is not None:
+                            signal.metadata["ai_macro_regime"] = ai_result.macro_regime
+                            signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                            signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
+                            signal.metadata["ai_anomalies"] = [a for a in ai_result.anomalies if a.get("symbol") == symbol]
+
+                        routed = router.route(signal.asset_class, signal.symbol)
+                        if routed is None:
+                            logger.warning("run_m5 | no_route | {} {}", signal.symbol, signal.asset_class)
+                            continue
+                        signal.broker = routed
+
+                        portfolio_state = await _load_portfolio_state(
+                            session_factory,
+                            fallback_portfolio_value=Decimal(str(args.portfolio_value)),
+                            signal_price_fallback=signal.suggested_price,
+                        )
+                        risk_engine.update_high_watermark(
+                            Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
+                        )
+                        risk_engine.restore_runtime_state(portfolio_state)
+                        risk_decision = await risk_engine.evaluate_and_persist(
+                            session_factory,
+                            signal,
+                            portfolio_state,
+                        )
+                        if risk_decision.verdict != RiskVerdict.APPROVED:
+                            continue
+
+                        if ai_result is not None and ai_classifier is not None:
+                            rationale = await ai_classifier.generate_rationale(
+                                {
+                                    "symbol": signal.symbol,
+                                    "strategy": signal.strategy,
+                                    "confidence": signal.confidence,
+                                    "news_score": signal.news_score,
+                                    "macro_regime": ai_result.macro_regime,
+                                    "asset_class": signal.asset_class,
+                                }
+                            )
+                            signal.metadata["ai_rationale"] = rationale
+                            async with session_factory() as session:
+                                session.add(
+                                    AIOutputLog(
+                                        symbol=signal.symbol[:32],
+                                        context_type="rationale",
+                                        score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
+                                        confidence=Decimal(str(signal.confidence)),
+                                        event_type=str(
+                                            ai_result.news_details.get(symbol, {}).get("event_type", "other")
+                                        ),
+                                        regime_label=ai_result.macro_regime,
+                                        decay_hours=int(
+                                            ai_result.news_details.get(symbol, {}).get("decay_hours", 24)
+                                        ),
+                                        rationale=rationale[:4000],
+                                        payload={
+                                            "headline": ai_result.news_details.get(symbol, {}).get("headline"),
+                                            "sample_count": ai_result.news_details.get(symbol, {}).get("sample_count", 0),
+                                            "macro_confidence": ai_result.macro_confidence,
+                                        },
+                                        source="claude",
+                                        signal_id=signal.signal_id,
+                                    )
+                                )
+                                await session.commit()
+
+                        await _persist_signal(
+                            session_factory,
+                            signal,
+                            paper_mode=not args.live,
+                            timeframe=args.timeframe,
+                            feature_ts=feature_ts,
+                        )
+                        generated += 1
+
+                        result = await execution.execute(
+                            signal,
+                            risk_decision,
+                            session_factory=session_factory,
+                        )
+                        if result is None:
+                            continue
+                        executed += 1
+
+                        realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
+                        if realized < 0:
+                            risk_engine.record_loss(abs(realized))
+                        elif realized > 0:
+                            risk_engine.record_win()
+                        portfolio_state.update(risk_engine.snapshot_runtime_state())
+
+                        _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
+                        await _persist_position_snapshot(session_factory, portfolio_state)
+                        await _upsert_daily_pnl(session_factory, portfolio_state)
+
+                    now_ts = datetime.now(timezone.utc).timestamp()
+                    if now_ts >= next_reconcile_at:
+                        ok = await execution.reconcile_positions(session_factory=session_factory)
+                        logger.info("run_m5 | reconcile | ok={}", ok)
+                        next_reconcile_at = now_ts + max(10, int(args.reconcile_interval_sec))
+
+                    await publish_runner_heartbeat(
+                        bus,
+                        runner_name="run_m5",
+                        symbols=symbols,
+                        generated=generated,
+                        executed=executed,
+                        extra={"paper_mode": not args.live},
+                    )
+                    logger.info("run_m5 | iteration | generated={} executed={}", generated, executed)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("run_m5 | iteration failed | {}", exc)
+                    await execution._send_critical_alert(f"run_m5 iteration failure: {exc}")
+                    # Attempt DB recovery to avoid prolonged persistence outages.
+                    try:
+                        await dispose_engine(engine)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    engine, session_factory = await _reconnect_db()
+                    if session_factory is None:
+                        await asyncio.sleep(max(5, int(args.loop_interval_sec)))
+                        continue
+                    bus = CommandBus(session_factory)
+                    control_ctx["bus"] = bus
+                    await hydrate_risk_parameters_from_bus(bus, risk_engine)
+                await asyncio.sleep(max(1, int(args.loop_interval_sec)))
+        finally:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
     finally:
         await dispose_engine(engine)
 
@@ -421,6 +454,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--portfolio-value", type=float, default=100000.0)
     p.add_argument("--live", action="store_true")
     p.add_argument("--loop-interval-sec", type=int, default=120)
+    p.add_argument(
+        "--control-poll-interval-sec",
+        type=int,
+        default=5,
+        help="How often to apply control commands from the queue (independent of main loop)",
+    )
     p.add_argument("--reconcile-interval-sec", type=int, default=300)
     p.add_argument("--place-order-retries", type=int, default=2)
     p.add_argument("--place-order-retry-backoff-sec", type=float, default=1.0)

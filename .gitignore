@@ -16,6 +16,9 @@ dist/
 build/
 *.egg
 
+# Risk overrides (runner / dashboard persistence)
+config/risk_parameter_overrides.yaml
+
 # Data
 *.csv
 *.parquet

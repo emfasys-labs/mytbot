@@ -22,7 +22,7 @@ from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
 from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
-from control.runner_control import apply_control_commands, publish_runner_heartbeat
+from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from risk.engine import RiskEngine, RiskVerdict
 from signals.engine import RawSignal, SignalEngine
@@ -419,6 +419,7 @@ async def _run_once(args: argparse.Namespace) -> int:
             state_v = await bus.get_state(f"strategy.enabled.{name}", None)
             if state_v is not None:
                 strategy.enabled = bool(state_v)
+        await hydrate_risk_parameters_from_bus(bus, risk_engine)
         await apply_control_commands(bus, risk_engine=risk_engine, execution_engine=None, strategies=strategies)
         generated = 0
         ai_result = None

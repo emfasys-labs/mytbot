@@ -7,6 +7,9 @@ from sqlalchemy import select
 
 from storage.models import ControlCommand, ControlState
 
+DASHBOARD_EVENTS_KEY = "dashboard.events"
+RISK_OVERRIDES_STATE_KEY = "risk.parameters.override"
+
 
 class CommandBus:
     def __init__(self, session_factory):
@@ -71,6 +74,51 @@ class CommandBus:
         async with self._session_factory() as session:
             q = await session.execute(select(ControlCommand).order_by(ControlCommand.id.desc()).limit(limit))
             return list(q.scalars().all())
+
+    async def get_command(self, command_id: int) -> ControlCommand | None:
+        async with self._session_factory() as session:
+            q = await session.execute(select(ControlCommand).where(ControlCommand.id == command_id).limit(1))
+            return q.scalars().first()
+
+    async def append_dashboard_event(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        """Rolling event log for WebSocket push (max 100 entries)."""
+        async with self._session_factory() as session:
+            q = await session.execute(select(ControlState).where(ControlState.key == DASHBOARD_EVENTS_KEY).limit(1))
+            row = q.scalars().first()
+            lst: list[dict[str, Any]] = []
+            if row is not None and isinstance(row.value, list):
+                lst = list(row.value)
+            entry = {
+                "type": event_type,
+                "payload": payload or {},
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            lst.append(entry)
+            lst = lst[-100:]
+            if row is None:
+                session.add(ControlState(key=DASHBOARD_EVENTS_KEY, value=lst, updated_at=datetime.now(timezone.utc)))
+            else:
+                row.value = lst
+                row.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    async def merge_risk_override_state(self, name: str, value: str, reason: str) -> None:
+        """Persist effective risk overrides for API display and runner restarts."""
+        async with self._session_factory() as session:
+            q = await session.execute(select(ControlState).where(ControlState.key == RISK_OVERRIDES_STATE_KEY).limit(1))
+            row = q.scalars().first()
+            data: dict[str, Any] = {}
+            if row is not None and isinstance(row.value, dict):
+                data = dict(row.value)
+            data[name] = {"value": value, "reason": reason, "updated_at": datetime.now(timezone.utc).isoformat()}
+            if row is None:
+                session.add(
+                    ControlState(key=RISK_OVERRIDES_STATE_KEY, value=data, updated_at=datetime.now(timezone.utc))
+                )
+            else:
+                row.value = data
+                row.updated_at = datetime.now(timezone.utc)
+            await session.commit()
 
     async def set_state(self, key: str, value: Any) -> None:
         async with self._session_factory() as session:

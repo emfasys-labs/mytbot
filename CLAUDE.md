@@ -49,9 +49,8 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M7 — Dashboard + Control ✅ Complete
-- Last completed task: Added DB-backed control plane (`control_commands`, `control_state`) with API command enqueue + runner command polling/ack in `run_m3.py` and `run_m5.py`
-- Last completed task: Implemented M7 FastAPI endpoints + websocket and React dashboard scaffold under `dashboard/` (status, logs, controls, risk editor, trade detail, pnl chart)
+- Milestone: M7 — Dashboard + Control ✅ Complete (hardened + UX pass)
+- Last completed task: M7+ — WS tick events (signals/orders + runner `dashboard.events`), `GET /control/commands/{id}`, dashboard read-token auth + optional login, risk overrides persisted to `control_state` + YAML (`config/risk_parameter_overrides.yaml`), `run_m5` control poll every ~5s, live CORS warning, drawdown overlay + WS reconnect + command polling in UI
 - Next task: M8 — Micro-live rollout and iterative scaling safeguards
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
