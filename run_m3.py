@@ -128,6 +128,9 @@ async def _load_portfolio_state(
     asset_class_exposure: dict[str, Decimal] = {}
     positions: dict[str, dict[str, Any]] = {}
     trades_today = 0
+    consecutive_losses = 0
+    cooldown_until: str | None = None
+    daily_loss_accumulated = Decimal("0")
 
     async with session_factory() as session:
         latest_pnl_q = await session.execute(
@@ -137,6 +140,19 @@ async def _load_portfolio_state(
         if latest_pnl is not None:
             portfolio_value = Decimal(str(latest_pnl.portfolio_value or fallback_portfolio_value))
             daily_realized_pnl = Decimal(str(latest_pnl.realised_pnl or "0"))
+            if isinstance(latest_pnl.strategy_breakdown, dict):
+                b = latest_pnl.strategy_breakdown
+                try:
+                    consecutive_losses = int(b.get("risk_consecutive_losses", 0))
+                except Exception:  # noqa: BLE001
+                    consecutive_losses = 0
+                raw_cu = b.get("risk_cooldown_until")
+                if isinstance(raw_cu, str) and raw_cu.strip():
+                    cooldown_until = raw_cu
+                try:
+                    daily_loss_accumulated = Decimal(str(b.get("risk_daily_loss_accumulated", "0")))
+                except Exception:  # noqa: BLE001
+                    daily_loss_accumulated = Decimal("0")
 
         hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
         hwm_raw = hwm_q.scalar_one_or_none()
@@ -190,6 +206,9 @@ async def _load_portfolio_state(
         "asset_class_exposure": asset_class_exposure,
         "positions": positions,
         "trades_today": trades_today,
+        "consecutive_losses": consecutive_losses,
+        "cooldown_until": cooldown_until,
+        "daily_loss_accumulated": daily_loss_accumulated,
     }
 
 
@@ -210,6 +229,14 @@ def _resolve_price_from_signal(signal) -> Decimal:
 
 
 def _apply_signal_to_portfolio_state(portfolio_state: dict[str, Any], signal) -> None:
+    """
+    Apply intended signal quantities to local state (M3 simulation path).
+    Execution-accurate updates should use the M5 fill-based updater.
+    """
+    _apply_intended_signal_to_portfolio_state(portfolio_state, signal)
+
+
+def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], signal) -> None:
     positions = dict(portfolio_state.get("positions", {}))
     price = _resolve_price_from_signal(signal)
     if price <= 0:
@@ -300,13 +327,22 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
                 total_fees=Decimal("0"),
                 trade_count=int(portfolio_state.get("trades_today", 0)),
                 portfolio_value=Decimal(str(portfolio_state.get("portfolio_value", "0"))),
-                strategy_breakdown=None,
+                strategy_breakdown={
+                    "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
+                    "risk_cooldown_until": portfolio_state.get("cooldown_until"),
+                    "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
+                },
             )
             session.add(row)
         else:
             row.realised_pnl = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
             row.trade_count = int(portfolio_state.get("trades_today", 0))
             row.portfolio_value = Decimal(str(portfolio_state.get("portfolio_value", "0")))
+            row.strategy_breakdown = {
+                "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
+                "risk_cooldown_until": portfolio_state.get("cooldown_until"),
+                "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
+            }
         await session.commit()
 
 

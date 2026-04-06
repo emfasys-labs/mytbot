@@ -154,6 +154,33 @@ class RiskEngine:
         if portfolio_value > self._high_watermark:
             self._high_watermark = portfolio_value
 
+    def restore_runtime_state(self, portfolio_state: dict) -> None:
+        """
+        Restore cooldown/loss counters from persisted state.
+        This helps preserve safety behavior across process restarts.
+        """
+        self._daily_loss = self._decimal_from_portfolio(portfolio_state, "daily_loss_accumulated", self._daily_loss)
+        try:
+            self._consecutive_losses = int(portfolio_state.get("consecutive_losses", self._consecutive_losses))
+        except Exception:  # noqa: BLE001
+            pass
+        raw_cooldown = portfolio_state.get("cooldown_until")
+        if isinstance(raw_cooldown, str) and raw_cooldown.strip():
+            try:
+                dt = datetime.fromisoformat(raw_cooldown.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                self._cooldown_until = dt
+            except Exception:  # noqa: BLE001
+                pass
+
+    def snapshot_runtime_state(self) -> dict:
+        return {
+            "consecutive_losses": int(self._consecutive_losses),
+            "daily_loss_accumulated": self._daily_loss,
+            "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
+        }
+
     # ── Checks ────────────────────────────────────────────────────────────────
 
     def _check_kill_switch(self, signal, portfolio) -> tuple[bool, str]:

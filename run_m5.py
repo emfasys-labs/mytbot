@@ -193,7 +193,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
 
     try:
         if args.reconcile_only:
-            ok = await execution.reconcile_positions()
+            ok = await execution.reconcile_positions(session_factory=session_factory)
             logger.info("run_m5 | reconcile-only | ok={}", ok)
             return 0 if ok else 3
 
@@ -245,6 +245,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     risk_engine.update_high_watermark(
                         Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
                     )
+                    risk_engine.restore_runtime_state(portfolio_state)
                     risk_decision = await risk_engine.evaluate_and_persist(
                         session_factory,
                         signal,
@@ -276,6 +277,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                         risk_engine.record_loss(abs(realized))
                     elif realized > 0:
                         risk_engine.record_win()
+                    portfolio_state.update(risk_engine.snapshot_runtime_state())
 
                     _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
                     await _persist_position_snapshot(session_factory, portfolio_state)
