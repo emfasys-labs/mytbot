@@ -74,7 +74,9 @@ Rules:
         self.model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
         self.max_retries = int(os.getenv("AI_NEWS_MAX_RETRIES", "2"))
         self.timeout_sec = float(os.getenv("AI_NEWS_TIMEOUT_SEC", "20"))
+        self.max_concurrency = max(1, int(os.getenv("AI_NEWS_MAX_CONCURRENCY", "3")))
         self._client: AsyncAnthropic | None = None
+        self._startup_validated = False
 
     def _client_or_init(self) -> AsyncAnthropic:
         if self._client is None:
@@ -101,10 +103,38 @@ Rules:
         """Score multiple news items."""
         if not items:
             return []
-        out: list[Optional[NewsScore]] = []
-        for item in items:
-            out.append(await self.score(item))
-        return out
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async def _score_one(item: NewsItem) -> Optional[NewsScore]:
+            async with semaphore:
+                return await self.score(item)
+
+        tasks = [asyncio.create_task(_score_one(item)) for item in items]
+        return await asyncio.gather(*tasks)
+
+    async def validate_startup(self) -> bool:
+        if self._startup_validated:
+            return True
+        if not self.api_key:
+            logger.warning("news_classifier | startup validation skipped | no API key")
+            return False
+        try:
+            raw = await self._call_text(
+                system_prompt="Return exactly this JSON: {\"ok\":true}",
+                user_prompt="healthcheck",
+                max_tokens=16,
+            )
+            parsed = self._extract_json(raw)
+            ok = bool(parsed.get("ok", False))
+            if ok:
+                logger.info("news_classifier | startup validation passed | model={}", self.model)
+                self._startup_validated = True
+                return True
+            logger.warning("news_classifier | startup validation unexpected response | model={}", self.model)
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("news_classifier | startup validation failed | model={} err={}", self.model, exc)
+            return False
 
     def get_symbol_score(
         self,

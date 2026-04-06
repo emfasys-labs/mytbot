@@ -3,12 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
+from ai.regime import filter_by_allowed_strategies
 from run_m5 import (
     _apply_filled_result_to_portfolio_state,
     _build_broker_configs,
     _build_parser,
     _estimate_realized_pnl_from_fill,
-    _filter_by_regime,
 )
 
 
@@ -35,7 +35,7 @@ def test_parser_supports_ai_config_flag():
 def test_filter_by_regime():
     a = SimpleNamespace(strategy="momentum_breakout")
     b = SimpleNamespace(strategy="mean_reversion")
-    out = _filter_by_regime([a, b], {"mean_reversion"})
+    out = filter_by_allowed_strategies([a, b], {"mean_reversion"})
     assert len(out) == 1
     assert out[0].strategy == "mean_reversion"
 

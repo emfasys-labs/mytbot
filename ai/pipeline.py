@@ -31,13 +31,35 @@ class AIPipeline:
         self.news_limit = int(cfg.get("news_limit", 200))
         self.regime_strategy_gates = cfg.get("regime_strategy_gates", {})
         self.anomaly_cfg = cfg.get("anomaly_detection", {})
+        self.cache_ttl_seconds = max(0, int(cfg.get("cache_ttl_seconds", 900)))
+        self._last_result: AIPipelineResult | None = None
+        self._last_result_ts: datetime | None = None
+        self._last_symbols: tuple[str, ...] | None = None
+        self._startup_validated = False
 
     async def compute(self, session_factory, symbols: list[str]) -> AIPipelineResult:
         norm_symbols = [s.strip().upper() for s in symbols if s and s.strip()]
+        if not self._startup_validated:
+            try:
+                await self.classifier.validate_startup()
+            except Exception:  # noqa: BLE001
+                pass
+            self._startup_validated = True
+        now = datetime.now(timezone.utc)
+        symbols_key = tuple(sorted(norm_symbols))
+        if (
+            self.cache_ttl_seconds > 0
+            and self._last_result is not None
+            and self._last_result_ts is not None
+            and self._last_symbols == symbols_key
+            and (now - self._last_result_ts).total_seconds() < self.cache_ttl_seconds
+        ):
+            logger.info("ai.pipeline | returning cached result | age_s={:.1f}", (now - self._last_result_ts).total_seconds())
+            return self._last_result
         news = await self._load_recent_news(session_factory)
         macro_regime, macro_conf, macro_payload = await self._compute_macro_regime(session_factory)
         news_scores, details, anomalies = await self._score_news(symbols=norm_symbols, rows=news)
-        return AIPipelineResult(
+        result = AIPipelineResult(
             news_scores=news_scores,
             macro_regime=macro_regime,
             macro_confidence=macro_conf,
@@ -45,6 +67,10 @@ class AIPipeline:
             news_details=details,
             anomalies=anomalies,
         )
+        self._last_result = result
+        self._last_result_ts = now
+        self._last_symbols = symbols_key
+        return result
 
     async def persist(self, session_factory, result: AIPipelineResult) -> None:
         now = datetime.now(timezone.utc)

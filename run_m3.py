@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
+from ai.regime import filter_by_allowed_strategies
 from control.runtime import set_risk_engine
 from risk.engine import RiskEngine, RiskVerdict
 from signals.engine import RawSignal, SignalEngine
@@ -58,16 +59,6 @@ def _pick_best_signal(signals: list[RawSignal]) -> RawSignal | None:
     if not signals:
         return None
     return max(signals, key=lambda s: s.confidence)
-
-
-def _filter_by_regime(raw_candidates: list[RawSignal], allowed_strategy_names: set[str] | None) -> list[RawSignal]:
-    if not allowed_strategy_names:
-        return raw_candidates
-    kept: list[RawSignal] = []
-    for raw in raw_candidates:
-        if raw.strategy in allowed_strategy_names:
-            kept.append(raw)
-    return kept
 
 
 async def _load_recent_features(
@@ -443,7 +434,7 @@ async def _run_once(args: argparse.Namespace) -> int:
                 raw_candidates.append(r_sig)
             if ai_result is not None and ai_pipeline is not None:
                 allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                filtered = _filter_by_regime(raw_candidates, allowed)
+                filtered = filter_by_allowed_strategies(raw_candidates, allowed)
                 if not filtered and raw_candidates:
                     logger.info(
                         "run_m3 | regime_gate_block | {} regime={} candidates={}",

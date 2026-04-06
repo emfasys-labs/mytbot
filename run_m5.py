@@ -20,6 +20,7 @@ from loguru import logger
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
+from ai.regime import filter_by_allowed_strategies
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
@@ -42,12 +43,6 @@ from strategies.momentum import MomentumBreakoutStrategy
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     with Path(path).open(encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def _filter_by_regime(raw_candidates, allowed_strategy_names: set[str] | None):  # noqa: ANN001
-    if not allowed_strategy_names:
-        return raw_candidates
-    return [r for r in raw_candidates if r.strategy in allowed_strategy_names]
 
 
 def _build_broker_configs() -> dict[str, dict[str, Any]]:
@@ -237,7 +232,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                         raw_candidates.append(r_sig)
                     if ai_result is not None and ai_pipeline is not None:
                         allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                        filtered = _filter_by_regime(raw_candidates, allowed)
+                        filtered = filter_by_allowed_strategies(raw_candidates, allowed)
                         if not filtered and raw_candidates:
                             logger.info(
                                 "run_m5 | regime_gate_block | {} regime={} candidates={}",

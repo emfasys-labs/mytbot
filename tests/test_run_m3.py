@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from run_m3 import _filter_by_regime, _pick_best_signal, _rows_to_features_frame, main
+from ai.regime import filter_by_allowed_strategies
+from run_m3 import _pick_best_signal, _rows_to_features_frame, main
 from signals.engine import RawSignal
 
 
@@ -50,7 +51,7 @@ def test_pick_best_signal_none_for_empty():
 def test_filter_by_regime_keeps_only_allowed():
     a = RawSignal("momentum_breakout", "SPY", "buy", 0.6, "ibkr", "equity", {})
     b = RawSignal("mean_reversion", "SPY", "buy", 0.6, "ibkr", "equity", {})
-    out = _filter_by_regime([a, b], {"mean_reversion"})
+    out = filter_by_allowed_strategies([a, b], {"mean_reversion"})
     assert len(out) == 1
     assert out[0].strategy == "mean_reversion"
 
