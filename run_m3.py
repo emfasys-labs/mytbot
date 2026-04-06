@@ -16,12 +16,13 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from control.runtime import set_risk_engine
 from risk.engine import RiskEngine, RiskVerdict
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
-from storage.models import FeatureSnapshot, SignalLog
+from storage.models import DailyPnL, FeatureSnapshot, PositionLog, SignalLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -109,6 +110,68 @@ async def _persist_signal(session_factory, signal, *, paper_mode: bool, timefram
         await session.commit()
 
 
+async def _load_portfolio_state(
+    session_factory,
+    *,
+    fallback_portfolio_value: Decimal,
+    signal_price_fallback: Decimal | None = None,
+) -> dict[str, Any]:
+    """
+    Build portfolio state from DB snapshots (M4 risk checks).
+    Falls back to provided portfolio value when history is unavailable.
+    """
+    portfolio_value = fallback_portfolio_value
+    high_watermark_value = fallback_portfolio_value
+    daily_realized_pnl = Decimal("0")
+    current_gross_exposure = Decimal("0")
+    symbol_exposure: dict[str, Decimal] = {}
+    asset_class_exposure: dict[str, Decimal] = {}
+
+    async with session_factory() as session:
+        latest_pnl_q = await session.execute(
+            select(DailyPnL).order_by(DailyPnL.id.desc()).limit(1)
+        )
+        latest_pnl = latest_pnl_q.scalars().first()
+        if latest_pnl is not None:
+            portfolio_value = Decimal(str(latest_pnl.portfolio_value or fallback_portfolio_value))
+            daily_realized_pnl = Decimal(str(latest_pnl.realised_pnl or "0"))
+
+        hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
+        hwm_raw = hwm_q.scalar_one_or_none()
+        if hwm_raw is not None:
+            high_watermark_value = Decimal(str(hwm_raw))
+        else:
+            high_watermark_value = portfolio_value
+
+        latest_pos_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
+        latest_pos_ts = latest_pos_ts_q.scalar_one_or_none()
+        if latest_pos_ts is not None:
+            rows_q = await session.execute(
+                select(PositionLog).where(PositionLog.timestamp == latest_pos_ts)
+            )
+            rows = list(rows_q.scalars().all())
+            for row in rows:
+                qty = abs(Decimal(str(row.quantity)))
+                px = Decimal(str(row.current_price or signal_price_fallback or "0"))
+                notional = qty * px
+                current_gross_exposure += notional
+                symbol = (row.symbol or "").strip()
+                if symbol:
+                    symbol_exposure[symbol] = symbol_exposure.get(symbol, Decimal("0")) + notional
+                asset = (row.asset_class or "").strip().lower()
+                if asset:
+                    asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+
+    return {
+        "portfolio_value": portfolio_value,
+        "high_watermark_value": high_watermark_value,
+        "daily_realized_pnl": daily_realized_pnl,
+        "current_gross_exposure": current_gross_exposure,
+        "symbol_exposure": symbol_exposure,
+        "asset_class_exposure": asset_class_exposure,
+    }
+
+
 async def _run_once(args: argparse.Namespace) -> int:
     strategies_cfg = _load_yaml(args.strategies_config)
     pipeline_cfg = _load_yaml(args.pipeline_config)
@@ -127,6 +190,7 @@ async def _run_once(args: argparse.Namespace) -> int:
     try:
         sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
         risk_engine = RiskEngine(risk_cfg)
+        set_risk_engine(risk_engine)
         strat_cfg = strategies_cfg.get("strategies", {})
         momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
         mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
@@ -165,13 +229,15 @@ async def _run_once(args: argparse.Namespace) -> int:
                 logger.info("run_m3 | vetoed | {} {}", symbol, raw.strategy)
                 continue
 
-            # M3/M4 bridge: evaluate and audit every risk decision before persistence.
-            portfolio_state = {
-                "portfolio_value": Decimal(str(args.portfolio_value)),
-                "daily_realized_pnl": Decimal("0"),
-                "current_gross_exposure": Decimal("0"),
-                "symbol_exposure": {},
-            }
+            # M4: evaluate against live-ish portfolio state loaded from DB snapshots.
+            portfolio_state = await _load_portfolio_state(
+                session_factory,
+                fallback_portfolio_value=Decimal(str(args.portfolio_value)),
+                signal_price_fallback=signal.suggested_price,
+            )
+            risk_engine.update_high_watermark(
+                Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
+            )
             risk_decision = await risk_engine.evaluate_and_persist(
                 session_factory,
                 signal,

@@ -20,6 +20,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
+from control.runtime import get_execution_engine, get_risk_engine
+
 app = FastAPI(
     title="mytbot Control API",
     description="Autonomous trading system dashboard API",
@@ -38,12 +40,17 @@ APP_ENV = os.getenv("APP_ENV", "paper")
 
 @app.get("/status")
 async def get_status():
+    risk_engine = get_risk_engine()
+    execution_engine = get_execution_engine()
+    connected_brokers = []
+    if execution_engine is not None:
+        connected_brokers = list(getattr(execution_engine, "_brokers", {}).keys())
     return {
         "status": "running",
         "mode": APP_ENV,
         "paper_mode": APP_ENV != "live",
-        "kill_switch": False,           # TODO M7: read from risk engine
-        "connected_brokers": [],        # TODO M7: read from execution engine
+        "kill_switch": bool(getattr(risk_engine, "is_killed", False)),
+        "connected_brokers": connected_brokers,
         "active_strategies": [],        # TODO M7: read from strategy registry
     }
 
@@ -78,14 +85,24 @@ async def get_pnl():
 @app.post("/kill")
 async def activate_kill_switch():
     """Immediately halt all trading. Cancel all open orders."""
-    # TODO M7: call risk_engine.kill() and execution_engine.cancel_all()
-    return {"kill_switch": True, "message": "Kill switch activated"}
+    risk_engine = get_risk_engine()
+    execution_engine = get_execution_engine()
+    if risk_engine is None:
+        raise HTTPException(status_code=503, detail="Risk engine not registered")
+
+    risk_engine.kill()
+    if execution_engine is not None:
+        await execution_engine.cancel_all()
+    return {"kill_switch": True, "message": "Kill switch activated; open orders cancelled"}
 
 
 @app.post("/kill/reset")
 async def reset_kill_switch():
     """Re-enable trading after kill switch. Deliberate action required."""
-    # TODO M7: call risk_engine.reset_kill()
+    risk_engine = get_risk_engine()
+    if risk_engine is None:
+        raise HTTPException(status_code=503, detail="Risk engine not registered")
+    risk_engine.reset_kill()
     return {"kill_switch": False, "message": "Kill switch reset"}
 
 

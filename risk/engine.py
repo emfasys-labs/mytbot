@@ -67,6 +67,7 @@ class RiskEngine:
         self._consecutive_losses = 0
         self._in_cooldown = False
         self._is_killed = False
+        self._high_watermark = Decimal("0")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -86,9 +87,11 @@ class RiskEngine:
             self._check_kill_switch,
             self._check_cooldown,
             self._check_daily_loss_limit,
+            self._check_drawdown_limit,
             self._check_position_size,
             self._check_max_exposure,
             self._check_concentration,
+            self._check_asset_class_limits,
             self._check_consecutive_losses,
             self._check_confidence_threshold,
         ]
@@ -128,6 +131,10 @@ class RiskEngine:
         self._is_killed = False
         logger.warning("Kill switch deactivated")
 
+    @property
+    def is_killed(self) -> bool:
+        return self._is_killed
+
     def record_loss(self, amount: Decimal) -> None:
         """Called by execution engine after a losing trade."""
         self._daily_loss += amount
@@ -141,6 +148,11 @@ class RiskEngine:
         """Called at start of each trading day."""
         self._daily_loss = Decimal("0")
         self._in_cooldown = False
+
+    def update_high_watermark(self, portfolio_value: Decimal) -> None:
+        """Track best observed portfolio value for drawdown checks."""
+        if portfolio_value > self._high_watermark:
+            self._high_watermark = portfolio_value
 
     # ── Checks ────────────────────────────────────────────────────────────────
 
@@ -174,6 +186,20 @@ class RiskEngine:
         allowed_notional = portfolio_value * max_position_pct
         return (requested_notional <= allowed_notional, "position_size")
 
+    def _check_drawdown_limit(self, signal, portfolio) -> tuple[bool, str]:
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "drawdown_limit")
+        state_hwm = self._decimal_from_portfolio(portfolio, "high_watermark_value", Decimal("0"))
+        if state_hwm > self._high_watermark:
+            self._high_watermark = state_hwm
+        if self._high_watermark <= 0:
+            self._high_watermark = portfolio_value
+            return (True, "drawdown_limit")
+        max_drawdown_pct = Decimal(str(self.config.get("max_drawdown_pct", 0.10)))
+        drawdown = (self._high_watermark - portfolio_value) / self._high_watermark
+        return (drawdown <= max_drawdown_pct, "drawdown_limit")
+
     def _check_max_exposure(self, signal, portfolio) -> tuple[bool, str]:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
@@ -196,6 +222,31 @@ class RiskEngine:
         projected_symbol_exposure = symbol_exposure + self._requested_notional(signal)
         allowed_symbol_exposure = portfolio_value * max_concentration_pct
         return (projected_symbol_exposure <= allowed_symbol_exposure, "concentration")
+
+    def _check_asset_class_limits(self, signal, portfolio) -> tuple[bool, str]:
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "asset_class_limit")
+
+        asset_class = (signal.asset_class or "").strip().lower()
+        asset_class_exposure_raw = portfolio.get("asset_class_exposure", {})
+        asset_class_exposure = Decimal("0")
+        if isinstance(asset_class_exposure_raw, dict):
+            asset_class_exposure = Decimal(str(asset_class_exposure_raw.get(asset_class, "0")))
+        projected = asset_class_exposure + self._requested_notional(signal)
+
+        key_by_class = {
+            "crypto": "max_crypto_pct",
+            "bond": "max_bond_pct",
+            "equity": "max_single_stock_pct",
+        }
+        config_key = key_by_class.get(asset_class)
+        if config_key is None:
+            return (True, "asset_class_limit")
+
+        pct = Decimal(str(self.config.get(config_key, "1.0")))
+        allowed = portfolio_value * pct
+        return (projected <= allowed, "asset_class_limit")
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = self.config.get("max_consecutive_losses", 3)

@@ -14,6 +14,10 @@ def _risk_cfg() -> dict:
         "max_concentration_pct": 0.20,
         "max_gross_exposure_pct": 0.80,
         "max_daily_loss_pct": 0.02,
+        "max_drawdown_pct": 0.10,
+        "max_crypto_pct": 0.30,
+        "max_single_stock_pct": 0.10,
+        "max_bond_pct": 0.50,
         "max_consecutive_losses": 3,
         "min_signal_confidence": 0.55,
     }
@@ -89,6 +93,56 @@ def test_rejects_on_concentration_limit() -> None:
     decision = engine.evaluate(sig, portfolio)
     assert decision.verdict == RiskVerdict.REJECTED
     assert decision.checks_failed == ["concentration"]
+
+
+def test_rejects_on_drawdown_limit() -> None:
+    engine = RiskEngine(_risk_cfg())
+    # Seed engine high watermark to 100k
+    engine.update_high_watermark(Decimal("100000"))
+    sig = _signal(qty="1", price="100")
+    portfolio = {
+        "portfolio_value": Decimal("85000"),  # 15% drawdown > 10% max
+        "high_watermark_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["drawdown_limit"]
+
+
+def test_rejects_on_asset_class_limit_crypto() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="5", price="1000")
+    sig.asset_class = "crypto"
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {"crypto": Decimal("29000")},  # +5k => 34k > 30k max
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["asset_class_limit"]
+
+
+def test_rejects_on_asset_class_limit_bond() -> None:
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(qty="2", price="1000")
+    sig.asset_class = "bond"
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {"bond": Decimal("49500")},  # +2k => 51.5k > 50k max
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["asset_class_limit"]
 
 
 @dataclass
