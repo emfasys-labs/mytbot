@@ -125,8 +125,10 @@ async def init_async_database() -> tuple[AsyncEngine | None, async_sessionmaker[
         hint = ""
         if "password authentication failed" in msg:
             hint = (
-                " | hint: POSTGRES_PASSWORD must match the DB user. "
-                "If you changed .env after first `docker compose up`, reset volume or restore password."
+                " | hint: POSTGRES_PASSWORD in .env must match the DB role. "
+                "If .env is correct but login still fails, either run .\\scripts\\apply_postgres_password.ps1 "
+                "(sets DB password from .env) or .\\scripts\\reset_postgres_volume.ps1 -Force (wipes volumes), "
+                "then restart the API."
             )
         logger.warning("storage | init failed — running without DB | {}{}", exc, hint)
         if engine is not None:

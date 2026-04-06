@@ -6,7 +6,14 @@ import asyncio
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+# Same as runners: uvicorn does not load .env automatically — without this,
+# POSTGRES_* and API_CONTROL_TOKEN are missing when starting `uvicorn api.server:app`.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware

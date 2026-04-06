@@ -33,6 +33,9 @@ logs/
 # Claude / local worktrees (do not commit nested copies)
 .claude/
 
+# Node (dashboard)
+node_modules/
+
 # IDE
 .vscode/
 .idea/
