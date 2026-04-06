@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -23,7 +24,13 @@ def _risk_cfg() -> dict:
     }
 
 
-def _signal(*, qty: str = "1", price: str = "100", confidence: float = 0.9) -> Signal:
+def _signal(
+    *,
+    qty: str = "1",
+    price: str = "100",
+    confidence: float = 0.9,
+    metadata: dict | None = None,
+) -> Signal:
     return Signal(
         signal_id="s-1",
         symbol="SPY",
@@ -35,7 +42,7 @@ def _signal(*, qty: str = "1", price: str = "100", confidence: float = 0.9) -> S
         broker="ibkr",
         asset_class="equity",
         timestamp="2026-04-06T12:00:00+00:00",
-        metadata={},
+        metadata=metadata or {},
     )
 
 
@@ -278,4 +285,61 @@ def test_approves_when_all_checks_pass() -> None:
     )
     assert decision.verdict == RiskVerdict.APPROVED
     assert not decision.checks_failed
+
+
+def test_rejects_on_max_trades_per_day() -> None:
+    cfg = _risk_cfg()
+    cfg["max_trades_per_day"] = 2
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "trades_today": 2,
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_trades_per_day"]
+
+
+def test_rejects_on_max_loss_per_trade_pct() -> None:
+    cfg = _risk_cfg()
+    cfg["max_loss_per_trade_pct"] = 0.01
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(qty="50", price="100", metadata={"stop_loss_pct": "0.30"}),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "trades_today": 0,
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_loss_per_trade_pct"]
+
+
+def test_cooldown_expires_after_elapsed_time() -> None:
+    cfg = _risk_cfg()
+    cfg["cooldown_minutes"] = 60
+    engine = RiskEngine(cfg)
+    engine._cooldown_until = datetime.now(timezone.utc)  # immediately expired
+    decision = engine.evaluate(
+        _signal(),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "trades_today": 0,
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
 

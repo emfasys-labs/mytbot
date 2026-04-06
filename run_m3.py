@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -126,6 +126,8 @@ async def _load_portfolio_state(
     current_gross_exposure = Decimal("0")
     symbol_exposure: dict[str, Decimal] = {}
     asset_class_exposure: dict[str, Decimal] = {}
+    positions: dict[str, dict[str, Any]] = {}
+    trades_today = 0
 
     async with session_factory() as session:
         latest_pnl_q = await session.execute(
@@ -151,16 +153,33 @@ async def _load_portfolio_state(
             )
             rows = list(rows_q.scalars().all())
             for row in rows:
-                qty = abs(Decimal(str(row.quantity)))
+                qty = Decimal(str(row.quantity))
                 px = Decimal(str(row.current_price or signal_price_fallback or "0"))
-                notional = qty * px
+                notional = abs(qty) * px
                 current_gross_exposure += notional
                 symbol = (row.symbol or "").strip()
                 if symbol:
                     symbol_exposure[symbol] = symbol_exposure.get(symbol, Decimal("0")) + notional
+                    positions[symbol] = {
+                        "quantity": qty,
+                        "avg_entry_price": Decimal(str(row.avg_entry_price or px)),
+                        "current_price": px,
+                        "asset_class": (row.asset_class or "").strip().lower(),
+                        "broker": (row.broker or "").strip()[:20],
+                    }
                 asset = (row.asset_class or "").strip().lower()
                 if asset:
                     asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+
+        now = datetime.now(timezone.utc)
+        start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        trades_q = await session.execute(
+            select(func.count())
+            .select_from(SignalLog)
+            .where(SignalLog.timestamp >= start, SignalLog.timestamp < end)
+        )
+        trades_today = int(trades_q.scalar_one() or 0)
 
     return {
         "portfolio_value": portfolio_value,
@@ -169,7 +188,126 @@ async def _load_portfolio_state(
         "current_gross_exposure": current_gross_exposure,
         "symbol_exposure": symbol_exposure,
         "asset_class_exposure": asset_class_exposure,
+        "positions": positions,
+        "trades_today": trades_today,
     }
+
+
+def _resolve_price_from_signal(signal) -> Decimal:
+    if signal.suggested_price is not None and signal.suggested_price > 0:
+        return signal.suggested_price
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    for key in ("close", "last_price", "price"):
+        if key not in metadata:
+            continue
+        try:
+            p = Decimal(str(metadata[key]))
+        except Exception:  # noqa: BLE001
+            continue
+        if p > 0:
+            return p
+    return Decimal("0")
+
+
+def _apply_signal_to_portfolio_state(portfolio_state: dict[str, Any], signal) -> None:
+    positions = dict(portfolio_state.get("positions", {}))
+    price = _resolve_price_from_signal(signal)
+    if price <= 0:
+        return
+    symbol = signal.symbol
+    side_mult = Decimal("1") if signal.side == "buy" else Decimal("-1")
+    qty_delta = Decimal(str(signal.suggested_quantity)) * side_mult
+
+    row = positions.get(symbol)
+    if row is None:
+        row = {
+            "quantity": Decimal("0"),
+            "avg_entry_price": price,
+            "current_price": price,
+            "asset_class": (signal.asset_class or "").strip().lower(),
+            "broker": (signal.broker or "").strip()[:20],
+        }
+    prev_qty = Decimal(str(row["quantity"]))
+    new_qty = prev_qty + qty_delta
+    if new_qty == 0:
+        positions.pop(symbol, None)
+    else:
+        row["quantity"] = new_qty
+        row["current_price"] = price
+        if prev_qty == 0:
+            row["avg_entry_price"] = price
+        elif (prev_qty > 0 and qty_delta > 0) or (prev_qty < 0 and qty_delta < 0):
+            # Weighted average on add-to-position in same direction.
+            old_notional = abs(prev_qty) * Decimal(str(row["avg_entry_price"]))
+            add_notional = abs(qty_delta) * price
+            denom = abs(new_qty)
+            if denom > 0:
+                row["avg_entry_price"] = (old_notional + add_notional) / denom
+        positions[symbol] = row
+
+    symbol_exposure: dict[str, Decimal] = {}
+    asset_class_exposure: dict[str, Decimal] = {}
+    current_gross_exposure = Decimal("0")
+    for sym, p in positions.items():
+        qty = abs(Decimal(str(p["quantity"])))
+        px = Decimal(str(p["current_price"]))
+        notional = qty * px
+        current_gross_exposure += notional
+        symbol_exposure[sym] = symbol_exposure.get(sym, Decimal("0")) + notional
+        asset = str(p.get("asset_class", "")).strip().lower()
+        if asset:
+            asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+
+    portfolio_state["positions"] = positions
+    portfolio_state["symbol_exposure"] = symbol_exposure
+    portfolio_state["asset_class_exposure"] = asset_class_exposure
+    portfolio_state["current_gross_exposure"] = current_gross_exposure
+    portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
+
+
+async def _persist_position_snapshot(session_factory, portfolio_state: dict[str, Any]) -> None:
+    positions = portfolio_state.get("positions", {})
+    if not positions:
+        return
+    ts = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        for symbol, p in positions.items():
+            row = PositionLog(
+                timestamp=ts,
+                symbol=symbol[:20],
+                broker=str(p.get("broker", "ibkr"))[:20] or "ibkr",
+                quantity=Decimal(str(p.get("quantity", "0"))),
+                avg_entry_price=Decimal(str(p.get("avg_entry_price", "0"))),
+                current_price=Decimal(str(p.get("current_price", "0"))),
+                unrealised_pnl=Decimal("0"),
+                asset_class=str(p.get("asset_class", ""))[:20],
+            )
+            session.add(row)
+        await session.commit()
+
+
+async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    d = now.date().isoformat()
+    async with session_factory() as session:
+        q = await session.execute(select(DailyPnL).where(DailyPnL.date == d).limit(1))
+        row = q.scalars().first()
+        if row is None:
+            row = DailyPnL(
+                date=d,
+                realised_pnl=Decimal(str(portfolio_state.get("daily_realized_pnl", "0"))),
+                unrealised_pnl=Decimal("0"),
+                total_fees=Decimal("0"),
+                trade_count=int(portfolio_state.get("trades_today", 0)),
+                portfolio_value=Decimal(str(portfolio_state.get("portfolio_value", "0"))),
+                strategy_breakdown=None,
+            )
+            session.add(row)
+        else:
+            row.realised_pnl = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
+            row.trade_count = int(portfolio_state.get("trades_today", 0))
+            row.portfolio_value = Decimal(str(portfolio_state.get("portfolio_value", "0")))
+        await session.commit()
 
 
 async def _run_once(args: argparse.Namespace) -> int:
@@ -259,6 +397,9 @@ async def _run_once(args: argparse.Namespace) -> int:
                 timeframe=args.timeframe,
                 feature_ts=feature_ts,
             )
+            _apply_signal_to_portfolio_state(portfolio_state, signal)
+            await _persist_position_snapshot(session_factory, portfolio_state)
+            await _upsert_daily_pnl(session_factory, portfolio_state)
             generated += 1
             logger.info(
                 "run_m3 | signal | {} {} | strategy={} confidence={:.2f} qty={}",

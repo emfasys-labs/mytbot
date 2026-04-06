@@ -17,6 +17,7 @@ All thresholds live in config/risk_limits.yaml — editable without code changes
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from datetime import timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Optional
@@ -65,7 +66,7 @@ class RiskEngine:
         self.config = config
         self._daily_loss = Decimal("0")
         self._consecutive_losses = 0
-        self._in_cooldown = False
+        self._cooldown_until: Optional[datetime] = None
         self._is_killed = False
         self._high_watermark = Decimal("0")
 
@@ -87,8 +88,10 @@ class RiskEngine:
             self._check_kill_switch,
             self._check_cooldown,
             self._check_daily_loss_limit,
+            self._check_max_trades_per_day,
             self._check_drawdown_limit,
             self._check_position_size,
+            self._check_max_loss_per_trade_pct,
             self._check_max_exposure,
             self._check_concentration,
             self._check_asset_class_limits,
@@ -147,7 +150,7 @@ class RiskEngine:
     def reset_daily(self) -> None:
         """Called at start of each trading day."""
         self._daily_loss = Decimal("0")
-        self._in_cooldown = False
+        self._cooldown_until = None
 
     def update_high_watermark(self, portfolio_value: Decimal) -> None:
         """Track best observed portfolio value for drawdown checks."""
@@ -160,7 +163,12 @@ class RiskEngine:
         return (not self._is_killed, "kill_switch")
 
     def _check_cooldown(self, signal, portfolio) -> tuple[bool, str]:
-        return (not self._in_cooldown, "cooldown")
+        if self._cooldown_until is None:
+            return (True, "cooldown")
+        if datetime.now(timezone.utc) < self._cooldown_until:
+            return (False, "cooldown")
+        self._cooldown_until = None
+        return (True, "cooldown")
 
     def _check_daily_loss_limit(self, signal, portfolio) -> tuple[bool, str]:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
@@ -173,6 +181,13 @@ class RiskEngine:
         observed_loss = max(self._daily_loss, state_loss)
         allowed_loss = portfolio_value * max_daily_loss_pct
         return (observed_loss <= allowed_loss, "daily_loss_limit")
+
+    def _check_max_trades_per_day(self, signal, portfolio) -> tuple[bool, str]:
+        max_trades = int(self.config.get("max_trades_per_day", 0))
+        if max_trades <= 0:
+            return (True, "max_trades_per_day")
+        trades_today = int(portfolio.get("trades_today", 0))
+        return (trades_today < max_trades, "max_trades_per_day")
 
     def _check_position_size(self, signal, portfolio) -> tuple[bool, str]:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
@@ -199,6 +214,20 @@ class RiskEngine:
         max_drawdown_pct = Decimal(str(self.config.get("max_drawdown_pct", 0.10)))
         drawdown = (self._high_watermark - portfolio_value) / self._high_watermark
         return (drawdown <= max_drawdown_pct, "drawdown_limit")
+
+    def _check_max_loss_per_trade_pct(self, signal, portfolio) -> tuple[bool, str]:
+        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        if portfolio_value <= 0:
+            return (False, "max_loss_per_trade_pct")
+        max_loss_pct = Decimal(str(self.config.get("max_loss_per_trade_pct", 0.01)))
+        requested_notional = self._requested_notional(signal)
+        expected_loss_pct = self._infer_expected_loss_pct(signal)
+        if expected_loss_pct is None:
+            # Keep the gate non-blocking when stop-distance proxy is unavailable.
+            return (True, "max_loss_per_trade_pct")
+        expected_loss = requested_notional * expected_loss_pct
+        allowed_loss = portfolio_value * max_loss_pct
+        return (expected_loss <= allowed_loss, "max_loss_per_trade_pct")
 
     def _check_max_exposure(self, signal, portfolio) -> tuple[bool, str]:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
@@ -242,6 +271,10 @@ class RiskEngine:
         }
         config_key = key_by_class.get(asset_class)
         if config_key is None:
+            logger.warning(
+                "Asset class '%s' has no configured limit key; allowing by default",
+                asset_class,
+            )
             return (True, "asset_class_limit")
 
         pct = Decimal(str(self.config.get(config_key, "1.0")))
@@ -251,7 +284,8 @@ class RiskEngine:
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = self.config.get("max_consecutive_losses", 3)
         if self._consecutive_losses >= max_losses:
-            self._in_cooldown = True
+            cooldown_minutes = int(self.config.get("cooldown_minutes", 60))
+            self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
             return (False, "consecutive_losses")
         return (True, "consecutive_losses")
 
@@ -295,6 +329,32 @@ class RiskEngine:
 
     def _requested_notional(self, signal: Signal) -> Decimal:
         return abs(signal.suggested_quantity) * self._resolve_signal_price(signal)
+
+    def _infer_expected_loss_pct(self, signal: Signal) -> Optional[Decimal]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        for key in ("stop_loss_pct", "expected_loss_pct"):
+            if key not in metadata:
+                continue
+            try:
+                v = Decimal(str(metadata[key]))
+            except Exception:  # noqa: BLE001
+                continue
+            if v > 0:
+                return v
+
+        price = self._resolve_signal_price(signal)
+        if price <= 0:
+            return None
+        for key in ("atr_14", "atr"):
+            if key not in metadata:
+                continue
+            try:
+                atr = Decimal(str(metadata[key]))
+            except Exception:  # noqa: BLE001
+                continue
+            if atr > 0:
+                return atr / price
+        return None
 
     async def persist_decision(self, session_factory, signal: Signal, decision: RiskDecision) -> None:
         """Persist every risk decision for audit; no-op if DB/session factory is missing."""
