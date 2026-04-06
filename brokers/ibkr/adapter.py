@@ -145,6 +145,8 @@ class IBKRAdapter(BrokerAdapter):
         self.account_id = account_id
         self.paper_mode = paper_mode
         self._ib: Optional[IB] = None
+        self._last_ib_order_snapshot_monotonic: float = -1e9
+        self._ib_order_snap_lock = asyncio.Lock()
 
     def _resolve_account(self) -> str:
         """Return configured account or the sole managed account from IB."""
@@ -211,6 +213,19 @@ class IBKRAdapter(BrokerAdapter):
             return str(pid)
         return str(trade.order.orderId)
 
+    def _filled_from_executions(self, trade: Trade) -> Decimal:
+        """Sum execution shares when orderStatus lags behind execDetails (common after slow sync)."""
+        total = Decimal(0)
+        for f in trade.fills:
+            sh = getattr(f.execution, "shares", None)
+            if sh is not None:
+                total += _d(sh)
+        return total
+
+    def _effective_filled_qty(self, trade: Trade) -> Decimal:
+        os_filled = _d(trade.orderStatus.filled)
+        return max(os_filled, self._filled_from_executions(trade))
+
     def _map_ib_status(self, trade: Trade) -> OrderStatus:
         s = trade.orderStatus.status or ""
         if s in ("Cancelled", "ApiCancelled"):
@@ -221,9 +236,12 @@ class IBKRAdapter(BrokerAdapter):
             return OrderStatus.REJECTED
         if s == "PendingCancel":
             return OrderStatus.PENDING
-        filled = trade.orderStatus.filled or 0.0
+        qty = _d(trade.order.totalQuantity)
+        filled_e = self._effective_filled_qty(trade)
         remaining = trade.orderStatus.remaining or 0.0
-        if filled > 0 and remaining > 0:
+        if qty > 0 and filled_e >= qty:
+            return OrderStatus.FILLED
+        if filled_e > 0 and remaining > 0:
             return OrderStatus.PARTIALLY_FILLED
         if s in ("PendingSubmit", "ApiPending", "PreSubmitted"):
             return OrderStatus.PENDING
@@ -246,7 +264,7 @@ class IBKRAdapter(BrokerAdapter):
         sym = self._contract_symbol_key(trade.contract)
         side = OrderSide.BUY if trade.order.action == "BUY" else OrderSide.SELL
         qty = _d(trade.order.totalQuantity)
-        filled = _d(trade.orderStatus.filled)
+        filled = self._effective_filled_qty(trade)
         avg = trade.orderStatus.avgFillPrice
         avg_d = _d(avg) if avg and avg > 0 else None
         return OrderResult(
@@ -547,6 +565,7 @@ class IBKRAdapter(BrokerAdapter):
             logger.warning("disconnect | IBKR | error={}", exc)
         finally:
             self._ib = None
+            self._last_ib_order_snapshot_monotonic = -1e9
 
     async def is_connected(self) -> bool:
         """Return True if the IB API connection is active."""
@@ -563,7 +582,24 @@ class IBKRAdapter(BrokerAdapter):
             return []
         try:
             acct = self._resolve_account()
-            rows = await self._ib.accountSummaryAsync(account=acct)
+            try:
+                summary_timeout = float(os.getenv("IBKR_ACCOUNT_SUMMARY_TIMEOUT", "30"))
+            except ValueError:
+                summary_timeout = 30.0
+            # accountSummaryAsync may await reqAccountSummaryAsync; Gateway can stall after
+            # partial connect (e.g. positions sync timed out) — never block forever.
+            try:
+                rows = await asyncio.wait_for(
+                    self._ib.accountSummaryAsync(account=acct),
+                    timeout=max(5.0, summary_timeout),
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "get_balance | IBKR | account summary timed out after {}s | "
+                    "raise IBKR_ACCOUNT_SUMMARY_TIMEOUT or fix Gateway SSO/network",
+                    summary_timeout,
+                )
+                return []
             tags_by_ccy: dict[str, dict[str, Decimal]] = defaultdict(dict)
             for row in rows:
                 if acct and row.account != acct:
@@ -876,6 +912,45 @@ class IBKRAdapter(BrokerAdapter):
             logger.exception("cancel_order | IBKR | id={} | error={}", broker_order_id, exc)
             return False
 
+    def _trade_ib_is_terminal(self, trade: Trade) -> bool:
+        s = trade.orderStatus.status or ""
+        if s in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+            return True
+        qty = _d(trade.order.totalQuantity)
+        return qty > 0 and self._effective_filled_qty(trade) >= qty
+
+    async def _refresh_ib_order_snapshot(self, *, force: bool = False) -> None:
+        """Replay open orders + executions so Trade matches Gateway (helps after connect sync timeouts)."""
+        if self._ib is None or not self._ib.isConnected():
+            return
+        try:
+            min_iv = float(os.getenv("IBKR_ORDER_REFRESH_MIN_SEC", "2"))
+        except ValueError:
+            min_iv = 2.0
+        min_iv = max(0.0, min_iv)
+        now = asyncio.get_running_loop().time()
+        async with self._ib_order_snap_lock:
+            if (
+                not force
+                and self._last_ib_order_snapshot_monotonic > -1e8
+                and (now - self._last_ib_order_snapshot_monotonic) < min_iv
+            ):
+                return
+            try:
+                to = float(os.getenv("IBKR_ORDER_REFRESH_TIMEOUT", "15"))
+            except ValueError:
+                to = 15.0
+            to = max(3.0, to)
+            try:
+                await asyncio.wait_for(self._ib.reqOpenOrdersAsync(), timeout=to)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("reqOpenOrdersAsync | {}", exc)
+            try:
+                await asyncio.wait_for(self._ib.reqExecutionsAsync(), timeout=to)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("reqExecutionsAsync | {}", exc)
+            self._last_ib_order_snapshot_monotonic = asyncio.get_running_loop().time()
+
     async def get_order(self, broker_order_id: str) -> OrderResult:
         """Return current status for an order by broker id."""
         if self._ib is None or not self._ib.isConnected():
@@ -885,6 +960,9 @@ class IBKRAdapter(BrokerAdapter):
         if trade is None:
             logger.warning("get_order | IBKR | not found | id={}", broker_order_id)
             raise ValueError(f"Order not found: {broker_order_id}")
+        if not self._trade_ib_is_terminal(trade):
+            await self._refresh_ib_order_snapshot()
+            trade = self._find_trade_by_broker_id(broker_order_id) or trade
         return self._trade_to_order_result(trade)
 
     async def get_open_orders(self) -> list[OrderResult]:
