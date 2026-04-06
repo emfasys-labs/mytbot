@@ -20,6 +20,8 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
+from brokers.permissions import get_permissions
+
 logger = logging.getLogger(__name__)
 
 # Which assets each broker can trade
@@ -55,6 +57,7 @@ class SmartOrderRouter:
 
     def __init__(self, available_brokers: list[str]):
         self.available_brokers = available_brokers
+        self.permissions = get_permissions()
 
     def route(self, asset_class: str, symbol: str) -> Optional[str]:
         """
@@ -69,19 +72,53 @@ class SmartOrderRouter:
         ]
 
         if not eligible:
-            logger.warning(f"No broker available for asset_class={asset_class} symbol={symbol}")
+            logger.warning(
+                "No broker available by asset map | asset_class=%s symbol=%s",
+                asset_class,
+                symbol,
+            )
+            return None
+
+        permitted = [
+            b for b in eligible if self.permissions.check_permission(b, asset_class)
+        ]
+        if not permitted:
+            logger.warning(
+                "No broker permitted for asset_class=%s symbol=%s | eligible=%s",
+                asset_class,
+                symbol,
+                eligible,
+            )
             return None
 
         # Sort by fee (ascending) — cheapest first
-        eligible.sort(key=lambda b: BROKER_FEE_MAP.get(b, Decimal("0.01")))
+        permitted.sort(key=lambda b: BROKER_FEE_MAP.get(b, Decimal("0.01")))
 
         # IBKR is preferred for non-crypto (regulatory safety, multi-asset)
-        if asset_class != "crypto" and "ibkr" in eligible:
+        if asset_class != "crypto" and "ibkr" in permitted:
             return "ibkr"
 
-        chosen = eligible[0]
-        logger.debug(f"Routing {symbol} ({asset_class}) → {chosen}")
+        chosen = permitted[0]
+        logger.debug("Routing %s (%s) -> %s", symbol, asset_class, chosen)
         return chosen
+
+    def check_permission(self, broker: str, asset_class: str) -> bool:
+        return self.permissions.check_permission(broker, asset_class)
+
+    def get_fallback_broker(self, asset_class: str, exclude: list[str] | None = None) -> Optional[str]:
+        candidates = [
+            b
+            for b in self.available_brokers
+            if asset_class in BROKER_ASSET_MAP.get(b, set())
+        ]
+        return self.permissions.get_fallback_broker(
+            asset_class,
+            candidates=candidates,
+            exclude=exclude or [],
+        )
+
+    def reload_permissions(self) -> None:
+        self.permissions.reload(force=True)
 
     def add_broker(self, name: str) -> None:
         """Register a newly connected broker as available for routing."""
