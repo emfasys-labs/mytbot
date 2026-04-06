@@ -190,3 +190,21 @@ class MacroObservation(Base):
     obs_date = Column(String(10), nullable=False)
     value = Column(Numeric(24, 10), nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ParameterLog(Base):
+    """Audit trail for dynamic risk parameter changes."""
+
+    __tablename__ = "parameter_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now())
+    parameter = Column(String(64), nullable=False, index=True)
+    layer = Column(String(20), nullable=False)  # regime | ai | ai_rejected | expiry
+    old_value = Column(Numeric(20, 8), nullable=False)
+    new_value = Column(Numeric(20, 8), nullable=False)
+    reason = Column(Text, nullable=False)
+    source = Column(String(50), nullable=False, default="system")
+    confidence = Column(Numeric(5, 4), nullable=True)
+    expiry_time = Column(DateTime(timezone=True), nullable=True)
+    evidence = Column(JSON, nullable=True)

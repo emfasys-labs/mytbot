@@ -37,3 +37,50 @@ max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
 # It can only be reset manually. Never auto-reset.
 auto_kill_on_api_failure: true
 auto_kill_on_reconciliation_failure: true
+
+# ── Capital tiers (allocator) ────────────────────────────────────────────────
+capital_tiers:
+  micro:
+    min: 0
+    max: 1000
+    assets_allowed: ["crypto"]
+    max_positions: 2
+    max_position_pct: 0.20
+    strategies_enabled: ["momentum_breakout"]
+    notes: "Crypto only — no minimums, fractional amounts"
+
+  small:
+    min: 1000
+    max: 10000
+    assets_allowed: ["crypto", "etf", "equity"]
+    max_positions: 5
+    max_position_pct: 0.15
+    strategies_enabled: ["momentum_breakout", "mean_reversion"]
+    notes: "Add US equities via Alpaca zero commission"
+
+  medium:
+    min: 10000
+    max: 50000
+    assets_allowed: ["crypto", "equity", "etf", "bond", "forex"]
+    max_positions: 10
+    max_position_pct: 0.10
+    strategies_enabled: ["momentum_breakout", "mean_reversion", "funding_rate_arb"]
+    notes: "Full multi-asset"
+
+  full:
+    min: 50000
+    max: 999999999
+    assets_allowed: ["crypto", "equity", "etf", "bond", "forex", "future", "option"]
+    max_positions: 20
+    max_position_pct: 0.08
+    strategies_enabled: ["all"]
+    notes: "Complete system"
+
+minimum_order_sizes_gbp:
+  crypto: 10
+  equity: 50
+  etf: 50
+  bond: 1000
+  forex: 1000
+  future: 5000
+  option: 500

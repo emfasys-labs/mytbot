@@ -1,0 +1,46 @@
+# config/fundamentals.yaml
+# ========================
+# Proven defaults with hard safety bounds.
+
+risk_parameters:
+  half_kelly_fraction:
+    proven_default: 0.50
+    absolute_min: 0.20
+    absolute_max: 0.75
+    source: "Thorp (1962), Rising & Wyner (2012)"
+    notes: "Half-Kelly targets high growth with lower variance than full Kelly."
+
+  cash_buffer_pct:
+    proven_default: 0.10
+    absolute_min: 0.05
+    absolute_max: 0.30
+    source: "Liquidity management best practice"
+    notes: "Keeps deployable buffer and avoids forced liquidation pressure."
+
+  max_single_position_pct:
+    proven_default: 0.25
+    absolute_min: 0.05
+    absolute_max: 0.40
+    source: "Ruin theory constraints"
+    notes: "Caps concentration so one loss does not cause ruin."
+
+  target_annual_vol:
+    proven_default: 0.15
+    absolute_min: 0.05
+    absolute_max: 0.30
+    source: "Volatility targeting literature"
+    notes: "Target annualized volatility used by sizing scalars."
+
+  min_kelly_trades:
+    proven_default: 30
+    absolute_min: 20
+    absolute_max: 100
+    source: "Statistical stability heuristic"
+    notes: "Minimum sample size for stable Kelly estimates."
+
+ai_recommendation_policy:
+  min_confidence_to_apply: 0.80
+  max_deviation_from_default_pct: 0.40
+  max_duration_hours: 168
+  require_evidence: true
+  log_all_recommendations: true
