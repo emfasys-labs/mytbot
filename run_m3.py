@@ -60,6 +60,16 @@ def _pick_best_signal(signals: list[RawSignal]) -> RawSignal | None:
     return max(signals, key=lambda s: s.confidence)
 
 
+def _filter_by_regime(raw_candidates: list[RawSignal], allowed_strategy_names: set[str] | None) -> list[RawSignal]:
+    if not allowed_strategy_names:
+        return raw_candidates
+    kept: list[RawSignal] = []
+    for raw in raw_candidates:
+        if raw.strategy in allowed_strategy_names:
+            kept.append(raw)
+    return kept
+
+
 async def _load_recent_features(
     session_factory,
     *,
@@ -431,6 +441,17 @@ async def _run_once(args: argparse.Namespace) -> int:
             r_sig = mean_rev.generate_signal(symbol, df)
             if r_sig is not None:
                 raw_candidates.append(r_sig)
+            if ai_result is not None and ai_pipeline is not None:
+                allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
+                filtered = _filter_by_regime(raw_candidates, allowed)
+                if not filtered and raw_candidates:
+                    logger.info(
+                        "run_m3 | regime_gate_block | {} regime={} candidates={}",
+                        symbol,
+                        ai_result.macro_regime,
+                        [r.strategy for r in raw_candidates],
+                    )
+                raw_candidates = filtered
 
             raw = _pick_best_signal(raw_candidates)
             if raw is None:
@@ -451,6 +472,7 @@ async def _run_once(args: argparse.Namespace) -> int:
                 signal.metadata["ai_macro_regime"] = ai_result.macro_regime
                 signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
                 signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
+                signal.metadata["ai_anomalies"] = [a for a in ai_result.anomalies if a.get("symbol") == symbol]
 
             # M4: evaluate against live-ish portfolio state loaded from DB snapshots.
             portfolio_state = await _load_portfolio_state(

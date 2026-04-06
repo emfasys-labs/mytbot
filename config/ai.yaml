@@ -6,6 +6,25 @@ pipeline:
   macro_series:
     - FEDFUNDS
     - CPIAUCSL
+  regime_strategy_gates:
+    risk_off_stagflation:
+      - mean_reversion
+    tightening:
+      - mean_reversion
+    easing:
+      - momentum_breakout
+      - mean_reversion
+    risk_on_disinflation:
+      - momentum_breakout
+      - mean_reversion
+    neutral:
+      - momentum_breakout
+      - mean_reversion
+  anomaly_detection:
+    min_sample_count: 3
+    disagreement_ratio_threshold: 0.6
+    high_impact_score_abs: 0.75
+    low_confidence_threshold: 0.45
 
 sources:
   news:

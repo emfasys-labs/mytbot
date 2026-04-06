@@ -38,6 +38,19 @@ class _FakeClassifier:
         ]
 
 
+class _ConflictClassifier:
+    async def score_batch(self, items):  # noqa: ANN001
+        _ = items
+        now = datetime.now(timezone.utc).isoformat()
+        return [
+            NewsScore("a", 0.9, 0.3, ["SPY"], "macro", "bullish", "x", now, 24),
+            NewsScore("b", 0.8, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
+            NewsScore("c", 0.7, 0.2, ["SPY"], "macro", "bullish", "x", now, 24),
+            NewsScore("d", 0.6, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
+            NewsScore("e", 1.0, 0.3, ["QQQ"], "macro", "bullish", "x", now, 24),
+        ]
+
+
 @pytest.mark.asyncio
 async def test_score_news_aggregates_per_symbol():
     p = AIPipeline({}, classifier=_FakeClassifier())
@@ -49,10 +62,49 @@ async def test_score_news_aggregates_per_symbol():
             description="d",
         )
     ]
-    scores, details = await p._score_news(symbols=["SPY", "BTC-USD"], rows=rows)
+    scores, details, _anomalies = await p._score_news(symbols=["SPY", "BTC-USD"], rows=rows)
     assert scores["SPY"] > 0
     assert scores["BTC-USD"] < 0
     assert details["SPY"]["event_type"] == "macro"
+
+
+@pytest.mark.asyncio
+async def test_score_news_detects_anomalies():
+    p = AIPipeline(
+        {
+            "anomaly_detection": {
+                "min_sample_count": 3,
+                "disagreement_ratio_threshold": 0.4,
+                "high_impact_score_abs": 0.2,
+                "low_confidence_threshold": 0.5,
+            }
+        },
+        classifier=_ConflictClassifier(),
+    )
+    rows = [
+        SimpleNamespace(
+            title="a",
+            source_name="src",
+            published_at=datetime.now(timezone.utc),
+            description="d",
+        )
+    ]
+    _scores, _details, anomalies = await p._score_news(symbols=["SPY", "QQQ"], rows=rows)
+    assert any(a.get("kind") == "conflicting_narrative" for a in anomalies)
+    assert any(a.get("kind") == "high_impact_low_confidence" for a in anomalies)
+
+
+def test_allowed_strategy_names_from_regime_config():
+    p = AIPipeline(
+        {
+            "regime_strategy_gates": {
+                "tightening": ["mean_reversion"],
+            }
+        },
+        classifier=_FakeClassifier(),
+    )
+    assert p.allowed_strategy_names("tightening") == {"mean_reversion"}
+    assert p.allowed_strategy_names("neutral") is None
 
 
 def test_trend_label():

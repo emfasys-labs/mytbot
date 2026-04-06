@@ -44,6 +44,12 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def _filter_by_regime(raw_candidates, allowed_strategy_names: set[str] | None):  # noqa: ANN001
+    if not allowed_strategy_names:
+        return raw_candidates
+    return [r for r in raw_candidates if r.strategy in allowed_strategy_names]
+
+
 def _build_broker_configs() -> dict[str, dict[str, Any]]:
     return {
         "ibkr": {
@@ -229,6 +235,17 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     r_sig = mean_rev.generate_signal(symbol, df)
                     if r_sig is not None:
                         raw_candidates.append(r_sig)
+                    if ai_result is not None and ai_pipeline is not None:
+                        allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
+                        filtered = _filter_by_regime(raw_candidates, allowed)
+                        if not filtered and raw_candidates:
+                            logger.info(
+                                "run_m5 | regime_gate_block | {} regime={} candidates={}",
+                                symbol,
+                                ai_result.macro_regime,
+                                [r.strategy for r in raw_candidates],
+                            )
+                        raw_candidates = filtered
 
                     raw = _pick_best_signal(raw_candidates)
                     if raw is None:
@@ -247,6 +264,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                         signal.metadata["ai_macro_regime"] = ai_result.macro_regime
                         signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
                         signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
+                        signal.metadata["ai_anomalies"] = [a for a in ai_result.anomalies if a.get("symbol") == symbol]
 
                     routed = router.route(signal.asset_class, signal.symbol)
                     if routed is None:

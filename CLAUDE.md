@@ -49,10 +49,10 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M6 — AI Intelligence Layer ⏳ In progress (Claude-first core implemented)
-- Last completed task: Implemented production `ai/news_classifier.py` (Claude API calls, retries, parsing/validation/fallbacks) and `ai/pipeline.py` (per-symbol news score + macro regime from persisted FRED data)
-- Last completed task: Wired AI flow into `run_m3.py` and `run_m5.py` with signal metadata enrichment + `ai_outputs` audit persistence (`storage.models.AIOutputLog`, Alembic migration `f27c0a1b9e10_add_ai_outputs_table.py`)
-- Next task: Complete remaining M6 items (regime-gated strategy selection and anomaly detection), then move to M7 dashboard control-plane depth
+- Milestone: M6 — AI Intelligence Layer ✅ Complete
+- Last completed task: Added regime-gated strategy selection (config-driven via `config/ai.yaml`) in `run_m3.py` and `run_m5.py`
+- Last completed task: Added narrative anomaly detection in `ai/pipeline.py` and anomaly persistence to `ai_outputs`
+- Next task: M7 — Dashboard + control-plane visibility (risk/runtime/AI state endpoints and UI wiring)
 - Blockers: IBKR stream/order need local IB Gateway/TWS; Kraken/Binance live connectivity needs API keys; 2+ week paper soak is an operational runtime validation step
 - Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
 

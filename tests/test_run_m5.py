@@ -8,6 +8,7 @@ from run_m5 import (
     _build_broker_configs,
     _build_parser,
     _estimate_realized_pnl_from_fill,
+    _filter_by_regime,
 )
 
 
@@ -29,6 +30,14 @@ def test_parser_supports_ai_config_flag():
     p = _build_parser()
     args = p.parse_args(["--ai-config", "config/ai.yaml"])
     assert args.ai_config == "config/ai.yaml"
+
+
+def test_filter_by_regime():
+    a = SimpleNamespace(strategy="momentum_breakout")
+    b = SimpleNamespace(strategy="mean_reversion")
+    out = _filter_by_regime([a, b], {"mean_reversion"})
+    assert len(out) == 1
+    assert out[0].strategy == "mean_reversion"
 
 
 def test_apply_filled_result_uses_actual_fill_quantity_and_price():

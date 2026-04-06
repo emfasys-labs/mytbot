@@ -19,6 +19,7 @@ class AIPipelineResult:
     macro_confidence: float
     macro_payload: dict[str, Any]
     news_details: dict[str, dict[str, Any]]
+    anomalies: list[dict[str, Any]]
 
 
 class AIPipeline:
@@ -28,18 +29,21 @@ class AIPipeline:
         self.classifier = classifier or NewsClassifier()
         self.news_lookback_hours = int(cfg.get("news_lookback_hours", 24))
         self.news_limit = int(cfg.get("news_limit", 200))
+        self.regime_strategy_gates = cfg.get("regime_strategy_gates", {})
+        self.anomaly_cfg = cfg.get("anomaly_detection", {})
 
     async def compute(self, session_factory, symbols: list[str]) -> AIPipelineResult:
         norm_symbols = [s.strip().upper() for s in symbols if s and s.strip()]
         news = await self._load_recent_news(session_factory)
         macro_regime, macro_conf, macro_payload = await self._compute_macro_regime(session_factory)
-        news_scores, details = await self._score_news(symbols=norm_symbols, rows=news)
+        news_scores, details, anomalies = await self._score_news(symbols=norm_symbols, rows=news)
         return AIPipelineResult(
             news_scores=news_scores,
             macro_regime=macro_regime,
             macro_confidence=macro_conf,
             macro_payload=macro_payload,
             news_details=details,
+            anomalies=anomalies,
         )
 
     async def persist(self, session_factory, result: AIPipelineResult) -> None:
@@ -75,7 +79,30 @@ class AIPipeline:
                     source="system",
                 )
             )
+            for a in result.anomalies:
+                session.add(
+                    AIOutputLog(
+                        timestamp=now,
+                        symbol=a.get("symbol"),
+                        context_type="anomaly",
+                        score=Decimal(str(a.get("score", 0.0))),
+                        confidence=Decimal(str(a.get("confidence", 0.0))),
+                        event_type="anomaly",
+                        rationale=str(a.get("reason", "Narrative anomaly detected"))[:4000],
+                        payload=a,
+                        source="system",
+                    )
+                )
             await session.commit()
+
+    def allowed_strategy_names(self, macro_regime: str) -> set[str] | None:
+        rules = self.regime_strategy_gates
+        if not isinstance(rules, dict):
+            return None
+        allowed = rules.get(macro_regime)
+        if not isinstance(allowed, list):
+            return None
+        return {str(x).strip() for x in allowed if str(x).strip()}
 
     async def _load_recent_news(self, session_factory) -> list[NewsHeadline]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.news_lookback_hours)
@@ -88,9 +115,14 @@ class AIPipeline:
             )
             return list(q.scalars().all())
 
-    async def _score_news(self, *, symbols: list[str], rows: list[NewsHeadline]) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+    async def _score_news(
+        self,
+        *,
+        symbols: list[str],
+        rows: list[NewsHeadline],
+    ) -> tuple[dict[str, float], dict[str, dict[str, Any]], list[dict[str, Any]]]:
         if not rows:
-            return ({s: 0.0 for s in symbols}, {})
+            return ({s: 0.0 for s in symbols}, {}, [])
 
         items: list[NewsItem] = []
         for row in rows:
@@ -105,10 +137,15 @@ class AIPipeline:
         scored = await self.classifier.score_batch(items)
         usable: list[NewsScore] = [s for s in scored if s is not None]
         if not usable:
-            return ({s: 0.0 for s in symbols}, {})
+            return ({s: 0.0 for s in symbols}, {}, [])
 
         details: dict[str, dict[str, Any]] = {}
         scores: dict[str, float] = {}
+        anomalies: list[dict[str, Any]] = []
+        min_sample = int(self.anomaly_cfg.get("min_sample_count", 3))
+        disagreement_threshold = float(self.anomaly_cfg.get("disagreement_ratio_threshold", 0.6))
+        high_impact = float(self.anomaly_cfg.get("high_impact_score_abs", 0.75))
+        low_conf = float(self.anomaly_cfg.get("low_confidence_threshold", 0.45))
         for symbol in symbols:
             sym_scores = [s for s in usable if symbol in s.affected_symbols]
             if not sym_scores:
@@ -122,6 +159,10 @@ class AIPipeline:
             v = max(-1.0, min(1.0, v))
             top = max(sym_scores, key=lambda x: x.confidence)
             scores[symbol] = v
+            directional = [s.directional_bias for s in sym_scores]
+            bull_n = sum(1 for b in directional if b == "bullish")
+            bear_n = sum(1 for b in directional if b == "bearish")
+            disagree_ratio = min(bull_n, bear_n) / max(1, bull_n + bear_n)
             details[symbol] = {
                 "confidence": top.confidence,
                 "event_type": top.event_type,
@@ -129,8 +170,32 @@ class AIPipeline:
                 "rationale": top.rationale,
                 "headline": top.headline,
                 "sample_count": len(sym_scores),
+                "disagreement_ratio": disagree_ratio,
             }
-        return scores, details
+            if len(sym_scores) >= min_sample and disagree_ratio >= disagreement_threshold:
+                anomalies.append(
+                    {
+                        "symbol": symbol,
+                        "kind": "conflicting_narrative",
+                        "reason": "Conflicting bullish/bearish narrative detected",
+                        "sample_count": len(sym_scores),
+                        "disagreement_ratio": disagree_ratio,
+                        "score": v,
+                        "confidence": top.confidence,
+                    }
+                )
+            if abs(v) >= high_impact and top.confidence <= low_conf:
+                anomalies.append(
+                    {
+                        "symbol": symbol,
+                        "kind": "high_impact_low_confidence",
+                        "reason": "Large predicted impact with low confidence",
+                        "sample_count": len(sym_scores),
+                        "score": v,
+                        "confidence": top.confidence,
+                    }
+                )
+        return scores, details, anomalies
 
     async def _compute_macro_regime(self, session_factory) -> tuple[str, float, dict[str, Any]]:
         series = self.config.get("macro_series", ["FEDFUNDS", "CPIAUCSL"])
