@@ -44,6 +44,7 @@ util.patchAsyncio()
 from brokers.base import Order, OrderSide, OrderType, Tick
 from brokers.ibkr.adapter import IBKRAdapter, _KNOWN_PAXOS_CRYPTO
 from brokers.kraken.adapter import KrakenAdapter
+from control.startup_validation import validate_startup_env
 from storage.db import dispose_engine, init_async_database, persist_order_log, persist_price_tick
 
 
@@ -78,6 +79,13 @@ def _configure_logging() -> None:
 async def run_m1() -> None:
     load_dotenv()
     _configure_logging()
+    validate_startup_env(
+        component="main.py (M1)",
+        require_postgres=True,
+        require_ibkr=_env_bool("M1_ENABLE_IBKR", True),
+        require_kraken=_env_bool("M1_ENABLE_KRAKEN", True),
+        strict=True,
+    )
 
     app_env = os.getenv("APP_ENV", "paper")
     paper_mode = app_env.strip().lower() != "live"

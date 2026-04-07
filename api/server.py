@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse
 from api.dashboard_layer import gather_ws_events, log_cors_live_warning, merge_risk_parameters_for_api, verify_dashboard_token
 from control.command_bus import CommandBus
 from control.runtime import get_execution_engine, get_risk_engine
+from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
 from storage.db import dispose_engine, init_async_database
 from storage.models import AnomalyLog, DailyPnL, OrderLog, PositionLog, SignalLog, ThesisLog
@@ -78,6 +79,7 @@ app.add_middleware(_DashboardReadMiddleware)
 @app.on_event("startup")
 async def _startup() -> None:
     log_cors_live_warning()
+    validate_startup_env(component="api.server", require_postgres=True, strict=True)
     engine, session_factory = await init_async_database()
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory

@@ -61,6 +61,10 @@ docker compose up -d
 
 **Tests:** `pytest` (smoke tests under `tests/`). Requires `pip install -r requirements.txt`.
 
+**Dev bootstrap:** `python scripts/setup_dev.py` (installs `requirements-dev.txt`, including test tooling).
+
+**Release gate:** `python scripts/release_gate.py` (docs consistency + compile + tests).
+
 ## Build Plan
 
 | Milestone | Focus | Status |
@@ -70,9 +74,9 @@ docker compose up -d
 | M3 | First strategy, signal engine | ✅ |
 | M4 | Risk engine | ✅ |
 | M5 | Execution engine, full paper loop | ✅ |
-| M6 | AI intelligence layer | ⏳ |
-| M7 | Dashboard & control | ⏳ |
-| M8 | Micro-live trading | ⏳ |
+| M6 | AI intelligence layer | ✅ |
+| M7 | Dashboard & control | ✅ |
+| M8 | Micro-live trading | ✅ |
 
 ## Architecture Principles
 

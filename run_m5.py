@@ -25,6 +25,7 @@ from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
 from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
+from control.startup_validation import validate_startup_env
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
 from risk.engine import RiskEngine, RiskVerdict
@@ -535,6 +536,15 @@ def main() -> None:
     load_dotenv()
     p = _build_parser()
     args = p.parse_args()
+    available_brokers = {x.strip().lower() for x in str(args.available_brokers).split(",") if x.strip()}
+    validate_startup_env(
+        component="run_m5.py",
+        require_postgres=True,
+        require_ibkr="ibkr" in available_brokers,
+        require_kraken="kraken" in available_brokers,
+        require_binance="binance" in available_brokers,
+        strict=True,
+    )
     raise SystemExit(asyncio.run(_run_loop(args)))
 
 

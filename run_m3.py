@@ -24,6 +24,7 @@ from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
 from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
+from control.startup_validation import validate_startup_env
 from risk.engine import RiskEngine, RiskVerdict
 from risk.m8_loader import merge_m8_into_risk_cfg
 from signals.engine import RawSignal, SignalEngine
@@ -569,6 +570,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
 
 def main() -> None:
     load_dotenv()
+    validate_startup_env(component="run_m3.py", require_postgres=True, strict=True)
     p = argparse.ArgumentParser(description="M3 signal generation runner")
     p.add_argument("--strategies-config", default="config/strategies.yaml")
     p.add_argument("--pipeline-config", default="config/data_pipeline.yaml")

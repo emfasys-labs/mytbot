@@ -1,0 +1,12 @@
+# requirements-dev.txt
+# ====================
+# Development + CI parity bootstrap.
+# Install with:
+#   python scripts/setup_dev.py
+# or
+#   pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Test/tooling extras
+pytest-cov>=5.0,<6

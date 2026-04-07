@@ -18,6 +18,7 @@ import sys
 from dotenv import load_dotenv
 from loguru import logger
 
+from control.startup_validation import validate_startup_env
 from data.pipeline import load_pipeline_config, run_loop, run_once
 from storage.db import dispose_engine, init_async_database
 
@@ -51,6 +52,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 def main() -> None:
     load_dotenv()
+    validate_startup_env(component="run_pipeline.py", require_postgres=True, strict=True)
     p = argparse.ArgumentParser(description="M2 data pipeline")
     p.add_argument("--config", default=None, help="Path to data_pipeline.yaml")
     p.add_argument(
