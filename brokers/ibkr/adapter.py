@@ -241,6 +241,9 @@ class IBKRAdapter(BrokerAdapter):
         remaining = trade.orderStatus.remaining or 0.0
         if qty > 0 and filled_e >= qty:
             return OrderStatus.FILLED
+        # PAXOS crypto: IB uses totalQuantity=0 + cashQty; fills still land on orderStatus / executions
+        if qty == 0 and filled_e > 0 and remaining <= 0:
+            return OrderStatus.FILLED
         if filled_e > 0 and remaining > 0:
             return OrderStatus.PARTIALLY_FILLED
         if s in ("PendingSubmit", "ApiPending", "PreSubmitted"):
@@ -285,6 +288,10 @@ class IBKRAdapter(BrokerAdapter):
             return None
         for t in self._ib.trades():
             if self._trade_broker_id(t) == broker_order_id:
+                return t
+        # Caller may hold broker_order_id from before permId arrived (was orderId string).
+        for t in self._ib.trades():
+            if str(t.order.orderId) == broker_order_id:
                 return t
         return None
 
@@ -480,6 +487,84 @@ class IBKRAdapter(BrokerAdapter):
             ask=ask_d,
         )
 
+    def _post_connect_summary_probe_enabled(self) -> bool:
+        v = (os.getenv("IBKR_POST_CONNECT_SUMMARY_PROBE", "1") or "1").strip().lower()
+        return v not in ("0", "false", "no", "off")
+
+    def _account_summary_tags(self) -> str:
+        """
+        Tags for ``reqAccountSummary``.
+
+        ib_insync defaults include ``$LEDGER:ALL`` which can be slow or stall on
+        some Gateway sessions; we keep a minimal default and allow opt-in.
+        """
+        v = (os.getenv("IBKR_ACCOUNT_SUMMARY_TAGS", "") or "").strip()
+        if v:
+            return v
+        tags = "NetLiquidation,TotalCashValue,SettledCash,AvailableFunds"
+        include_ledger = (os.getenv("IBKR_ACCOUNT_SUMMARY_INCLUDE_LEDGER", "") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if include_ledger:
+            tags += ",$LEDGER:ALL"
+        return tags
+
+    async def _fetch_account_summary_rows(self, timeout: float) -> list[Any]:
+        """
+        Force a fresh account summary. ib_insync's ``accountSummaryAsync`` skips
+        ``reqAccountSummaryAsync`` when ``acctSummary`` is non-empty, which can return
+        stale or wrong-account rows; it can also mask a never-completed first request.
+        """
+        if self._ib is None or not self._ib.isConnected():
+            return []
+        try:
+            to = float(timeout)
+        except Exception:  # noqa: BLE001
+            to = 12.0
+        to = max(3.0, to)
+
+        tags = self._account_summary_tags()
+        self._ib.wrapper.acctSummary.clear()
+        req_id = self._ib.client.getReqId()
+        fut = self._ib.wrapper.startReq(req_id)
+        self._ib.client.reqAccountSummary(req_id, "All", tags)
+
+        # Wait for either completion or first rows; many Gateway builds only
+        # emit accountSummaryEnd after cancel.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + to
+        while loop.time() < deadline and not fut.done():
+            if self._ib.wrapper.acctSummary:
+                break
+            await asyncio.sleep(0.05)
+
+        try:
+            self._ib.client.cancelAccountSummary(req_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("cancelAccountSummary | {!r}", exc)
+
+        # Give the end callback a chance to run; do not fail on timeout.
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout=3.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+        return list(self._ib.wrapper.acctSummary.values())
+
+    async def _account_summary_probe_ok(self, timeout: float) -> bool:
+        """True if a fresh reqAccountSummary completes with at least one row."""
+        if self._ib is None or not self._ib.isConnected():
+            return False
+        try:
+            rows = await self._fetch_account_summary_rows(timeout=max(3.0, timeout))
+            return len(rows) > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("account summary probe | {!r}", exc)
+            return False
+
     async def connect(self) -> bool:
         """Establish connection to IB Gateway / TWS. Return True if successful."""
         try:
@@ -495,18 +580,14 @@ class IBKRAdapter(BrokerAdapter):
                 IB.MaxSyncedSubAccounts = int(os.getenv("IBKR_MAX_SYNCED_SUB_ACCOUNTS", "0"))
             except ValueError:
                 IB.MaxSyncedSubAccounts = 0
-            # ib_insync uses ONE timeout for: TCP/API handshake, each parallel sync task
-            # (positions, account updates, orders), and reqExecutionsAsync.
-            #
-            # Repo default was always timeout=15 (snappy). Raising it to "fix" timeout *logs*
-            # does not speed up IB — it raises the ceiling so slow sync can *finish*, which
-            # increases wall-clock time when Gateway is slow (e.g. 2151 positions delay).
-            # Default 15 keeps prior behavior; set IBKR_CONNECT_TIMEOUT=120+ if you prefer
-            # to wait for full sync instead of ib_insync failing those tasks fast.
+            # Same timeout applies to TCP handshake, each parallel sync task (positions, open
+            # orders, account updates), and reqExecutionsAsync. Too low → "positions/account
+            # updates timed out" while the socket still connects (degraded session). Default
+            # 45s; override with IBKR_CONNECT_TIMEOUT.
             try:
-                connect_timeout = float(os.getenv("IBKR_CONNECT_TIMEOUT", "15"))
+                connect_timeout = float(os.getenv("IBKR_CONNECT_TIMEOUT", "45"))
             except ValueError:
-                connect_timeout = 15.0
+                connect_timeout = 45.0
             connect_readonly = os.getenv("IBKR_CONNECT_READONLY", "").strip().lower() in (
                 "1",
                 "true",
@@ -526,6 +607,57 @@ class IBKRAdapter(BrokerAdapter):
             if acct:
                 connect_kw["account"] = acct
             await self._ib.connectAsync(**connect_kw)
+            if not self._ib.managedAccounts():
+                logger.warning(
+                    "connect | IBKR | no managed accounts after sync — reconnecting once "
+                    "(degraded ib_insync sync is common right after Gateway starts)"
+                )
+                self._ib.disconnect()
+                await asyncio.sleep(3.0)
+                await self._ib.connectAsync(**connect_kw)
+            if not self._ib.managedAccounts():
+                logger.error(
+                    "connect | IBKR | still no managed accounts after reconnect | "
+                    "raise IBKR_CONNECT_TIMEOUT (e.g. 90–120) or wait for Gateway API"
+                )
+                self._ib.disconnect()
+                self._ib = None
+                return False
+
+            if self._post_connect_summary_probe_enabled():
+                try:
+                    probe_to = float(os.getenv("IBKR_POST_CONNECT_SUMMARY_PROBE_TIMEOUT", "12"))
+                except ValueError:
+                    probe_to = 12.0
+                probe_to = max(3.0, probe_to)
+                if not await self._account_summary_probe_ok(probe_to):
+                    logger.warning(
+                        "connect | IBKR | account summary probe failed or empty — "
+                        "reconnecting once with longer timeout (IBKR_CONNECT_BOOST_TIMEOUT)"
+                    )
+                    try:
+                        boost = float(os.getenv("IBKR_CONNECT_BOOST_TIMEOUT", "90"))
+                    except ValueError:
+                        boost = 90.0
+                    boost = max(connect_timeout, boost)
+                    connect_kw_boost = {**connect_kw, "timeout": boost}
+                    self._ib.disconnect()
+                    await asyncio.sleep(2.0)
+                    await self._ib.connectAsync(**connect_kw_boost)
+                    if not self._ib.managedAccounts():
+                        logger.error(
+                            "connect | IBKR | no managed accounts after boosted reconnect"
+                        )
+                        self._ib.disconnect()
+                        self._ib = None
+                        return False
+                    if not await self._account_summary_probe_ok(probe_to):
+                        logger.warning(
+                            "connect | IBKR | account summary still failing after boosted "
+                            "reconnect | get_balance may timeout — set IBKR_CONNECT_TIMEOUT "
+                            "or IBKR_CONNECT_BOOST_TIMEOUT higher"
+                        )
+
             if self.paper_mode:
                 logger.info(
                     "connect | IBKR | session=paper | host={} | port={}",
@@ -586,13 +718,21 @@ class IBKRAdapter(BrokerAdapter):
                 summary_timeout = float(os.getenv("IBKR_ACCOUNT_SUMMARY_TIMEOUT", "30"))
             except ValueError:
                 summary_timeout = 30.0
-            # accountSummaryAsync may await reqAccountSummaryAsync; Gateway can stall after
-            # partial connect (e.g. positions sync timed out) — never block forever.
+            # Always issue a fresh summary (see _fetch_account_summary_rows); never block forever.
             try:
-                rows = await asyncio.wait_for(
-                    self._ib.accountSummaryAsync(account=acct),
+                rows = await self._fetch_account_summary_rows(
                     timeout=max(5.0, summary_timeout),
                 )
+                if acct:
+                    filtered = [r for r in rows if r.account == acct]
+                    if not filtered and rows:
+                        logger.warning(
+                            "get_balance | IBKR | no summary rows for account={!r} "
+                            "(got {} other rows) — check IBKR_ACCOUNT_ID",
+                            acct,
+                            len(rows),
+                        )
+                    rows = filtered
             except asyncio.TimeoutError:
                 logger.warning(
                     "get_balance | IBKR | account summary timed out after {}s | "
@@ -917,7 +1057,13 @@ class IBKRAdapter(BrokerAdapter):
         if s in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
             return True
         qty = _d(trade.order.totalQuantity)
-        return qty > 0 and self._effective_filled_qty(trade) >= qty
+        filled_e = self._effective_filled_qty(trade)
+        remaining = trade.orderStatus.remaining or 0.0
+        if qty > 0 and filled_e >= qty:
+            return True
+        if qty == 0 and filled_e > 0 and remaining <= 0:
+            return True
+        return False
 
     async def _refresh_ib_order_snapshot(self, *, force: bool = False) -> None:
         """Replay open orders + executions so Trade matches Gateway (helps after connect sync timeouts)."""

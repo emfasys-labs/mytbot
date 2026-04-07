@@ -4,12 +4,15 @@ Telegram + broker smoke: balances → open → notify → hold → close → not
 
 Loads `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, broker credentials).
 
-Default: IBKR paper, tiny BTC market (IOC). Use --live only if you intend real orders.
+Default: IBKR paper. For a full open→hold→close check on IBKR paper, prefer FX
+(``EURUSD``) because many US ETFs (e.g. ``SPY``) are blocked for UK/EU retail (KID/PRIIPs),
+and PAXOS crypto often does **not** fill on IB paper.
 
 Symbol hints: IBKR crypto often ``BTC``; Kraken ``BTC/USD``; Binance/Bybit spot or linear ``BTCUSDT``.
 
 Examples:
   python test_telegram_trade_cycle.py --paper
+  python test_telegram_trade_cycle.py --paper --symbol EURUSD --qty 1000 --hold-sec 2
   python test_telegram_trade_cycle.py --broker kraken --symbol BTC/USD --qty 0.0001 --paper
 """
 
@@ -44,6 +47,30 @@ def _is_likely_crypto_symbol(sym: str) -> bool:
 
 def _default_tif(symbol: str) -> str:
     return "IOC" if _is_likely_crypto_symbol(symbol) else "DAY"
+
+
+# IBKR PAXOS spot bases (align with brokers.ibkr.adapter._KNOWN_PAXOS_CRYPTO)
+_IBKR_PAXOS_BASES = frozenset(
+    {
+        "BTC",
+        "ETH",
+        "LTC",
+        "BCH",
+        "PAXG",
+        "SOL",
+        "ADA",
+        "DOGE",
+        "LINK",
+        "MATIC",
+        "DOT",
+    }
+)
+
+
+def _ibkr_likely_paxos_spot(symbol: str) -> bool:
+    u = symbol.strip().upper().replace("/", " ")
+    base = u.split()[0]
+    return base in _IBKR_PAXOS_BASES
 
 
 async def send_telegram(text: str) -> None:
@@ -164,8 +191,8 @@ async def _wait_open_fill(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Telegram notifications around a tiny open/hold/close cycle")
     p.add_argument("--broker", default="ibkr", help="ibkr | kraken | binance | bybit")
-    p.add_argument("--symbol", default=os.getenv("TEST_TG_SYMBOL", "BTC"))
-    p.add_argument("--qty", default=os.getenv("TEST_TG_QTY", "0.001"))
+    p.add_argument("--symbol", default=None, help="Symbol (defaults depend on broker; env TEST_TG_SYMBOL overrides)")
+    p.add_argument("--qty", default=None, help="Quantity (env TEST_TG_QTY overrides; else computed from symbol)")
     p.add_argument("--hold-sec", type=int, default=60, help="Seconds to wait between open and close")
     p.add_argument(
         "--fill-wait-sec",
@@ -177,6 +204,17 @@ def parse_args() -> argparse.Namespace:
         "--tif",
         default=None,
         help="Time in force (default IOC for crypto-like symbols, else DAY for IBKR)",
+    )
+    p.add_argument(
+        "--ibkr-client-id",
+        type=int,
+        default=None,
+        help="Override IBKR client id (useful if 'client id already in use')",
+    )
+    p.add_argument(
+        "--ibkr-account-id",
+        default=None,
+        help="Override IBKR account id (e.g. DUP694288). If unset, adapter auto-resolves.",
     )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--paper", action="store_true", help="Paper / sandbox (default if APP_ENV=paper)")
@@ -195,14 +233,47 @@ async def main() -> None:
     else:
         paper_mode = app_env != "live"
 
-    symbol = str(args.symbol).strip()
-    qty = Decimal(str(args.qty))
+    broker_name = args.broker.strip().lower()
+
+    env_symbol = (os.getenv("TEST_TG_SYMBOL", "") or "").strip()
+    if args.symbol:
+        symbol = str(args.symbol).strip()
+    elif env_symbol:
+        symbol = env_symbol
+    else:
+        if broker_name == "ibkr":
+            symbol = "EURUSD"
+        elif broker_name == "kraken":
+            symbol = "BTC/USD"
+        elif broker_name in ("binance", "bybit"):
+            symbol = "BTCUSDT"
+        else:
+            symbol = "BTC"
+
+    env_qty = (os.getenv("TEST_TG_QTY", "") or "").strip()
+    if args.qty is not None:
+        qty = Decimal(str(args.qty))
+    elif env_qty:
+        qty = Decimal(env_qty)
+    else:
+        u = symbol.strip().upper().replace("/", "")
+        if _is_likely_crypto_symbol(symbol) or u.endswith("USDT") or u.endswith("USDC"):
+            qty = Decimal("0.001")
+        elif len(u) == 6 and u.isalpha():
+            qty = Decimal("1000")
+        else:
+            qty = Decimal("1")
+
     tif = (args.tif or _default_tif(symbol)).strip()
 
     if qty <= 0:
         raise SystemExit("--qty must be positive")
 
-    broker_name = args.broker.strip().lower()
+    if broker_name == "ibkr":
+        if args.ibkr_client_id is not None:
+            os.environ["IBKR_CLIENT_ID"] = str(int(args.ibkr_client_id))
+        if args.ibkr_account_id is not None:
+            os.environ["IBKR_ACCOUNT_ID"] = str(args.ibkr_account_id).strip()
     adapter = _make_broker(broker_name, paper_mode)
 
     await send_telegram(
@@ -216,10 +287,8 @@ async def main() -> None:
         await send_telegram(f"ERROR: connect failed for {broker_name}")
         raise SystemExit(1)
 
-    logger.info(
-        "{} connected | fetching balances (IBKR_ACCOUNT_SUMMARY_TIMEOUT, default 30s)…",
-        broker_name.upper(),
-    )
+    await send_telegram("Connected. Fetching balances…")
+    logger.info("{} connected | fetching balances…", broker_name.upper())
 
     try:
         bal0 = await adapter.get_balance()
@@ -265,11 +334,35 @@ async def main() -> None:
 
         fill = open_res.filled_quantity
         if fill is None or fill <= 0:
-            await send_telegram(
-                "No fill on open — skipping close. "
-                "(IBKR: raise IBKR_CONNECT_TIMEOUT / IBKR_ORDER_REFRESH_TIMEOUT, check crypto paper fills, "
-                "or increase --fill-wait-sec; Binance/Bybit paper_mode does not submit live orders.)"
-            )
+            diag = ""
+            if broker_name == "ibkr" and hasattr(adapter, "order_cancel_diagnostics"):
+                raw = adapter.order_cancel_diagnostics(open_res.broker_order_id)
+                if raw:
+                    diag = raw[:3500]
+
+            if (
+                broker_name == "ibkr"
+                and paper_mode
+                and _ibkr_likely_paxos_spot(symbol)
+                and open_res.status == OrderStatus.REJECTED
+            ):
+                msg = (
+                    "OPEN leg → REJECTED/Inactive (typical on IBKR *paper* for PAXOS crypto: "
+                    "paper simulator does not fill Paxos-routed crypto).\n"
+                    "Telegram + adapter wiring is OK — for a full fill cycle on paper use equity, e.g.\n"
+                    "  python test_telegram_trade_cycle.py --paper --symbol SPY --qty 1"
+                )
+                if diag:
+                    msg += f"\n\nIBKR diagnostics:\n{diag}"
+                await send_telegram(msg)
+            else:
+                await send_telegram(
+                    "No fill on open — skipping close. "
+                    "(IBKR: raise IBKR_CONNECT_TIMEOUT, IBKR_ORDER_REFRESH_TIMEOUT; "
+                    "paper PAXOS crypto often rejects; try --symbol SPY --qty 1; "
+                    "Binance/Bybit paper_mode does not submit live orders.)"
+                    + (f"\n\nIBKR diagnostics:\n{diag}" if diag else "")
+                )
             bal1 = await adapter.get_balance()
             await send_telegram(f"Balances (after open attempt):\n{_fmt_balances(bal1)}")
             return

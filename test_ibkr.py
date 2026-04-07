@@ -226,7 +226,7 @@ async def main(args: argparse.Namespace) -> None:
     engine, session_factory = await init_async_database()
 
     try:
-        sync_timeout_s = float(os.getenv("IBKR_CONNECT_TIMEOUT", "15"))
+        sync_timeout_s = float(os.getenv("IBKR_CONNECT_TIMEOUT", "45"))
     except ValueError:
         sync_timeout_s = 15.0
     logger.info(

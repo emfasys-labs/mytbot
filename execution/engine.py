@@ -540,6 +540,12 @@ class ExecutionEngine:
         await dispose_engine(engine)
 
     async def _send_critical_alert(self, message: str) -> None:
+        # Never send real Telegram alerts from unit tests.
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            return
+        disable = (os.getenv("MYTBOT_DISABLE_TELEGRAM_ALERTS", "") or "").strip().lower()
+        if disable in ("1", "true", "yes", "on"):
+            return
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         if not token or not chat_id:
