@@ -116,6 +116,8 @@ export default function App() {
   const [positions, setPositions] = useState([]);
   const [pnl, setPnl] = useState(null);
   const [pnlHistory, setPnlHistory] = useState([]);
+  const [anomalies, setAnomalies] = useState([]);
+  const [theses, setTheses] = useState([]);
   const [selectedSignal, setSelectedSignal] = useState(null);
   const [params, setParams] = useState({});
   const [strategyName, setStrategyName] = useState("momentum_breakout");
@@ -145,7 +147,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, sig, ord, pos, p, rp, ph] = await Promise.all([
+      const [s, sig, ord, pos, p, rp, ph, an, th] = await Promise.all([
         getJson("/status"),
         getJson("/signals?limit=50"),
         getJson("/orders?limit=50"),
@@ -153,6 +155,8 @@ export default function App() {
         getJson("/pnl"),
         getJson("/risk/parameters"),
         getJson("/pnl/history?limit=90"),
+        getJson("/discovery/anomalies?limit=50"),
+        getJson("/discovery/theses?limit=50"),
       ]);
       setStatus(s);
       setSignals(sig.signals || []);
@@ -161,6 +165,8 @@ export default function App() {
       setPnl(p);
       setParams(rp.parameters || {});
       setPnlHistory(ph.history || []);
+      setAnomalies(an.anomalies || []);
+      setTheses(th.theses || []);
       setSelectedSignal((sig.signals || [])[0] || null);
       setNeedsLogin(false);
     } catch (e) {
@@ -405,6 +411,16 @@ export default function App() {
         title="Signals"
         rows={signals}
         columns={["timestamp", "symbol", "side", "strategy", "confidence", "news_score"]}
+      />
+      <JsonTable
+        title="Discovery Anomalies"
+        rows={anomalies}
+        columns={["timestamp", "symbol", "direction", "price_move_pct", "price_z_score", "anomaly_score", "thesis_generated"]}
+      />
+      <JsonTable
+        title="Discovery Theses"
+        rows={theses}
+        columns={["timestamp", "trigger_symbol", "trigger_direction", "overall_confidence", "time_horizon_hours", "model_used"]}
       />
       <div className="panel">
         <h3>Trade Detail View</h3>

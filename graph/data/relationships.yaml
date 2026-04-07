@@ -1,0 +1,135 @@
+# Static economic dependency relationships.
+# confidence: empirical strength 0.0-1.0
+# lag_hours: approximate time for impact to appear
+# mechanism: plain English explanation of why
+
+relationships:
+  - trigger: crude_oil_price
+    direction: up
+    impacts:
+      - {instrument: XLE, asset_class: etf, direction: up, confidence: 0.85, lag_hours: 0, mechanism: "Energy sector direct revenue correlation"}
+      - {instrument: CVX, asset_class: equity, direction: up, confidence: 0.82, lag_hours: 0, mechanism: "Major oil producer — direct revenue"}
+      - {instrument: XOM, asset_class: equity, direction: up, confidence: 0.80, lag_hours: 0, mechanism: "Major oil producer — direct revenue"}
+      - {instrument: UAL, asset_class: equity, direction: down, confidence: 0.78, lag_hours: 0, mechanism: "Fuel 20-25% of airline operating costs"}
+      - {instrument: DAL, asset_class: equity, direction: down, confidence: 0.76, lag_hours: 0, mechanism: "Fuel 20-25% of airline operating costs"}
+      - {instrument: CAD_USD, asset_class: forex, direction: up, confidence: 0.72, lag_hours: 0, mechanism: "Canada is major oil exporter"}
+      - {instrument: NOK_USD, asset_class: forex, direction: up, confidence: 0.68, lag_hours: 2, mechanism: "Norway sovereign wealth fund oil revenues"}
+      - {instrument: XLY, asset_class: etf, direction: down, confidence: 0.52, lag_hours: 24, mechanism: "Higher energy costs reduce consumer spending"}
+      - {instrument: BTC, asset_class: crypto, direction: down, confidence: 0.35, lag_hours: 6, mechanism: "Energy cost of mining increases — weak correlation"}
+
+  - trigger: crude_oil_price
+    direction: down
+    impacts:
+      - {instrument: UAL, asset_class: equity, direction: up, confidence: 0.78, lag_hours: 0, mechanism: "Fuel cost relief"}
+      - {instrument: DAL, asset_class: equity, direction: up, confidence: 0.76, lag_hours: 0, mechanism: "Fuel cost relief"}
+      - {instrument: XLY, asset_class: etf, direction: up, confidence: 0.52, lag_hours: 24, mechanism: "Consumer spending relief"}
+      - {instrument: XLE, asset_class: etf, direction: down, confidence: 0.85, lag_hours: 0, mechanism: "Energy sector revenue falls"}
+      - {instrument: CAD_USD, asset_class: forex, direction: down, confidence: 0.72, lag_hours: 0, mechanism: "Petrocurrency weakens"}
+
+  - trigger: us_10yr_yield
+    direction: up
+    impacts:
+      - {instrument: TLT, asset_class: etf, direction: down, confidence: 0.95, lag_hours: 0, mechanism: "Bond price inverse to yield — direct"}
+      - {instrument: QQQ, asset_class: etf, direction: down, confidence: 0.72, lag_hours: 0, mechanism: "Higher discount rate hurts growth valuations"}
+      - {instrument: XLU, asset_class: etf, direction: down, confidence: 0.68, lag_hours: 0, mechanism: "Utilities compete with bonds for yield investors"}
+      - {instrument: GLD, asset_class: etf, direction: down, confidence: 0.55, lag_hours: 4, mechanism: "Higher real rates increase opportunity cost of gold"}
+      - {instrument: USD_DXY, asset_class: forex, direction: up, confidence: 0.74, lag_hours: 0, mechanism: "Higher yields attract foreign capital to USD"}
+      - {instrument: XLF, asset_class: etf, direction: up, confidence: 0.65, lag_hours: 0, mechanism: "Banks profit from wider net interest margin"}
+      - {instrument: BTC, asset_class: crypto, direction: down, confidence: 0.58, lag_hours: 4, mechanism: "Risk-off + higher opportunity cost"}
+      - {instrument: ETH, asset_class: crypto, direction: down, confidence: 0.55, lag_hours: 4, mechanism: "Risk-off + higher opportunity cost"}
+      - {instrument: EM_bonds, asset_class: bond, direction: down, confidence: 0.62, lag_hours: 8, mechanism: "Dollar strength stresses EM debt service"}
+
+  - trigger: us_10yr_yield
+    direction: down
+    impacts:
+      - {instrument: TLT, asset_class: etf, direction: up, confidence: 0.95, lag_hours: 0, mechanism: "Bond price rises as yield falls"}
+      - {instrument: QQQ, asset_class: etf, direction: up, confidence: 0.65, lag_hours: 0, mechanism: "Lower discount rate boosts growth valuations"}
+      - {instrument: GLD, asset_class: etf, direction: up, confidence: 0.55, lag_hours: 4, mechanism: "Lower real rates reduce gold opportunity cost"}
+      - {instrument: XLU, asset_class: etf, direction: up, confidence: 0.60, lag_hours: 0, mechanism: "Yield-seeking investors rotate to utilities"}
+
+  - trigger: vix
+    direction: up
+    impacts:
+      - {instrument: SPY, asset_class: etf, direction: down, confidence: 0.88, lag_hours: 0, mechanism: "VIX inverse to equity — direct relationship"}
+      - {instrument: QQQ, asset_class: etf, direction: down, confidence: 0.85, lag_hours: 0, mechanism: "Risk-off hits growth hardest"}
+      - {instrument: GLD, asset_class: etf, direction: up, confidence: 0.70, lag_hours: 0, mechanism: "Safe haven demand"}
+      - {instrument: TLT, asset_class: etf, direction: up, confidence: 0.72, lag_hours: 0, mechanism: "Flight to safety — treasuries"}
+      - {instrument: JPY_USD, asset_class: forex, direction: up, confidence: 0.65, lag_hours: 0, mechanism: "Yen is safe haven currency"}
+      - {instrument: USD_DXY, asset_class: forex, direction: up, confidence: 0.60, lag_hours: 0, mechanism: "Dollar safe haven demand"}
+      - {instrument: BTC, asset_class: crypto, direction: down, confidence: 0.62, lag_hours: 2, mechanism: "Risk-off sells speculative assets"}
+      - {instrument: ETH, asset_class: crypto, direction: down, confidence: 0.60, lag_hours: 2, mechanism: "Risk-off sells speculative assets"}
+
+  - trigger: gold_price
+    direction: up
+    impacts:
+      - {instrument: GDX, asset_class: etf, direction: up, confidence: 0.82, lag_hours: 0, mechanism: "Gold miners — leveraged play on gold price"}
+      - {instrument: SLV, asset_class: etf, direction: up, confidence: 0.65, lag_hours: 2, mechanism: "Silver follows gold — industrial + precious"}
+      - {instrument: USD_DXY, asset_class: forex, direction: down, confidence: 0.55, lag_hours: 0, mechanism: "Gold priced in USD — inverse relationship"}
+      - {instrument: SPY, asset_class: etf, direction: down, confidence: 0.40, lag_hours: 4, mechanism: "Gold rising often signals risk-off rotation"}
+
+  - trigger: btc_price
+    direction: up
+    impacts:
+      - {instrument: ETH, asset_class: crypto, direction: up, confidence: 0.82, lag_hours: 0, mechanism: "Crypto correlation — BTC leads alt season"}
+      - {instrument: SOL, asset_class: crypto, direction: up, confidence: 0.75, lag_hours: 2, mechanism: "Alt coins follow BTC momentum"}
+      - {instrument: COIN, asset_class: equity, direction: up, confidence: 0.72, lag_hours: 0, mechanism: "Coinbase revenue correlated to crypto volumes"}
+      - {instrument: MSTR, asset_class: equity, direction: up, confidence: 0.85, lag_hours: 0, mechanism: "MicroStrategy holds BTC as primary asset"}
+      - {instrument: MARA, asset_class: equity, direction: up, confidence: 0.80, lag_hours: 0, mechanism: "Bitcoin miner — direct BTC exposure"}
+
+  - trigger: fed_rate_decision
+    direction: hawkish
+    impacts:
+      - {instrument: USD_DXY, asset_class: forex, direction: up, confidence: 0.78, lag_hours: 0, mechanism: "Higher rates attract capital inflows"}
+      - {instrument: TLT, asset_class: etf, direction: down, confidence: 0.82, lag_hours: 0, mechanism: "Existing bonds lose value"}
+      - {instrument: SPY, asset_class: etf, direction: down, confidence: 0.65, lag_hours: 0, mechanism: "Higher rates slow growth and compress multiples"}
+      - {instrument: GLD, asset_class: etf, direction: down, confidence: 0.60, lag_hours: 2, mechanism: "Dollar strength and higher real rates"}
+      - {instrument: BTC, asset_class: crypto, direction: down, confidence: 0.65, lag_hours: 2, mechanism: "Risk-off + dollar strength"}
+      - {instrument: XLF, asset_class: etf, direction: up, confidence: 0.60, lag_hours: 0, mechanism: "Banks benefit from wider NIM"}
+      - {instrument: EM_equity, asset_class: etf, direction: down, confidence: 0.68, lag_hours: 4, mechanism: "Dollar strength + capital outflows from EM"}
+
+  - trigger: geopolitical_conflict
+    direction: escalation
+    impacts:
+      - {instrument: GLD, asset_class: etf, direction: up, confidence: 0.75, lag_hours: 0, mechanism: "Safe haven demand spikes"}
+      - {instrument: crude_oil, asset_class: commodity, direction: up, confidence: 0.70, lag_hours: 0, mechanism: "Supply disruption risk premium"}
+      - {instrument: LMT, asset_class: equity, direction: up, confidence: 0.80, lag_hours: 0, mechanism: "Lockheed Martin — defence spending increases"}
+      - {instrument: RTX, asset_class: equity, direction: up, confidence: 0.78, lag_hours: 0, mechanism: "Raytheon — defence spending increases"}
+      - {instrument: XLI, asset_class: etf, direction: up, confidence: 0.55, lag_hours: 4, mechanism: "Industrial/defence sector rotation"}
+      - {instrument: SPY, asset_class: etf, direction: down, confidence: 0.60, lag_hours: 0, mechanism: "Risk-off sentiment"}
+      - {instrument: wheat_futures, asset_class: commodity, direction: up, confidence: 0.65, lag_hours: 2, mechanism: "Supply chain disruption risk"}
+
+  - trigger: china_gdp
+    direction: miss
+    impacts:
+      - {instrument: FXI, asset_class: etf, direction: down, confidence: 0.80, lag_hours: 0, mechanism: "China equity ETF — direct exposure"}
+      - {instrument: copper, asset_class: commodity, direction: down, confidence: 0.72, lag_hours: 2, mechanism: "Copper is China growth barometer"}
+      - {instrument: iron_ore, asset_class: commodity, direction: down, confidence: 0.70, lag_hours: 2, mechanism: "Steel production input — China dependent"}
+      - {instrument: AUD_USD, asset_class: forex, direction: down, confidence: 0.68, lag_hours: 2, mechanism: "Australia major commodities exporter to China"}
+      - {instrument: crude_oil, asset_class: commodity, direction: down, confidence: 0.55, lag_hours: 4, mechanism: "World's largest oil importer"}
+      - {instrument: LVMH, asset_class: equity, direction: down, confidence: 0.60, lag_hours: 4, mechanism: "Luxury goods demand from Chinese consumers"}
+
+  - trigger: inflation_cpi
+    direction: above_expectation
+    impacts:
+      - {instrument: TLT, asset_class: etf, direction: down, confidence: 0.80, lag_hours: 0, mechanism: "Higher inflation erodes bond real returns"}
+      - {instrument: GLD, asset_class: etf, direction: up, confidence: 0.65, lag_hours: 0, mechanism: "Traditional inflation hedge"}
+      - {instrument: TIPS, asset_class: etf, direction: up, confidence: 0.70, lag_hours: 0, mechanism: "Inflation-linked bonds — direct beneficiary"}
+      - {instrument: XLP, asset_class: etf, direction: up, confidence: 0.55, lag_hours: 4, mechanism: "Consumer staples pass through price increases"}
+      - {instrument: BTC, asset_class: crypto, direction: up, confidence: 0.45, lag_hours: 4, mechanism: "Narrative: inflation hedge — weak but present"}
+      - {instrument: USD_DXY, asset_class: forex, direction: up, confidence: 0.60, lag_hours: 0, mechanism: "Higher rates anticipated — dollar strength"}
+
+  - trigger: tech_earnings
+    direction: beat
+    impacts:
+      - {instrument: QQQ, asset_class: etf, direction: up, confidence: 0.75, lag_hours: 0, mechanism: "Tech heavy index — sector lifts"}
+      - {instrument: SMH, asset_class: etf, direction: up, confidence: 0.65, lag_hours: 0, mechanism: "Semiconductors often correlated with tech earnings"}
+      - {instrument: SPY, asset_class: etf, direction: up, confidence: 0.55, lag_hours: 0, mechanism: "Tech is 30%+ of S&P500"}
+
+  - trigger: usd_strength
+    direction: up
+    impacts:
+      - {instrument: GLD, asset_class: etf, direction: down, confidence: 0.70, lag_hours: 0, mechanism: "Gold priced in USD — inverse"}
+      - {instrument: crude_oil, asset_class: commodity, direction: down, confidence: 0.55, lag_hours: 2, mechanism: "Dollar-priced commodity becomes more expensive globally"}
+      - {instrument: EM_equity, asset_class: etf, direction: down, confidence: 0.65, lag_hours: 4, mechanism: "EM debt in USD becomes more expensive to service"}
+      - {instrument: BTC, asset_class: crypto, direction: down, confidence: 0.50, lag_hours: 2, mechanism: "Risk asset correlation with dollar strength"}
+      - {instrument: EEM, asset_class: etf, direction: down, confidence: 0.62, lag_hours: 4, mechanism: "EM equity ETF — dollar headwind"}

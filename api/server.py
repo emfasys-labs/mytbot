@@ -28,7 +28,7 @@ from control.command_bus import CommandBus
 from control.runtime import get_execution_engine, get_risk_engine
 from risk.parameters import ParameterManager
 from storage.db import dispose_engine, init_async_database
-from storage.models import DailyPnL, OrderLog, PositionLog, SignalLog
+from storage.models import AnomalyLog, DailyPnL, OrderLog, PositionLog, SignalLog, ThesisLog
 
 APP_ENV = os.getenv("APP_ENV", "paper")
 MUTATION_TOKEN = os.getenv("API_CONTROL_TOKEN", "").strip()
@@ -230,6 +230,60 @@ async def get_signals(limit: int = Query(50, ge=1, le=500), session_factory=Depe
                 "news_score": _decimal_str(r.news_score) if r.news_score is not None else None,
                 "news_veto": bool(r.news_veto),
                 "metadata": r.metadata_ or {},
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/discovery/anomalies")
+async def get_discovery_anomalies(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        q = await session.execute(select(AnomalyLog).order_by(AnomalyLog.timestamp.desc()).limit(limit))
+        rows = list(q.scalars().all())
+    return {
+        "anomalies": [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "symbol": r.symbol,
+                "asset_class": r.asset_class,
+                "direction": r.direction,
+                "price_move_pct": _decimal_str(r.price_move_pct),
+                "price_z_score": _decimal_str(r.price_z_score),
+                "volume_z_score": _decimal_str(r.volume_z_score) if r.volume_z_score is not None else None,
+                "news_velocity": _decimal_str(r.news_velocity) if r.news_velocity is not None else None,
+                "news_sentiment": _decimal_str(r.news_sentiment) if r.news_sentiment is not None else None,
+                "anomaly_score": _decimal_str(r.anomaly_score),
+                "opportunities_found": r.opportunities_found,
+                "thesis_generated": bool(r.thesis_generated),
+                "signals_produced": r.signals_produced,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/discovery/theses")
+async def get_discovery_theses(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        q = await session.execute(select(ThesisLog).order_by(ThesisLog.timestamp.desc()).limit(limit))
+        rows = list(q.scalars().all())
+    return {
+        "theses": [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "trigger_symbol": r.trigger_symbol,
+                "trigger_direction": r.trigger_direction,
+                "trigger_explanation": r.trigger_explanation,
+                "overall_confidence": _decimal_str(r.overall_confidence),
+                "time_horizon_hours": r.time_horizon_hours,
+                "opportunities": r.opportunities or [],
+                "invalidation_conditions": r.invalidation_conditions or [],
+                "model_used": r.model_used,
+                "tokens_used": r.tokens_used,
+                "ai_cost_usd": _decimal_str(r.ai_cost_usd) if r.ai_cost_usd is not None else None,
             }
             for r in rows
         ]

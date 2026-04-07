@@ -20,6 +20,7 @@ from loguru import logger
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
+from ai.thesis_generator import ThesisGenerator
 from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
 from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
@@ -28,6 +29,10 @@ from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
 from risk.engine import RiskEngine, RiskVerdict
 from risk.m8_loader import merge_m8_into_risk_cfg
+from data.scanner import UniverseScanner
+from data.universe import UniverseManager
+from graph.engine import DependencyGraphEngine
+from graph.pipeline import DiscoveryPipeline
 from run_m3 import (
     _load_portfolio_state,
     _load_recent_features,
@@ -38,6 +43,7 @@ from run_m3 import (
 )
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
+from storage.discovery import persist_anomaly_log, persist_thesis_log
 from storage.models import AIOutputLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
@@ -167,6 +173,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
     risk_cfg = _load_yaml(args.risk_config)
     merge_m8_into_risk_cfg(risk_cfg, args.m8_config)
     ai_cfg = _load_yaml(args.ai_config)
+    discovery_cfg = _load_yaml(args.discovery_config)
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]
     if not symbols:
         logger.error("run_m5 | no symbols configured")
@@ -203,6 +210,18 @@ async def _run_loop(args: argparse.Namespace) -> int:
     ai_enabled = bool(ai_cfg.get("enabled", True))
     ai_classifier = NewsClassifier() if ai_enabled else None
     ai_pipeline = AIPipeline(ai_cfg.get("pipeline", {}), classifier=ai_classifier) if ai_enabled else None
+    discovery_enabled = bool(discovery_cfg.get("enabled", False)) and os.getenv("DISCOVERY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    discovery_pipeline = None
+    if discovery_enabled:
+        universe = UniverseManager()
+        scanner = UniverseScanner(
+            universe,
+            session_factory,
+            cooldown_seconds=int(discovery_cfg.get("scanner", {}).get("cooldown_seconds", 300)),
+        )
+        graph = DependencyGraphEngine(relationships_path=str(discovery_cfg.get("relationships_path", "graph/data/relationships.yaml")))
+        thesis_generator = ThesisGenerator()
+        discovery_pipeline = DiscoveryPipeline(scanner, graph, thesis_generator, sig_engine)
     strat_cfg = strategies_cfg.get("strategies", {})
     momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
     mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
@@ -234,6 +253,98 @@ async def _run_loop(args: argparse.Namespace) -> int:
             return None, None
         logger.info("run_m5 | db reconnect succeeded")
         return new_engine, new_session_factory
+
+    async def _process_signal(signal, *, ai_result, symbol_hint: str | None = None) -> bool:
+        routed = router.route(signal.asset_class, signal.symbol)
+        if routed is None:
+            logger.warning("run_m5 | no_route | {} {}", signal.symbol, signal.asset_class)
+            return False
+        signal.broker = routed
+
+        portfolio_state = await _load_portfolio_state(
+            session_factory,
+            fallback_portfolio_value=Decimal(str(args.portfolio_value)),
+            signal_price_fallback=signal.suggested_price,
+        )
+        risk_engine.update_high_watermark(
+            Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
+        )
+        risk_engine.restore_runtime_state(portfolio_state)
+        risk_decision = await risk_engine.evaluate_and_persist(
+            session_factory,
+            signal,
+            portfolio_state,
+        )
+        if risk_decision.verdict != RiskVerdict.APPROVED:
+            logger.info(
+                "run_m5 | risk rejected | {} | {} | failed={}",
+                signal.symbol,
+                signal.signal_id,
+                risk_decision.checks_failed,
+            )
+            return False
+
+        if ai_result is not None and ai_classifier is not None:
+            rationale = await ai_classifier.generate_rationale(
+                {
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy,
+                    "confidence": signal.confidence,
+                    "news_score": signal.news_score,
+                    "macro_regime": ai_result.macro_regime,
+                    "asset_class": signal.asset_class,
+                }
+            )
+            signal.metadata["ai_rationale"] = rationale
+            s_key = symbol_hint or signal.symbol
+            async with session_factory() as session:
+                session.add(
+                    AIOutputLog(
+                        symbol=signal.symbol[:32],
+                        context_type="rationale",
+                        score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
+                        confidence=Decimal(str(signal.confidence)),
+                        event_type=str(ai_result.news_details.get(s_key, {}).get("event_type", "other")),
+                        regime_label=ai_result.macro_regime,
+                        decay_hours=int(ai_result.news_details.get(s_key, {}).get("decay_hours", 24)),
+                        rationale=rationale[:4000],
+                        payload={
+                            "headline": ai_result.news_details.get(s_key, {}).get("headline"),
+                            "sample_count": ai_result.news_details.get(s_key, {}).get("sample_count", 0),
+                            "macro_confidence": ai_result.macro_confidence,
+                        },
+                        source="claude",
+                        signal_id=signal.signal_id,
+                    )
+                )
+                await session.commit()
+
+        await _persist_signal(
+            session_factory,
+            signal,
+            paper_mode=not args.live,
+            timeframe=args.timeframe,
+            feature_ts=datetime.now(timezone.utc),
+        )
+        result = await execution.execute(
+            signal,
+            risk_decision,
+            session_factory=session_factory,
+        )
+        if result is None:
+            return False
+
+        realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
+        if realized < 0:
+            risk_engine.record_loss(abs(realized))
+        elif realized > 0:
+            risk_engine.record_win()
+        portfolio_state.update(risk_engine.snapshot_runtime_state())
+
+        _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
+        await _persist_position_snapshot(session_factory, portfolio_state)
+        await _upsert_daily_pnl(session_factory, portfolio_state)
+        return True
 
     try:
         if args.reconcile_only:
@@ -336,101 +447,48 @@ async def _run_loop(args: argparse.Namespace) -> int:
                             signal.metadata["ai_news_detail"] = ai_result.news_details.get(symbol, {})
                             signal.metadata["ai_anomalies"] = [a for a in ai_result.anomalies if a.get("symbol") == symbol]
 
-                        routed = router.route(signal.asset_class, signal.symbol)
-                        if routed is None:
-                            logger.warning("run_m5 | no_route | {} {}", signal.symbol, signal.asset_class)
-                            continue
-                        signal.broker = routed
-
-                        portfolio_state = await _load_portfolio_state(
-                            session_factory,
-                            fallback_portfolio_value=Decimal(str(args.portfolio_value)),
-                            signal_price_fallback=signal.suggested_price,
-                        )
-                        risk_engine.update_high_watermark(
-                            Decimal(str(portfolio_state.get("high_watermark_value", args.portfolio_value)))
-                        )
-                        risk_engine.restore_runtime_state(portfolio_state)
-                        risk_decision = await risk_engine.evaluate_and_persist(
-                            session_factory,
-                            signal,
-                            portfolio_state,
-                        )
-                        if risk_decision.verdict != RiskVerdict.APPROVED:
-                            logger.info(
-                                "run_m5 | risk rejected | {} | {} | failed={}",
-                                signal.symbol,
-                                signal.signal_id,
-                                risk_decision.checks_failed,
-                            )
-                            continue
-
-                        if ai_result is not None and ai_classifier is not None:
-                            rationale = await ai_classifier.generate_rationale(
-                                {
-                                    "symbol": signal.symbol,
-                                    "strategy": signal.strategy,
-                                    "confidence": signal.confidence,
-                                    "news_score": signal.news_score,
-                                    "macro_regime": ai_result.macro_regime,
-                                    "asset_class": signal.asset_class,
-                                }
-                            )
-                            signal.metadata["ai_rationale"] = rationale
-                            async with session_factory() as session:
-                                session.add(
-                                    AIOutputLog(
-                                        symbol=signal.symbol[:32],
-                                        context_type="rationale",
-                                        score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
-                                        confidence=Decimal(str(signal.confidence)),
-                                        event_type=str(
-                                            ai_result.news_details.get(symbol, {}).get("event_type", "other")
-                                        ),
-                                        regime_label=ai_result.macro_regime,
-                                        decay_hours=int(
-                                            ai_result.news_details.get(symbol, {}).get("decay_hours", 24)
-                                        ),
-                                        rationale=rationale[:4000],
-                                        payload={
-                                            "headline": ai_result.news_details.get(symbol, {}).get("headline"),
-                                            "sample_count": ai_result.news_details.get(symbol, {}).get("sample_count", 0),
-                                            "macro_confidence": ai_result.macro_confidence,
-                                        },
-                                        source="claude",
-                                        signal_id=signal.signal_id,
-                                    )
-                                )
-                                await session.commit()
-
-                        await _persist_signal(
-                            session_factory,
-                            signal,
-                            paper_mode=not args.live,
-                            timeframe=args.timeframe,
-                            feature_ts=feature_ts,
-                        )
                         generated += 1
+                        ok = await _process_signal(signal, ai_result=ai_result, symbol_hint=symbol)
+                        if ok:
+                            executed += 1
 
-                        result = await execution.execute(
-                            signal,
-                            risk_decision,
-                            session_factory=session_factory,
+                    if discovery_pipeline is not None:
+                        discovery_items = await discovery_pipeline.run_cycle_detailed(
+                            portfolio_value=Decimal(str(args.portfolio_value)),
+                            market_context={
+                                "macro_regime": ai_result.macro_regime if ai_result is not None else None,
+                                "macro_confidence": ai_result.macro_confidence if ai_result is not None else None,
+                            },
                         )
-                        if result is None:
-                            continue
-                        executed += 1
-
-                        realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
-                        if realized < 0:
-                            risk_engine.record_loss(abs(realized))
-                        elif realized > 0:
-                            risk_engine.record_win()
-                        portfolio_state.update(risk_engine.snapshot_runtime_state())
-
-                        _apply_filled_result_to_portfolio_state(portfolio_state, signal, result)
-                        await _persist_position_snapshot(session_factory, portfolio_state)
-                        await _upsert_daily_pnl(session_factory, portfolio_state)
+                        discovery_signal_count = sum(len(item.signals) for item in discovery_items)
+                        if discovery_signal_count:
+                            logger.info("run_m5 | discovery produced {} candidate signals", discovery_signal_count)
+                        for item in discovery_items:
+                            anomaly = item.anomaly
+                            thesis = item.thesis
+                            d_signals = item.signals
+                            for ds in d_signals:
+                                if ai_result is not None:
+                                    ds.news_score = ai_result.news_scores.get(ds.symbol)
+                                    ds.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                    ds.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                                    ds.metadata["ai_news_detail"] = ai_result.news_details.get(ds.symbol, {})
+                                generated += 1
+                                ok = await _process_signal(ds, ai_result=ai_result, symbol_hint=ds.symbol)
+                                if ok:
+                                    executed += 1
+                            await persist_anomaly_log(
+                                session_factory,
+                                anomaly=anomaly,
+                                opportunities_found=len(item.opportunities),
+                                thesis_generated=thesis is not None,
+                                signals_produced=len(d_signals),
+                            )
+                            if thesis is not None:
+                                await persist_thesis_log(
+                                    session_factory,
+                                    thesis=thesis,
+                                )
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     if now_ts >= next_reconcile_at:
@@ -491,6 +549,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional M8 micro-live profile merged into risk config",
     )
     p.add_argument("--ai-config", default="config/ai.yaml")
+    p.add_argument("--discovery-config", default="config/discovery.yaml")
     p.add_argument("--symbols", default=None, help="Comma-separated symbol override")
     p.add_argument("--available-brokers", default="ibkr,kraken,binance,bybit,alpaca")
     p.add_argument(

@@ -230,6 +230,42 @@ class AIOutputLog(Base):
     signal_id = Column(String(128), nullable=True, index=True)
 
 
+class AnomalyLog(Base):
+    __tablename__ = "anomaly_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    asset_class = Column(String(20), nullable=False)
+    direction = Column(String(8), nullable=False)
+    price_move_pct = Column(Numeric(10, 4), nullable=False)
+    price_z_score = Column(Numeric(10, 4), nullable=False)
+    volume_z_score = Column(Numeric(10, 4), nullable=True)
+    news_velocity = Column(Numeric(10, 4), nullable=True)
+    news_sentiment = Column(Numeric(10, 4), nullable=True)
+    anomaly_score = Column(Numeric(10, 4), nullable=False)
+    opportunities_found = Column(Integer, nullable=True)
+    thesis_generated = Column(Boolean, default=False)
+    signals_produced = Column(Integer, nullable=True)
+
+
+class ThesisLog(Base):
+    __tablename__ = "thesis_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    trigger_symbol = Column(String(20), nullable=False, index=True)
+    trigger_direction = Column(String(8), nullable=False)
+    trigger_explanation = Column(Text, nullable=False)
+    overall_confidence = Column(Numeric(10, 4), nullable=False)
+    time_horizon_hours = Column(Integer, nullable=False)
+    opportunities = Column(JSON, nullable=True)
+    invalidation_conditions = Column(JSON, nullable=True)
+    model_used = Column(String(64), nullable=False)
+    tokens_used = Column(Integer, nullable=True)
+    ai_cost_usd = Column(Numeric(12, 6), nullable=True)
+
+
 class ControlCommand(Base):
     """Cross-process control command queue for API -> runners."""
 

@@ -1,0 +1,19 @@
+enabled: false
+relationships_path: graph/data/relationships.yaml
+
+scanner:
+  cooldown_seconds: 300
+  price_z_threshold: 2.0
+  volume_z_threshold: 2.0
+  lookback_periods: 252
+
+graph:
+  min_confidence_threshold: 0.45
+  max_chain_depth: 2
+
+thesis:
+  min_anomaly_score_for_ai: 0.65
+  cache_minutes: 30
+
+runner:
+  max_anomalies_per_cycle: 10
