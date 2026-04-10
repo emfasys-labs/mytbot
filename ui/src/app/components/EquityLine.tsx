@@ -43,23 +43,6 @@ export function EquityLine({
   }, [balance, dailyPnL, historyValues]);
 
   // Animate the line gradually
-  useEffect(() => {
-    if (!isActive) return;
-
-    const interval = setInterval(() => {
-      setDataPoints((prev) => {
-        const newPoints = [...prev];
-        // Remove first point and add new one at the end
-        newPoints.shift();
-        const lastValue = newPoints[newPoints.length - 1];
-        const variation = (Math.random() - 0.5) * 10;
-        newPoints.push(lastValue + variation);
-        return newPoints;
-      });
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, [isActive]);
 
   const getColorScheme = () => {
     if (isFlattened) {

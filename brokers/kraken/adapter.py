@@ -192,41 +192,52 @@ class KrakenAdapter(BrokerAdapter):
             raise RuntimeError("Kraken private API not available (connect with API keys)")
 
     async def connect(self) -> bool:
-        try:
-            Market, Trade, User = _kraken_sdk_classes()
-            self._market = Market()
-            await self._run_sync(lambda: self._market.get_system_status())  # type: ignore[union-attr]
-
-            if self.api_key and self.api_secret:
-                self._user = User(key=self.api_key, secret=self.api_secret)
-                self._trade = Trade(key=self.api_key, secret=self.api_secret)
-                # Balance (not BalanceEx) is the reliable baseline; some keys/accounts
-                # return little or nothing from BalanceEx while Balance still works.
-                await self._run_sync(lambda: self._user.get_account_balance())  # type: ignore[union-attr]
-                self._private_ok = True
-                logger.info("connect | Kraken | private API | ok")
-            else:
-                self._user = None
-                self._trade = None
+        for attempt in range(3):
+            try:
+                return await self._try_connect()
+            except Exception as exc:  # noqa: BLE001
+                is_nonce = "nonce" in str(exc).lower()
+                if is_nonce and attempt < 2:
+                    logger.warning(
+                        "connect | Kraken | nonce error (attempt {}/3) — retrying in 2s",
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(2)
+                    continue
+                logger.exception("connect | Kraken | failed | error={}", exc)
+                self._connected = False
                 self._private_ok = False
-                if not self.paper_mode:
-                    logger.error("connect | Kraken | live mode requires KRAKEN_API_KEY and KRAKEN_API_SECRET")
-                    self._connected = False
-                    return False
-                logger.info("connect | Kraken | public only (no API keys)")
+                return False
+        return False
 
-            self._connected = True
-            logger.info(
-                "connect | Kraken | paper_mode={} | private={}",
-                self.paper_mode,
-                self._private_ok,
-            )
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("connect | Kraken | failed | error={}", exc)
-            self._connected = False
+    async def _try_connect(self) -> bool:
+        Market, Trade, User = _kraken_sdk_classes()
+        self._market = Market()
+        await self._run_sync(lambda: self._market.get_system_status())  # type: ignore[union-attr]
+
+        if self.api_key and self.api_secret:
+            self._user = User(key=self.api_key, secret=self.api_secret)
+            self._trade = Trade(key=self.api_key, secret=self.api_secret)
+            await self._run_sync(lambda: self._user.get_account_balance())  # type: ignore[union-attr]
+            self._private_ok = True
+            logger.info("connect | Kraken | private API | ok")
+        else:
+            self._user = None
+            self._trade = None
             self._private_ok = False
-            return False
+            if not self.paper_mode:
+                logger.error("connect | Kraken | live mode requires KRAKEN_API_KEY and KRAKEN_API_SECRET")
+                self._connected = False
+                return False
+            logger.info("connect | Kraken | public only (no API keys)")
+
+        self._connected = True
+        logger.info(
+            "connect | Kraken | paper_mode={} | private={}",
+            self.paper_mode,
+            self._private_ok,
+        )
+        return True
 
     async def disconnect(self) -> None:
         self._connected = False
