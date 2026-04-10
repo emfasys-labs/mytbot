@@ -140,6 +140,7 @@ function App() {
           setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
         } else if (sysState === 'off' || sysState === 'error') {
           setControlState('flatten');
+          setNewsItems([]);
         }
       }
 
@@ -187,7 +188,8 @@ function App() {
         setLivePositions(mappedPositions);
       }
 
-      if (news) {
+      const currentSysState = sysStatus?.state ?? systemState;
+      if (news && currentSysState === 'running') {
         const headlines = news.headlines ?? [];
         const aiMap = new Map<string, { score: number; sentiment: 'positive' | 'negative' | 'neutral' }>();
         for (const ai of news.ai_scores ?? []) {
