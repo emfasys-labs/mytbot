@@ -17,6 +17,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -79,7 +80,12 @@ app.add_middleware(_DashboardReadMiddleware)
 @app.on_event("startup")
 async def _startup() -> None:
     log_cors_live_warning()
-    validate_startup_env(component="api.server", require_postgres=True, strict=True)
+    # Gracefully try DB — orchestrator may not have started infra yet when
+    # the API is loaded standalone (e.g. uvicorn api.server:app).
+    try:
+        validate_startup_env(component="api.server", require_postgres=True, strict=False)
+    except Exception:
+        pass
     engine, session_factory = await init_async_database()
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
@@ -118,6 +124,15 @@ def _decimal_str(v: Any) -> str:
     return str(Decimal(str(v)))
 
 
+def _get_orchestrator():
+    """Lazy-import to avoid circular deps when API is loaded standalone."""
+    try:
+        from system.orchestrator import Orchestrator
+        return Orchestrator.get_instance()
+    except Exception:
+        return None
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "service": "api", "ts": datetime.now(timezone.utc).isoformat()}
@@ -142,12 +157,17 @@ async def get_status():
         state_map = await bus.get_state_prefix("strategy.enabled.")
         strategies = {k.replace("strategy.enabled.", "", 1): bool(v) for k, v in state_map.items()}
 
+    orch = _get_orchestrator()
+    system_state = orch.state.value if orch else "off"
+    orch_brokers = orch.status().get("active_brokers", []) if orch else []
+
     return {
         "status": "running",
+        "system_state": system_state,
         "mode": APP_ENV,
         "paper_mode": APP_ENV != "live",
         "kill_switch": bool(getattr(risk_engine, "is_killed", False)),
-        "connected_brokers": connected_brokers,
+        "connected_brokers": connected_brokers or orch_brokers,
         "active_strategies": strategies,
         "runtime": runtime,
     }
@@ -292,6 +312,33 @@ async def get_discovery_theses(limit: int = Query(50, ge=1, le=500), session_fac
     }
 
 
+async def _live_portfolio_value() -> Decimal:
+    """Sum net-liquidation across all connected brokers.
+
+    Each broker returns a list of Balance objects (one per currency).
+    We take the largest total per broker as the net-liquidation proxy
+    (IBKR returns BASE; crypto brokers return USDT/USD).
+    """
+    orch = _get_orchestrator()
+    if orch is None:
+        return Decimal(0)
+    bm = getattr(orch, "_broker_manager", None)
+    if bm is None:
+        return Decimal(0)
+    total = Decimal(0)
+    for _name, adapter in bm.adapters.items():
+        try:
+            balances = await adapter.get_balance()
+            if not balances:
+                continue
+            best = max(balances, key=lambda b: b.total)
+            if best.total > 0:
+                total += best.total
+        except Exception:
+            pass
+    return total
+
+
 @app.get("/pnl")
 async def get_pnl(session_factory=Depends(_session_factory)):
     today = date.today().isoformat()
@@ -307,13 +354,18 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             )
         )
         agg = agg_q.one()
+
+    db_value = today_row.portfolio_value if today_row and today_row.portfolio_value else Decimal(0)
+    if db_value <= 0:
+        db_value = await _live_portfolio_value()
+
     return {
         "today": {
             "realised": _decimal_str(today_row.realised_pnl if today_row else 0),
             "unrealised": _decimal_str(today_row.unrealised_pnl if today_row else 0),
             "fees": _decimal_str(today_row.total_fees if today_row else 0),
             "trades": int(today_row.trade_count if today_row else 0),
-            "portfolio_value": _decimal_str(today_row.portfolio_value if today_row else 0),
+            "portfolio_value": _decimal_str(db_value),
         },
         "all_time": {
             "realised": _decimal_str(agg[0]),
@@ -466,6 +518,47 @@ async def toggle_strategy(
     return {"strategy": name, "enabled": enabled, "command_id": cmd_id}
 
 
+# ── System orchestrator endpoints (one-button control) ────────────────────────
+
+
+@app.get("/system/status")
+async def system_status():
+    """Full system status including state, brokers, infrastructure."""
+    orch = _get_orchestrator()
+    if orch is None:
+        return {
+            "state": "off",
+            "paper_mode": APP_ENV != "live",
+            "active_brokers": [],
+            "brokers": {},
+            "infrastructure": {},
+            "trading": {"running": False},
+            "errors": ["Orchestrator not initialized"],
+            "pipeline_running": False,
+        }
+    return orch.status()
+
+
+@app.post("/system/start")
+async def system_start():
+    """Start the entire trading system (one-button ON)."""
+    orch = _get_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not available")
+    result = await orch.start()
+    return result
+
+
+@app.post("/system/stop")
+async def system_stop():
+    """Stop the entire trading system (one-button OFF)."""
+    orch = _get_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not available")
+    result = await orch.stop()
+    return result
+
+
 @app.websocket("/ws")
 async def ws_updates(ws: WebSocket):
     token = ws.query_params.get("token") or ws.query_params.get("dashboard_token")
@@ -480,11 +573,14 @@ async def ws_updates(ws: WebSocket):
         while True:
             status = await get_status()
             events = await gather_ws_events(bus, sf)
+            orch = _get_orchestrator()
+            sys_status = orch.status() if orch else {"state": "off"}
             await ws.send_json(
                 {
                     "type": "tick",
                     "payload": {
                         "status": status,
+                        "system": sys_status,
                         "events": events,
                     },
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -493,3 +589,22 @@ async def ws_updates(ws: WebSocket):
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         return
+
+
+# ---------------------------------------------------------------------------
+# Serve the React UI from ui/dist (must be LAST so API routes take priority)
+# ---------------------------------------------------------------------------
+_UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
+if _UI_DIR.is_dir():
+    _index_html = _UI_DIR / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str):  # noqa: ARG001
+        """Serve index.html for any path not matched by the API (SPA routing)."""
+        from starlette.responses import FileResponse
+
+        if (_UI_DIR / full_path).is_file():
+            return FileResponse(_UI_DIR / full_path)
+        if _index_html.is_file():
+            return FileResponse(_index_html)
+        raise HTTPException(404)

@@ -13,6 +13,10 @@ Owner: UK-based, trading stocks, bonds, ETFs, forex, crypto.
 Primary broker: IBKR Pro. Crypto: Kraken + Binance.
 
 ## ARCHITECTURE IN ONE PARAGRAPH
+**One-button system.** `python run.py` starts everything — orchestrator brings up
+Docker (Postgres, Redis), auto-discovers available brokers (skipping unavailable),
+runs the trading loop and data pipeline, and exposes an API+WebSocket for the UI.
+The UI has a single ON/OFF button (`POST /system/start`, `POST /system/stop`).
 All brokers implement a single abstract interface in `brokers/base.py`.
 The signal engine aggregates strategy outputs into a Signal.
 Every Signal passes through the risk engine (unconditional veto power).
@@ -23,6 +27,11 @@ Risk parameters are managed by `ParameterManager` with layered overrides
 AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## KEY FILES
+- `run.py`                   — **THE entry point** (`python run.py` starts everything)
+- `system/orchestrator.py`   — state machine: OFF → STARTING → RUNNING → STOPPING → OFF
+- `system/dependency_manager.py` — auto-start Postgres/Redis via Docker
+- `system/broker_manager.py` — auto-discover and connect available brokers
+- `system/trading_loop.py`   — controllable async trading loop (start/stop)
 - `brokers/base.py`          — the adapter interface (FROZEN, never change)
 - `brokers/registry.py`      — add new brokers here (one line)
 - `brokers/bybit/adapter.py` — Bybit V5 (spot / USDT linear)
@@ -34,6 +43,7 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 - `execution/engine.py`      — order placement
 - `execution/router.py`      — smart order routing
 - `storage/models.py`        — database schema
+- `api/server.py`            — FastAPI: includes `/system/start`, `/system/stop`, `/system/status`
 - `config/risk_limits.yaml`  — all risk thresholds (editable without code change)
 - `config/m8_micro_live.yaml` — optional micro-live profile (symbol/strategy/notional caps when `APP_ENV=live`)
 - `config/fundamentals.yaml` — parameter defaults, absolute bounds, AI policy
@@ -51,11 +61,11 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M8 — Micro-Live + Iteration ✅ (code deliverables; live soak remains operational)
-- Last completed task: Bybit adapter + registry/router; M8 `strategy_sleeve_caps`; ATR-based volatility sizing in `signal_engine`; expanded pipeline symbols (IWM); `run_m5` wires `BYBIT_*` env
-- Next task: Operational — enable `m8_micro_live.enabled` only with checklist; IBKR/Binance/Bybit live keys; weekly reviews
-- Blockers: IBKR stream/order need local IB Gateway/TWS; exchange live keys; 2+ week paper soak is an operational validation step
-- Notes: .env not committed — use .env.example; set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for critical alerts
+- Milestone: M9 — One-Button System ✅
+- Last completed task: Full orchestrator redesign — `run.py` single entry point, `system/` package (orchestrator, dependency_manager, broker_manager, trading_loop), API endpoints (`/system/start`, `/system/stop`, `/system/status`), UI MasterControl wired to system start/stop with real-time state
+- Next task: Operational soak — `python run.py` end-to-end testing, broker credential setup, live validation
+- Blockers: IBKR stream/order need local IB Gateway/TWS; exchange live keys
+- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed to run the entire system
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
 1. Never change `brokers/base.py` interface — it is frozen

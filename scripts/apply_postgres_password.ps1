@@ -39,6 +39,11 @@ function Get-DotEnvValue {
             elseif ($val.Length -ge 2 -and $val.StartsWith("'") -and $val.EndsWith("'")) {
                 $val = $val.Substring(1, $val.Length - 2).Replace("''", "'")
             }
+            else {
+                # Support inline comments for unquoted values:
+                # KEY=value   # comment
+                $val = ($val -replace '\s+#.*$', '').Trim()
+            }
             return $val
         }
     }

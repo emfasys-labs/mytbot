@@ -19,6 +19,7 @@ import uuid
 import logging
 import os
 from decimal import Decimal
+from datetime import datetime, timezone
 from typing import Optional
 import asyncio
 
@@ -38,6 +39,7 @@ class ExecutionEngine:
         broker_configs: dict,
         paper_mode: bool = True,
         *,
+        allowed_brokers: list[str] | None = None,
         place_order_retries: int = 2,
         place_order_retry_backoff_sec: float = 1.0,
         fill_poll_timeout_sec: float = 10.0,
@@ -46,6 +48,7 @@ class ExecutionEngine:
     ):
         self.paper_mode = paper_mode
         self.broker_configs = broker_configs
+        self.allowed_brokers = [b.strip().lower() for b in (allowed_brokers or []) if str(b).strip()]
         self._brokers = {}          # lazy-loaded broker adapters
         self._open_orders = {}      # client_order_id → OrderResult
         self.place_order_retries = max(0, int(place_order_retries))
@@ -204,10 +207,13 @@ class ExecutionEngine:
                 paper_mode=self.paper_mode,
                 **config
             )
-            connected = await broker.connect()
+            try:
+                connected = await broker.connect()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Broker connect raised | broker=%s | %s", name, exc)
+                return None
             if not connected:
                 logger.error("Broker connect failed | broker=%s", name)
-                self._maybe_auto_kill("broker connect failure")
                 return None
             self._brokers[name] = broker
         return self._brokers[name]
@@ -485,7 +491,17 @@ class ExecutionEngine:
                         key = (str(row.broker).strip().lower(), str(row.symbol).strip().upper())
                         local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
 
+            # Ensure we attempt broker reconciliation even before any order execution.
+            preload_names = self.allowed_brokers if self.allowed_brokers else list(self.broker_configs.keys())
+            for broker_name in preload_names:
+                if broker_name in self._brokers:
+                    continue
+                if not self._broker_seems_configured(broker_name):
+                    continue
+                await self._get_broker(broker_name)
+
             remote: dict[tuple[str, str], Decimal] = {}
+            remote_snapshots: list[tuple[str, Position]] = []
             for broker_name, broker in self._brokers.items():
                 try:
                     positions: list[Position] = await broker.get_positions()
@@ -495,6 +511,7 @@ class ExecutionEngine:
                 for p in positions:
                     key = (broker_name.strip().lower(), str(p.symbol).strip().upper())
                     remote[key] = remote.get(key, Decimal("0")) + Decimal(str(p.quantity))
+                    remote_snapshots.append((broker_name, p))
 
             keys = set(local.keys()) | set(remote.keys())
             for key in keys:
@@ -509,10 +526,41 @@ class ExecutionEngine:
                         rq,
                     )
                     return False
+
+            # Persist latest remote broker positions as a fresh snapshot so API/UI can show real holdings.
+            if remote_snapshots:
+                snap_ts = datetime.now(timezone.utc)
+                async with sf() as session:
+                    for broker_name, p in remote_snapshots:
+                        session.add(
+                            PositionLog(
+                                timestamp=snap_ts,
+                                symbol=str(p.symbol).strip().upper()[:20],
+                                broker=str(broker_name).strip().lower()[:20],
+                                quantity=Decimal(str(p.quantity)),
+                                avg_entry_price=Decimal(str(p.avg_entry_price)),
+                                current_price=Decimal(str(p.current_price)),
+                                unrealised_pnl=Decimal(str(p.unrealised_pnl)),
+                                asset_class=str(p.asset_class.value if hasattr(p.asset_class, "value") else p.asset_class)
+                                .strip()
+                                .lower()[:20],
+                            )
+                        )
+                    await session.commit()
             return True
         finally:
             if own_engine is not None:
                 await self._dispose_db(own_engine)
+
+    def _broker_seems_configured(self, name: str) -> bool:
+        cfg = self.broker_configs.get(name, {}) or {}
+        name = (name or "").strip().lower()
+        if name == "ibkr":
+            # IBKR host/port/client_id defaults are acceptable; connectivity checked in connect().
+            return True
+        if name in {"kraken", "binance", "bybit", "alpaca"}:
+            return bool(str(cfg.get("api_key", "")).strip() and str(cfg.get("api_secret", "")).strip())
+        return True
 
     def _maybe_auto_kill_reconciliation(self, reason: str) -> None:
         limits = self._execution_limits()

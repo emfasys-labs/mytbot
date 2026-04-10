@@ -606,8 +606,24 @@ class IBKRAdapter(BrokerAdapter):
             }
             if acct:
                 connect_kw["account"] = acct
-            await self._ib.connectAsync(**connect_kw)
-            if not self._ib.managedAccounts():
+            def _on_error(reqId: int, errorCode: int, errorString: str, contract: str) -> None:  # noqa: N803
+                logger.warning(
+                    "connect | IBKR | IB error | reqId={} code={} msg={} contract={}",
+                    reqId, errorCode, errorString, contract,
+                )
+
+            self._ib.errorEvent += _on_error
+            try:
+                await self._ib.connectAsync(**connect_kw)
+            finally:
+                self._ib.errorEvent -= _on_error
+
+            accounts = self._ib.managedAccounts()
+            logger.info(
+                "connect | IBKR | handshake done | accounts={} | clientId={}",
+                accounts or "(none)", self.client_id,
+            )
+            if not accounts:
                 logger.warning(
                     "connect | IBKR | no managed accounts after sync — reconnecting once "
                     "(degraded ib_insync sync is common right after Gateway starts)"

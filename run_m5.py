@@ -200,6 +200,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
     execution = ExecutionEngine(
         broker_configs=broker_configs,
         paper_mode=not args.live,
+        allowed_brokers=available_brokers,
         place_order_retries=args.place_order_retries,
         place_order_retry_backoff_sec=args.place_order_retry_backoff_sec,
         fill_poll_timeout_sec=args.fill_poll_timeout_sec,
@@ -277,6 +278,15 @@ async def _run_loop(args: argparse.Namespace) -> int:
             portfolio_state,
         )
         if risk_decision.verdict != RiskVerdict.APPROVED:
+            signal.metadata["risk_verdict"] = "rejected"
+            signal.metadata["risk_failed_checks"] = list(risk_decision.checks_failed or [])
+            await _persist_signal(
+                session_factory,
+                signal,
+                paper_mode=not args.live,
+                timeframe=args.timeframe,
+                feature_ts=datetime.now(timezone.utc),
+            )
             logger.info(
                 "run_m5 | risk rejected | {} | {} | failed={}",
                 signal.symbol,
