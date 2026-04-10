@@ -30,7 +30,7 @@ from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
 from storage.db import dispose_engine, init_async_database
-from storage.models import AnomalyLog, DailyPnL, OrderLog, PositionLog, SignalLog, ThesisLog
+from storage.models import AIOutputLog, AnomalyLog, DailyPnL, NewsHeadline, OrderLog, PositionLog, SignalLog, ThesisLog
 
 APP_ENV = os.getenv("APP_ENV", "paper")
 MUTATION_TOKEN = os.getenv("API_CONTROL_TOKEN", "").strip()
@@ -255,6 +255,51 @@ async def get_signals(limit: int = Query(50, ge=1, le=500), session_factory=Depe
             }
             for r in rows
         ]
+    }
+
+
+@app.get("/news")
+async def get_news(limit: int = Query(30, ge=1, le=100), session_factory=Depends(_session_factory)):
+    async with session_factory() as session:
+        hq = await session.execute(
+            select(NewsHeadline)
+            .order_by(NewsHeadline.published_at.desc())
+            .limit(limit)
+        )
+        headlines = list(hq.scalars().all())
+
+        aq = await session.execute(
+            select(AIOutputLog)
+            .where(AIOutputLog.context_type == "news")
+            .order_by(AIOutputLog.timestamp.desc())
+            .limit(limit)
+        )
+        ai_rows = list(aq.scalars().all())
+
+    ai_by_symbol: dict[str, dict[str, Any]] = {}
+    for r in ai_rows:
+        if r.symbol and r.symbol not in ai_by_symbol:
+            ai_by_symbol[r.symbol] = {
+                "symbol": r.symbol,
+                "score": _decimal_str(r.score) if r.score is not None else None,
+                "confidence": _decimal_str(r.confidence) if r.confidence is not None else None,
+                "event_type": r.event_type,
+                "rationale": r.rationale,
+                "scored_at": r.timestamp.isoformat() if r.timestamp else None,
+            }
+
+    return {
+        "headlines": [
+            {
+                "title": h.title,
+                "source": h.source_name,
+                "published_at": h.published_at.isoformat() if h.published_at else None,
+                "url": h.url,
+                "description": h.description,
+            }
+            for h in headlines
+        ],
+        "ai_scores": list(ai_by_symbol.values()),
     }
 
 

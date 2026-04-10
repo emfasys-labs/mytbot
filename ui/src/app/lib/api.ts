@@ -80,6 +80,28 @@ export type ApiStatusResponse = {
   connected_brokers?: string[];
 };
 
+export type NewsHeadline = {
+  title: string;
+  source: string;
+  published_at: string | null;
+  url: string;
+  description?: string | null;
+};
+
+export type NewsAiScore = {
+  symbol: string;
+  score: string | null;
+  confidence: string | null;
+  event_type: string | null;
+  rationale: string | null;
+  scored_at: string | null;
+};
+
+export type ApiNewsResponse = {
+  headlines?: NewsHeadline[];
+  ai_scores?: NewsAiScore[];
+};
+
 export type SystemState = 'off' | 'starting' | 'running' | 'stopping' | 'error';
 
 export type SystemStatusResponse = {
@@ -117,6 +139,7 @@ export const api = {
   getPnlHistory: (limit = 90) => getJson<ApiPnlHistoryResponse>(`/pnl/history?limit=${limit}`),
   getPositions: (limit = 20) => getJson<ApiPositionsResponse>(`/positions?limit=${limit}`),
   getSignals: (limit = 20) => getJson<ApiSignalsResponse>(`/signals?limit=${limit}`),
+  getNews: (limit = 30) => getJson<ApiNewsResponse>(`/news?limit=${limit}`),
   getStatus: () => getJson<ApiStatusResponse>('/status'),
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),

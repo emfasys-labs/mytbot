@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { NewsTicker } from './components/NewsTicker';
+import { NewsTicker, type TickerItem } from './components/NewsTicker';
 import { EquityLine } from './components/EquityLine';
 import { ModeSelector } from './components/ModeSelector';
 import { CapitalSlider } from './components/CapitalSlider';
@@ -9,7 +9,7 @@ import { PositionChips } from './components/PositionChips';
 import { SystemHeartbeat } from './components/SystemHeartbeat';
 import { HapticFeedback, useHaptic } from './components/HapticFeedback';
 import { api, toNumber, type SystemState } from './lib/api';
-import { eventTimestamp, formatWsEventLine, getWsUrl, type WsTickMessage } from './lib/ws';
+import { eventTimestamp, getWsUrl, type WsTickMessage } from './lib/ws';
 
 type Mode = 'defender' | 'trader' | 'hunter';
 type ControlState = 'live' | 'pause' | 'flatten';
@@ -28,7 +28,7 @@ function App() {
   const [activeCapital, setActiveCapital] = useState(0);
   const [dailyPnL, setDailyPnL] = useState(0);
   const [equityHistory, setEquityHistory] = useState<number[]>([]);
-  const [newsItems, setNewsItems] = useState<string[]>([]);
+  const [newsItems, setNewsItems] = useState<TickerItem[]>([]);
   const [tradesToday, setTradesToday] = useState(0);
   const [lastTradeMinutes, setLastTradeMinutes] = useState(0);
   const lastTradeTs = useRef<number>(0);
@@ -112,6 +112,7 @@ function App() {
         api.getSignals(20),
         api.getStatus(),
         api.getSystemStatus(),
+        api.getNews(30),
       ]);
 
       const pnl = results[0].status === 'fulfilled' ? results[0].value : null;
@@ -120,6 +121,7 @@ function App() {
       const sig = results[3].status === 'fulfilled' ? results[3].value : null;
       const status = results[4].status === 'fulfilled' ? results[4].value : null;
       const sysStatus = results[5].status === 'fulfilled' ? results[5].value : null;
+      const news = results[6].status === 'fulfilled' ? results[6].value : null;
 
       if (sysStatus) {
         const newState = sysStatus.state ?? 'off';
@@ -184,23 +186,40 @@ function App() {
         setLivePositions(mappedPositions);
       }
 
-      if (sig) {
-        const signalRows = sig.signals || [];
-        const liveNews = signalRows
-          .slice(0, 8)
-          .map((s) => `${s.symbol} ${s.side.toUpperCase()} · ${s.strategy}`)
-          .filter(Boolean);
-        if (liveNews.length > 0) {
-          setNewsItems((prev) => {
-            if (wsConnectedRef.current) {
-              return prev.length === 0 ? liveNews : prev;
-            }
-            return liveNews;
-          });
-        } else if (!wsConnectedRef.current) {
-          setNewsItems([]);
+      if (news) {
+        const headlines = news.headlines ?? [];
+        const aiMap = new Map<string, { score: number; sentiment: 'positive' | 'negative' | 'neutral' }>();
+        for (const ai of news.ai_scores ?? []) {
+          if (ai.symbol && ai.score != null) {
+            const s = parseFloat(ai.score);
+            aiMap.set(ai.symbol.toUpperCase(), {
+              score: s,
+              sentiment: s > 0.2 ? 'positive' : s < -0.2 ? 'negative' : 'neutral',
+            });
+          }
         }
 
+        const tickerItems: TickerItem[] = headlines.slice(0, 20).map((h) => {
+          let sentiment: TickerItem['sentiment'] = 'neutral';
+          for (const [, v] of aiMap) {
+            sentiment = v.sentiment;
+            break;
+          }
+          return {
+            text: h.title,
+            source: h.source,
+            time: h.published_at ?? undefined,
+            sentiment,
+          };
+        });
+
+        if (tickerItems.length > 0) {
+          setNewsItems(tickerItems);
+        }
+      }
+
+      if (sig) {
+        const signalRows = sig.signals || [];
         const lastSignalTs = signalRows.find((s) => s.timestamp)?.timestamp;
         if (lastSignalTs) {
           const tsMs = new Date(lastSignalTs).getTime();
@@ -279,24 +298,6 @@ function App() {
           }
 
           const events = msg.payload.events ?? [];
-          const lines = events
-            .map(formatWsEventLine)
-            .filter((x): x is string => Boolean(x))
-            .reverse();
-          if (lines.length > 0) {
-            setNewsItems((prev) => {
-              const merged = [...lines, ...prev];
-              const seen = new Set<string>();
-              const deduped: string[] = [];
-              for (const line of merged) {
-                if (seen.has(line)) continue;
-                seen.add(line);
-                deduped.push(line);
-              }
-              return deduped.slice(0, 24);
-            });
-          }
-
           for (let i = events.length - 1; i >= 0; i -= 1) {
             const ts = eventTimestamp(events[i]);
             if (ts) {
@@ -351,7 +352,7 @@ function App() {
       <HapticFeedback />
 
       <div className="w-full h-screen flex flex-col">
-        <NewsTicker isFlattened={isFlattened} items={newsItems} />
+        <NewsTicker items={newsItems} paused={isFlattened} />
 
         <div className="relative flex flex-1 flex-col justify-between px-6 pb-5 pt-4 md:px-8 md:pb-7 md:pt-5">
           <div className="flex items-start justify-between">
