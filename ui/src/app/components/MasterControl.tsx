@@ -14,9 +14,10 @@ interface MasterControlProps {
   onHaptic?: () => void;
 }
 
-const BTN_SIZE = 44;
-const EXPANDED_H = 140;
+const BTN = 44;
+const TRACK_H = 96;
 const HOLD_MS = 800;
+const WHEEL_STEP = 0.12;
 
 export function MasterControl({
   currentState,
@@ -35,8 +36,9 @@ export function MasterControl({
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerDown = useRef(false);
   const longPressTriggered = useRef(false);
-  const dragStartY = useRef(0);
+  const touchStartY = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef(0);
 
   const isSystemOff = systemState === 'off' || systemState === 'error';
   const isSystemStarting = systemState === 'starting';
@@ -81,6 +83,7 @@ export function MasterControl({
     setIsTransitioning(true);
     setArmed(false);
     setSlideProgress(0);
+    progressRef.current = 0;
     flashHint('Stopping...');
     try {
       await onSystemStop();
@@ -96,16 +99,26 @@ export function MasterControl({
   const disarm = () => {
     setArmed(false);
     setSlideProgress(0);
+    progressRef.current = 0;
   };
+
+  const pushProgress = useCallback(
+    (next: number) => {
+      const clamped = Math.max(0, Math.min(1, next));
+      progressRef.current = clamped;
+      setSlideProgress(clamped);
+      if (clamped >= 1) {
+        doStop();
+      }
+    },
+    [doStop],
+  );
+
+  /* ── Button tap / long-press (works on both desktop and mobile) ── */
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isBusy) return;
-
-    if (armed) {
-      e.currentTarget.setPointerCapture(e.pointerId);
-      dragStartY.current = e.clientY;
-      return;
-    }
+    if (armed) return;
 
     e.currentTarget.setPointerCapture(e.pointerId);
     pointerDown.current = true;
@@ -122,30 +135,15 @@ export function MasterControl({
       } else if (isSystemRunning) {
         setArmed(true);
         setSlideProgress(0);
+        progressRef.current = 0;
       }
     }, HOLD_MS);
-  };
-
-  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!armed) return;
-    const dy = e.clientY - dragStartY.current;
-    const trackH = EXPANDED_H - BTN_SIZE;
-    const pct = Math.max(0, Math.min(1, dy / trackH));
-    setSlideProgress(pct);
   };
 
   const onPointerUp = () => {
     clearLongPress();
 
-    if (armed) {
-      if (slideProgress >= 0.9) {
-        doStop();
-      } else {
-        disarm();
-      }
-      pointerDown.current = false;
-      return;
-    }
+    if (armed) return;
 
     if (!longPressTriggered.current) {
       if (isSystemOff) {
@@ -170,9 +168,52 @@ export function MasterControl({
 
   const onPointerCancel = () => {
     clearLongPress();
-    disarm();
     pointerDown.current = false;
   };
+
+  /* ── Slider: mouse wheel (desktop) ── */
+
+  const onWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      if (!armed) return;
+      e.stopPropagation();
+      const delta =
+        Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const direction = delta > 0 ? 1 : -1;
+      const magnitude = Math.min(1, Math.abs(delta) / 120);
+      pushProgress(progressRef.current + direction * WHEEL_STEP * magnitude);
+    },
+    [armed, pushProgress],
+  );
+
+  /* ── Slider: touch drag (mobile) ── */
+
+  const onTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (!armed) return;
+      touchStartY.current = e.touches[0].clientY;
+    },
+    [armed],
+  );
+
+  const onTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (!armed) return;
+      const dy = e.touches[0].clientY - touchStartY.current;
+      const pct = Math.max(0, Math.min(1, dy / TRACK_H));
+      pushProgress(pct);
+    },
+    [armed, pushProgress],
+  );
+
+  const onTouchEnd = useCallback(() => {
+    if (!armed) return;
+    if (progressRef.current < 1) {
+      disarm();
+    }
+  }, [armed]);
+
+  /* ── Click outside to disarm ── */
 
   useEffect(() => {
     if (!armed) return;
@@ -234,20 +275,23 @@ export function MasterControl({
   };
 
   const colors = getStateColor();
-  const height = armed ? EXPANDED_H : BTN_SIZE;
 
   return (
-    <div className="relative" ref={containerRef}>
+    <div className="relative" ref={containerRef} style={{ width: BTN, height: BTN }}>
+      {/* Main button — always at the top, fixed size in layout */}
       <motion.div
         className={`relative overflow-hidden rounded-2xl border ${colors.bg} ${colors.border} backdrop-blur-xl`}
-        animate={{ height, width: BTN_SIZE }}
+        style={{ width: BTN, touchAction: 'none', userSelect: 'none', cursor: 'pointer' }}
+        animate={{ height: armed ? BTN + TRACK_H : BTN }}
         transition={{ type: 'spring', stiffness: 400, damping: 30 }}
         onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerCancel}
         onPointerCancel={onPointerCancel}
-        style={{ touchAction: 'none', userSelect: 'none', cursor: 'pointer' }}
+        onWheel={onWheel}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
         aria-label="Master control"
       >
         {/* Glow */}
@@ -266,12 +310,15 @@ export function MasterControl({
           }}
           transition={{
             duration: armed ? 0.8 : isBusy ? 1.2 : 2.4,
-            repeat: armed || (isSystemRunning && currentState === 'live') || isBusy ? Infinity : 0,
+            repeat:
+              armed || (isSystemRunning && currentState === 'live') || isBusy
+                ? Infinity
+                : 0,
             ease: 'easeInOut',
           }}
         />
 
-        {/* Vertical slide fill (bottom-up rose fill when armed) */}
+        {/* Vertical slide fill (from bottom up when armed) */}
         {armed && (
           <motion.div
             className="absolute inset-x-0 bottom-0 bg-rose-500/20 rounded-b-2xl"
@@ -280,10 +327,10 @@ export function MasterControl({
           />
         )}
 
-        {/* Power icon at top */}
+        {/* Power icon — always at top of the component */}
         <div
           className={`relative z-10 flex items-center justify-center ${colors.text}`}
-          style={{ height: BTN_SIZE, width: BTN_SIZE }}
+          style={{ height: BTN, width: BTN }}
         >
           {isBusy ? (
             <Loader2 size={14} strokeWidth={2.3} className="animate-spin" />
@@ -292,7 +339,7 @@ export function MasterControl({
           )}
         </div>
 
-        {/* Arrow indicator when armed */}
+        {/* Scroll / swipe hint when armed */}
         <AnimatePresence>
           {armed && (
             <motion.div
@@ -302,9 +349,16 @@ export function MasterControl({
               className="absolute bottom-2 left-0 right-0 flex flex-col items-center gap-0.5 text-rose-300/60"
             >
               <svg width="12" height="8" viewBox="0 0 12 8" fill="none">
-                <path d="M1 1L6 6L11 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path
+                  d="M1 1L6 6L11 1"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
               </svg>
-              <span className="text-[7px] font-medium uppercase tracking-widest">stop</span>
+              <span className="text-[7px] font-medium uppercase tracking-widest">
+                stop
+              </span>
             </motion.div>
           )}
         </AnimatePresence>
@@ -317,7 +371,8 @@ export function MasterControl({
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className="absolute right-0 top-14 whitespace-nowrap rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] text-gray-300 backdrop-blur-xl"
+            className="absolute right-0 whitespace-nowrap rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] text-gray-300 backdrop-blur-xl"
+            style={{ top: BTN + 8 }}
           >
             {hintText}
           </motion.div>

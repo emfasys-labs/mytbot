@@ -363,9 +363,9 @@ function App() {
               />
             </div>
 
-            <div className="pt-2 flex items-center gap-2">
+            <div className="pt-2 flex items-start gap-2">
               {systemState !== 'off' && Object.keys(allBrokers).length > 0 && (
-                <div className="flex gap-1 flex-wrap justify-end">
+                <div className="flex gap-1 flex-wrap justify-end pt-2.5">
                   {Object.entries(allBrokers)
                     .filter(([, v]) => v.configured)
                     .map(([name, v]) => (
