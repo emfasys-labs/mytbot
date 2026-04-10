@@ -363,16 +363,8 @@ function App() {
               />
             </div>
 
-            <div className="pt-2 flex flex-col items-end gap-1">
-              <MasterControl
-                currentState={controlState}
-                systemState={systemState}
-                onStateChange={handleControlStateChange}
-                onSystemStart={handleSystemStart}
-                onSystemStop={handleSystemStop}
-                onHaptic={() => triggerHaptic('light')}
-              />
-              {Object.keys(allBrokers).length > 0 ? (
+            <div className="pt-2 flex items-center gap-2">
+              {systemState !== 'off' && Object.keys(allBrokers).length > 0 && (
                 <div className="flex gap-1 flex-wrap justify-end">
                   {Object.entries(allBrokers)
                     .filter(([, v]) => v.configured)
@@ -389,7 +381,15 @@ function App() {
                       </span>
                     ))}
                 </div>
-              ) : null}
+              )}
+              <MasterControl
+                currentState={controlState}
+                systemState={systemState}
+                onStateChange={handleControlStateChange}
+                onSystemStart={handleSystemStart}
+                onSystemStop={handleSystemStop}
+                onHaptic={() => triggerHaptic('light')}
+              />
             </div>
           </div>
 

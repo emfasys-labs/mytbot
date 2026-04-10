@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react';
-import { Loader2, Power, TriangleAlert } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Loader2, Power } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SystemState } from '../lib/api';
 
 type ControlState = 'live' | 'pause' | 'flatten';
@@ -14,6 +14,10 @@ interface MasterControlProps {
   onHaptic?: () => void;
 }
 
+const BTN_SIZE = 44;
+const EXPANDED_H = 140;
+const HOLD_MS = 800;
+
 export function MasterControl({
   currentState,
   systemState,
@@ -22,20 +26,17 @@ export function MasterControl({
   onSystemStop,
   onHaptic,
 }: MasterControlProps) {
-  const HOLD_MS = 1500;
-  const WHEEL_STEP = 0.12;
-
-  const [isHolding, setIsHolding] = useState(false);
-  const [showSlideConfirm, setShowSlideConfirm] = useState(false);
-  const [slideProgress, setSlideProgress] = useState(0);
   const [hintText, setHintText] = useState<string | null>(null);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const [slideProgress, setSlideProgress] = useState(0);
 
-  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
-  const hintTimer = useRef<NodeJS.Timeout | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerDown = useRef(false);
   const longPressTriggered = useRef(false);
-  const confirmDragging = useRef(false);
+  const dragStartY = useRef(0);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const isSystemOff = systemState === 'off' || systemState === 'error';
   const isSystemStarting = systemState === 'starting';
@@ -56,31 +57,12 @@ export function MasterControl({
     hintTimer.current = setTimeout(() => setHintText(null), 2000);
   };
 
-  const handleStateSelect = (state: ControlState, haptic = true) => {
-    onStateChange(state);
-    if (haptic) onHaptic?.();
-  };
-
   const clearLongPress = () => {
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
     longPressTimer.current = null;
   };
 
-  const pushSlideProgress = (next: number) => {
-    const clamped = Math.max(0, Math.min(1, next));
-    setSlideProgress(clamped);
-    if (clamped >= 1) {
-      handleSystemStop();
-      setShowSlideConfirm(false);
-      setSlideProgress(0);
-      setIsHolding(false);
-      pointerDown.current = false;
-      clearLongPress();
-      confirmDragging.current = false;
-    }
-  };
-
-  const handleSystemStart = async () => {
+  const doStart = async () => {
     if (isBusy) return;
     setIsTransitioning(true);
     flashHint('Starting...');
@@ -94,35 +76,40 @@ export function MasterControl({
     }
   };
 
-  const handleSystemStop = async () => {
+  const doStop = useCallback(async () => {
     if (isBusy) return;
     setIsTransitioning(true);
+    setArmed(false);
+    setSlideProgress(0);
     flashHint('Stopping...');
     try {
       await onSystemStop();
-      handleStateSelect('flatten', false);
+      onStateChange('flatten');
       flashHint('System OFF');
     } catch {
       flashHint('Stop failed');
     } finally {
       setIsTransitioning(false);
     }
+  }, [isBusy, onSystemStop, onStateChange]);
+
+  const disarm = () => {
+    setArmed(false);
+    setSlideProgress(0);
   };
 
-  const resetInteraction = () => {
-    pointerDown.current = false;
-    setIsHolding(false);
-    if (!showSlideConfirm) {
-      setSlideProgress(0);
-    }
-  };
-
-  const onButtonPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isBusy) return;
+
+    if (armed) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      dragStartY.current = e.clientY;
+      return;
+    }
+
     e.currentTarget.setPointerCapture(e.pointerId);
     pointerDown.current = true;
     longPressTriggered.current = false;
-    setIsHolding(true);
 
     clearLongPress();
     longPressTimer.current = setTimeout(() => {
@@ -131,37 +118,46 @@ export function MasterControl({
       onHaptic?.();
 
       if (isSystemOff) {
-        handleSystemStart();
-        setIsHolding(false);
+        doStart();
       } else if (isSystemRunning) {
-        setShowSlideConfirm(true);
+        setArmed(true);
         setSlideProgress(0);
-        flashHint('Slide to stop system');
       }
     }, HOLD_MS);
   };
 
-  const onButtonPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (!pointerDown.current) return;
-    if (!showSlideConfirm) return;
-    e.preventDefault();
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!armed) return;
+    const dy = e.clientY - dragStartY.current;
+    const trackH = EXPANDED_H - BTN_SIZE;
+    const pct = Math.max(0, Math.min(1, dy / trackH));
+    setSlideProgress(pct);
   };
 
-  const onButtonPointerUp = () => {
+  const onPointerUp = () => {
     clearLongPress();
+
+    if (armed) {
+      if (slideProgress >= 0.9) {
+        doStop();
+      } else {
+        disarm();
+      }
+      pointerDown.current = false;
+      return;
+    }
 
     if (!longPressTriggered.current) {
       if (isSystemOff) {
-        handleSystemStart();
+        doStart();
       } else if (isSystemRunning) {
         if (currentState === 'live') {
-          handleStateSelect('pause');
+          onStateChange('pause');
+          onHaptic?.();
           flashHint('Paused');
-        } else if (currentState === 'pause') {
-          handleStateSelect('live');
-          flashHint('Live');
-        } else if (currentState === 'flatten') {
-          handleStateSelect('live');
+        } else if (currentState === 'pause' || currentState === 'flatten') {
+          onStateChange('live');
+          onHaptic?.();
           flashHint('Live');
         }
       } else if (isBusy) {
@@ -169,48 +165,23 @@ export function MasterControl({
       }
     }
 
-    if (showSlideConfirm && slideProgress < 1) {
-      setShowSlideConfirm(false);
-      setSlideProgress(0);
-    }
-    resetInteraction();
+    pointerDown.current = false;
   };
 
-  const onButtonPointerCancel = () => {
+  const onPointerCancel = () => {
     clearLongPress();
-    if (showSlideConfirm) {
-      setShowSlideConfirm(false);
-      setSlideProgress(0);
-    }
-    resetInteraction();
+    disarm();
+    pointerDown.current = false;
   };
 
-  const onSlideWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    if (!showSlideConfirm) return;
-    e.preventDefault();
-    const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? Math.abs(e.deltaY) : Math.abs(e.deltaX);
-    const factor = Math.min(1, delta / 120);
-    pushSlideProgress(slideProgress + WHEEL_STEP * factor);
-  };
-
-  const onConfirmPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    confirmDragging.current = true;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    pushSlideProgress(pct);
-  };
-
-  const onConfirmPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!confirmDragging.current) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    pushSlideProgress(pct);
-  };
-
-  const onConfirmPointerUp = () => {
-    confirmDragging.current = false;
-  };
+  useEffect(() => {
+    if (!armed) return;
+    const handler = (e: PointerEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) disarm();
+    };
+    window.addEventListener('pointerdown', handler);
+    return () => window.removeEventListener('pointerdown', handler);
+  }, [armed]);
 
   const getStateColor = () => {
     if (isBusy) {
@@ -227,6 +198,14 @@ export function MasterControl({
         text: 'text-gray-400',
         glow: 'rgba(156, 163, 175, 0.12)',
         border: 'border-gray-400/30',
+      };
+    }
+    if (armed) {
+      return {
+        bg: 'bg-rose-300/10',
+        text: 'text-rose-300',
+        glow: 'rgba(248, 113, 113, 0.25)',
+        border: 'border-rose-300/30',
       };
     }
     switch (currentState) {
@@ -255,78 +234,85 @@ export function MasterControl({
   };
 
   const colors = getStateColor();
+  const height = armed ? EXPANDED_H : BTN_SIZE;
 
   return (
-    <div className="relative">
-      <motion.button
-        className={`relative h-11 w-11 overflow-hidden rounded-2xl border ${colors.bg} ${colors.text} ${colors.border} backdrop-blur-xl`}
-        onPointerDown={onButtonPointerDown}
-        onPointerMove={onButtonPointerMove}
-        onPointerUp={onButtonPointerUp}
-        onPointerLeave={onButtonPointerCancel}
-        onPointerCancel={onButtonPointerCancel}
-        whileTap={{ scale: 0.95 }}
-        style={{ touchAction: 'none', userSelect: 'none' }}
+    <div className="relative" ref={containerRef}>
+      <motion.div
+        className={`relative overflow-hidden rounded-2xl border ${colors.bg} ${colors.border} backdrop-blur-xl`}
+        animate={{ height, width: BTN_SIZE }}
+        transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerCancel}
+        onPointerCancel={onPointerCancel}
+        style={{ touchAction: 'none', userSelect: 'none', cursor: 'pointer' }}
         aria-label="Master control"
       >
+        {/* Glow */}
         <motion.div
           className="absolute inset-0 rounded-2xl blur-xl"
           style={{ backgroundColor: colors.glow }}
           animate={{
-            opacity: isSystemRunning && currentState === 'live'
-              ? [0.22, 0.48, 0.22]
-              : isBusy
-                ? [0.15, 0.35, 0.15]
-                : 0.16,
+            opacity:
+              armed
+                ? [0.2, 0.5, 0.2]
+                : isSystemRunning && currentState === 'live'
+                  ? [0.22, 0.48, 0.22]
+                  : isBusy
+                    ? [0.15, 0.35, 0.15]
+                    : 0.16,
           }}
           transition={{
-            duration: isBusy ? 1.2 : 2.4,
-            repeat: (isSystemRunning && currentState === 'live') || isBusy ? Infinity : 0,
+            duration: armed ? 0.8 : isBusy ? 1.2 : 2.4,
+            repeat: armed || (isSystemRunning && currentState === 'live') || isBusy ? Infinity : 0,
             ease: 'easeInOut',
           }}
         />
 
-        <div className="relative z-10 flex h-full items-center justify-center">
+        {/* Vertical slide fill (bottom-up rose fill when armed) */}
+        {armed && (
+          <motion.div
+            className="absolute inset-x-0 bottom-0 bg-rose-500/20 rounded-b-2xl"
+            animate={{ height: `${slideProgress * 100}%` }}
+            transition={{ duration: 0.05, ease: 'linear' }}
+          />
+        )}
+
+        {/* Power icon at top */}
+        <div
+          className={`relative z-10 flex items-center justify-center ${colors.text}`}
+          style={{ height: BTN_SIZE, width: BTN_SIZE }}
+        >
           {isBusy ? (
             <Loader2 size={14} strokeWidth={2.3} className="animate-spin" />
           ) : (
             <Power size={14} strokeWidth={2.3} />
           )}
         </div>
-      </motion.button>
 
-      <AnimatePresence>
-        {showSlideConfirm && (
-          <motion.div
-            initial={{ opacity: 0, x: 8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 8 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="absolute right-14 top-1/2 z-30 h-8 w-44 -translate-y-1/2 rounded-full border border-rose-300/20 bg-black/55 px-1 backdrop-blur-xl"
-            onWheel={onSlideWheel}
-            onPointerDown={onConfirmPointerDown}
-            onPointerMove={onConfirmPointerMove}
-            onPointerUp={onConfirmPointerUp}
-            onPointerCancel={onConfirmPointerUp}
-            onPointerLeave={onConfirmPointerUp}
-          >
-            <div className="relative h-full w-full overflow-hidden rounded-full bg-white/5">
-              <motion.div
-                className="absolute inset-y-0 left-0 rounded-full bg-rose-400/25"
-                animate={{ width: `${slideProgress * 100}%` }}
-                transition={{ duration: 0.07, ease: 'linear' }}
-              />
-              <div className="relative z-10 flex h-full items-center justify-center gap-1 text-[11px] text-rose-200/85">
-                <TriangleAlert size={12} />
-                <span>Slide to stop</span>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        {/* Arrow indicator when armed */}
+        <AnimatePresence>
+          {armed && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute bottom-2 left-0 right-0 flex flex-col items-center gap-0.5 text-rose-300/60"
+            >
+              <svg width="12" height="8" viewBox="0 0 12 8" fill="none">
+                <path d="M1 1L6 6L11 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <span className="text-[7px] font-medium uppercase tracking-widest">stop</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
 
+      {/* Hint tooltip */}
       <AnimatePresence>
-        {hintText && (
+        {hintText && !armed && (
           <motion.div
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
@@ -337,28 +323,6 @@ export function MasterControl({
           </motion.div>
         )}
       </AnimatePresence>
-
-      {isHolding && isSystemOff && !showSlideConfirm && (
-        <motion.span
-          className="absolute -bottom-6 right-0 text-[11px] text-gray-500"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-        >
-          Starting system...
-        </motion.span>
-      )}
-
-      {isHolding && isSystemRunning && !showSlideConfirm && (
-        <motion.span
-          className="absolute -bottom-6 right-0 text-[11px] text-gray-500"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-        >
-          Hold to arm stop
-        </motion.span>
-      )}
     </div>
   );
 }
