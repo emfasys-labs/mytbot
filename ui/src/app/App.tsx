@@ -31,6 +31,7 @@ function App() {
   const [newsItems, setNewsItems] = useState<string[]>([]);
   const [tradesToday, setTradesToday] = useState(0);
   const [lastTradeMinutes, setLastTradeMinutes] = useState(0);
+  const lastTradeTs = useRef<number>(0);
   const [livePositions, setLivePositions] = useState<Position[]>([]);
   const [activeBrokers, setActiveBrokers] = useState<string[]>([]);
   const [allBrokers, setAllBrokers] = useState<Record<string, { configured: boolean; connected: boolean }>>({});
@@ -145,7 +146,14 @@ function App() {
         const unrealised = toNumber(pnl.today?.unrealised, 0);
         const todayTrades = Math.max(0, Math.trunc(toNumber(pnl.today?.trades, 0)));
 
-        setTotalCapital(Math.max(0, portfolioValue));
+        setTotalCapital((prev) => {
+          const next = Math.max(0, portfolioValue);
+          if (prev > 0 && next > 0) {
+            const ratio = next / prev;
+            if (ratio > 3 || ratio < 0.33) return prev;
+          }
+          return next;
+        });
         if (portfolioValue > 0) {
           setActiveCapital(Math.max(0, Math.min(portfolioValue, portfolioValue * pct)));
         } else {
@@ -195,8 +203,11 @@ function App() {
 
         const lastSignalTs = signalRows.find((s) => s.timestamp)?.timestamp;
         if (lastSignalTs) {
-          const deltaMs = Date.now() - new Date(lastSignalTs).getTime();
-          setLastTradeMinutes(Math.max(0, Math.round(deltaMs / 60000)));
+          const tsMs = new Date(lastSignalTs).getTime();
+          if (tsMs > lastTradeTs.current) {
+            lastTradeTs.current = tsMs;
+            setLastTradeMinutes(Math.max(0, Math.round((Date.now() - tsMs) / 60000)));
+          }
         }
       }
 
@@ -289,8 +300,11 @@ function App() {
           for (let i = events.length - 1; i >= 0; i -= 1) {
             const ts = eventTimestamp(events[i]);
             if (ts) {
-              const deltaMs = Date.now() - new Date(ts).getTime();
-              setLastTradeMinutes(Math.max(0, Math.round(deltaMs / 60000)));
+              const tsMs = new Date(ts).getTime();
+              if (tsMs > lastTradeTs.current) {
+                lastTradeTs.current = tsMs;
+                setLastTradeMinutes(Math.max(0, Math.round((Date.now() - tsMs) / 60000)));
+              }
               break;
             }
           }
@@ -375,10 +389,6 @@ function App() {
                       </span>
                     ))}
                 </div>
-              ) : systemState === 'off' ? (
-                <span className="text-[10px] text-gray-500">
-                  Tap to start
-                </span>
               ) : null}
             </div>
           </div>

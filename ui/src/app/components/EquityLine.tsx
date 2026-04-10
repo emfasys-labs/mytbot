@@ -22,7 +22,6 @@ export function EquityLine({
 }: EquityLineProps) {
   const [dataPoints, setDataPoints] = useState<number[]>([]);
 
-  // Generate initial smooth equity curve
   useEffect(() => {
     if (historyValues && historyValues.length > 1) {
       setDataPoints(historyValues.slice(-80));
@@ -35,7 +34,6 @@ export function EquityLine({
     
     for (let i = 0; i < steps; i++) {
       const progress = i / steps;
-      // Smooth curve with some variation
       const variation = Math.sin(progress * Math.PI * 3) * (dailyPnL * 0.1);
       const value = baseValue + (dailyPnL * progress) + variation;
       points.push(value);
