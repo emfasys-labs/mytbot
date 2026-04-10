@@ -307,6 +307,7 @@ class BrokerManager:
             connected = await asyncio.wait_for(adapter.connect(), timeout=timeout)
             if connected:
                 status.connected = True
+                status.error = None
                 self.adapters[name] = adapter
                 logger.info("broker | {} | connected", name)
             else:
