@@ -79,6 +79,7 @@ function App() {
       const result = await api.systemStop();
       setSystemState(result.state ?? 'off');
       setActiveBrokers([]);
+      setNewsItems([]);
     } catch {
       // Keep current state
     }
