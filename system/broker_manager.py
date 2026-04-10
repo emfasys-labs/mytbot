@@ -5,14 +5,20 @@ Auto-discover and connect available brokers.
 Never crash if a broker is unavailable — just skip it.
 Reports which brokers are live and which failed.
 
-IBKR gets special handling: a fast TCP probe (3s) checks if Gateway/TWS
-is even listening before attempting the slow multi-step ib_insync handshake.
+IBKR gets special handling:
+  - Quick TCP probe (3s) before attempting the slow ib_insync handshake
+  - API health check (send handshake, verify response) before full connect
+  - Single-attempt guard (only one IBKR connect at a time)
+  - Exponential backoff on repeated failures (60s → 120s → 300s max)
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import socket
+import struct
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -105,6 +111,33 @@ async def _tcp_probe(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+def _ibkr_api_alive(host: str, port: int, timeout: float = 5.0) -> bool:
+    """Send IB API handshake and check if Gateway actually responds.
+
+    Returns True only if the Gateway sends back protocol bytes.
+    This catches the case where the Gateway is listening on the port
+    but its API handler is dead (zombie state).
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        msg = b"API\x00" + struct.pack("!I", 9) + b"v100..176"
+        sock.sendall(msg)
+        sock.settimeout(timeout)
+        data = sock.recv(4096)
+        return len(data) > 0
+    except Exception:
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 class BrokerManager:
     """Attempts to connect every configured broker, skipping those that fail."""
 
@@ -115,6 +148,9 @@ class BrokerManager:
         self.report = BrokerReport()
         self._late_connect_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
+        self._ibkr_connecting = asyncio.Lock()
+        self._ibkr_fail_count: int = 0
+        self._ibkr_last_attempt: float = 0
 
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
@@ -175,16 +211,15 @@ class BrokerManager:
 
     async def _handle_ibkr(self, cfg: dict[str, Any], status: BrokerStatus) -> None:
         """
-        IBKR needs special handling because ib_insync's connectAsync does a
-        complex multi-step handshake (TCP → API negotiation → account sync →
-        summary probe → optional boost reconnect) that can take 30–90 seconds.
-
-        Strategy:
-          1. Quick TCP probe (3s) — is Gateway/TWS even listening?
-          2. If not → skip immediately with a clear message.
-          3. If yes → fire the full connect as a background task so it never
-             blocks startup. The trading loop picks up IBKR when it's ready.
+        IBKR connection with three safety layers:
+          1. TCP probe — is the port open at all?
+          2. API health check — does the Gateway actually respond to protocol?
+          3. Background connect with single-attempt guard
         """
+        if self._ibkr_connecting.locked():
+            logger.debug("broker | ibkr | connection attempt already in progress, skipping")
+            return
+
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 7497)
 
@@ -199,9 +234,21 @@ class BrokerManager:
             logger.warning("broker | ibkr | {}", status.error)
             return
 
+        api_ok = await asyncio.get_event_loop().run_in_executor(
+            None, _ibkr_api_alive, host, port, 5.0
+        )
+        if not api_ok:
+            status.error = (
+                "Gateway listening but API not responding — "
+                "restart Gateway (zombie state)"
+            )
+            logger.warning("broker | ibkr | {}", status.error)
+            self._ibkr_fail_count += 1
+            return
+
+        self._ibkr_fail_count = 0
         logger.info(
-            "broker | ibkr | Gateway listening — connecting in background "
-            "(handshake takes 30-60s, system proceeds immediately)"
+            "broker | ibkr | Gateway API alive — connecting in background"
         )
         self._late_connect_task = asyncio.create_task(
             self._background_ibkr_connect(cfg, status),
@@ -211,29 +258,46 @@ class BrokerManager:
     async def _background_ibkr_connect(
         self, cfg: dict[str, Any], status: BrokerStatus
     ) -> None:
-        """Connect IBKR in the background. Updates status + adapters when done."""
-        try:
-            adapter = get_broker("ibkr", paper_mode=self.paper_mode, **cfg)
-            connected = await asyncio.wait_for(
-                adapter.connect(), timeout=self._BROKER_TIMEOUTS["ibkr"]
-            )
-            if connected:
-                status.connected = True
-                status.error = None
-                self.adapters["ibkr"] = adapter
-                logger.info("broker | ibkr | connected (background)")
-            else:
-                status.error = "connect() returned False after background attempt"
-                logger.warning("broker | ibkr | background connect failed")
-        except asyncio.TimeoutError:
-            status.error = f"Connection timed out ({self._BROKER_TIMEOUTS['ibkr']}s)"
-            logger.warning("broker | ibkr | background connect timed out")
-        except asyncio.CancelledError:
-            status.error = "Background connect cancelled (system stopping)"
-            logger.info("broker | ibkr | background connect cancelled")
-        except Exception as exc:
-            status.error = str(exc)[:200]
-            logger.warning("broker | ibkr | background connect error: {}", exc)
+        """Connect IBKR in the background with a single-attempt guard."""
+        async with self._ibkr_connecting:
+            adapter = None
+            try:
+                self._ibkr_last_attempt = time.monotonic()
+                adapter = get_broker("ibkr", paper_mode=self.paper_mode, **cfg)
+                connected = await asyncio.wait_for(
+                    adapter.connect(), timeout=self._BROKER_TIMEOUTS["ibkr"]
+                )
+                if connected:
+                    status.connected = True
+                    status.error = None
+                    self.adapters["ibkr"] = adapter
+                    self._ibkr_fail_count = 0
+                    logger.info("broker | ibkr | connected (background)")
+                else:
+                    self._ibkr_fail_count += 1
+                    status.error = "connect() returned False"
+                    logger.warning("broker | ibkr | connect failed (attempt {})", self._ibkr_fail_count)
+            except asyncio.TimeoutError:
+                self._ibkr_fail_count += 1
+                status.error = f"Timed out ({self._BROKER_TIMEOUTS['ibkr']}s)"
+                logger.warning("broker | ibkr | connect timed out (attempt {})", self._ibkr_fail_count)
+                if adapter is not None:
+                    try:
+                        await adapter.disconnect()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                status.error = "Cancelled (system stopping)"
+                logger.info("broker | ibkr | background connect cancelled")
+                if adapter is not None:
+                    try:
+                        await adapter.disconnect()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self._ibkr_fail_count += 1
+                status.error = str(exc)[:200]
+                logger.warning("broker | ibkr | connect error (attempt {}): {}", self._ibkr_fail_count, exc)
 
     async def _try_connect(
         self, name: str, cfg: dict[str, Any], status: BrokerStatus, timeout: float
@@ -255,16 +319,23 @@ class BrokerManager:
             status.error = str(exc)[:200]
             logger.warning("broker | {} | connect error: {}", name, exc)
 
-    def start_reconnect_loop(self, interval: float = 60) -> None:
+    _RECONNECT_BASE = 60
+    _RECONNECT_MAX = 300
+
+    def start_reconnect_loop(self) -> None:
         """Start a background task that retries failed broker connections."""
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return
         self._reconnect_task = asyncio.create_task(
-            self._reconnect_loop(interval), name="broker-reconnect-loop"
+            self._reconnect_loop(), name="broker-reconnect-loop"
         )
 
-    async def _reconnect_loop(self, interval: float) -> None:
-        await asyncio.sleep(interval)
+    def _ibkr_backoff(self) -> float:
+        """Exponential backoff: 60 → 120 → 240 → 300 (capped)."""
+        return min(self._RECONNECT_BASE * (2 ** self._ibkr_fail_count), self._RECONNECT_MAX)
+
+    async def _reconnect_loop(self) -> None:
+        await asyncio.sleep(self._RECONNECT_BASE)
         while True:
             failed = [
                 name for name, s in self.report.brokers.items()
@@ -274,6 +345,14 @@ class BrokerManager:
                 cfg = self.configs.get(name, {})
                 status = self.report.brokers[name]
                 if name == "ibkr":
+                    backoff = self._ibkr_backoff()
+                    elapsed = time.monotonic() - self._ibkr_last_attempt if self._ibkr_last_attempt else backoff
+                    if elapsed < backoff:
+                        logger.debug(
+                            "broker | ibkr | backoff {:.0f}s (next in {:.0f}s)",
+                            backoff, backoff - elapsed,
+                        )
+                        continue
                     await self._handle_ibkr(cfg, status)
                     if self._late_connect_task:
                         try:
@@ -288,7 +367,7 @@ class BrokerManager:
             if newly:
                 logger.info("broker | reconnected: {}", ", ".join(newly))
 
-            await asyncio.sleep(interval)
+            await asyncio.sleep(self._RECONNECT_BASE)
 
     async def disconnect_all(self) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():

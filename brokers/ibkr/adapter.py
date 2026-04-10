@@ -636,8 +636,7 @@ class IBKRAdapter(BrokerAdapter):
                     "connect | IBKR | still no managed accounts after reconnect | "
                     "raise IBKR_CONNECT_TIMEOUT (e.g. 90–120) or wait for Gateway API"
                 )
-                self._ib.disconnect()
-                self._ib = None
+                self._force_close_ib()
                 return False
 
             if self._post_connect_summary_probe_enabled():
@@ -664,8 +663,7 @@ class IBKRAdapter(BrokerAdapter):
                         logger.error(
                             "connect | IBKR | no managed accounts after boosted reconnect"
                         )
-                        self._ib.disconnect()
-                        self._ib = None
+                        self._force_close_ib()
                         return False
                     if not await self._account_summary_probe_ok(probe_to):
                         logger.warning(
@@ -688,7 +686,6 @@ class IBKRAdapter(BrokerAdapter):
                 )
             return True
         except OSError as exc:
-            # Windows: WinError 1225 connection refused; POSIX: errno 111, etc.
             logger.warning(
                 "connect | IBKR | unreachable | host={} | port={} | error={} | "
                 "start IB Gateway or TWS with API enabled on this port (paper=7497, live=7496)",
@@ -696,22 +693,37 @@ class IBKRAdapter(BrokerAdapter):
                 self.port,
                 exc,
             )
-            self._ib = None
+            self._force_close_ib()
             return False
         except Exception as exc:  # noqa: BLE001 — broker connectivity
             logger.exception("connect | IBKR | failed | error={}", exc)
-            self._ib = None
+            self._force_close_ib()
             return False
 
-    async def disconnect(self) -> None:
-        """Clean disconnect from IB Gateway / TWS."""
+    def _force_close_ib(self) -> None:
+        """Ensure the IB instance and its underlying socket are fully closed."""
+        if self._ib is None:
+            return
         try:
-            if self._ib is not None and self._ib.isConnected():
+            if self._ib.isConnected():
                 self._ib.disconnect()
-                logger.info("disconnect | IBKR | done")
+            sock = getattr(self._ib.client, "_socket", None) or getattr(self._ib.client, "socket", None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._ib = None
+
+    async def disconnect(self) -> None:
+        """Clean disconnect from IB Gateway / TWS, ensuring socket closure."""
+        try:
+            self._force_close_ib()
+            logger.info("disconnect | IBKR | done")
         except Exception as exc:  # noqa: BLE001
             logger.warning("disconnect | IBKR | error={}", exc)
-        finally:
             self._ib = None
             self._last_ib_order_snapshot_monotonic = -1e9
 

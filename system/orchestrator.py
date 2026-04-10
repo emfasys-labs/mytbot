@@ -115,7 +115,7 @@ class Orchestrator:
                     self.errors.append("No brokers connected — running in observation mode")
                     logger.warning("orchestrator | no brokers — observation mode")
 
-                self._broker_manager.start_reconnect_loop(interval=60)
+                self._broker_manager.start_reconnect_loop()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
