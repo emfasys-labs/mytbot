@@ -604,6 +604,28 @@ async def system_stop():
     return result
 
 
+@app.put("/system/capital-allocation")
+async def set_capital_allocation(body: dict):
+    """Set the fraction of capital exposed for trading (0.0–1.0)."""
+    orch = _get_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not available")
+    pct = float(body.get("pct", 1.0))
+    if not (0.0 <= pct <= 1.0):
+        raise HTTPException(status_code=400, detail="pct must be between 0 and 1")
+    orch.set_capital_pct(pct)
+    return {"capital_pct": orch.capital_pct}
+
+
+@app.get("/system/capital-allocation")
+async def get_capital_allocation():
+    """Get the current capital allocation fraction."""
+    orch = _get_orchestrator()
+    if orch is None:
+        return {"capital_pct": 1.0}
+    return {"capital_pct": orch.capital_pct}
+
+
 @app.websocket("/ws")
 async def ws_updates(ws: WebSocket):
     token = ws.query_params.get("token") or ws.query_params.get("dashboard_token")

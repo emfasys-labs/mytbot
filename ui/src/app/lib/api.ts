@@ -114,6 +114,7 @@ export type SystemStatusResponse = {
   trading?: { running: boolean; iterations?: number; last_error?: string | null };
   errors?: string[];
   pipeline_running?: boolean;
+  capital_pct?: number;
 };
 
 async function getJson<T>(path: string): Promise<T> {
@@ -126,6 +127,17 @@ async function getJson<T>(path: string): Promise<T> {
 async function postJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`${path} failed (${r.status})`);
+  return (await r.json()) as T;
+}
+
+async function putJson<T>(path: string, body: unknown): Promise<T> {
+  const base = await resolveApiBase();
+  const r = await fetch(`${base}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
   return (await r.json()) as T;
 }
@@ -144,6 +156,8 @@ export const api = {
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
+  setCapitalAllocation: (pct: number) =>
+    putJson<{ capital_pct: number }>('/system/capital-allocation', { pct }),
 };
 
 export function toNumber(v: unknown, fallback = 0): number {

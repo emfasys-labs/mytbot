@@ -46,6 +46,19 @@ from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
 
+_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-EUR", "-GBP", "/USD", "/USDT", "/EUR", "/GBP")
+_CRYPTO_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "UNI", "LTC"}
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    s = symbol.upper().strip()
+    if any(s.endswith(suf) for suf in _CRYPTO_SUFFIXES):
+        base = s.split("-")[0].split("/")[0]
+        if base in _CRYPTO_BASES:
+            return True
+    return False
+
+
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     p = Path(path)
     if not p.exists():
@@ -72,12 +85,14 @@ class TradingLoop:
         lookback_bars: int = 200,
         reconcile_interval_sec: int = 300,
         broker_manager: Any = None,
+        capital_pct: float = 1.0,
     ):
         self.broker_configs = broker_configs
         self.available_brokers = list(available_brokers)
         self.paper_mode = paper_mode
         self._broker_manager = broker_manager
         self.portfolio_value = portfolio_value
+        self.capital_pct = max(0.0, min(1.0, capital_pct))
         self.loop_interval_sec = max(10, loop_interval_sec)
         self.timeframe = timeframe
         self.lookback_bars = lookback_bars
@@ -187,6 +202,7 @@ class TradingLoop:
 
             while not self._stop_event.is_set():
                 self._check_late_brokers()
+                effective_value = self.portfolio_value * self.capital_pct
                 try:
                     generated = 0
                     executed = 0
@@ -237,11 +253,14 @@ class TradingLoop:
 
                         signal = self.sig_engine.process(
                             raw,
-                            portfolio_value=Decimal(str(self.portfolio_value)),
+                            portfolio_value=Decimal(str(effective_value)),
                             news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
                         )
                         if signal is None:
                             continue
+
+                        if _is_crypto_symbol(symbol) and signal.asset_class != "crypto":
+                            signal.asset_class = "crypto"
 
                         if ai_result is not None:
                             signal.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -254,11 +273,11 @@ class TradingLoop:
 
                         portfolio_state = await _load_portfolio_state(
                             session_factory,
-                            fallback_portfolio_value=Decimal(str(self.portfolio_value)),
+                            fallback_portfolio_value=Decimal(str(effective_value)),
                             signal_price_fallback=signal.suggested_price,
                         )
                         self.risk_engine.update_high_watermark(
-                            Decimal(str(portfolio_state.get("high_watermark_value", self.portfolio_value)))
+                            Decimal(str(portfolio_state.get("high_watermark_value", effective_value)))
                         )
                         self.risk_engine.restore_runtime_state(portfolio_state)
                         risk_decision = await self.risk_engine.evaluate_and_persist(
@@ -344,4 +363,5 @@ class TradingLoop:
             "last_iteration_at": self.last_iteration_at.isoformat() if self.last_iteration_at else None,
             "last_error": self.last_error,
             "paper_mode": self.paper_mode,
+            "capital_pct": self.capital_pct,
         }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { NewsTicker, type TickerItem } from './components/NewsTicker';
 import { EquityLine } from './components/EquityLine';
@@ -25,7 +25,12 @@ function App() {
   const [controlState, setControlState] = useState<ControlState>('flatten');
   const [systemState, setSystemState] = useState<SystemState>('off');
   const [totalCapital, setTotalCapital] = useState(0);
-  const [activeCapital, setActiveCapital] = useState(0);
+  const [capitalPct, setCapitalPct] = useState(() => {
+    try {
+      const v = parseFloat(localStorage.getItem('mytbot_capital_pct') ?? '');
+      return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 1;
+    } catch { return 1; }
+  });
   const [dailyPnL, setDailyPnL] = useState(0);
   const [equityHistory, setEquityHistory] = useState<number[]>([]);
   const [newsItems, setNewsItems] = useState<TickerItem[]>([]);
@@ -87,14 +92,17 @@ function App() {
 
   const isActive = controlState === 'live' && systemState === 'running';
   const isFlattened = controlState === 'flatten' || systemState === 'off';
-  const activeCapitalPct = useMemo(
-    () => (totalCapital > 0 ? activeCapital / totalCapital : 0),
-    [activeCapital, totalCapital]
-  );
-  const activeCapitalPctRef = useRef(activeCapitalPct);
+
+  const handlePctChange = useCallback((pct: number) => {
+    const clamped = Math.max(0, Math.min(1, pct));
+    setCapitalPct(clamped);
+    try { localStorage.setItem('mytbot_capital_pct', String(clamped)); } catch {}
+  }, []);
+
   useEffect(() => {
-    activeCapitalPctRef.current = activeCapitalPct;
-  }, [activeCapitalPct]);
+    api.setCapitalAllocation(capitalPct).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [wsConnected, setWsConnected] = useState(false);
   const wsConnectedRef = useRef(false);
@@ -104,8 +112,6 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const pct = activeCapitalPctRef.current;
-
       const results = await Promise.allSettled([
         api.getPnl(),
         api.getPnlHistory(90),
@@ -158,11 +164,6 @@ function App() {
           }
           return next;
         });
-        if (portfolioValue > 0) {
-          setActiveCapital(Math.max(0, Math.min(portfolioValue, portfolioValue * pct)));
-        } else {
-          setActiveCapital(0);
-        }
         setDailyPnL(realised + unrealised);
         setTradesToday(todayTrades);
       }
@@ -401,9 +402,10 @@ function App() {
             <div className="absolute right-0 top-1/2 -translate-y-1/2">
               <CapitalSlider
                 totalCapital={totalCapital}
-                activeCapital={activeCapital}
-                onCapitalChange={setActiveCapital}
+                pct={capitalPct}
+                onPctChange={handlePctChange}
                 onHaptic={() => triggerHaptic('light')}
+                dormant={isFlattened}
               />
             </div>
 

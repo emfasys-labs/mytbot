@@ -19,7 +19,7 @@ max_consecutive_losses: 3       # Enter cooldown after 3 losses in a row
 cooldown_minutes: 60            # Wait 60 minutes before trading again
 
 # ── Signal quality ────────────────────────────────────────────────────────────
-min_signal_confidence: 0.55     # Minimum confidence score to proceed (0.0-1.0)
+min_signal_confidence: 0.50     # Minimum confidence score to proceed (0.0-1.0)
 max_trades_per_day: 20          # Hard cap on daily trade count
 
 # ── Asset class limits ────────────────────────────────────────────────────────

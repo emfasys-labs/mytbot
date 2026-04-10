@@ -51,6 +51,7 @@ class Orchestrator:
         self.state = SystemState.OFF
         self.state_changed_at = datetime.now(timezone.utc)
         self.errors: list[str] = []
+        self.capital_pct: float = 1.0
 
         self._dep_manager = DependencyManager(compose_dir=os.getcwd())
         self._dep_report: DependencyReport | None = None
@@ -133,6 +134,7 @@ class Orchestrator:
                     loop_interval_sec=int(os.getenv("LOOP_INTERVAL_SEC", "120")),
                     timeframe=os.getenv("TIMEFRAME", "1h"),
                     broker_manager=self._broker_manager,
+                    capital_pct=self.capital_pct,
                 )
                 await self._trading_loop.start()
 
@@ -231,7 +233,15 @@ class Orchestrator:
             "trading": trading_status,
             "errors": list(self.errors),
             "pipeline_running": self._pipeline_task is not None and not self._pipeline_task.done(),
+            "capital_pct": self.capital_pct,
         }
+
+    def set_capital_pct(self, pct: float) -> None:
+        """Set the fraction of total capital available for trading (0.0 – 1.0)."""
+        self.capital_pct = max(0.0, min(1.0, float(pct)))
+        if self._trading_loop is not None:
+            self._trading_loop.capital_pct = self.capital_pct
+        logger.info("orchestrator | capital_pct set to {:.0%}", self.capital_pct)
 
     async def _run_migrations(self) -> None:
         """Run database migrations / create tables."""

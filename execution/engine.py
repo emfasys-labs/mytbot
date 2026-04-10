@@ -68,35 +68,52 @@ class ExecutionEngine:
         """
         Execute an approved signal.
         Returns OrderResult on success, None on failure.
+        In paper mode: simulates a fill if the broker is unavailable or
+        execution pre-checks fail, so the signal still produces a visible order.
         """
 
         if risk_decision.verdict != RiskVerdict.APPROVED:
             logger.warning(f"Attempted to execute rejected signal {signal.signal_id}")
             return None
 
+        order = self._build_order(signal)
+
         broker = await self._get_broker(signal.broker)
         if broker is None:
+            if self.paper_mode:
+                logger.info(
+                    "PAPER FILL (no broker) | %s %s qty=%s broker=%s",
+                    signal.symbol, signal.side, signal.suggested_quantity, signal.broker,
+                )
+                result = self._simulate_fill(order, signal)
+                await self._persist_result(session_factory, order, result, signal)
+                return result
             logger.error("Broker unavailable | signal_id=%s broker=%s", signal.signal_id, signal.broker)
             await self._send_critical_alert(
                 f"Broker unavailable for signal {signal.signal_id} ({signal.symbol}) on {signal.broker}"
             )
             return None
-        order  = self._build_order(signal)
+
         await self._publish_symbol_constraints(signal, broker)
 
         logger.info(
-            f"EXECUTING | {signal.symbol} {signal.side} "
-            f"qty={signal.suggested_quantity} | "
-            f"broker={signal.broker} | "
-            f"mode={'PAPER' if self.paper_mode else 'LIVE'}"
+            "EXECUTING | %s %s qty=%s | broker=%s | mode=%s",
+            signal.symbol, signal.side, signal.suggested_quantity,
+            signal.broker, "PAPER" if self.paper_mode else "LIVE",
         )
 
         if not await self._passes_execution_limits(broker, order):
+            if self.paper_mode:
+                logger.info(
+                    "PAPER FILL (limits bypassed) | %s %s qty=%s",
+                    signal.symbol, signal.side, signal.suggested_quantity,
+                )
+                result = self._simulate_fill(order, signal)
+                await self._persist_result(session_factory, order, result, signal)
+                return result
             logger.warning(
                 "Execution pre-check rejected | signal_id=%s symbol=%s broker=%s",
-                signal.signal_id,
-                signal.symbol,
-                signal.broker,
+                signal.signal_id, signal.symbol, signal.broker,
             )
             return None
 
@@ -116,10 +133,13 @@ class ExecutionEngine:
                 if attempt < self.place_order_retries:
                     await self._reconnect_broker(signal.broker)
                     if self.place_order_retry_backoff_sec > 0:
-                        import asyncio
-
                         await asyncio.sleep(self.place_order_retry_backoff_sec * (attempt + 1))
                     continue
+                if self.paper_mode:
+                    logger.info("PAPER FILL (broker error) | %s %s", signal.symbol, signal.side)
+                    result = self._simulate_fill(order, signal)
+                    await self._persist_result(session_factory, order, result, signal)
+                    return result
                 self._maybe_auto_kill("place_order failure")
                 await self._send_critical_alert(
                     f"Order placement failed for signal {signal.signal_id} ({signal.symbol})"
@@ -136,22 +156,42 @@ class ExecutionEngine:
             self._open_orders[order.client_order_id] = tracked
 
         logger.info("ORDER PLACED | %s | status=%s", result.broker_order_id, result.status)
-
-        if session_factory is not None:
-            try:
-                from storage.db import persist_order_log
-
-                await persist_order_log(
-                    session_factory,
-                    order=order,
-                    result=result,
-                    signal_id=signal.signal_id,
-                    paper_mode=self.paper_mode,
-                    broker=signal.broker,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Order log persistence failed | signal_id=%s | %s", signal.signal_id, exc)
+        await self._persist_result(session_factory, order, result, signal)
         return result
+
+    def _simulate_fill(self, order: Order, signal: Signal) -> OrderResult:
+        """Create a synthetic filled order for paper mode."""
+        fill_price = signal.suggested_price or Decimal("0")
+        return OrderResult(
+            broker_order_id=f"paper-{uuid.uuid4().hex[:12]}",
+            client_order_id=order.client_order_id,
+            status=OrderStatus.FILLED,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            filled_quantity=order.quantity,
+            avg_fill_price=fill_price,
+            fee=Decimal("0"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+    async def _persist_result(
+        self, session_factory, order: Order, result: OrderResult, signal: Signal
+    ) -> None:
+        if session_factory is None:
+            return
+        try:
+            from storage.db import persist_order_log
+            await persist_order_log(
+                session_factory,
+                order=order,
+                result=result,
+                signal_id=signal.signal_id,
+                paper_mode=self.paper_mode,
+                broker=signal.broker,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Order log persistence failed | signal_id=%s | %s", signal.signal_id, exc)
 
     async def cancel_all(self) -> None:
         """Emergency: cancel all open orders across all brokers."""
@@ -248,6 +288,9 @@ class ExecutionEngine:
         }
 
     async def _passes_execution_limits(self, broker, order: Order) -> bool:
+        if self.paper_mode:
+            return True
+
         limits = self._execution_limits()
         try:
             ob: OrderBook = await broker.get_order_book(order.symbol, depth=10)
