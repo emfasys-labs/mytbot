@@ -16,22 +16,31 @@ from typing import Any
 
 import yaml
 from loguru import logger
+from sqlalchemy import select
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
 from ai.regime import filter_by_allowed_strategies
+from ai.thesis_generator import ThesisGenerator
 from control.command_bus import CommandBus
 from control.runner_control import (
     apply_control_commands,
     hydrate_risk_parameters_from_bus,
     publish_runner_heartbeat,
 )
+from data.scanner import UniverseScanner
+from data.universe import UniverseManager
+from data.universe_tiers import load_universe_tiers
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
+from graph.engine import DependencyGraphEngine
+from graph.pipeline import DiscoveryPipeline
 from risk.engine import RiskEngine, RiskVerdict
+from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from run_m3 import (
+    _apply_signal_to_portfolio_state,
     _load_portfolio_state,
     _load_recent_features,
     _persist_position_snapshot,
@@ -41,7 +50,8 @@ from run_m3 import (
 )
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
-from storage.models import AIOutputLog
+from storage.discovery import persist_anomaly_log, persist_thesis_log
+from storage.models import AIOutputLog, FeatureSnapshot
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -65,6 +75,56 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
         return {}
     with p.open(encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def _enrich_signal_volume_z(signal: Any, df: Any) -> None:
+    """
+    Compute rolling volume z-score from the feature DataFrame and store in
+    signal.metadata["volume_z_score"].  Used by the quality gate in the risk engine.
+    Safe — never raises; leaves metadata unchanged on any error.
+    """
+    try:
+        import pandas as pd  # already available in this module's env
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return
+        if "volume" not in df.columns:
+            return
+        vol = df["volume"].dropna()
+        if len(vol) < 5:
+            return
+        mean_v = float(vol.mean())
+        std_v = float(vol.std())
+        if std_v <= 0:
+            return
+        latest_v = float(vol.iloc[-1])
+        z = (latest_v - mean_v) / std_v
+        # Ensure metadata is a real dict (not None) before writing
+        if not isinstance(getattr(signal, "metadata", None), dict):
+            signal.metadata = {}
+        signal.metadata["volume_z_score"] = round(z, 4)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _apply_saved_mode_to_risk_cfg(risk_engine: "RiskEngine") -> None:
+    """Apply the last-saved mode profile to the risk engine config dict at startup."""
+    import json as _json
+
+    mode_file = Path("data/runtime/active_mode.json")
+    if not mode_file.is_file():
+        return
+    try:
+        mode = _json.loads(mode_file.read_text(encoding="utf-8")).get("mode", "trader")
+    except Exception:  # noqa: BLE001
+        return
+    modes = _load_yaml("config/risk_modes.yaml")
+    profile = modes.get(mode, {})
+    for key, value in profile.items():
+        if key in ("label", "description"):
+            continue
+        risk_engine.config[key] = value
+    if profile:
+        logger.info("trading_loop | applied mode profile | mode={}", mode)
 
 
 class TradingLoop:
@@ -118,7 +178,9 @@ class TradingLoop:
         """Pick up brokers that connected after startup (e.g. IBKR background connect)."""
         if self._broker_manager is None:
             return
-        for name, adapter in self._broker_manager.adapters.items():
+        # Snapshot the dict to avoid "dictionary changed size during iteration"
+        # when a broker connects asynchronously while we're looping.
+        for name, adapter in list(self._broker_manager.adapters.items()):
             if name not in self.available_brokers:
                 self.available_brokers.append(name)
                 if self.router is not None:
@@ -160,6 +222,9 @@ class TradingLoop:
 
             symbols_raw = pipeline_cfg.get("symbols", [])
             symbols = [s.strip() for s in symbols_raw if s.strip()] if isinstance(symbols_raw, list) else []
+            # Keep base symbols permanently in the loop even in dynamic mode so
+            # we always monitor a stable liquid anchor set (SPY/QQQ/BTC/ETH, etc).
+            base_symbols = list(dict.fromkeys(symbols))
             if not symbols:
                 logger.warning("trading_loop | no symbols in config/data_pipeline.yaml — idle")
                 self._running = False
@@ -180,11 +245,32 @@ class TradingLoop:
             )
             self.sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
             self.risk_engine = RiskEngine(risk_cfg)
+            # Starting the system from OFF should begin from a clean trading state.
+            # Clear any stale latched kill switch from prior runs.
+            try:
+                self.risk_engine.reset_kill()
+            except Exception:  # noqa: BLE001
+                pass
+            # Apply persisted mode overrides (if user selected a mode before this start)
+            _apply_saved_mode_to_risk_cfg(self.risk_engine)
             set_risk_engine(self.risk_engine)
+            discovery_enabled = bool(discovery_cfg.get("enabled", False)) and os.getenv("DISCOVERY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+            discovery_pipeline = None
+            if discovery_enabled:
+                universe = UniverseManager()
+                scanner = UniverseScanner(
+                    universe,
+                    session_factory,
+                    cooldown_seconds=int(discovery_cfg.get("scanner", {}).get("cooldown_seconds", 300)),
+                )
+                graph = DependencyGraphEngine(relationships_path=str(discovery_cfg.get("relationships_path", "graph/data/relationships.yaml")))
+                thesis_generator = ThesisGenerator()
+                discovery_pipeline = DiscoveryPipeline(scanner, graph, thesis_generator, self.sig_engine)
 
             ai_enabled = bool(ai_cfg.get("enabled", True))
             ai_classifier = NewsClassifier() if ai_enabled else None
             ai_pipeline = AIPipeline(ai_cfg.get("pipeline", {}), classifier=ai_classifier) if ai_enabled else None
+            ai_cycle_timeout_sec = float(ai_cfg.get("pipeline", {}).get("cycle_timeout_seconds", 45))
 
             strat_cfg = strategies_cfg.get("strategies", {})
             momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
@@ -199,10 +285,144 @@ class TradingLoop:
             await hydrate_risk_parameters_from_bus(bus, self.risk_engine)
 
             next_reconcile_at = datetime.now(timezone.utc).timestamp()
+            universe_mode = str(pipeline_cfg.get("universe_mode", "static")).strip().lower()
+            dynamic_cfg = pipeline_cfg.get("dynamic_universe", {}) or {}
+            rank_cfg = dynamic_cfg.get("ranking", {}) or {}
+            ranking_on = universe_mode == "dynamic" and bool(rank_cfg.get("enabled", False))
+            tiers_path = Path(str(rank_cfg.get("tiers_path", "data/runtime/universe_tiers.json")).strip() or "data/runtime/universe_tiers.json")
+            scan_strategy_every_n = max(1, int(rank_cfg.get("scan_strategy_every_n", 1)))
+            scan_batch_size = max(1, int(rank_cfg.get("scan_batch_size", 45)))
+            max_symbols_per_iteration = max(10, int(rank_cfg.get("max_symbols_per_iteration", 120)))
+            db_symbol_cache: list[str] = []
+
+            async def _refresh_symbols_from_db(limit: int = 300) -> list[str]:
+                async with session_factory() as session:
+                    q = await session.execute(
+                        select(FeatureSnapshot.symbol).distinct().order_by(FeatureSnapshot.symbol.asc()).limit(limit)
+                    )
+                    rows = [str(r[0]).strip() for r in q.all() if r and str(r[0]).strip()]
+                return rows
+
+            def _symbols_for_tiered_iteration(
+                tiered,
+                db_syms: list[str],
+                iteration: int,
+            ) -> list[str] | None:
+                if tiered is None:
+                    return None
+                by_upper: dict[str, str] = {}
+                for s in db_syms:
+                    u = s.strip().upper()
+                    if u and u not in by_upper:
+                        by_upper[u] = s.strip()
+                core = list(tiered.core)
+                scan = list(tiered.scan)
+                want = list(core)
+                if scan and iteration % scan_strategy_every_n == 0:
+                    # Rotate through scan tier in small batches so each cycle stays responsive.
+                    cycle_idx = iteration // scan_strategy_every_n
+                    start = (cycle_idx * scan_batch_size) % len(scan)
+                    batch = [scan[(start + j) % len(scan)] for j in range(min(scan_batch_size, len(scan)))]
+                    want.extend(batch)
+                ordered = [by_upper[s] for s in want if s in by_upper]
+                if len(ordered) > max_symbols_per_iteration:
+                    ordered = ordered[:max_symbols_per_iteration]
+                return ordered if ordered else None
+
+            async def _process_signal(signal, *, symbol_hint: str | None = None) -> bool:
+                routed = self.router.route(signal.asset_class, signal.symbol)
+                if routed is None:
+                    return False
+                signal.broker = routed
+                portfolio_state = await _load_portfolio_state(
+                    session_factory,
+                    fallback_portfolio_value=total_equity,
+                    signal_price_fallback=signal.suggested_price,
+                    capital_pct=Decimal(str(self.capital_pct)),
+                )
+                self.risk_engine.update_high_watermark(
+                    Decimal(str(portfolio_state.get("high_watermark_value", total_equity)))
+                )
+                self.risk_engine.restore_runtime_state(portfolio_state)
+                risk_decision = await self.risk_engine.evaluate_and_persist(
+                    session_factory, signal, portfolio_state,
+                )
+                if risk_decision.verdict != RiskVerdict.APPROVED:
+                    await _persist_signal(
+                        session_factory, signal,
+                        paper_mode=self.paper_mode,
+                        timeframe=self.timeframe,
+                        feature_ts=datetime.now(timezone.utc),
+                    )
+                    return False
+                await _persist_signal(
+                    session_factory, signal,
+                    paper_mode=self.paper_mode,
+                    timeframe=self.timeframe,
+                    feature_ts=datetime.now(timezone.utc),
+                )
+                result = await self.execution_engine.execute(
+                    signal, risk_decision, session_factory=session_factory,
+                )
+                if result is None:
+                    return False
+                status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
+                if status_val != "filled":
+                    # Only treat fully filled orders as executed positions.
+                    return False
+                filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
+                if filled_qty <= 0:
+                    return False
+                # Refresh portfolio state after execution so persisted position/PnL
+                # reflect newly filled orders (not the pre-trade snapshot).
+                post_trade_state = await _load_portfolio_state(
+                    session_factory,
+                    fallback_portfolio_value=total_equity,
+                    signal_price_fallback=signal.suggested_price,
+                    capital_pct=Decimal(str(self.capital_pct)),
+                )
+                signal.suggested_quantity = filled_qty
+                avg_fill = getattr(result, "avg_fill_price", None)
+                if avg_fill is not None:
+                    try:
+                        avg_fill_d = Decimal(str(avg_fill))
+                        if avg_fill_d > 0:
+                            signal.suggested_price = avg_fill_d
+                    except Exception:  # noqa: BLE001
+                        pass
+                _apply_signal_to_portfolio_state(post_trade_state, signal)
+                await _persist_position_snapshot(session_factory, post_trade_state)
+                await _upsert_daily_pnl(session_factory, post_trade_state)
+                return True
 
             while not self._stop_event.is_set():
+                if self.iterations == 0:
+                    logger.info("trading_loop | startup flush — first iteration running immediately")
                 self._check_late_brokers()
-                effective_value = self.portfolio_value * self.capital_pct
+                if universe_mode == "dynamic" and (self.iterations % 5 == 0):
+                    try:
+                        db_symbols = await _refresh_symbols_from_db(limit=500)
+                        if db_symbols:
+                            db_symbol_cache = db_symbols
+                            if ranking_on:
+                                tiered = load_universe_tiers(tiers_path)
+                                picked = _symbols_for_tiered_iteration(tiered, db_symbols, self.iterations)
+                                picked_or_db = picked if picked is not None else db_symbols
+                                symbols = list(dict.fromkeys(base_symbols + picked_or_db))
+                            else:
+                                symbols = list(dict.fromkeys(base_symbols + db_symbols))
+                    except Exception as exc:
+                        logger.debug("trading_loop | dynamic symbols refresh failed: {}", exc)
+                elif universe_mode == "dynamic" and ranking_on and db_symbol_cache:
+                    tiered = load_universe_tiers(tiers_path)
+                    picked = _symbols_for_tiered_iteration(tiered, db_symbol_cache, self.iterations)
+                    if picked is not None:
+                        symbols = list(dict.fromkeys(base_symbols + picked))
+                total_equity = await live_portfolio_value(self._broker_manager)
+                if total_equity <= 0:
+                    total_equity = Decimal(str(self.portfolio_value))
+                tradable = total_equity * Decimal(str(self.capital_pct))
+                effective_value = float(tradable)
                 try:
                     generated = 0
                     executed = 0
@@ -216,8 +436,20 @@ class TradingLoop:
                     ai_result = None
                     if ai_pipeline is not None:
                         try:
-                            ai_result = await ai_pipeline.compute(session_factory, symbols)
-                            await ai_pipeline.persist(session_factory, ai_result)
+                            ai_result = await asyncio.wait_for(
+                                ai_pipeline.compute(session_factory, symbols),
+                                timeout=ai_cycle_timeout_sec,
+                            )
+                            await asyncio.wait_for(
+                                ai_pipeline.persist(session_factory, ai_result),
+                                timeout=max(10.0, ai_cycle_timeout_sec / 2),
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "trading_loop | AI pipeline timed out after {}s (continuing without AI this cycle)",
+                                ai_cycle_timeout_sec,
+                            )
+                            ai_result = None
                         except Exception as exc:
                             logger.warning("trading_loop | AI pipeline error (continuing): {}", exc)
 
@@ -266,47 +498,52 @@ class TradingLoop:
                             signal.metadata["ai_macro_regime"] = ai_result.macro_regime
                             signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
 
-                        routed = self.router.route(signal.asset_class, signal.symbol)
-                        if routed is None:
-                            continue
-                        signal.broker = routed
+                        # Quality enrichment: volume z-score from recent feature data
+                        _enrich_signal_volume_z(signal, df)
 
-                        portfolio_state = await _load_portfolio_state(
-                            session_factory,
-                            fallback_portfolio_value=Decimal(str(effective_value)),
-                            signal_price_fallback=signal.suggested_price,
-                        )
-                        self.risk_engine.update_high_watermark(
-                            Decimal(str(portfolio_state.get("high_watermark_value", effective_value)))
-                        )
-                        self.risk_engine.restore_runtime_state(portfolio_state)
-                        risk_decision = await self.risk_engine.evaluate_and_persist(
-                            session_factory, signal, portfolio_state,
-                        )
-                        if risk_decision.verdict != RiskVerdict.APPROVED:
-                            await _persist_signal(
-                                session_factory, signal,
-                                paper_mode=self.paper_mode,
-                                timeframe=self.timeframe,
-                                feature_ts=datetime.now(timezone.utc),
-                            )
-                            continue
-
-                        await _persist_signal(
-                            session_factory, signal,
-                            paper_mode=self.paper_mode,
-                            timeframe=self.timeframe,
-                            feature_ts=datetime.now(timezone.utc),
-                        )
                         generated += 1
-
-                        result = await self.execution_engine.execute(
-                            signal, risk_decision, session_factory=session_factory,
-                        )
-                        if result is not None:
+                        ok = await _process_signal(signal, symbol_hint=symbol)
+                        if ok:
                             executed += 1
-                            await _persist_position_snapshot(session_factory, portfolio_state)
-                            await _upsert_daily_pnl(session_factory, portfolio_state)
+
+                    if discovery_pipeline is not None:
+                        discovery_items = await discovery_pipeline.run_cycle_detailed(
+                            portfolio_value=Decimal(str(effective_value)),
+                            market_context={
+                                "macro_regime": ai_result.macro_regime if ai_result is not None else None,
+                                "macro_confidence": ai_result.macro_confidence if ai_result is not None else None,
+                            },
+                        )
+                        for item in discovery_items:
+                            anomaly = item.anomaly
+                            thesis = item.thesis
+                            d_signals = item.signals
+                            for ds in d_signals:
+                                if ai_result is not None:
+                                    ds.news_score = ai_result.news_scores.get(ds.symbol)
+                                    ds.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                    ds.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                                    ds.metadata["ai_news_detail"] = ai_result.news_details.get(ds.symbol, {})
+                                # Anomaly-derived signals carry their anomaly score as quality signal
+                                if item.anomaly is not None:
+                                    ds.metadata["anomaly_score"] = float(getattr(item.anomaly, "anomaly_score", 0) or 0)
+                                    ds.metadata["price_z_score"] = float(getattr(item.anomaly, "price_z_score", 0) or 0)
+                                generated += 1
+                                ok = await _process_signal(ds, symbol_hint=ds.symbol)
+                                if ok:
+                                    executed += 1
+                            await persist_anomaly_log(
+                                session_factory,
+                                anomaly=anomaly,
+                                opportunities_found=len(item.opportunities),
+                                thesis_generated=thesis is not None,
+                                signals_produced=len(d_signals),
+                            )
+                            if thesis is not None:
+                                await persist_thesis_log(
+                                    session_factory,
+                                    thesis=thesis,
+                                )
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     if now_ts >= next_reconcile_at:

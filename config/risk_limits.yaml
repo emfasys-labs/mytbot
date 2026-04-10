@@ -19,11 +19,30 @@ max_consecutive_losses: 3       # Enter cooldown after 3 losses in a row
 cooldown_minutes: 60            # Wait 60 minutes before trading again
 
 # ── Signal quality ────────────────────────────────────────────────────────────
+# No trade count limits — the system is incapable of placing a weak trade, not restricted
+# from placing many.  Quality gates determine what gets through.
 min_signal_confidence: 0.50     # Minimum confidence score to proceed (0.0-1.0)
-max_trades_per_day: 20          # Hard cap on daily trade count
+
+# ── Quality gate (composite score) ────────────────────────────────────────────
+# TradeQualityScore = weighted blend of confidence + news factor + volume z-score.
+# A trade that has no catalyst (no volume spike, no news) AND low confidence is
+# rejected here regardless of how many trades ran today.
+min_trade_quality_score: 0.30   # Minimum composite quality score (0 = disabled)
+
+# ── Catalyst requirement ───────────────────────────────────────────────────────
+# Set to true to require at least one of: volume spike OR news sentiment.
+# Leave false while data pipelines (NewsAPI / feature data) are being validated.
+require_catalyst: false
+catalyst_volume_z_min: 1.0      # Volume z-score threshold for "volume confirms"
+catalyst_news_score_min: 0.15   # |news_score| threshold for "news confirms"
+
+# ── Theme deduplication ────────────────────────────────────────────────────────
+# One idea = one expression. If we already hold this symbol in this direction, reject.
+theme_uniqueness_check: true
 
 # ── Asset class limits ────────────────────────────────────────────────────────
 max_crypto_pct: 0.30            # Max 30% of portfolio in crypto
+max_equity_pct: 0.80            # Max 80% total in equities/ETFs combined
 max_single_stock_pct: 0.10      # Max 10% in any single stock
 max_bond_pct: 0.50              # Max 50% in bonds
 
@@ -36,7 +55,7 @@ max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
 # Kill switch is activated programmatically or via dashboard.
 # It can only be reset manually. Never auto-reset.
 auto_kill_on_api_failure: true
-auto_kill_on_reconciliation_failure: true
+auto_kill_on_reconciliation_failure: false
 
 # ── Proportionality gate (no capital tiers) ─────────────────────────────────
 # Asset class is tradable iff:

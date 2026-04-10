@@ -8,10 +8,22 @@ import { MasterControl } from './components/MasterControl';
 import { PositionChips } from './components/PositionChips';
 import { SystemHeartbeat } from './components/SystemHeartbeat';
 import { HapticFeedback, useHaptic } from './components/HapticFeedback';
-import { api, toNumber, type SystemState } from './lib/api';
+import { DiscoveryPanel } from './components/DiscoveryPanel';
+import { IntelligencePanel } from './components/IntelligencePanel';
+import { OpportunityTicker } from './components/OpportunityTicker';
+import {
+  api,
+  toNumber,
+  type SystemState,
+  type TradingMode,
+  type DiscoverySummaryResponse,
+  type DiscoveryAnomaliesResponse,
+  type IntelligenceRegimeResponse,
+  type IntelligenceSignalsResponse,
+} from './lib/api';
 import { eventTimestamp, getWsUrl, type WsTickMessage } from './lib/ws';
 
-type Mode = 'defender' | 'trader' | 'hunter';
+type Mode = TradingMode;
 type ControlState = 'live' | 'pause' | 'flatten';
 type TrendState = 'positive' | 'mixed' | 'drawdown';
 
@@ -25,6 +37,7 @@ function App() {
   const [controlState, setControlState] = useState<ControlState>('flatten');
   const [systemState, setSystemState] = useState<SystemState>('off');
   const [totalCapital, setTotalCapital] = useState(0);
+  const [tradableCapital, setTradableCapital] = useState<number | null>(null);
   const [capitalPct, setCapitalPct] = useState(() => {
     try {
       const v = parseFloat(localStorage.getItem('mytbot_capital_pct') ?? '');
@@ -41,6 +54,13 @@ function App() {
   const [activeBrokers, setActiveBrokers] = useState<string[]>([]);
   const [allBrokers, setAllBrokers] = useState<Record<string, { configured: boolean; connected: boolean }>>({});
 
+  // Discovery & Intelligence state
+  const [discoverySummary, setDiscoverySummary] = useState<DiscoverySummaryResponse | null>(null);
+  const [discoveryAnomalies, setDiscoveryAnomalies] = useState<DiscoveryAnomaliesResponse | null>(null);
+  const [intelligenceRegime, setIntelligenceRegime] = useState<IntelligenceRegimeResponse | null>(null);
+  const [intelligenceSignals, setIntelligenceSignals] = useState<IntelligenceSignalsResponse | null>(null);
+  const lastIntelRefresh = useRef<number>(0);
+
   const triggerHaptic = useHaptic();
 
   const positions: Position[] = livePositions;
@@ -53,7 +73,6 @@ function App() {
 
   const handleControlStateChange = (state: ControlState) => {
     setControlState(state);
-
     if (state === 'live') {
       triggerHaptic('medium');
     } else if (state === 'pause') {
@@ -135,6 +154,11 @@ function App() {
         setSystemState(newState);
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
         if (sysStatus.brokers) setAllBrokers(sysStatus.brokers as Record<string, { configured: boolean; connected: boolean }>);
+        if (typeof sysStatus.capital_pct === 'number' && Number.isFinite(sysStatus.capital_pct)) {
+          const c = Math.max(0, Math.min(1, sysStatus.capital_pct));
+          setCapitalPct(c);
+          try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
+        }
       }
 
       const killActive = !!status?.kill_switch;
@@ -155,17 +179,11 @@ function App() {
         const realised = toNumber(pnl.today?.realised, 0);
         const unrealised = toNumber(pnl.today?.unrealised, 0);
         const todayTrades = Math.max(0, Math.trunc(toNumber(pnl.today?.trades, 0)));
-
-        setTotalCapital((prev) => {
-          const next = Math.max(0, portfolioValue);
-          if (prev > 0 && next > 0) {
-            const ratio = next / prev;
-            if (ratio > 3 || ratio < 0.33) return prev;
-          }
-          return next;
-        });
+        setTotalCapital(Math.max(0, portfolioValue));
         setDailyPnL(realised + unrealised);
         setTradesToday(todayTrades);
+        const tc = toNumber(pnl.today?.tradable_capital, -1);
+        setTradableCapital(tc >= 0 ? tc : null);
       }
 
       if (hist) {
@@ -181,10 +199,7 @@ function App() {
           const current = toNumber(p.current_price, 0);
           const unreal = toNumber(p.unrealised_pnl, 0);
           const pctMove = entry > 0 ? ((current - entry) / entry) * 100 : unreal >= 0 ? 0.5 : -0.5;
-          return {
-            symbol: p.symbol,
-            change: Number.isFinite(pctMove) ? pctMove : 0,
-          };
+          return { symbol: p.symbol, change: Number.isFinite(pctMove) ? pctMove : 0 };
         });
         setLivePositions(mappedPositions);
       }
@@ -202,24 +217,12 @@ function App() {
             });
           }
         }
-
         const tickerItems: TickerItem[] = headlines.slice(0, 20).map((h) => {
           let sentiment: TickerItem['sentiment'] = 'neutral';
-          for (const [, v] of aiMap) {
-            sentiment = v.sentiment;
-            break;
-          }
-          return {
-            text: h.title,
-            source: h.source,
-            time: h.published_at ?? undefined,
-            sentiment,
-          };
+          for (const [, v] of aiMap) { sentiment = v.sentiment; break; }
+          return { text: h.title, source: h.source, time: h.published_at ?? undefined, sentiment };
         });
-
-        if (tickerItems.length > 0) {
-          setNewsItems(tickerItems);
-        }
+        if (tickerItems.length > 0) setNewsItems(tickerItems);
       }
 
       if (sig) {
@@ -234,21 +237,33 @@ function App() {
         }
       }
 
-      // kill_switch handling moved up (combined with system state check)
+      // Refresh discovery/intelligence data every ~30s
+      const now = Date.now();
+      if (now - lastIntelRefresh.current > 28_000) {
+        lastIntelRefresh.current = now;
+        const [ds, da, ir, is_, modeRes] = await Promise.allSettled([
+          api.getDiscoverySummary(),
+          api.getDiscoveryAnomalies(8),
+          api.getIntelligenceRegime(),
+          api.getIntelligenceSignals(8),
+          api.getSystemMode(),
+        ]);
+        if (ds.status === 'fulfilled') setDiscoverySummary(ds.value);
+        if (da.status === 'fulfilled') setDiscoveryAnomalies(da.value);
+        if (ir.status === 'fulfilled') setIntelligenceRegime(ir.value);
+        if (is_.status === 'fulfilled') setIntelligenceSignals(is_.value);
+        if (modeRes.status === 'fulfilled' && modeRes.value.mode) setMode(modeRes.value.mode);
+      }
     } catch {
       // Keep UI running with last known data.
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
     if (wsConnected) return;
-    const t = window.setInterval(() => {
-      void refresh();
-    }, 10000);
+    const t = window.setInterval(() => { void refresh(); }, 10000);
     return () => window.clearInterval(t);
   }, [wsConnected, refresh]);
 
@@ -283,8 +298,7 @@ function App() {
           const wsKill = !!msg.payload.status?.kill_switch;
 
           if (sysPayload?.state && typeof sysPayload.state === 'string') {
-            const wsState = sysPayload.state as SystemState;
-            setSystemState(wsState);
+            setSystemState(sysPayload.state as SystemState);
           }
           if (sysPayload?.active_brokers && Array.isArray(sysPayload.active_brokers)) {
             setActiveBrokers(sysPayload.active_brokers as string[]);
@@ -313,17 +327,13 @@ function App() {
               break;
             }
           }
-
           void refresh();
         } catch {
           // ignore malformed frames
         }
       };
 
-      ws.onerror = () => {
-        // onclose will run
-      };
-
+      ws.onerror = () => { /* onclose will run */ };
       ws.onclose = () => {
         setWsConnected(false);
         ws = null;
@@ -335,14 +345,10 @@ function App() {
       if (stopped) return;
       const delay = Math.min(30000, 800 * 2 ** attempt);
       attempt += 1;
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
     };
 
     connect();
-
     return () => {
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -356,107 +362,151 @@ function App() {
       <HapticFeedback />
 
       <div className="w-full h-screen flex flex-col">
+        {/* Top news ticker */}
         <NewsTicker items={newsItems} paused={isFlattened} />
 
-        <div className="relative flex flex-1 flex-col justify-between px-6 pb-5 pt-4 md:px-8 md:pb-7 md:pt-5">
-          <div className="flex items-start justify-between">
-            <div className="pt-6">
-              <ModeSelector
-                selectedMode={mode}
-                onModeChange={setMode}
-                onHaptic={() => triggerHaptic('medium')}
-              />
+        {/* Three-tier main area */}
+        <div className="flex flex-1 overflow-hidden">
+
+          {/* ── DISCOVERY (left) ─────────────────────────────────── */}
+          <aside className="hidden xl:flex flex-col w-72 shrink-0 border-r border-white/5 overflow-y-auto px-5 py-6">
+            <DiscoveryPanel summary={discoverySummary} anomalies={discoveryAnomalies} />
+          </aside>
+
+          {/* ── CENTER (equity + controls) ───────────────────────── */}
+          <div className="flex flex-1 flex-col justify-between px-6 pb-3 pt-4 md:px-8 md:pb-5 md:pt-5 overflow-y-auto">
+            {/* Top bar: mode + brokers + master control */}
+            <div className="flex items-start justify-between">
+              <div className="pt-6">
+                <ModeSelector
+                  selectedMode={mode}
+                  onModeChange={setMode}
+                  onHaptic={() => triggerHaptic('medium')}
+                />
+              </div>
+
+              <div className="pt-2 flex items-start gap-2">
+                {systemState !== 'off' && Object.keys(allBrokers).length > 0 && (
+                  <div className="flex gap-1 flex-wrap justify-end pt-2.5">
+                    {Object.entries(allBrokers)
+                      .filter(([, v]) => v.configured)
+                      .map(([name, v]) => (
+                        <span
+                          key={name}
+                          className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${
+                            v.connected
+                              ? 'bg-emerald-400/10 text-emerald-300/70'
+                              : 'bg-gray-400/10 text-gray-500/50'
+                          }`}
+                        >
+                          {name}
+                        </span>
+                      ))}
+                  </div>
+                )}
+                <MasterControl
+                  currentState={controlState}
+                  systemState={systemState}
+                  onStateChange={handleControlStateChange}
+                  onSystemStart={handleSystemStart}
+                  onSystemStop={handleSystemStop}
+                  onHaptic={() => triggerHaptic('light')}
+                />
+              </div>
             </div>
 
-            <div className="pt-2 flex items-start gap-2">
-              {systemState !== 'off' && Object.keys(allBrokers).length > 0 && (
-                <div className="flex gap-1 flex-wrap justify-end pt-2.5">
-                  {Object.entries(allBrokers)
-                    .filter(([, v]) => v.configured)
-                    .map(([name, v]) => (
-                      <span
-                        key={name}
-                        className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${
-                          v.connected
-                            ? 'bg-emerald-400/10 text-emerald-300/70'
-                            : 'bg-gray-400/10 text-gray-500/50'
-                        }`}
+            {/* Equity + balance */}
+            <div className="relative flex flex-1 items-center justify-center">
+              <div className="absolute right-0 top-1/2 -translate-y-1/2">
+                <CapitalSlider
+                  totalCapital={totalCapital}
+                  pct={capitalPct}
+                  onPctChange={handlePctChange}
+                  onHaptic={() => triggerHaptic('light')}
+                  dormant={isFlattened}
+                />
+              </div>
+
+              <div className="w-full max-w-4xl">
+                <EquityLine
+                  balance={totalCapital}
+                  dailyPnL={dailyPnL}
+                  state={getTrendState()}
+                  isActive={isActive}
+                  isFlattened={isFlattened}
+                  historyValues={equityHistory}
+                />
+
+                <div className="mt-8 text-center">
+                  {systemState === 'running' ? (
+                    <>
+                      <motion.div
+                        className="text-6xl font-light tracking-tight"
+                        animate={{ scale: [1.02, 1] }}
+                        transition={{ duration: 0.3 }}
                       >
-                        {name}
-                      </span>
-                    ))}
+                        £{Math.round(totalCapital).toLocaleString()}
+                      </motion.div>
+                      {tradableCapital != null && totalCapital > 0 && capitalPct < 0.999 ? (
+                        <div className="mt-2 text-sm font-light text-gray-400">
+                          £{Math.round(tradableCapital).toLocaleString()} available for trading ·{' '}
+                          {Math.round(capitalPct * 100)}%
+                        </div>
+                      ) : null}
+                      <motion.div
+                        className={`mt-3 text-xl font-light ${dailyPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        {dailyPnL >= 0 ? '+' : ''}£{Math.round(dailyPnL).toLocaleString()} today
+                      </motion.div>
+                    </>
+                  ) : (
+                    <div className="text-gray-600 text-sm font-light">
+                      Start the system to see live balance
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex justify-center">
+                    <SystemHeartbeat
+                      isActive={isActive}
+                      controlState={controlState}
+                      tradesCount={tradesToday}
+                      lastTradeMinutes={lastTradeMinutes}
+                    />
+                  </div>
                 </div>
-              )}
-              <MasterControl
-                currentState={controlState}
-                systemState={systemState}
-                onStateChange={handleControlStateChange}
-                onSystemStart={handleSystemStart}
-                onSystemStop={handleSystemStop}
-                onHaptic={() => triggerHaptic('light')}
-              />
-            </div>
-          </div>
-
-          <div className="relative flex flex-1 items-center justify-center">
-            <div className="absolute right-0 top-1/2 -translate-y-1/2">
-              <CapitalSlider
-                totalCapital={totalCapital}
-                pct={capitalPct}
-                onPctChange={handlePctChange}
-                onHaptic={() => triggerHaptic('light')}
-                dormant={isFlattened}
-              />
+              </div>
             </div>
 
-            <div className="w-full max-w-4xl">
-              <EquityLine
-                balance={totalCapital}
-                dailyPnL={dailyPnL}
-                state={getTrendState()}
-                isActive={isActive}
+            {/* Positions + mobile Discovery/Intelligence accordion */}
+            <div className="pb-2 space-y-4">
+              <PositionChips
+                positions={positions}
                 isFlattened={isFlattened}
-                historyValues={equityHistory}
+                onHaptic={() => triggerHaptic('light')}
               />
 
-              <div className="mt-8 text-center">
-                <motion.div
-                  className="text-6xl font-light tracking-tight"
-                  animate={{ scale: [1.02, 1] }}
-                  transition={{ duration: 0.3 }}
-                >
-                  £{Math.round(totalCapital).toLocaleString()}
-                </motion.div>
-                <motion.div
-                  className={`mt-3 text-xl font-light ${
-                    dailyPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'
-                  }`}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  {dailyPnL >= 0 ? '+' : ''}£{Math.round(dailyPnL).toLocaleString()} today
-                </motion.div>
-
-                <div className="mt-3 flex justify-center">
-                  <SystemHeartbeat
-                    isActive={isActive}
-                    controlState={controlState}
-                    tradesCount={tradesToday}
-                    lastTradeMinutes={lastTradeMinutes}
-                  />
+              {/* On screens < xl, show compact Discovery + Intelligence inline */}
+              <div className="xl:hidden grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-xl border border-white/5 bg-white/2 px-4 py-4">
+                  <DiscoveryPanel summary={discoverySummary} anomalies={discoveryAnomalies} />
+                </div>
+                <div className="rounded-xl border border-white/5 bg-white/2 px-4 py-4">
+                  <IntelligencePanel regime={intelligenceRegime} signals={intelligenceSignals} />
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="pb-4">
-            <PositionChips
-              positions={positions}
-              isFlattened={isFlattened}
-              onHaptic={() => triggerHaptic('light')}
-            />
-          </div>
+          {/* ── INTELLIGENCE (right) ─────────────────────────────── */}
+          <aside className="hidden xl:flex flex-col w-64 shrink-0 border-l border-white/5 overflow-y-auto px-5 py-6">
+            <IntelligencePanel regime={intelligenceRegime} signals={intelligenceSignals} />
+          </aside>
         </div>
+
+        {/* Opportunity ticker at bottom */}
+        <OpportunityTicker signals={intelligenceSignals} regime={intelligenceRegime} />
       </div>
     </div>
   );

@@ -3,6 +3,8 @@ enabled: true
 pipeline:
   news_lookback_hours: 24
   news_limit: 200
+  max_news_items_per_cycle: 40
+  cycle_timeout_seconds: 45
   macro_series:
     - FEDFUNDS
     - CPIAUCSL

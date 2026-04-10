@@ -351,7 +351,7 @@ class BrokerManager:
         await asyncio.sleep(self._RECONNECT_BASE)
         while True:
             failed = [
-                name for name, s in self.report.brokers.items()
+                name for name, s in list(self.report.brokers.items())
                 if s.configured and not s.connected and name not in self.adapters
             ]
             for name in failed:
@@ -404,7 +404,7 @@ class BrokerManager:
                 await self._late_connect_task
             except (asyncio.CancelledError, Exception):
                 pass
-        for name, adapter in self.adapters.items():
+        for name, adapter in list(self.adapters.items()):
             try:
                 await adapter.disconnect()
                 logger.info("broker | {} | disconnected", name)

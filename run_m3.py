@@ -155,13 +155,15 @@ async def _load_portfolio_state(
     *,
     fallback_portfolio_value: Decimal,
     signal_price_fallback: Decimal | None = None,
+    capital_pct: Decimal | None = None,
 ) -> dict[str, Any]:
     """
     Build portfolio state from DB snapshots (M4 risk checks).
-    Falls back to provided portfolio value when history is unavailable.
+
+    ``portfolio_value`` is total account equity (sum of balances / configured NAV).
+    ``tradable_capital`` is the slice allowed for trading: portfolio_value × capital_pct
+    (when capital_pct is omitted, tradable_capital equals portfolio_value).
     """
-    portfolio_value = fallback_portfolio_value
-    high_watermark_value = fallback_portfolio_value
     daily_realized_pnl = Decimal("0")
     current_gross_exposure = Decimal("0")
     symbol_exposure: dict[str, Decimal] = {}
@@ -171,6 +173,7 @@ async def _load_portfolio_state(
     consecutive_losses = 0
     cooldown_until: str | None = None
     daily_loss_accumulated = Decimal("0")
+    pv_from_db = Decimal("0")
 
     async with session_factory() as session:
         latest_pnl_q = await session.execute(
@@ -178,7 +181,7 @@ async def _load_portfolio_state(
         )
         latest_pnl = latest_pnl_q.scalars().first()
         if latest_pnl is not None:
-            portfolio_value = Decimal(str(latest_pnl.portfolio_value or fallback_portfolio_value))
+            pv_from_db = Decimal(str(latest_pnl.portfolio_value or "0"))
             daily_realized_pnl = Decimal(str(latest_pnl.realised_pnl or "0"))
             if isinstance(latest_pnl.strategy_breakdown, dict):
                 b = latest_pnl.strategy_breakdown
@@ -196,10 +199,6 @@ async def _load_portfolio_state(
 
         hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
         hwm_raw = hwm_q.scalar_one_or_none()
-        if hwm_raw is not None:
-            high_watermark_value = Decimal(str(hwm_raw))
-        else:
-            high_watermark_value = portfolio_value
 
         latest_pos_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_pos_ts = latest_pos_ts_q.scalar_one_or_none()
@@ -237,8 +236,33 @@ async def _load_portfolio_state(
         )
         trades_today = int(trades_q.scalar_one() or 0)
 
+    if fallback_portfolio_value > 0 and pv_from_db > 0:
+        portfolio_value = max(fallback_portfolio_value, pv_from_db)
+    elif fallback_portfolio_value > 0:
+        portfolio_value = fallback_portfolio_value
+    elif pv_from_db > 0:
+        portfolio_value = pv_from_db
+    else:
+        portfolio_value = fallback_portfolio_value
+
+    if hwm_raw is not None:
+        high_watermark_value = Decimal(str(hwm_raw))
+    else:
+        high_watermark_value = portfolio_value
+    if portfolio_value > high_watermark_value:
+        high_watermark_value = portfolio_value
+
+    alloc_pct = Decimal("1")
+    if capital_pct is not None:
+        try:
+            alloc_pct = max(Decimal("0"), min(Decimal("1"), Decimal(str(capital_pct))))
+        except Exception:  # noqa: BLE001
+            alloc_pct = Decimal("1")
+    tradable_capital = portfolio_value * alloc_pct
+
     return {
         "portfolio_value": portfolio_value,
+        "tradable_capital": tradable_capital,
         "high_watermark_value": high_watermark_value,
         "daily_realized_pnl": daily_realized_pnl,
         "current_gross_exposure": current_gross_exposure,

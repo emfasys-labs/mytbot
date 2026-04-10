@@ -24,6 +24,7 @@ config/risk_parameter_overrides.yaml
 *.parquet
 data/cache/
 data/historical/
+data/runtime/
 
 # Logs
 logs/

@@ -20,6 +20,7 @@ import signal
 import socket
 import subprocess
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -70,6 +71,71 @@ def _try_free_port(port: int) -> None:
             )
         except Exception:
             pass
+
+
+def _ui_sources_newer_than_dist(ui_dir: Path) -> bool:
+    """True if ui/src changed after the last ui/dist build (or dist is missing)."""
+    dist_index = ui_dir / "dist" / "index.html"
+    src = ui_dir / "src"
+    if not src.is_dir():
+        return False
+    newest_src = 0.0
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            newest_src = max(newest_src, p.stat().st_mtime)
+        except OSError:
+            continue
+    if not dist_index.is_file():
+        return True
+    try:
+        return newest_src > dist_index.stat().st_mtime
+    except OSError:
+        return True
+
+
+def _ensure_ui_built() -> None:
+    """
+    The API serves the pre-built SPA from ui/dist. After pulling UI changes, that folder
+    must be rebuilt — otherwise a browser refresh still shows old JS. This keeps the
+    one-command workflow: python run.py refreshes the bundle when sources are newer than dist.
+    Set UI_AUTO_BUILD=0 to skip (e.g. when using Vite dev server separately).
+    """
+    if os.getenv("UI_AUTO_BUILD", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    root = Path(__file__).resolve().parent
+    ui_dir = root / "ui"
+    if not (ui_dir / "package.json").is_file():
+        return
+    if not _ui_sources_newer_than_dist(ui_dir):
+        return
+    logger.info("mytbot | building dashboard (npm run build in ui/) — one-time when UI changed")
+    try:
+        completed = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(ui_dir),
+            timeout=600,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        logger.warning(
+            "mytbot | npm not found — install Node.js or run manually: cd ui && npm run build"
+        )
+        return
+    except subprocess.TimeoutExpired:
+        logger.error("mytbot | dashboard build timed out after 600s")
+        return
+    if completed.returncode != 0:
+        tail = (completed.stderr or completed.stdout or "")[-2500:]
+        logger.warning(
+            "mytbot | dashboard build failed (exit {}); using existing ui/dist if any.\n{}",
+            completed.returncode,
+            tail,
+        )
+        return
+    logger.info("mytbot | dashboard build finished — refresh the browser")
 
 
 def _resolve_port(preferred: int) -> int:
@@ -165,6 +231,7 @@ def main() -> None:
     _configure_logging()
     logger.info("mytbot | one-button trading system")
     logger.info("mytbot | press Ctrl+C to stop")
+    _ensure_ui_built()
 
     try:
         asyncio.run(_run())

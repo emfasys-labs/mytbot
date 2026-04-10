@@ -62,6 +62,7 @@ class Orchestrator:
 
         self._trading_loop: TradingLoop | None = None
         self._pipeline_task: asyncio.Task | None = None
+        self._pipeline_scan_idx: int = 0
 
         self._lock = asyncio.Lock()
 
@@ -267,6 +268,7 @@ class Orchestrator:
     async def _pipeline_runner(self) -> None:
         """Periodically run the data pipeline (feature ingestion)."""
         try:
+            from data.universe_builder import UniverseBuilder
             from data.pipeline import run_once
             from storage.db import init_async_database, dispose_engine as _dispose
         except ImportError:
@@ -285,15 +287,63 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("orchestrator | pipeline config load error: {}", exc)
 
+        universe_mode = str(pipeline_cfg.get("universe_mode", "static")).strip().lower()
+        base_symbols_cfg = pipeline_cfg.get("symbols") if isinstance(pipeline_cfg.get("symbols"), list) else []
+        base_symbols = list(dict.fromkeys([str(s).strip() for s in base_symbols_cfg if str(s).strip()]))
+        dynamic_cfg = pipeline_cfg.get("dynamic_universe", {}) or {}
+        ranking_cfg = dynamic_cfg.get("ranking", {}) or {}
+        ranking_on = universe_mode == "dynamic" and bool(ranking_cfg.get("enabled", False))
+        universe_builder = UniverseBuilder(
+            max_symbols=int(dynamic_cfg.get("max_symbols", 300)),
+            ranking=ranking_cfg if ranking_on else {},
+        )
+
+        first_pipeline_run = True
         while True:
             eng = None
             try:
                 eng, sf = await init_async_database()
                 if sf is not None:
+                    if first_pipeline_run:
+                        logger.info("orchestrator | pipeline | startup flush — running immediately")
+                    if universe_mode == "dynamic":
+                        if ranking_on:
+                            tiers = await universe_builder.build_tiered_universe(self._broker_manager)
+                            scan_batch = max(1, int(ranking_cfg.get("scan_batch_size", 50)))
+                            sl = list(tiers.scan)
+                            start = self._pipeline_scan_idx % max(len(sl), 1)
+                            batch: list[str] = []
+                            if sl:
+                                for j in range(scan_batch):
+                                    batch.append(sl[(start + j) % len(sl)])
+                                self._pipeline_scan_idx = (start + scan_batch) % len(sl)
+                            dynamic_symbols = list(dict.fromkeys(list(tiers.core) + batch))
+                            if not dynamic_symbols:
+                                fb = pipeline_cfg.get("symbols")
+                                if isinstance(fb, list):
+                                    dynamic_symbols = [str(s).strip() for s in fb if s and str(s).strip()]
+                            if dynamic_symbols:
+                                pipeline_cfg["symbols"] = list(dict.fromkeys(base_symbols + dynamic_symbols))
+                                logger.info(
+                                    "orchestrator | pipeline tiered | core={} batch={} total={}",
+                                    len(tiers.core),
+                                    len(batch),
+                                    len(pipeline_cfg["symbols"]),
+                                )
+                        else:
+                            dynamic_symbols = await universe_builder.build_symbols(self._broker_manager)
+                            if dynamic_symbols:
+                                pipeline_cfg["symbols"] = list(dict.fromkeys(base_symbols + dynamic_symbols))
+                                logger.info(
+                                    "orchestrator | pipeline dynamic universe | symbols={}",
+                                    len(pipeline_cfg["symbols"]),
+                                )
                     await run_once(sf, pipeline_cfg, backfill=False)
-                    logger.info("orchestrator | pipeline cycle complete")
+                    logger.info("orchestrator | pipeline cycle complete | first_run={}", first_pipeline_run)
+                    first_pipeline_run = False
             except Exception as exc:
                 logger.warning("orchestrator | pipeline error (non-fatal): {}", exc)
+                first_pipeline_run = False  # don't retry-loop on error
             finally:
                 if eng is not None:
                     try:

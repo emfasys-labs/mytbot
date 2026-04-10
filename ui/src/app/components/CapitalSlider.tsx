@@ -40,7 +40,8 @@ export function CapitalSlider({ totalCapital, pct, onPctChange, onHaptic, dorman
   };
 
   return (
-    <div className="relative h-96 w-12 flex flex-col items-center">
+    <div className="relative flex h-96 flex-col items-center">
+      <div className="relative h-full w-12 flex flex-col items-center">
       <AnimatePresence>
         {isDragging && !dormant && (
           <motion.div
@@ -50,7 +51,7 @@ export function CapitalSlider({ totalCapital, pct, onPctChange, onHaptic, dorman
             transition={{ duration: 0.2 }}
             className="absolute -left-40 top-1/2 -translate-y-1/2 bg-white/10 backdrop-blur-xl px-4 py-2 rounded-lg"
           >
-            <div className="text-xs text-gray-400 mb-0.5">Exposing</div>
+            <div className="text-xs text-gray-400 mb-0.5">Tradable</div>
             <div className="text-xl font-medium text-amber-400">
               £{Math.round(activeCapital).toLocaleString()}
             </div>
@@ -112,6 +113,7 @@ export function CapitalSlider({ totalCapital, pct, onPctChange, onHaptic, dorman
         }}
         transition={{ type: 'spring', stiffness: 200, damping: 25 }}
       />
+      </div>
     </div>
   );
 }

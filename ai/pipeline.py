@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from ai.news_classifier import NewsClassifier, NewsItem, NewsScore
 from storage.models import AIOutputLog, MacroObservation, NewsHeadline
@@ -29,13 +30,15 @@ class AIPipeline:
         self.classifier = classifier or NewsClassifier()
         self.news_lookback_hours = int(cfg.get("news_lookback_hours", 24))
         self.news_limit = int(cfg.get("news_limit", 200))
+        self.max_news_items_per_cycle = max(1, int(cfg.get("max_news_items_per_cycle", 40)))
         self.regime_strategy_gates = cfg.get("regime_strategy_gates", {})
         self.anomaly_cfg = cfg.get("anomaly_detection", {})
-        self.cache_ttl_seconds = max(0, int(cfg.get("cache_ttl_seconds", 900)))
+        self.cache_ttl_seconds = max(0, int(cfg.get("cache_ttl_seconds", 300)))
         self._last_result: AIPipelineResult | None = None
         self._last_result_ts: datetime | None = None
         self._last_symbols: tuple[str, ...] | None = None
         self._startup_validated = False
+        self._first_run = True  # bypass cache and stale-check on first call
 
     async def compute(self, session_factory, symbols: list[str]) -> AIPipelineResult:
         norm_symbols = [s.strip().upper() for s in symbols if s and s.strip()]
@@ -48,7 +51,8 @@ class AIPipeline:
         now = datetime.now(timezone.utc)
         symbols_key = tuple(sorted(norm_symbols))
         if (
-            self.cache_ttl_seconds > 0
+            not self._first_run  # never skip on first call — always boot fresh
+            and self.cache_ttl_seconds > 0
             and self._last_result is not None
             and self._last_result_ts is not None
             and self._last_symbols == symbols_key
@@ -56,6 +60,10 @@ class AIPipeline:
         ):
             logger.info("ai.pipeline | returning cached result | age_s={:.1f}", (now - self._last_result_ts).total_seconds())
             return self._last_result
+        # Auto-fetch fresh news from NewsAPI if DB is stale (no recent headlines).
+        # On first run after startup, always refresh regardless of staleness threshold.
+        await self._refresh_news_if_stale(session_factory, force=self._first_run)
+        self._first_run = False
         news = await self._load_recent_news(session_factory)
         macro_regime, macro_conf, macro_payload = await self._compute_macro_regime(session_factory)
         news_scores, details, anomalies = await self._score_news(symbols=norm_symbols, rows=news)
@@ -130,6 +138,46 @@ class AIPipeline:
             return None
         return {str(x).strip() for x in allowed if str(x).strip()}
 
+    async def _refresh_news_if_stale(self, session_factory, *, force: bool = False) -> None:
+        """
+        Fetch fresh headlines from NewsAPI if the DB has no news in the last hour.
+        Pass force=True on startup to always fetch regardless of last fetch time.
+        This makes the AI pipeline self-sufficient — no separate run_pipeline.py needed.
+        """
+        news_api_key = os.getenv("NEWS_API_KEY", "").strip()
+        if not news_api_key:
+            return
+        try:
+            if not force:
+                stale_threshold = timedelta(hours=1)
+                cutoff = datetime.now(timezone.utc) - stale_threshold
+                async with session_factory() as session:
+                    latest_q = await session.execute(
+                        select(func.max(NewsHeadline.fetched_at))
+                    )
+                    latest_fetch = latest_q.scalar_one()
+                # Make timezone-aware for comparison
+                if latest_fetch is not None:
+                    lf = latest_fetch if latest_fetch.tzinfo else latest_fetch.replace(tzinfo=timezone.utc)
+                    if lf >= cutoff:
+                        return  # DB is fresh enough
+            # DB is stale — fetch now
+            from data.pipeline import ingest_news
+            import yaml
+            from pathlib import Path
+            pipeline_cfg_path = Path("config/data_pipeline.yaml")
+            pipeline_cfg: dict = {}
+            if pipeline_cfg_path.is_file():
+                with pipeline_cfg_path.open(encoding="utf-8") as f:
+                    pipeline_cfg = yaml.safe_load(f) or {}
+            news_cfg = pipeline_cfg.get("news", {"enabled": True, "query": "market stocks equities crypto forex", "page_size": 100})
+            news_cfg["enabled"] = True
+            reason = "startup flush" if force else "stale"
+            logger.info("ai.pipeline | news {} | fetching from NewsAPI", reason)
+            await ingest_news(session_factory, news_cfg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai.pipeline | news refresh failed (non-fatal) | {}", exc)
+
     async def _load_recent_news(self, session_factory) -> list[NewsHeadline]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.news_lookback_hours)
         async with session_factory() as session:
@@ -139,7 +187,17 @@ class AIPipeline:
                 .order_by(NewsHeadline.published_at.desc())
                 .limit(self.news_limit)
             )
-            return list(q.scalars().all())
+            rows = list(q.scalars().all())
+            if rows:
+                return rows
+            # Fallback: if published_at window is empty (common with delayed feeds),
+            # use most recently fetched headlines so intelligence panels are not blank.
+            fq = await session.execute(
+                select(NewsHeadline)
+                .order_by(NewsHeadline.fetched_at.desc())
+                .limit(self.news_limit)
+            )
+            return list(fq.scalars().all())
 
     async def _score_news(
         self,
@@ -151,7 +209,7 @@ class AIPipeline:
             return ({s: 0.0 for s in symbols}, {}, [])
 
         items: list[NewsItem] = []
-        for row in rows:
+        for row in rows[: self.max_news_items_per_cycle]:
             items.append(
                 NewsItem(
                     headline=row.title,
@@ -172,11 +230,26 @@ class AIPipeline:
         disagreement_threshold = float(self.anomaly_cfg.get("disagreement_ratio_threshold", 0.6))
         high_impact = float(self.anomaly_cfg.get("high_impact_score_abs", 0.75))
         low_conf = float(self.anomaly_cfg.get("low_confidence_threshold", 0.45))
-        for symbol in symbols:
+
+        # Build scoring universe: monitored symbols PLUS every symbol Claude
+        # mentioned in affected_symbols (the "discovered" set).  This is
+        # the key insight — news movers should show what the market is
+        # actually moving, not just the narrow monitored list.
+        monitored_set = set(symbols)
+        discovered_set: set[str] = set()
+        for ns in usable:
+            for sym in ns.affected_symbols:
+                s = sym.strip().upper()
+                if s and len(s) <= 12:  # basic sanity: valid ticker length
+                    discovered_set.add(s)
+        all_symbols = list(monitored_set | discovered_set)
+
+        def _score_symbol(symbol: str) -> None:
             sym_scores = [s for s in usable if symbol in s.affected_symbols]
             if not sym_scores:
-                scores[symbol] = 0.0
-                continue
+                if symbol in monitored_set:
+                    scores[symbol] = 0.0  # keep monitored symbols even if no match
+                return
             weighted = []
             for s in sym_scores:
                 bias_mult = 1.0 if s.directional_bias == "bullish" else (-1.0 if s.directional_bias == "bearish" else 0.0)
@@ -221,6 +294,16 @@ class AIPipeline:
                         "confidence": top.confidence,
                     }
                 )
+
+        for sym in all_symbols:
+            _score_symbol(sym)
+
+        discovered_count = len(discovered_set - monitored_set)
+        non_zero = sum(1 for v in scores.values() if v != 0.0)
+        logger.info(
+            "ai.pipeline | scored {} monitored + {} discovered symbols | {} non-zero",
+            len(monitored_set), discovered_count, non_zero,
+        )
         return scores, details, anomalies
 
     async def _compute_macro_regime(self, session_factory) -> tuple[str, float, dict[str, Any]]:

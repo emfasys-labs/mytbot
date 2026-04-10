@@ -42,16 +42,8 @@ class MeanReversionStrategy(Strategy):
         latest = df.iloc[-1]
         close = float(latest["close"])
         rsi = self._to_float(latest.get("rsi_14"))
-        bb_lower = self._to_float(
-            latest.get("BBL_20_2.0")
-            if "BBL_20_2.0" in df.columns
-            else latest.get("BBL_20_2")
-        )
-        bb_upper = self._to_float(
-            latest.get("BBU_20_2.0")
-            if "BBU_20_2.0" in df.columns
-            else latest.get("BBU_20_2")
-        )
+        bb_lower = self._to_float(self._get_latest_band_value(df, latest, "BBL"))
+        bb_upper = self._to_float(self._get_latest_band_value(df, latest, "BBU"))
         if rsi is None or bb_lower is None or bb_upper is None:
             return None
 
@@ -87,6 +79,30 @@ class MeanReversionStrategy(Strategy):
                 "atr_pct": atr_pct,
             },
         )
+
+    @staticmethod
+    def _get_latest_band_value(df: pd.DataFrame, latest: pd.Series, band_prefix: str) -> object:
+        """
+        Resolve Bollinger column variants from feature engineering.
+        We see names like:
+          - BBL_20_2.0
+          - BBL_20_2
+          - BBL_20_2.0_2.0
+        """
+        direct_candidates = [
+            f"{band_prefix}_20_2.0",
+            f"{band_prefix}_20_2",
+            f"{band_prefix}_20_2.0_2.0",
+        ]
+        for col in direct_candidates:
+            if col in df.columns:
+                return latest.get(col)
+
+        # Generic fallback: first matching Bollinger column by prefix.
+        for col in df.columns:
+            if str(col).startswith(f"{band_prefix}_"):
+                return latest.get(col)
+        return None
 
     def _calculate_atr(self, df: pd.DataFrame, period: int) -> float:
         high = df["high"]

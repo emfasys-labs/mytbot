@@ -4,6 +4,21 @@
 
 data_source: yfinance
 
+universe_mode: dynamic
+
+dynamic_universe:
+  max_symbols: 300
+  # Tiered "world monitor": rank broker-listed names by yfinance liquidity + spread proxy.
+  ranking:
+    enabled: true
+    core_max: 50
+    scan_max: 250
+    max_candidates_to_score: 400
+    yf_concurrency: 10
+    score_timeout_sec: 4
+    scan_batch_size: 45
+    scan_strategy_every_n: 3
+
 symbols:
   - SPY
   - QQQ
@@ -36,7 +51,7 @@ research_features:
 
 news:
   enabled: true
-  query: "(SPY OR QQQ OR bitcoin OR ethereum) AND (market OR stocks OR crypto)"
+  query: "(market OR stocks OR equities OR bonds OR forex OR commodities OR crypto) AND (surge OR rally OR crash OR guidance OR rates OR inflation OR conflict)"
   page_size: 100
   language: en
 

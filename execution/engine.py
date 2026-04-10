@@ -121,6 +121,8 @@ class ExecutionEngine:
         for attempt in range(self.place_order_retries + 1):
             try:
                 result = await broker.place_order(order)
+                if result is None:
+                    raise RuntimeError("broker.place_order returned None")
                 break
             except Exception as e:
                 logger.error(

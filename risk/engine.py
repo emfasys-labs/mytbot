@@ -105,7 +105,6 @@ class RiskEngine:
             self._check_asset_proportionality,
             self._check_minimum_order_size,
             self._check_daily_loss_limit,
-            self._check_max_trades_per_day,
             self._check_drawdown_limit,
             self._check_position_size,
             self._check_max_loss_per_trade_pct,
@@ -114,6 +113,9 @@ class RiskEngine:
             self._check_asset_class_limits,
             self._check_consecutive_losses,
             self._check_confidence_threshold,
+            self._check_theme_uniqueness,
+            self._check_catalyst_present,
+            self._check_trade_quality_score,
         ]
 
         for check in checks:
@@ -286,7 +288,7 @@ class RiskEngine:
             return (True, "m8_strategy_sleeve_cap")
         if p <= 0:
             return (True, "m8_strategy_sleeve_cap")
-        pv = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
+        pv = self._sizing_nav(portfolio)
         if pv <= 0:
             return (False, "m8_strategy_sleeve_cap")
         limit = pv * p
@@ -313,34 +315,27 @@ class RiskEngine:
         allowed_loss = portfolio_value * max_daily_loss_pct
         return (observed_loss <= allowed_loss, "daily_loss_limit")
 
-    def _check_max_trades_per_day(self, signal, portfolio) -> tuple[bool, str]:
-        max_trades = int(self.config.get("max_trades_per_day", 0))
-        if max_trades <= 0:
-            return (True, "max_trades_per_day")
-        trades_today = int(portfolio.get("trades_today", 0))
-        return (trades_today < max_trades, "max_trades_per_day")
-
     def _check_position_size(self, signal, portfolio) -> tuple[bool, str]:
-        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
-        if portfolio_value <= 0:
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
             return (False, "position_size")
         max_position_pct = self._effective_max_position_pct()
         price = self._resolve_signal_price(signal)
         if price <= 0:
             return (False, "position_size")
         requested_notional = abs(signal.suggested_quantity) * price
-        allowed_notional = portfolio_value * max_position_pct
+        allowed_notional = sizing_base * max_position_pct
         return (requested_notional <= allowed_notional, "position_size")
 
     def _check_asset_proportionality(self, signal, portfolio) -> tuple[bool, str]:
-        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
-        if portfolio_value <= 0:
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
             return (False, "asset_proportionality")
         threshold_pct = self._provider.get_decimal("proportionality_threshold_pct", fallback=Decimal("0"))
         minimum = self._minimum_order_size(signal.asset_class)
         if minimum <= 0:
             return (True, "asset_proportionality")
-        return (minimum < (portfolio_value * threshold_pct), "asset_proportionality")
+        return (minimum < (sizing_base * threshold_pct), "asset_proportionality")
 
     def _check_minimum_order_size(self, signal, portfolio) -> tuple[bool, str]:
         notional = self._requested_notional(signal)
@@ -378,18 +373,18 @@ class RiskEngine:
         return (expected_loss <= allowed_loss, "max_loss_per_trade_pct")
 
     def _check_max_exposure(self, signal, portfolio) -> tuple[bool, str]:
-        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
-        if portfolio_value <= 0:
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
             return (False, "max_exposure")
         max_gross_pct = self._provider.get_decimal("max_gross_exposure_pct", fallback=Decimal("0"))
         current_gross = self._decimal_from_portfolio(portfolio, "current_gross_exposure", Decimal("0"))
         projected_gross = current_gross + self._requested_notional(signal)
-        allowed_gross = portfolio_value * max_gross_pct
+        allowed_gross = sizing_base * max_gross_pct
         return (projected_gross <= allowed_gross, "max_exposure")
 
     def _check_concentration(self, signal, portfolio) -> tuple[bool, str]:
-        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
-        if portfolio_value <= 0:
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
             return (False, "concentration")
         max_concentration_pct = self._provider.get_decimal("max_concentration_pct", fallback=Decimal("0"))
         symbol_exposure_raw = portfolio.get("symbol_exposure", {})
@@ -397,12 +392,12 @@ class RiskEngine:
         if isinstance(symbol_exposure_raw, dict):
             symbol_exposure = Decimal(str(symbol_exposure_raw.get(signal.symbol, "0")))
         projected_symbol_exposure = symbol_exposure + self._requested_notional(signal)
-        allowed_symbol_exposure = portfolio_value * max_concentration_pct
+        allowed_symbol_exposure = sizing_base * max_concentration_pct
         return (projected_symbol_exposure <= allowed_symbol_exposure, "concentration")
 
     def _check_asset_class_limits(self, signal, portfolio) -> tuple[bool, str]:
-        portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
-        if portfolio_value <= 0:
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
             return (False, "asset_class_limit")
 
         asset_class = (signal.asset_class or "").strip().lower()
@@ -415,7 +410,8 @@ class RiskEngine:
         key_by_class = {
             "crypto": "max_crypto_pct",
             "bond": "max_bond_pct",
-            "equity": "max_single_stock_pct",
+            # Portfolio-level cap for all equity exposure combined.
+            "equity": "max_equity_pct",
         }
         config_key = key_by_class.get(asset_class)
         if config_key is None:
@@ -426,7 +422,7 @@ class RiskEngine:
             return (True, "asset_class_limit")
 
         pct = self._cfg_decimal(config_key, fallback=Decimal("1.0"))
-        allowed = portfolio_value * pct
+        allowed = sizing_base * pct
         return (projected <= allowed, "asset_class_limit")
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
@@ -440,6 +436,111 @@ class RiskEngine:
     def _check_confidence_threshold(self, signal, portfolio) -> tuple[bool, str]:
         min_confidence = float(self.config.get("min_signal_confidence", 1.0))
         return (signal.confidence >= min_confidence, "confidence_threshold")
+
+    def _check_theme_uniqueness(self, signal, portfolio) -> tuple[bool, str]:
+        """
+        Reject if we already hold a position in the same symbol in the same direction.
+        One idea = one expression. No stacking the same thesis.
+        """
+        if not self.config.get("theme_uniqueness_check", True):
+            return (True, "theme_uniqueness")
+        positions = portfolio.get("positions", {})
+        if not positions:
+            return (True, "theme_uniqueness")
+        sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        for pos_sym, pos in positions.items():
+            if pos_sym.strip().upper() != sym:
+                continue
+            qty = float(pos.get("quantity", 0) or 0)
+            if qty == 0:
+                continue
+            # Already long → reject another buy; already short → reject another sell
+            if signal.side == "buy" and qty > 0:
+                return (False, "theme_uniqueness")
+            if signal.side == "sell" and qty < 0:
+                return (False, "theme_uniqueness")
+        return (True, "theme_uniqueness")
+
+    def _check_catalyst_present(self, signal, portfolio) -> tuple[bool, str]:
+        """
+        A trade needs a reason to exist.
+        Require at least one of: confirmed volume spike OR meaningful news sentiment.
+        If neither is available (no data), pass through — don't penalise missing data.
+        """
+        if not self.config.get("require_catalyst", False):
+            return (True, "catalyst_present")
+
+        meta = signal.metadata if isinstance(signal.metadata, dict) else {}
+        volume_z = float(meta.get("volume_z_score") or 0.0)
+        news_score = float(signal.news_score or 0.0)
+        volume_threshold = float(self.config.get("catalyst_volume_z_min", 1.0))
+        news_threshold = float(self.config.get("catalyst_news_score_min", 0.15))
+
+        # If neither metric is populated, data is absent — assume neutral, don't block
+        data_absent = (volume_z == 0.0 and news_score == 0.0)
+        if data_absent:
+            return (True, "catalyst_present")
+
+        volume_confirms = volume_z >= volume_threshold
+        news_confirms = abs(news_score) >= news_threshold
+        return (volume_confirms or news_confirms, "catalyst_present")
+
+    def _check_trade_quality_score(self, signal, portfolio) -> tuple[bool, str]:
+        """
+        Composite quality gate. Raises the bar on what constitutes a 'real' trade.
+
+        score = 0.45 * confidence
+              + 0.30 * news_factor     (|news_score| capped at 1; 0 if no news configured)
+              + 0.25 * volume_factor   (volume_z normalized to 0-1; 0.5 if no data)
+
+        Modes can raise the threshold (defender) or lower it (hunter).
+        Set min_trade_quality_score: 0 to disable entirely.
+        """
+        threshold = float(self.config.get("min_trade_quality_score", 0.0))
+        if threshold <= 0.0:
+            return (True, "trade_quality")
+
+        confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
+        news_raw = float(getattr(signal, "news_score", None) or 0.0)
+        # Always work with the real signal.metadata dict — never a copy.
+        # {} is falsy so `signal.metadata or {}` would create a new dict and lose the write-back.
+        if not isinstance(getattr(signal, "metadata", None), dict):
+            signal.metadata = {}
+        meta = signal.metadata
+        volume_z = float(meta.get("volume_z_score") or 0.0)
+
+        # News factor: 0 when absent, normalized to 0-1 when present
+        news_factor = min(1.0, abs(news_raw))
+
+        # Determine quality based on available data signals
+        if volume_z == 0.0 and news_raw == 0.0:
+            # No enrichment data — weight entirely on confidence
+            quality = confidence
+        elif volume_z == 0.0:
+            # Have news, no volume
+            quality = 0.55 * confidence + 0.45 * news_factor
+        elif news_raw == 0.0:
+            # Have volume, no news
+            volume_factor = min(1.0, max(0.0, volume_z / 3.0))  # z=3 → 1.0
+            quality = 0.65 * confidence + 0.35 * volume_factor
+        else:
+            # Full data — all three components
+            volume_factor = min(1.0, max(0.0, volume_z / 3.0))
+            quality = 0.45 * confidence + 0.30 * news_factor + 0.25 * volume_factor
+
+        # Write quality score back into the signal's live metadata dict (persisted after risk check)
+        try:
+            meta["trade_quality_score"] = round(quality, 4)
+        except Exception:  # noqa: BLE001
+            pass
+
+        passed = quality >= threshold
+        if not passed:
+            logger.debug(
+                "RISK quality_gate | {} | conf={:.2f} news={:.2f} vol_z={:.2f} → quality={:.3f} < threshold={:.2f}",
+                signal.symbol, confidence, abs(news_raw), volume_z, quality, threshold,
+            )
+        return (passed, "trade_quality")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -458,6 +559,22 @@ class RiskEngine:
             return Decimal(str(portfolio.get(key, default)))
         except Exception:  # noqa: BLE001
             return default
+
+    def _sizing_nav(self, portfolio: dict) -> Decimal:
+        """
+        Notional limits (% of portfolio, exposure caps, etc.) apply to the **tradable**
+        sleeve (allocation slider), not necessarily full account equity.
+        Falls back to portfolio_value when tradable_capital is absent.
+        """
+        t = portfolio.get("tradable_capital")
+        if t is not None:
+            try:
+                d = Decimal(str(t))
+                if d > 0:
+                    return d
+            except Exception:  # noqa: BLE001
+                pass
+        return self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
 
     @staticmethod
     def _resolve_signal_price(signal: Signal) -> Decimal:

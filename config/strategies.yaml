@@ -38,6 +38,7 @@ strategies:
     preferred_broker: ibkr
     asset_class: equity
     lookback_periods: 30
-    rsi_buy_threshold: 35
-    rsi_sell_threshold: 65
-    band_epsilon: 0.0
+    # Slightly wider trigger zone so live 1h data produces actionable flow.
+    rsi_buy_threshold: 42
+    rsi_sell_threshold: 58
+    band_epsilon: 0.003

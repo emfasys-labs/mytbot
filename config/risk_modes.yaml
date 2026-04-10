@@ -1,0 +1,35 @@
+# config/risk_modes.yaml
+# ======================
+# Risk parameter profiles for each operating mode.
+# Applied at runtime via POST /system/mode — no restart needed.
+# These overlay risk_limits.yaml values in the live risk engine.
+#
+# Philosophy: no trade count limits.
+# The quality threshold is the gatekeeper — raise it for defence, lower it for offence.
+
+defender:
+  label: "Defender"
+  description: "Conservative. Smaller positions, high confidence bar, strict quality filter."
+  max_position_pct: 0.04          # 4% max per position
+  min_signal_confidence: 0.65     # Only high-confidence setups
+  min_trade_quality_score: 0.55   # Strict quality gate
+  require_catalyst: true          # Must have volume OR news trigger
+  max_gross_exposure_pct: 0.40    # Max 40% deployed
+
+trader:
+  label: "Trader"
+  description: "Balanced. Standard parameters — quality gate active, no count limits."
+  max_position_pct: 0.10
+  min_signal_confidence: 0.50
+  min_trade_quality_score: 0.30   # Default quality threshold
+  require_catalyst: false         # Catalyst preferred but not enforced
+  max_gross_exposure_pct: 0.80
+
+hunter:
+  label: "Hunter"
+  description: "Aggressive. Larger positions, lower confidence bar, looser quality filter."
+  max_position_pct: 0.15          # 15% per position
+  min_signal_confidence: 0.35     # Catch more setups
+  min_trade_quality_score: 0.15   # Loose quality gate — let setups through
+  require_catalyst: false
+  max_gross_exposure_pct: 0.80

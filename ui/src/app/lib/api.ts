@@ -44,6 +44,9 @@ export type ApiPnlResponse = {
     fees?: string;
     trades?: number;
     portfolio_value?: string;
+    /** Total equity × capital_allocation_pct — order sizing budget, not a second balance. */
+    tradable_capital?: string;
+    capital_allocation_pct?: number;
   };
 };
 
@@ -102,6 +105,82 @@ export type ApiNewsResponse = {
   ai_scores?: NewsAiScore[];
 };
 
+export type DiscoverySummaryResponse = {
+  universe?: {
+    broker_totals?: Record<string, number>;
+    total_broker_instruments?: number;
+    core?: number;
+    scan?: number;
+    light?: number;
+    total_tiered?: number;
+    tiers_updated_at?: string | null;
+  };
+  last_24h?: {
+    anomalies_detected?: number;
+    theses_generated?: number;
+    signals_produced?: number;
+    symbols_analysed?: number;
+  };
+};
+
+export type IntelligenceRegimeResponse = {
+  regime?: {
+    label?: string;
+    confidence?: number;
+    rationale?: string;
+    updated_at?: string | null;
+  };
+  top_movers?: Array<{
+    symbol: string;
+    score: number;
+    event_type: string;
+    rationale: string;
+    scored_at: string | null;
+  }>;
+};
+
+export type IntelligenceSignalsResponse = {
+  signals?: Array<{
+    id: string;
+    timestamp: string | null;
+    symbol: string;
+    side: string;
+    strategy: string;
+    confidence: number;
+    asset_class: string;
+    news_score: number | null;
+    quality_score: number | null;
+    volume_z: number | null;
+    verdict: string;
+    risk_reason: string;
+    checks_failed: string[];
+  }>;
+};
+
+export type DiscoveryAnomaliesResponse = {
+  anomalies?: Array<{
+    id: number;
+    timestamp: string | null;
+    symbol: string;
+    direction: string;
+    price_move_pct: string;
+    price_z_score: string;
+    anomaly_score: string;
+    thesis_generated: boolean;
+    signals_produced: number | null;
+  }>;
+};
+
+export type TradingMode = 'defender' | 'trader' | 'hunter';
+
+export type SystemModeResponse = {
+  mode: TradingMode;
+  label: string;
+  description: string;
+  applied?: Record<string, unknown>;
+  live_engine_updated?: boolean;
+};
+
 export type SystemState = 'off' | 'starting' | 'running' | 'stopping' | 'error';
 
 export type SystemStatusResponse = {
@@ -127,6 +206,17 @@ async function getJson<T>(path: string): Promise<T> {
 async function postJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`${path} failed (${r.status})`);
+  return (await r.json()) as T;
+}
+
+async function postJsonBody<T>(path: string, body: unknown): Promise<T> {
+  const base = await resolveApiBase();
+  const r = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
   return (await r.json()) as T;
 }
@@ -158,6 +248,13 @@ export const api = {
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   setCapitalAllocation: (pct: number) =>
     putJson<{ capital_pct: number }>('/system/capital-allocation', { pct }),
+  getSystemMode: () => getJson<SystemModeResponse>('/system/mode'),
+  setSystemMode: (mode: TradingMode) =>
+    postJsonBody<SystemModeResponse>('/system/mode', { mode }),
+  getDiscoverySummary: () => getJson<DiscoverySummaryResponse>('/discovery/summary'),
+  getDiscoveryAnomalies: (limit = 8) => getJson<DiscoveryAnomaliesResponse>(`/discovery/anomalies?limit=${limit}`),
+  getIntelligenceRegime: () => getJson<IntelligenceRegimeResponse>('/intelligence/regime'),
+  getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
 };
 
 export function toNumber(v: unknown, fallback = 0): number {
