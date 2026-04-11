@@ -15,7 +15,7 @@ pipeline:
   news_lookback_hours: 24
   news_limit: 200
   max_news_items_per_cycle: 40
-  cycle_timeout_seconds: 45
+  cycle_timeout_seconds: 300      # GPU: 45s is plenty; CPU: LLM ensemble needs up to 180s
   cache_ttl_seconds: 300
   macro_series:
     - FEDFUNDS
@@ -79,7 +79,7 @@ providers:
     fallback_model: llama3.1:8b     # secondary: runs in parallel for consensus
     temperature: 0.1
     max_tokens: 400
-    timeout_seconds: 15            # GPU: 2-3s typical; 60s for CPU fallback
+    timeout_seconds: 120           # GPU: 2-3s typical; CPU needs 60-90s + model swap time
     gpu_concurrency: 8              # parallel LLM calls (GPU can handle 8; use 3 for CPU)
     use_json_mode: true
     ensemble:

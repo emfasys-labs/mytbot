@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from loguru import logger
@@ -32,12 +33,32 @@ from control.runner_control import (
 from data.scanner import UniverseScanner
 from data.universe import UniverseManager
 from data.universe_tiers import load_universe_tiers
+from config.loaders import load_allocation, load_profile_modes
+from core.models_runtime import AssetClass
 from control.runtime import set_risk_engine
+from execution.d015_instruction_executor import risk_signal_from_execution_instruction
 from execution.engine import ExecutionEngine
+from execution.planner import build_execution_plan
 from execution.router import SmartOrderRouter
 from graph.engine import DependencyGraphEngine
 from graph.pipeline import DiscoveryPipeline
+from portfolio.allocation_engine import build_allocation_decision
+from portfolio.d015_smoothing import allocation_smoothing_snapshot, apply_allocation_smoothing
 from risk.engine import RiskEngine, RiskVerdict
+from risk.regime_state import compute_regime_state_async
+from signals.opportunity_engine import build_opportunities_async
+from signals.engine import unified_signal_to_signal_candidate
+from system.d015_escalation import (
+    drain_volume_refresh_features,
+    enqueue_volume_escalation_symbols,
+    load_replacement_context_from_bus,
+    load_smoothing_prev_from_bus,
+    merge_replacement_events_from_decision,
+    save_replacement_context_to_bus,
+    save_smoothing_prev_to_bus,
+)
+from system.d015_portfolio_bridge import portfolio_dict_to_runtime_state
+from system.d015_shadow import log_d015_shadow_for_signal
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from run_m3 import (
@@ -120,12 +141,47 @@ def _apply_saved_mode_to_risk_cfg(risk_engine: "RiskEngine") -> None:
         return
     modes = _load_yaml("config/risk_modes.yaml")
     profile = modes.get(mode, {})
+    if risk_engine.config.get("allocator_d015_primary"):
+        for key in ("label", "description"):
+            if key in profile:
+                risk_engine.config[key] = profile[key]
+        if profile:
+            logger.info("trading_loop | applied mode labels only (D015 primary) | mode={}", mode)
+        return
     for key, value in profile.items():
         if key in ("label", "description"):
             continue
         risk_engine.config[key] = value
     if profile:
         logger.info("trading_loop | applied mode profile | mode={}", mode)
+
+
+def _d015_legacy_fallback() -> bool:
+    return os.getenv("ALLOCATOR_D015_LEGACY_FALLBACK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _enrich_candidate_volume_z(candidate: Any, df: Any) -> None:
+    try:
+        import pandas as pd  # noqa: F401
+
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return
+        if "volume" not in df.columns:
+            return
+        vol = df["volume"].dropna()
+        if len(vol) < 5:
+            return
+        mean_v = float(vol.mean())
+        std_v = float(vol.std())
+        if std_v <= 0:
+            return
+        latest_v = float(vol.iloc[-1])
+        z = (latest_v - mean_v) / std_v
+        if not isinstance(getattr(candidate, "metadata", None), dict):
+            candidate.metadata = {}
+        candidate.metadata["volume_z_score"] = round(z, 4)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class TradingLoop:
@@ -218,6 +274,15 @@ class TradingLoop:
             pipeline_cfg = _load_yaml("config/data_pipeline.yaml")
             risk_cfg = _load_yaml("config/risk_limits.yaml")
             merge_m8_into_risk_cfg(risk_cfg, "config/m8_micro_live.yaml")
+            legacy_fb = _d015_legacy_fallback()
+            if legacy_fb:
+                risk_cfg["allocator_d015_primary"] = False
+                risk_cfg["allocator_d015_enabled"] = (
+                    os.getenv("ALLOCATOR_D015_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+                )
+            else:
+                risk_cfg["allocator_d015_enabled"] = True
+                risk_cfg["allocator_d015_primary"] = True
             ai_cfg = _load_yaml("config/ai.yaml")
             discovery_cfg = _load_yaml("config/discovery.yaml")
 
@@ -285,6 +350,8 @@ class TradingLoop:
             strategies = {momentum.name: momentum, mean_rev.name: mean_rev}
 
             bus = CommandBus(session_factory)
+            alloc_cfg = load_allocation()
+            profile_modes_cfg = load_profile_modes()
             for name, strategy in strategies.items():
                 state_v = await bus.get_state(f"strategy.enabled.{name}", None)
                 if state_v is not None:
@@ -460,97 +527,330 @@ class TradingLoop:
                         except Exception as exc:
                             logger.warning("trading_loop | AI pipeline error (continuing): {}", exc)
 
-                    for symbol in symbols:
-                        if self._stop_event.is_set():
-                            break
+                    mode_raw = "trader"
+                    try:
+                        import json as _json
+                        from pathlib import Path as _Path
 
-                        df, feature_ts = await _load_recent_features(
+                        _mf = _Path("data/runtime/active_mode.json")
+                        if _mf.is_file():
+                            mode_raw = str(_json.loads(_mf.read_text(encoding="utf-8")).get("mode", "trader"))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    async def _resolve_price_for_symbol(sym: str) -> Decimal:
+                        df_p, _ = await _load_recent_features(
                             session_factory,
-                            symbol=symbol,
+                            symbol=sym,
                             timeframe=self.timeframe,
                             lookback_bars=self.lookback_bars,
                         )
-                        if df.empty:
-                            continue
+                        if df_p is None or not hasattr(df_p, "empty") or df_p.empty:
+                            return Decimal("1")
+                        col = "close" if "close" in df_p.columns else None
+                        if col is None:
+                            return Decimal("1")
+                        try:
+                            return Decimal(str(float(df_p[col].iloc[-1])))
+                        except Exception:  # noqa: BLE001
+                            return Decimal("1")
 
-                        raw_candidates = []
-                        m_sig = momentum.generate_signal(symbol, df)
-                        if m_sig is not None:
-                            raw_candidates.append(m_sig)
-                        r_sig = mean_rev.generate_signal(symbol, df)
-                        if r_sig is not None:
-                            raw_candidates.append(r_sig)
+                    def _asset_class_lookup(sym: str, cands: list) -> str:
+                        for c in cands:
+                            if getattr(c, "symbol", None) == sym:
+                                return str(getattr(c, "asset_class", "equity") or "equity")
+                        return "equity"
 
-                        if ai_result is not None and ai_pipeline is not None:
-                            allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                            filtered = filter_by_allowed_strategies(raw_candidates, allowed)
-                            raw_candidates = filtered
+                    use_legacy = legacy_fb
 
-                        raw = _pick_best_signal(raw_candidates)
-                        if raw is None:
-                            continue
+                    if use_legacy:
+                        for symbol in symbols:
+                            if self._stop_event.is_set():
+                                break
 
-                        signal = self.sig_engine.process(
-                            raw,
-                            portfolio_value=Decimal(str(effective_value)),
-                            news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
-                        )
-                        if signal is None:
-                            continue
+                            df, feature_ts = await _load_recent_features(
+                                session_factory,
+                                symbol=symbol,
+                                timeframe=self.timeframe,
+                                lookback_bars=self.lookback_bars,
+                            )
+                            if df.empty:
+                                continue
 
-                        if _is_crypto_symbol(symbol) and signal.asset_class != "crypto":
-                            signal.asset_class = "crypto"
+                            raw_candidates = []
+                            m_sig = momentum.generate_signal(symbol, df)
+                            if m_sig is not None:
+                                raw_candidates.append(m_sig)
+                            r_sig = mean_rev.generate_signal(symbol, df)
+                            if r_sig is not None:
+                                raw_candidates.append(r_sig)
 
-                        if ai_result is not None:
-                            signal.metadata["ai_macro_regime"] = ai_result.macro_regime
-                            signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                            if ai_result is not None and ai_pipeline is not None:
+                                allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
+                                filtered = filter_by_allowed_strategies(raw_candidates, allowed)
+                                raw_candidates = filtered
 
-                        # Quality enrichment: volume z-score from recent feature data
-                        _enrich_signal_volume_z(signal, df)
+                            raw = _pick_best_signal(raw_candidates)
+                            if raw is None:
+                                continue
 
-                        generated += 1
-                        ok = await _process_signal(signal, symbol_hint=symbol)
-                        if ok:
-                            executed += 1
+                            signal = self.sig_engine.process(
+                                raw,
+                                portfolio_value=Decimal(str(effective_value)),
+                                news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
+                            )
+                            if signal is None:
+                                continue
 
-                    if discovery_pipeline is not None:
-                        discovery_items = await discovery_pipeline.run_cycle_detailed(
-                            portfolio_value=Decimal(str(effective_value)),
-                            market_context={
-                                "macro_regime": ai_result.macro_regime if ai_result is not None else None,
-                                "macro_confidence": ai_result.macro_confidence if ai_result is not None else None,
-                            },
-                        )
-                        for item in discovery_items:
-                            anomaly = item.anomaly
-                            thesis = item.thesis
-                            d_signals = item.signals
-                            for ds in d_signals:
-                                if ai_result is not None:
-                                    ds.news_score = ai_result.news_scores.get(ds.symbol)
-                                    ds.metadata["ai_macro_regime"] = ai_result.macro_regime
-                                    ds.metadata["ai_macro_confidence"] = ai_result.macro_confidence
-                                    ds.metadata["ai_news_detail"] = ai_result.news_details.get(ds.symbol, {})
-                                # Anomaly-derived signals carry their anomaly score as quality signal
-                                if item.anomaly is not None:
-                                    ds.metadata["anomaly_score"] = float(getattr(item.anomaly, "anomaly_score", 0) or 0)
-                                    ds.metadata["price_z_score"] = float(getattr(item.anomaly, "price_z_score", 0) or 0)
-                                generated += 1
-                                ok = await _process_signal(ds, symbol_hint=ds.symbol)
+                            if _is_crypto_symbol(symbol) and signal.asset_class != "crypto":
+                                signal.asset_class = "crypto"
+
+                            if ai_result is not None:
+                                signal.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+
+                            _enrich_signal_volume_z(signal, df)
+
+                            await log_d015_shadow_for_signal(
+                                session_factory,
+                                symbol=signal.symbol,
+                                strategy_name=signal.strategy,
+                                asset_class=signal.asset_class,
+                                side=signal.side,
+                                confidence=float(signal.confidence),
+                                adjusted_strength=Decimal(str(signal.confidence)),
+                                news_score=(
+                                    float(ai_result.news_scores.get(symbol))
+                                    if ai_result and ai_result.news_scores.get(symbol) is not None
+                                    else None
+                                ),
+                                metadata=dict(signal.metadata or {}),
+                                universe_symbols=list(symbols),
+                                nav_estimate=Decimal(str(total_equity)),
+                                capital_pct=float(self.capital_pct),
+                                mode=mode_raw,
+                                timeframe=self.timeframe,
+                                legacy_suggested_qty=signal.suggested_quantity,
+                            )
+
+                            generated += 1
+                            ok = await _process_signal(signal, symbol_hint=symbol)
+                            if ok:
+                                executed += 1
+
+                        if discovery_pipeline is not None:
+                            discovery_items = await discovery_pipeline.run_cycle_detailed(
+                                portfolio_value=Decimal(str(effective_value)),
+                                market_context={
+                                    "macro_regime": ai_result.macro_regime if ai_result is not None else None,
+                                    "macro_confidence": ai_result.macro_confidence if ai_result is not None else None,
+                                },
+                            )
+                            for item in discovery_items:
+                                anomaly = item.anomaly
+                                thesis = item.thesis
+                                d_signals = item.signals
+                                for ds in d_signals:
+                                    if ai_result is not None:
+                                        ds.news_score = ai_result.news_scores.get(ds.symbol)
+                                        ds.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                        ds.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                                        ds.metadata["ai_news_detail"] = ai_result.news_details.get(ds.symbol, {})
+                                    if item.anomaly is not None:
+                                        ds.metadata["anomaly_score"] = float(getattr(item.anomaly, "anomaly_score", 0) or 0)
+                                        ds.metadata["price_z_score"] = float(getattr(item.anomaly, "price_z_score", 0) or 0)
+                                    generated += 1
+                                    ok = await _process_signal(ds, symbol_hint=ds.symbol)
+                                    if ok:
+                                        executed += 1
+                                await persist_anomaly_log(
+                                    session_factory,
+                                    anomaly=anomaly,
+                                    opportunities_found=len(item.opportunities),
+                                    thesis_generated=thesis is not None,
+                                    signals_produced=len(d_signals),
+                                )
+                                if thesis is not None:
+                                    await persist_thesis_log(
+                                        session_factory,
+                                        thesis=thesis,
+                                    )
+                    else:
+                        batch_candidates: list = []
+                        for symbol in symbols:
+                            if self._stop_event.is_set():
+                                break
+
+                            df, feature_ts = await _load_recent_features(
+                                session_factory,
+                                symbol=symbol,
+                                timeframe=self.timeframe,
+                                lookback_bars=self.lookback_bars,
+                            )
+                            if df.empty:
+                                continue
+
+                            raw_candidates = []
+                            m_sig = momentum.generate_signal(symbol, df)
+                            if m_sig is not None:
+                                raw_candidates.append(m_sig)
+                            r_sig = mean_rev.generate_signal(symbol, df)
+                            if r_sig is not None:
+                                raw_candidates.append(r_sig)
+
+                            if ai_result is not None and ai_pipeline is not None:
+                                allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
+                                raw_candidates = filter_by_allowed_strategies(raw_candidates, allowed)
+
+                            raw = _pick_best_signal(raw_candidates)
+                            if raw is None:
+                                continue
+
+                            cand = self.sig_engine.raw_to_signal_candidate(
+                                raw,
+                                news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
+                            )
+                            if cand is None:
+                                continue
+
+                            if _is_crypto_symbol(symbol) and str(cand.asset_class) != "crypto":
+                                cand.asset_class = cast(AssetClass, "crypto")
+
+                            if ai_result is not None:
+                                cand.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                cand.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+
+                            _enrich_candidate_volume_z(cand, df)
+                            batch_candidates.append(cand)
+
+                        if discovery_pipeline is not None:
+                            discovery_items = await discovery_pipeline.run_cycle_detailed(
+                                portfolio_value=Decimal(str(effective_value)),
+                                market_context={
+                                    "macro_regime": ai_result.macro_regime if ai_result is not None else None,
+                                    "macro_confidence": ai_result.macro_confidence if ai_result is not None else None,
+                                },
+                            )
+                            for item in discovery_items:
+                                anomaly = item.anomaly
+                                thesis = item.thesis
+                                d_signals = item.signals
+                                for ds in d_signals:
+                                    if ai_result is not None:
+                                        ds.news_score = ai_result.news_scores.get(ds.symbol)
+                                        ds.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                        ds.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                                        ds.metadata["ai_news_detail"] = ai_result.news_details.get(ds.symbol, {})
+                                    if item.anomaly is not None:
+                                        ds.metadata["anomaly_score"] = float(getattr(item.anomaly, "anomaly_score", 0) or 0)
+                                        ds.metadata["price_z_score"] = float(getattr(item.anomaly, "price_z_score", 0) or 0)
+                                    batch_candidates.append(unified_signal_to_signal_candidate(ds))
+                                await persist_anomaly_log(
+                                    session_factory,
+                                    anomaly=anomaly,
+                                    opportunities_found=len(item.opportunities),
+                                    thesis_generated=thesis is not None,
+                                    signals_produced=len(d_signals),
+                                )
+                                if thesis is not None:
+                                    await persist_thesis_log(
+                                        session_factory,
+                                        thesis=thesis,
+                                    )
+
+                        generated = len(batch_candidates)
+                        executed = 0
+                        if batch_candidates:
+                            portfolio_dict = await _load_portfolio_state(
+                                session_factory,
+                                fallback_portfolio_value=total_equity,
+                                signal_price_fallback=None,
+                                capital_pct=Decimal(str(self.capital_pct)),
+                            )
+                            ps_rt = portfolio_dict_to_runtime_state(
+                                portfolio_dict,
+                                mode=mode_raw,
+                                capital_pct=float(self.capital_pct),
+                            )
+                            async with session_factory() as session:
+                                feat_extra = await drain_volume_refresh_features(
+                                    session,
+                                    bus,
+                                    universe_symbols=list(symbols),
+                                    timeframe=self.timeframe,
+                                    allocation_cfg=alloc_cfg,
+                                )
+                                regime = await compute_regime_state_async(
+                                    portfolio_state=ps_rt,
+                                    allocation_cfg=alloc_cfg,
+                                    session=session,
+                                    universe_symbols=list(symbols),
+                                    timeframe=self.timeframe,
+                                )
+                                opps = await build_opportunities_async(
+                                    signals=batch_candidates,
+                                    regime_state=regime,
+                                    allocation_cfg=alloc_cfg,
+                                    session=session,
+                                    timeframe=self.timeframe,
+                                    profile_cfg=profile_modes_cfg,
+                                    active_profile_mode=mode_raw
+                                    if mode_raw in profile_modes_cfg.modes
+                                    else profile_modes_cfg.defaults.active_mode,
+                                    feature_json_by_symbol=feat_extra,
+                                )
+                            esc_syms = [o.symbol for o in opps if o.metadata.get("d015_escalate_context")]
+                            await enqueue_volume_escalation_symbols(bus, esc_syms, alloc_cfg)
+                            repl_ctx = await load_replacement_context_from_bus(bus)
+                            dec = build_allocation_decision(
+                                opportunities=opps,
+                                portfolio_state=ps_rt,
+                                regime_state=regime,
+                                allocation_cfg=alloc_cfg,
+                                profile_cfg=profile_modes_cfg,
+                                replacement_context=repl_ctx,
+                            )
+                            smooth_prev = await load_smoothing_prev_from_bus(bus)
+                            dec = apply_allocation_smoothing(
+                                dec,
+                                prev=smooth_prev,
+                                stability_cfg=alloc_cfg.allocation_stability,
+                                nav=ps_rt.nav,
+                            )
+                            merge_replacement_events_from_decision(
+                                repl_ctx,
+                                decision=dec,
+                                now=datetime.now(timezone.utc),
+                            )
+                            await save_replacement_context_to_bus(bus, repl_ctx)
+                            await save_smoothing_prev_to_bus(bus, allocation_smoothing_snapshot(dec))
+                            plan = build_execution_plan(
+                                decision=dec,
+                                portfolio_state=ps_rt,
+                                allocation_cfg=alloc_cfg,
+                            )
+                            logger.info(
+                                "d015_primary | ge={} instructions={} turnover_est={}",
+                                dec.gross_exposure_target,
+                                len(plan.instructions),
+                                plan.estimated_turnover,
+                            )
+                            for instr in plan.instructions:
+                                px = await _resolve_price_for_symbol(instr.symbol)
+                                ac = _asset_class_lookup(instr.symbol, batch_candidates)
+                                routed = self.router.route(ac, instr.symbol)
+                                if routed is None:
+                                    continue
+                                rs = risk_signal_from_execution_instruction(
+                                    instr,
+                                    signal_id=str(uuid.uuid4()),
+                                    broker=routed,
+                                    asset_class=ac,
+                                    price=px,
+                                )
+                                ok = await _process_signal(rs, symbol_hint=instr.symbol)
                                 if ok:
                                     executed += 1
-                            await persist_anomaly_log(
-                                session_factory,
-                                anomaly=anomaly,
-                                opportunities_found=len(item.opportunities),
-                                thesis_generated=thesis is not None,
-                                signals_produced=len(d_signals),
-                            )
-                            if thesis is not None:
-                                await persist_thesis_log(
-                                    session_factory,
-                                    thesis=thesis,
-                                )
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     if now_ts >= next_reconcile_at:

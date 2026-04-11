@@ -50,6 +50,22 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `config/broker_permissions.yaml` — runtime broker permission/fallback map
 - `config/data_pipeline.yaml` — M2 symbols, intervals, News/FRED toggles
 - `config/ai.yaml`          — local-first AI config: providers, escalation policy, no daily caps
+- `config/profile_modes.yaml` — D015 mode coefficients + emergency safety_bounds (allocator)
+- `config/allocation.yaml`  — D015 global opportunity replacement policy (validated by `config/models.py`)
+- `config/loaders.py`       — `load_profile_modes()` / `load_allocation()`
+- `core/models_runtime.py`  — runtime types: Opportunity, RegimeState, AllocationDecision, ExecutionPlan
+- `signals/volume_anomaly.py` — D015 volume/flow features, detection vs scoring, YAML-weighted component
+- `signals/opportunity_engine.py` — D015 opportunities; blends momentum proxy + volume component from M2 JSON + metadata
+- `risk/regime_state.py` — D015 market/regime context for allocator (stub)
+- `portfolio/allocation_engine.py` — D015 global replacement allocator (stub)
+- `execution/planner.py` — D015 AllocationDecision → ExecutionPlan
+- `data/regime_metrics.py` — cross-section feature fetch + aggregates for regime
+- `data/feature_lookup.py` — latest `feature_snapshots.features` per symbol
+- `portfolio/d015_hold_switch.py` — hold score + switching-cost penalty
+- `signals/d015_weights.py` — profile/regime dynamic coefficient resolver
+- `signals/opportunity_components.py` — momentum/news/liquidity/structure component scores
+- `system/d015_shadow.py` — optional per-signal D015 vs legacy log (env `ALLOCATOR_D015_SHADOW`)
+- `core/signal_math.py` — bounded_sigmoid, tanh_clip, normalize_zscore (Decimal)
 - `run_pipeline.py`          — M2: yfinance → features → Postgres; NewsAPI + FRED
 - `ai/router.py`             — local-first AI router (drop-in for NewsClassifier)
 - `ai/providers/`            — provider implementations (rules, FinBERT, Ollama, Claude fallback)
@@ -66,8 +82,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: GPU-optimized materiality-based tier routing. HIGH materiality (macro, geopolitical, M&A) always goes to LLM ensemble regardless of FinBERT confidence. MEDIUM uses 0.75 confidence bar. LOW keeps original 0.55 bar. Concurrency configurable (8 for GPU). Materiality map configurable in ai.yaml.
-- Next task: Deploy on RTX 5080 GPU PC, end-to-end soak test under real news load
+- Last completed task: D015 **primary** operational path: `system/trading_loop.py` batches candidates → `compute_regime_state_async` → `build_opportunities_async` → `build_allocation_decision` (interval + churn) → `apply_allocation_smoothing` → `build_execution_plan` → `execution/d015_instruction_executor.py` → `RiskEngine` + `ExecutionEngine`. Volume escalation via `CommandBus` (`d015_volume_refresh`). Default `allocator_d015_primary` unless `ALLOCATOR_D015_LEGACY_FALLBACK=true`. Policy scalars in `config/allocation.yaml`. Paper summary script: `scripts/d015_paper_report.py`. DECISIONS D004 amendment + D015 status updated.
+- Next task: Paper soak on primary path; operator sign-off; optional further `risk_modes.yaml` trim for non-legacy UIs only.
 - Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS
 - Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b
 

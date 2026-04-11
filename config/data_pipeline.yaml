@@ -49,6 +49,19 @@ research_features:
   vpin_window: 50
   garch_min_history: 64
 
+# D015 volume/flow features persisted in feature_snapshots.features JSON (M2).
+volume_flow_features:
+  volume_z_window: 60
+  volume_z_min_periods: 20
+  dollar_volume_sma: 20
+  persistence_lookback: 5
+  persistence_vol_ratio_threshold: 1.0
+  persistence_volume_z_threshold: 0.5
+  trade_count_proxy_window: 20
+  fake_spike_vol_ratio: 2.5
+  fake_spike_abs_return_max: 0.002
+  fake_spike_vpin_low: 0.15
+
 news:
   enabled: true
   query: "(market OR stocks OR equities OR bonds OR forex OR commodities OR crypto) AND (surge OR rally OR crash OR guidance OR rates OR inflation OR conflict)"

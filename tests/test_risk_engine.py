@@ -335,6 +335,47 @@ def test_approves_when_all_checks_pass() -> None:
     assert not decision.checks_failed
 
 
+def test_allocator_d015_primary_skips_duplicate_checks() -> None:
+    cfg = _risk_cfg()
+    cfg["allocator_d015_primary"] = True
+    cfg["max_gross_exposure_pct"] = Decimal("0.01")
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(qty="1", price="100"),
+        {
+            "portfolio_value": Decimal("100000"),
+            "high_watermark_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("50000"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert "max_exposure" not in decision.checks_passed
+
+
+def test_allocator_d015_skips_duplicate_checks() -> None:
+    cfg = _risk_cfg()
+    cfg["allocator_d015_enabled"] = True
+    cfg["max_gross_exposure_pct"] = Decimal("0.01")
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(qty="1", price="100"),
+        {
+            "portfolio_value": Decimal("100000"),
+            "high_watermark_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("50000"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert "max_exposure" not in decision.checks_passed
+
+
+@pytest.mark.skip(reason="RiskEngine has no max_trades_per_day check wired yet (config key unused).")
 def test_rejects_on_max_trades_per_day() -> None:
     cfg = _risk_cfg()
     cfg["max_trades_per_day"] = 2

@@ -118,6 +118,20 @@ class RiskEngine:
             self._check_trade_quality_score,
         ]
 
+        d015 = bool(self.config.get("allocator_d015_enabled")) or bool(
+            self.config.get("allocator_d015_primary")
+        )
+        if d015:
+            skip = {
+                self._check_max_exposure,
+                self._check_position_size,
+                self._check_m8_strategy_sleeve_cap,
+                self._check_catalyst_present,
+                self._check_trade_quality_score,
+                self._check_theme_uniqueness,
+            }
+            checks = [c for c in checks if c not in skip]
+
         for check in checks:
             result, label = check(signal, portfolio_state)
             if result:

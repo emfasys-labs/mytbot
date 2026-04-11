@@ -1,0 +1,244 @@
+# Global opportunity replacement allocator policy (see docs/DECISIONS.md D015).
+# Formula strings are documentation; Python implements the actual math.
+
+version: 1
+
+allocator:
+  enabled: true
+  mode: global_opportunity_replacement
+  rebalance_trigger: continuous
+  evaluation_interval_seconds: 5
+  min_replacement_interval_seconds: 2
+
+opportunity_engine:
+  scoring:
+    normalisation: bounded_sigmoid
+    score_range: [-1.0, 1.0]
+    volume_escalation_strength_threshold: 0.72
+    urgency:
+      base: 0.2
+      volume_detection: 0.6
+      confidence: 0.15
+      escalation_multiplier: 1.08
+  components:
+    momentum:
+      enabled: true
+      weight: 1.00
+      subcomponents:
+        z_return_5m: 0.30
+        z_return_1h: 0.30
+        breakout_strength: 0.20
+        trend_slope: 0.10
+        trend_persistence: 0.10
+    volume_anomaly:
+      enabled: true
+      weight: 1.20
+      subcomponents:
+        volume_z: 0.35
+        relative_dollar_volume: 0.25
+        trade_count_anomaly: 0.20
+        orderbook_imbalance: 0.20
+      transforms:
+        saturating_function: tanh
+        persistence_boost_enabled: true
+        fake_spike_penalty_enabled: true
+    news_impact:
+      enabled: true
+      weight: 0.90
+      formula:
+        sentiment: 1.00
+        credibility: 1.00
+        materiality: 1.00
+        freshness: 1.00
+    regime_alignment:
+      enabled: true
+      weight: 0.80
+    liquidity_quality:
+      enabled: true
+      weight: 0.75
+      penalties:
+        spread: 0.35
+        slippage_estimate: 0.40
+        depth_fragility: 0.25
+    structure_quality:
+      enabled: true
+      weight: 0.65
+    relative_strength:
+      enabled: true
+      weight: 0.70
+
+market_state:
+  enabled: true
+  min_symbols_for_regime: 3
+  anomaly_volume_z_threshold: 1.25
+  anomaly_rel_dv_threshold: 0.45
+  news_lookback_hours: 48
+  liquidity_enrichment:
+    broker_depth_weight: 0.0
+    feature_proxy_weight: 1.0
+  components:
+    trend_strength: 0.20
+    cross_asset_confirmation: 0.15
+    liquidity_state: 0.10
+    macro_clarity: 0.08
+    risk_on_breadth: 0.12
+    chaos_penalty: -0.08
+    correlation_crowding: -0.04
+    volatility_structure: 0.12
+    anomaly_breadth: 0.10
+    news_conflict_score: -0.05
+
+gross_exposure:
+  formula: "capital_slider * profile_aggression * sigmoid(best_opportunity + market_state + breadth_score) * execution_quality * drawdown_throttle"
+  controls:
+    use_breadth_score: true
+    use_drawdown_throttle: true
+    use_execution_quality: true
+  shaping:
+    market_state_weight: 0.35
+    breadth_weight: 0.35
+    aggregate_scale: 1.8
+    sigmoid_clip_min: -3.0
+    sigmoid_clip_max: 3.0
+
+position_weights:
+  formula: "exp(lambda * opportunity_score * concentration_exponent)"
+  lambda: 1.00
+  post_adjustments:
+    liquidity_quality_multiplier: true
+    regime_alignment_multiplier: true
+    execution_quality_multiplier: true
+
+replacement_logic:
+  enabled: true
+  formula: "entry_score_new - hold_score_old - switching_cost"
+  actions:
+    allow_reduce_existing: true
+    allow_close_existing: true
+    allow_close_small_winner: true
+    allow_close_flat_position: true
+    allow_close_small_loser_for_better_opportunity: true
+  switching_cost:
+    fee_weight: 1.00
+    spread_weight: 1.00
+    slippage_weight: 1.00
+    urgency_discount_weight: 0.50
+  switching_cost_normalisation:
+    net_bps_max: 2000.0
+    penalty_divisor_bps: 400.0
+    urgency_discount_bps_scale: 15.0
+    fee_bps_clip_min: 1.0
+    fee_bps_clip_max: 500.0
+    spread_slippage_bps_clip_max: 500.0
+  churn:
+    enabled: true
+    penalty_per_recent_event: 0.02
+    max_recent_events: 10
+  thresholds:
+    minimum_replacement_advantage: 0.05
+    emergency_override_on_extreme_opportunity: true
+    extreme_opportunity_threshold: 0.90
+
+hold_score:
+  enabled: true
+  neutral_defaults:
+    unrealised_pnl_offset: 0.2
+    trend_continuation_default: 0.5
+  components:
+    current_opportunity_score: 0.40
+    unrealised_pnl_quality: 0.15
+    trend_continuation: 0.20
+    negative_exit_pressure: 0.15
+    negative_opportunity_cost: 0.10
+
+exit_pressure:
+  enabled: true
+  components:
+    trend_reversal: 0.30
+    volume_fade: 0.20
+    news_deterioration: 0.15
+    volatility_shock: 0.15
+    relative_weakening: 0.10
+    opportunity_cost: 0.10
+
+leverage:
+  enabled: true
+  formula: "profile_leverage * sigmoid(opportunity_score + market_state + liquidity_quality - chaos_penalty) * drawdown_throttle"
+  controls:
+    allow_long_leverage: true
+    allow_short_leverage: true
+    require_borrow_or_venue_support_for_shorts: true
+
+shorts:
+  enabled: true
+  score_components:
+    down_momentum: 0.30
+    negative_volume_anomaly: 0.25
+    negative_news_impact: 0.20
+    regime_alignment: 0.15
+    liquidity_quality: 0.10
+  extra_requirements:
+    borrow_available: true
+    squeeze_risk_check: true
+    stronger_confirmation_than_longs: true
+
+position_count:
+  hard_limit_enabled: false
+  notes:
+    - "Number of positions is an output of ranking and target weights, not a fixed limit."
+    - "Many tiny positions or one dominant position are both valid outcomes."
+
+capital_reuse:
+  enabled: true
+  require_free_cash_to_open_new_position: false
+  notes:
+    - "Allocator may reduce or close existing positions to fund better opportunities."
+    - "Capital is continuously contestable."
+
+strategy_attribution:
+  enabled: true
+  use_for_reporting_only: true
+  hard_strategy_sleeves_enabled: false
+
+safety:
+  enabled: true
+  notes:
+    - "Safety section is for emergency and ruin-prevention rails only."
+    - "Primary allocation must remain formula-driven."
+  emergency_kill:
+    broker_disconnect: true
+    stale_market_data: true
+    margin_danger: true
+    order_state_incoherence: true
+    abnormal_equity_jump: true
+  emergency_bounds:
+    max_daily_drawdown_pct:
+      defender: 0.03
+      trader: 0.05
+      hunter: 0.08
+    max_rolling_drawdown_pct:
+      defender: 0.08
+      trader: 0.15
+      hunter: 0.25
+    max_execution_slippage_pct:
+      defender: 0.004
+      trader: 0.007
+      hunter: 0.012
+
+execution_plan_urgency:
+  replace_close_old: 0.85
+  replacement_open: 0.9
+  allocation_close: 0.7
+  allocation_reduce: 0.5
+  allocation_open_or_increase: 0.55
+  reduce_vs_target_tolerance: 1.05
+
+volume_escalation:
+  enabled: true
+  command_type: d015_volume_refresh
+
+allocation_stability:
+  enabled: true
+  gross_exposure_smoothing_alpha: 0.35
+  turnover_damping_lambda: 0.5
+  turnover_weight_sum_threshold: 0.4

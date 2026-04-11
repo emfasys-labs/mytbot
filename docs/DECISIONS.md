@@ -42,6 +42,8 @@ No bypass, no flag, no override in code.
 orders the human would not have approved. Risk engine is the last line of defence.
 **Status:** Skeleton implemented in `risk/engine.py`.
 
+**Amendment (D015, 2026-04-11):** The D015 allocator may be the single source of truth for *sizing* and portfolio-level exposure targets. The risk engine still evaluates every order and may veto for kill switch, drawdown/daily loss, min order, M8 micro-live guards (when active), proportionality, confidence floor, asset-class limits, cooldown, and operational integrity — but when `allocator_d015_primary` is set (default unless `ALLOCATOR_D015_LEGACY_FALLBACK=true`), it does **not** re-apply duplicate caps that the allocator already encodes (`max_gross_exposure_pct`, `max_position_pct`, catalyst/quality/theme checks from `risk_modes.yaml`). Mode labels from `risk_modes.yaml` still apply to the risk config for display; numeric mode overlays are skipped in primary mode.
+
 ---
 
 ## D005 — AI advises, rules execute
@@ -168,3 +170,35 @@ not be the sole decision maker for events that could move the portfolio.
 **Status:** Implemented in `ai/escalation.py` (`should_escalate_to_local_llm`),
 `ai/providers/rules_provider.py` (configurable `materiality_map`), `ai/router.py`
 (new config params passed through), `config/ai.yaml` (materiality_map, confidence bars, gpu settings).
+
+---
+
+## D015 — Global opportunity replacement allocator
+**Date:** 2026-04-11
+**Decision:** Capital allocation is driven by a global opportunity ranking and replacement model, not by static capital sleeves, fixed position-count limits, or hard-coded exposure caps as primary logic.
+
+The system must continuously compare (1) current positions using capital and (2) new candidate opportunities from all enabled strategies and brokers. If a candidate offers materially better expected value than one or more held positions, the system may reduce or close those positions—including small winners, flat P&L, or controlled small losses—to fund the stronger opportunity.
+
+**What changes:**
+- No fixed maximum position count as a primary trading rule
+- No primary rejection path of “no free capital” when better opportunities exist
+- No hard strategy sleeve barriers as primary allocation logic (sleeves remain optional for attribution/reporting)
+- Held positions are always eligible for reduction or replacement; capital is continuously contestable
+
+**What remains true:**
+- The risk engine retains unconditional veto for ruin prevention, operational integrity, invalid market state, broker rejection, margin danger, impossible execution, or system-health failure
+- AI advises, scores, and explains only; it never executes directly
+- All replacement decisions, rejections, and reallocations must be logged with reasoning
+- `Decimal` for prices, quantities, fees, P&L, and target weights
+
+**Allocation philosophy:**
+- Gross exposure, concentration, leverage, and replacement aggressiveness are computed outputs from regime, opportunity scores, liquidity, volume anomaly, breadth, drawdown, and execution quality
+- Defender / Trader / Hunter shape behaviour through policy coefficients (see `config/profile_modes.yaml`), not static mode caps; explicit safety bounds remain configurable emergency rails only
+
+**Operational question:** Not “Do we have spare cash?” but “Is this opportunity better than the weakest current use of capital?”
+
+**Reason:** Static sleeves and fixed exposure buckets block the proactive, speculative reallocation the system is intended to support. This decision aligns implementation with layered parameters and auditable risk while preserving risk-engine supremacy.
+
+**Status:** Implemented end-to-end: primary trading path in `system/trading_loop.py` batches `SignalCandidate`s → regime → `build_opportunities_async` → `build_allocation_decision` (replacement interval + churn from `config/allocation.yaml`) → `apply_allocation_smoothing` → `build_execution_plan` → `risk_signal_from_execution_instruction` → existing `RiskEngine` + `ExecutionEngine`. Volume escalation enqueues `d015_volume_refresh` on `CommandBus`; the next cycle merges refreshed features via `drain_volume_refresh_features`. `ALLOCATOR_D015_LEGACY_FALLBACK=true` restores the per-symbol legacy signal path. When `allocator_d015_primary` is active (default), `risk/engine.py` skips allocator-duplicative checks; kill switch, min order, drawdown/daily loss, proportionality, confidence, asset class limits, M8 guards remain.
+
+**Env:** `ALLOCATOR_D015_SHADOW=true` logs legacy vs D015 summary (legacy path only). `ALLOCATOR_D015_LEGACY_FALLBACK=true` forces legacy loop. See `docs/D015_VALIDATION.md` and `scripts/d015_paper_report.py`.

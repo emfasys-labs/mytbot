@@ -15,6 +15,17 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
+
+# Stable keys written to feature_snapshots.features (D015 volume/flow).
+VOLUME_FLOW_KEYS = frozenset(
+    {
+        "volume_z",
+        "relative_dollar_volume",
+        "trade_count_anomaly",
+        "volume_persistence",
+        "fake_spike_penalty",
+    }
+)
 import pandas as pd
 import pandas_ta as ta
 
@@ -96,7 +107,83 @@ def _compute_research_columns(x: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
-def compute_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _volume_flow_defaults() -> dict[str, Any]:
+    return {
+        "volume_z_window": 60,
+        "volume_z_min_periods": 20,
+        "dollar_volume_sma": 20,
+        "persistence_lookback": 5,
+        "persistence_vol_ratio_threshold": 1.0,
+        "persistence_volume_z_threshold": 0.5,
+        "trade_count_proxy_window": 20,
+        "fake_spike_vol_ratio": 2.5,
+        "fake_spike_abs_return_max": 0.002,
+        "fake_spike_vpin_low": 0.15,
+    }
+
+
+def _compute_volume_flow_columns(x: pd.DataFrame, cfg: dict[str, Any] | None) -> pd.DataFrame:
+    """
+    D015 volume/flow features for yfinance OHLCV bars. ``orderbook_imbalance`` is not
+    computed here (no L2). ``trade_count_anomaly`` is a bar-activity proxy until tick data exists.
+    """
+    c = _volume_flow_defaults()
+    if cfg:
+        c.update({k: cfg[k] for k in c if k in cfg})
+
+    close = x["close"].astype(float)
+    vol = x["volume"].astype(float)
+    high = x["high"].astype(float)
+    low = x["low"].astype(float)
+
+    wz = int(c["volume_z_window"])
+    minp = int(c["volume_z_min_periods"])
+    log_v = np.log1p(np.maximum(vol, 0.0))
+    lv_mean = pd.Series(log_v, index=x.index).rolling(wz, min_periods=minp).mean()
+    lv_std = pd.Series(log_v, index=x.index).rolling(wz, min_periods=minp).std().replace(0.0, np.nan)
+    x["volume_z"] = (log_v - lv_mean) / lv_std
+
+    dv = close * vol
+    dvn = int(c["dollar_volume_sma"])
+    dv_sma = pd.Series(dv, index=x.index).rolling(dvn, min_periods=max(5, dvn // 4)).mean()
+    x["relative_dollar_volume"] = np.where(
+        (dv_sma.isna()) | (dv_sma <= 0),
+        np.nan,
+        np.clip(dv / dv_sma, 0.0, 10.0),
+    )
+
+    # Activity proxy: normalized bar range × volume z (no tick counts in yfinance).
+    tw = int(c["trade_count_proxy_window"])
+    bar_range = (high - low) / close.replace(0.0, np.nan)
+    br_mean = bar_range.rolling(tw, min_periods=max(5, tw // 4)).mean()
+    br_std = bar_range.rolling(tw, min_periods=max(5, tw // 4)).std().replace(0.0, np.nan)
+    range_z = (bar_range - br_mean) / br_std
+    vol_z_tc = x["volume_z"]
+    x["trade_count_anomaly"] = np.clip(range_z * np.nan_to_num(vol_z_tc, nan=0.0) / 4.0, -3.0, 3.0)
+
+    pl = int(c["persistence_lookback"])
+    vrt = float(c["persistence_vol_ratio_threshold"])
+    vzt = float(c["persistence_volume_z_threshold"])
+    elevated = (
+        (x["vol_ratio"] > vrt) | (x["volume_z"] > vzt)
+    ).astype(float)
+    x["volume_persistence"] = elevated.rolling(pl, min_periods=1).mean().clip(0.0, 1.0)
+
+    abs_ret = close.pct_change().abs()
+    vpin = x["vpin_proxy_50"] if "vpin_proxy_50" in x.columns else pd.Series(0.0, index=x.index)
+    spike_vr = float(c["fake_spike_vol_ratio"])
+    spike_ret = float(c["fake_spike_abs_return_max"])
+    spike_vp = float(c["fake_spike_vpin_low"])
+    fake = np.where(
+        (x["vol_ratio"] > spike_vr) & (abs_ret < spike_ret) & (vpin < spike_vp),
+        0.65,
+        np.where((x["vol_ratio"] > spike_vr * 1.1) & (abs_ret < spike_ret * 1.5), 0.35, 0.0),
+    )
+    x["fake_spike_penalty"] = fake
+    return x
+
+
+def compute_feature_columns(df: pd.DataFrame, pipeline_cfg: dict[str, Any] | None = None) -> pd.DataFrame:
     """
     Append indicator columns to OHLCV DataFrame (lowercase open/high/low/close/volume).
     Index preserved (typically DatetimeIndex).
@@ -124,6 +211,14 @@ def compute_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
         np.nan,
         vol / x["vol_sma_20"],
     )
+    # VPIN proxy before volume_flow (fake_spike_penalty); recomputed in _compute_research_columns for consistency.
+    direction = np.sign(close.diff().fillna(0.0))
+    buy_vol = (vol * (direction > 0)).rolling(50).sum()
+    sell_vol = (vol * (direction < 0)).rolling(50).sum()
+    total_bs = (buy_vol + sell_vol).replace(0.0, np.nan)
+    x["vpin_proxy_50"] = ((buy_vol - sell_vol).abs() / total_bs).clip(0.0, 1.0)
+    vf_cfg = (pipeline_cfg or {}).get("volume_flow_features") or {}
+    x = _compute_volume_flow_columns(x, vf_cfg)
     x = _compute_research_columns(x)
     return x
 

@@ -132,7 +132,7 @@ async def ingest_symbol_yfinance(
             "rows_with_full_features": 0,
         }
 
-    feat = compute_feature_columns(df)
+    feat = compute_feature_columns(df, cfg)
     v = validate_ohlcv_frame(
         feat,
         expected_interval=expected,

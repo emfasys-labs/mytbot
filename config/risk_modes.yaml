@@ -4,6 +4,10 @@
 # Applied at runtime via POST /system/mode — no restart needed.
 # These overlay risk_limits.yaml values in the live risk engine.
 #
+# When allocator_d015_primary is active (default trading loop), numeric keys below are NOT
+# merged into the risk engine — only label/description are applied. Legacy fallback
+# (`ALLOCATOR_D015_LEGACY_FALLBACK=true`) still applies the full numeric overlay.
+#
 # Philosophy: no trade count limits.
 # The quality threshold is the gatekeeper — raise it for defence, lower it for offence.
 

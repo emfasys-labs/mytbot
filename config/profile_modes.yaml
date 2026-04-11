@@ -1,0 +1,214 @@
+# Profile modes as behavioural coefficients (not primary static exposure caps).
+# See docs/DECISIONS.md D015. Wired into engines when portfolio/allocation_engine is implemented.
+
+version: 1
+
+defaults:
+  enabled: true
+  active_mode: trader
+  mode_selection_source: ui
+  allow_runtime_switch: true
+
+modes:
+  defender:
+    description: "Opportunistic but disciplined. Prefers cleaner setups, lower chaos, faster protection."
+    coefficients:
+      aggression_multiplier:
+        base: 0.70
+        dynamic:
+          trend_strength_weight: 0.20
+          breadth_weight: 0.10
+          drawdown_penalty_weight: 0.45
+          chaos_penalty_weight: 0.40
+      concentration_exponent:
+        base: 0.90
+        dynamic:
+          best_opportunity_weight: 0.20
+          crowding_penalty_weight: 0.35
+          liquidity_support_weight: 0.15
+      replacement_sensitivity:
+        base: 0.80
+        dynamic:
+          urgency_weight: 0.20
+          switching_cost_weight: 0.35
+          drawdown_penalty_weight: 0.30
+      leverage_base:
+        base: 0.60
+        dynamic:
+          opportunity_weight: 0.20
+          market_state_weight: 0.20
+          liquidity_weight: 0.10
+          chaos_penalty_weight: 0.40
+      volume_anomaly_weight:
+        base: 1.00
+        dynamic:
+          persistence_weight: 0.20
+          liquidity_support_weight: 0.20
+          fake_spike_penalty_weight: 0.30
+      liquidity_penalty_weight:
+        base: 1.30
+        dynamic:
+          spread_weight: 0.30
+          depth_fragility_weight: 0.35
+          slippage_weight: 0.35
+      chaos_penalty_weight:
+        base: 1.40
+        dynamic:
+          vol_shock_weight: 0.40
+          correlation_break_weight: 0.25
+          news_conflict_weight: 0.35
+      profit_lock_bias:
+        base: 1.25
+        dynamic:
+          reversal_weight: 0.30
+          volume_fade_weight: 0.20
+          opportunity_cost_weight: 0.20
+      drawdown_throttle_strength:
+        base: 1.40
+        dynamic:
+          daily_drawdown_weight: 0.50
+          rolling_drawdown_weight: 0.30
+          loss_streak_weight: 0.20
+
+  trader:
+    description: "Balanced but aggressive. Rotates capital actively and seeks broad growth."
+    coefficients:
+      aggression_multiplier:
+        base: 1.00
+        dynamic:
+          trend_strength_weight: 0.30
+          breadth_weight: 0.20
+          drawdown_penalty_weight: 0.30
+          chaos_penalty_weight: 0.25
+      concentration_exponent:
+        base: 1.15
+        dynamic:
+          best_opportunity_weight: 0.35
+          crowding_penalty_weight: 0.20
+          liquidity_support_weight: 0.20
+      replacement_sensitivity:
+        base: 1.10
+        dynamic:
+          urgency_weight: 0.35
+          switching_cost_weight: 0.20
+          drawdown_penalty_weight: 0.20
+      leverage_base:
+        base: 1.00
+        dynamic:
+          opportunity_weight: 0.35
+          market_state_weight: 0.25
+          liquidity_weight: 0.20
+          chaos_penalty_weight: 0.25
+      volume_anomaly_weight:
+        base: 1.20
+        dynamic:
+          persistence_weight: 0.30
+          liquidity_support_weight: 0.20
+          fake_spike_penalty_weight: 0.20
+      liquidity_penalty_weight:
+        base: 1.00
+        dynamic:
+          spread_weight: 0.30
+          depth_fragility_weight: 0.30
+          slippage_weight: 0.25
+      chaos_penalty_weight:
+        base: 1.00
+        dynamic:
+          vol_shock_weight: 0.30
+          correlation_break_weight: 0.20
+          news_conflict_weight: 0.25
+      profit_lock_bias:
+        base: 1.00
+        dynamic:
+          reversal_weight: 0.20
+          volume_fade_weight: 0.20
+          opportunity_cost_weight: 0.30
+      drawdown_throttle_strength:
+        base: 1.00
+        dynamic:
+          daily_drawdown_weight: 0.40
+          rolling_drawdown_weight: 0.25
+          loss_streak_weight: 0.20
+
+  hunter:
+    description: "Aggressive, concentrated, fast-rotating. Pursues dominant opportunities with high conviction."
+    coefficients:
+      aggression_multiplier:
+        base: 1.35
+        dynamic:
+          trend_strength_weight: 0.45
+          breadth_weight: 0.25
+          drawdown_penalty_weight: 0.20
+          chaos_penalty_weight: 0.15
+      concentration_exponent:
+        base: 1.50
+        dynamic:
+          best_opportunity_weight: 0.50
+          crowding_penalty_weight: 0.10
+          liquidity_support_weight: 0.25
+      replacement_sensitivity:
+        base: 1.45
+        dynamic:
+          urgency_weight: 0.50
+          switching_cost_weight: 0.10
+          drawdown_penalty_weight: 0.10
+      leverage_base:
+        base: 1.40
+        dynamic:
+          opportunity_weight: 0.45
+          market_state_weight: 0.30
+          liquidity_weight: 0.20
+          chaos_penalty_weight: 0.15
+      volume_anomaly_weight:
+        base: 1.50
+        dynamic:
+          persistence_weight: 0.40
+          liquidity_support_weight: 0.25
+          fake_spike_penalty_weight: 0.10
+      liquidity_penalty_weight:
+        base: 0.85
+        dynamic:
+          spread_weight: 0.20
+          depth_fragility_weight: 0.20
+          slippage_weight: 0.20
+      chaos_penalty_weight:
+        base: 0.80
+        dynamic:
+          vol_shock_weight: 0.20
+          correlation_break_weight: 0.15
+          news_conflict_weight: 0.20
+      profit_lock_bias:
+        base: 0.85
+        dynamic:
+          reversal_weight: 0.20
+          volume_fade_weight: 0.25
+          opportunity_cost_weight: 0.40
+      drawdown_throttle_strength:
+        base: 0.80
+        dynamic:
+          daily_drawdown_weight: 0.25
+          rolling_drawdown_weight: 0.20
+          loss_streak_weight: 0.15
+
+safety_bounds:
+  absolute_max_gross_exposure:
+    defender: 1.25
+    trader: 2.00
+    hunter: 3.00
+  absolute_max_single_position_weight:
+    defender: 0.35
+    trader: 0.60
+    hunter: 1.00
+  absolute_max_portfolio_leverage:
+    defender: 1.50
+    trader: 2.50
+    hunter: 4.00
+  absolute_max_replacement_turnover_per_cycle:
+    defender: 0.30
+    trader: 0.60
+    hunter: 1.00
+
+notes:
+  - "Coefficients are behaviour shapers, not direct trading limits."
+  - "Base values are starting calibration points and may later become self-adaptive."
+  - "Safety bounds are emergency rails only, not primary allocation logic."

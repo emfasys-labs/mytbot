@@ -7,7 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from brokers.base import OrderBook, OrderResult, OrderStatus, OrderSide
+from brokers.base import (
+    AssetClass,
+    OrderBook,
+    OrderResult,
+    OrderSide,
+    OrderStatus,
+    Position,
+)
 from control.runtime import set_risk_engine
 from execution.engine import ExecutionEngine
 from risk.engine import RiskDecision, RiskVerdict, Signal
@@ -92,7 +99,15 @@ class _FakeBroker:
 
     async def get_positions(self):
         return [
-            SimpleNamespace(symbol="SPY", quantity=Decimal("2"))
+            Position(
+                symbol="SPY",
+                asset_class=AssetClass.EQUITY,
+                quantity=Decimal("2"),
+                avg_entry_price=Decimal("100"),
+                current_price=Decimal("100.1"),
+                unrealised_pnl=Decimal("0"),
+                broker="ibkr",
+            )
         ]
 
     async def get_order(self, broker_order_id: str):
@@ -146,7 +161,7 @@ async def test_auto_kill_on_api_failure(monkeypatch) -> None:
     broker = _FakeBroker(fail_place=True)
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
 
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     result = await engine.execute(_signal(), _approved_decision())
     assert result is None
     assert risk.killed is True
@@ -166,7 +181,7 @@ async def test_rejects_on_spread_precheck(monkeypatch) -> None:
     broker = _FakeBroker(wide_spread=True)
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
 
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     result = await engine.execute(_signal(), _approved_decision())
     assert result is None
     assert broker.place_calls == 0
@@ -285,6 +300,12 @@ async def test_reconcile_positions_happy_path(monkeypatch) -> None:
         async def execute(self, _stmt):
             return _FakeScalarResult(datetime.now(timezone.utc))
 
+        def add(self, _obj) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
     class _FakeFactory:
         def __call__(self):
             s = _FakeSession()
@@ -319,7 +340,7 @@ async def test_retry_exhaustion_returns_none(monkeypatch) -> None:
     set_risk_engine(risk)
     broker = _FakeBroker(fail_place=True)
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True, place_order_retries=2)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False, place_order_retries=2)
     res = await engine.execute(_signal(), _approved_decision())
     assert res is None
     assert broker.place_calls == 3
@@ -364,7 +385,7 @@ async def test_rejects_on_liquidity_and_slippage_limits(monkeypatch) -> None:
     set_risk_engine(risk)
     low_liq_broker = _FakeBroker(low_liquidity=True)
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: low_liq_broker)
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     res1 = await engine.execute(_signal(), _approved_decision())
     assert res1 is None
     assert low_liq_broker.place_calls == 0
@@ -383,7 +404,8 @@ async def test_rejects_on_liquidity_and_slippage_limits(monkeypatch) -> None:
     # Larger qty to force walking into worse levels.
     s = _signal()
     s.suggested_quantity = Decimal("2")
-    res2 = await engine.execute(s, _approved_decision())
+    engine2 = ExecutionEngine(broker_configs={}, paper_mode=False)
+    res2 = await engine2.execute(s, _approved_decision())
     assert res2 is None
     assert thin_book_broker.place_calls == 0
 

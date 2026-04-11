@@ -197,25 +197,22 @@ class KrakenAdapter(BrokerAdapter):
             raise RuntimeError("Kraken private API not available (connect with API keys)")
 
     async def connect(self) -> bool:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 return await self._try_connect()
             except Exception as exc:  # noqa: BLE001
                 err_str = str(exc).lower()
-                is_nonce = "nonce" in err_str
                 is_rate_limit = "rate limit" in err_str or "eapi:rate limit" in err_str
                 if is_rate_limit:
                     logger.warning(
-                        "connect | Kraken | rate limited (attempt {}/3) — backing off 30s",
-                        attempt + 1,
+                        "connect | Kraken | rate limited — will retry via reconnect loop",
                     )
-                    await asyncio.sleep(30)
-                    continue
-                if is_nonce and attempt < 2:
-                    logger.warning(
-                        "connect | Kraken | nonce error (attempt {}/3) — retrying in 2s",
-                        attempt + 1,
-                    )
+                    self._connected = False
+                    self._private_ok = False
+                    return False
+                is_nonce = "nonce" in err_str
+                if is_nonce and attempt == 0:
+                    logger.warning("connect | Kraken | nonce error — retrying in 2s")
                     await asyncio.sleep(2)
                     continue
                 logger.exception("connect | Kraken | failed | error={}", exc)

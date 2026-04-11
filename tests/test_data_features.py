@@ -27,6 +27,12 @@ def test_compute_features_adds_indicators():
     assert "hurst_dfa_128" in out.columns
     assert "garch_vol_1d" in out.columns
     assert "vpin_proxy_50" in out.columns
+    assert "volume_z" in out.columns
+    assert "relative_dollar_volume" in out.columns
+    assert "trade_count_anomaly" in out.columns
+    assert "volume_persistence" in out.columns
+    assert "fake_spike_penalty" in out.columns
     last = out.iloc[-1]
     js = row_features_to_json_dict(last)
     assert "rsi_14" in js or any(k.startswith("MACD") for k in js)
+    assert "volume_z" in js

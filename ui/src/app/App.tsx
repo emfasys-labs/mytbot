@@ -97,13 +97,30 @@ function App() {
     }
   };
 
+  const clearLiveData = useCallback(() => {
+    setActiveBrokers([]);
+    setNewsItems([]);
+    setLivePositions([]);
+    setIntelligenceSignals(null);
+    setIntelligenceRegime(null);
+    setDiscoverySummary(null);
+    setDiscoveryAnomalies(null);
+    setTradesToday(0);
+    setLastTradeMinutes(0);
+    setDailyPnL(0);
+    setEquityHistory([]);
+    setTotalCapital(0);
+    setTradableCapital(null);
+    lastTradeTs.current = 0;
+    lastIntelRefresh.current = 0;
+  }, []);
+
   const handleSystemStop = async () => {
     triggerHaptic('heavy');
     try {
       const result = await api.systemStop();
       setSystemState(result.state ?? 'off');
-      setActiveBrokers([]);
-      setNewsItems([]);
+      clearLiveData();
     } catch {
       // Keep current state
     }
@@ -170,7 +187,8 @@ function App() {
           setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
         } else if (sysState === 'off' || sysState === 'error') {
           setControlState('flatten');
-          setNewsItems([]);
+          clearLiveData();
+          return; // skip further data processing — system is off
         }
       }
 
@@ -237,9 +255,10 @@ function App() {
         }
       }
 
-      // Refresh discovery/intelligence data every ~30s
+      // Refresh discovery/intelligence data every ~30s (only when running)
+      const currentSysStateForIntel = sysStatus?.state ?? systemState;
       const now = Date.now();
-      if (now - lastIntelRefresh.current > 28_000) {
+      if (currentSysStateForIntel === 'running' && now - lastIntelRefresh.current > 28_000) {
         lastIntelRefresh.current = now;
         const [ds, da, ir, is_, modeRes] = await Promise.allSettled([
           api.getDiscoverySummary(),
@@ -257,7 +276,7 @@ function App() {
     } catch {
       // Keep UI running with last known data.
     }
-  }, []);
+  }, [clearLiveData]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -313,6 +332,7 @@ function App() {
             setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
           } else if (sysPayload?.state === 'off' || sysPayload?.state === 'error') {
             setControlState('flatten');
+            clearLiveData();
           }
 
           const events = msg.payload.events ?? [];
@@ -355,7 +375,7 @@ function App() {
       if (ws && ws.readyState <= WebSocket.OPEN) ws.close();
       setWsConnected(false);
     };
-  }, [refresh]);
+  }, [refresh, clearLiveData]);
 
   return (
     <div className="min-h-screen overflow-hidden bg-[#0a0a0a] text-white relative">

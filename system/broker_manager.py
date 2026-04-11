@@ -162,17 +162,17 @@ class BrokerManager:
         "alpaca": 30,
     }
 
+    _STARTUP_TIMEOUT = 15.0  # max seconds to wait for any broker during startup
+
     async def discover_and_connect(self) -> BrokerReport:
         """
-        Two-phase discovery:
-          Phase 1 — connect all fast brokers (REST APIs) in parallel.
-          Phase 2 — IBKR gets a TCP probe first; if Gateway is listening,
-                    connect happens in the background so it doesn't block startup.
+        All brokers connect in parallel with a short startup timeout.
+        Whatever connects within STARTUP_TIMEOUT is ready immediately.
+        Anything slower (Kraken rate-limits, slow IBKR handshake) is
+        left for the reconnect loop — never blocks system start.
         """
         self.report = BrokerReport()
-        fast_tasks = []
-        ibkr_status: BrokerStatus | None = None
-        ibkr_cfg: dict[str, Any] = {}
+        all_tasks: list[asyncio.Task] = []
 
         for name in BROKER_REGISTRY:
             cfg = self.configs.get(name, {})
@@ -188,20 +188,26 @@ class BrokerManager:
             status.configured = True
 
             if name == "ibkr":
-                ibkr_status = status
-                ibkr_cfg = cfg
-                continue
+                all_tasks.append(asyncio.create_task(
+                    self._handle_ibkr(cfg, status), name=f"connect-{name}",
+                ))
+            else:
+                timeout = min(self._BROKER_TIMEOUTS.get(name, 30), self._STARTUP_TIMEOUT)
+                all_tasks.append(asyncio.create_task(
+                    self._try_connect(name, cfg, status, timeout), name=f"connect-{name}",
+                ))
 
-            timeout = self._BROKER_TIMEOUTS.get(name, 30)
-            fast_tasks.append(self._try_connect(name, cfg, status, timeout))
+        if all_tasks:
+            done, pending = await asyncio.wait(all_tasks, timeout=self._STARTUP_TIMEOUT)
+            for task in pending:
+                broker_name = task.get_name().replace("connect-", "")
+                status = self.report.brokers.get(broker_name)
+                if status and not status.connected:
+                    status.error = "Still connecting (will retry in background)"
+                    logger.info("broker | {} | slow connect — will retry in background", broker_name)
 
-        # Phase 1: all non-IBKR brokers in parallel (typically < 5s each)
-        if fast_tasks:
-            await asyncio.gather(*fast_tasks)
-
-        # Phase 2: IBKR — probe first, then connect (background if slow)
-        if ibkr_status is not None and ibkr_status.configured:
-            await self._handle_ibkr(ibkr_cfg, ibkr_status)
+        if self._late_connect_task and not self._late_connect_task.done():
+            pass  # IBKR background connect continues independently
 
         active = self.report.active_names
         if active:

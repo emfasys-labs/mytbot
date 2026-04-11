@@ -28,6 +28,27 @@ class CommandBus:
             await session.refresh(row)
             return int(row.id)
 
+    async def claim_pending_of_type(self, command_type: str, *, limit: int = 20) -> list[ControlCommand]:
+        """Claim only rows matching command_type (leaves other pending commands untouched)."""
+        out: list[ControlCommand] = []
+        async with self._session_factory() as session:
+            q = await session.execute(
+                select(ControlCommand)
+                .where(ControlCommand.status == "pending", ControlCommand.command_type == command_type)
+                .order_by(ControlCommand.id.asc())
+                .limit(limit)
+            )
+            rows = list(q.scalars().all())
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                row.status = "processing"
+                row.claimed_at = now
+                out.append(row)
+            await session.commit()
+            for row in out:
+                await session.refresh(row)
+        return out
+
     async def claim_pending(self, *, limit: int = 20) -> list[ControlCommand]:
         out: list[ControlCommand] = []
         async with self._session_factory() as session:

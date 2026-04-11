@@ -12,10 +12,12 @@ Flow:
 
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Optional, cast
 import uuid
 from datetime import datetime, timezone
 import logging
+
+from core.models_runtime import AssetClass, Side, SignalCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,48 @@ class SignalEngine:
 
         return signal if not news_veto else None
 
+    def raw_to_signal_candidate(
+        self,
+        raw: RawSignal,
+        news_score: Optional[float] = None,
+    ) -> Optional[SignalCandidate]:
+        """
+        D015 path: same news gating and confidence adjustment as ``process``, without legacy sizing.
+        """
+        news_veto = False
+        if news_score is not None:
+            veto_threshold = self.config.get("news_veto_threshold", -0.7)
+            if news_score < veto_threshold:
+                return None
+        adjusted_confidence = raw.confidence
+        if news_score is not None:
+            adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
+            adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
+        ac = (raw.asset_class or "other").strip().lower()
+        if ac not in (
+            "equity",
+            "etf",
+            "bond",
+            "forex",
+            "crypto",
+            "future",
+            "option",
+            "other",
+        ):
+            ac = "other"
+        side: Side = "long" if (raw.side or "").lower() in ("buy", "long") else "short"
+        return SignalCandidate(
+            symbol=raw.symbol,
+            asset_class=cast(AssetClass, ac),
+            side=side,
+            timestamp=datetime.now(timezone.utc),
+            raw_signal_strength=Decimal(str(raw.confidence)),
+            adjusted_signal_strength=Decimal(str(adjusted_confidence)),
+            confidence=Decimal(str(adjusted_confidence)),
+            strategy_name=raw.strategy,
+            metadata=dict(raw.metadata or {}),
+        )
+
     def _calculate_quantity(
         self,
         portfolio_value: Decimal,
@@ -177,3 +221,38 @@ class SignalEngine:
             if price > 0:
                 return price
         return None
+
+
+def unified_signal_to_signal_candidate(signal: Signal) -> SignalCandidate:
+    """Sizing-free ``SignalCandidate`` from a unified ``Signal`` (D015 batch path)."""
+    ac = (signal.asset_class or "other").strip().lower()
+    if ac not in (
+        "equity",
+        "etf",
+        "bond",
+        "forex",
+        "crypto",
+        "future",
+        "option",
+        "other",
+    ):
+        ac = "other"
+    side: Side = "long" if (signal.side or "").lower() in ("buy", "long") else "short"
+    try:
+        ts = datetime.fromisoformat(signal.timestamp.replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        ts = datetime.now(timezone.utc)
+    md = dict(signal.metadata or {})
+    if signal.news_score is not None:
+        md["news_score"] = signal.news_score
+    return SignalCandidate(
+        symbol=signal.symbol,
+        asset_class=cast(AssetClass, ac),
+        side=side,
+        timestamp=ts,
+        raw_signal_strength=Decimal(str(signal.confidence)),
+        adjusted_signal_strength=Decimal(str(signal.confidence)),
+        confidence=Decimal(str(signal.confidence)),
+        strategy_name=signal.strategy,
+        metadata=md,
+    )
