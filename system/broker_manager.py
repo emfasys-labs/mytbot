@@ -156,7 +156,7 @@ class BrokerManager:
 
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
-        "kraken": 30,
+        "kraken": 90,
         "binance": 30,
         "bybit": 30,
         "alpaca": 30,
@@ -327,9 +327,9 @@ class BrokerManager:
             status.error = str(exc)[:200]
             logger.warning("broker | {} | connect error: {}", name, exc)
 
-    _RECONNECT_BASE = 60
+    _RECONNECT_BASE = 30
     _RECONNECT_MAX = 300
-    _HEALTH_POLL_SEC = 5
+    _HEALTH_POLL_SEC = 10
 
     def start_reconnect_loop(self) -> None:
         """Start a background task that retries failed broker connections."""
@@ -356,11 +356,24 @@ class BrokerManager:
                 name for name, s in list(self.report.brokers.items())
                 if s.configured and not s.connected and name not in self.adapters
             ]
+            attempted: list[str] = []
             for name in failed:
+                now = time.monotonic()
+                if name == "ibkr":
+                    backoff = self._ibkr_backoff()
+                    last = self._ibkr_last_attempt
+                else:
+                    backoff = self._broker_backoff(name)
+                    last = self._broker_last_attempt.get(name, 0)
+                elapsed = now - last
+                if last > 0 and elapsed < backoff:
+                    continue
+
                 cfg = self.configs.get(name, {})
                 status = self.report.brokers[name]
+                attempted.append(name)
+
                 if name == "ibkr":
-                    # Fast reconnect path: if IB Gateway comes back, reconnect immediately.
                     await self._handle_ibkr(cfg, status)
                     if self._late_connect_task:
                         try:
@@ -368,11 +381,15 @@ class BrokerManager:
                         except Exception:
                             pass
                 else:
-                    # Fast reconnect path for all brokers: retry on each health loop.
+                    fails = self._broker_fail_count.get(name, 0)
+                    logger.info(
+                        "broker | {} | reconnect attempt (fails={} backoff={:.0f}s)",
+                        name, fails, backoff,
+                    )
                     timeout = self._BROKER_TIMEOUTS.get(name, 30)
                     await self._try_connect(name, cfg, status, timeout)
 
-            newly = [n for n in failed if n in self.adapters]
+            newly = [n for n in attempted if n in self.adapters]
             if newly:
                 logger.info("broker | reconnected: {}", ", ".join(newly))
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -165,6 +166,8 @@ class KrakenAdapter(BrokerAdapter):
 
     broker_name = "kraken"
 
+    _HEALTH_CHECK_INTERVAL = 60.0
+
     def __init__(
         self,
         api_key: str = "",
@@ -182,6 +185,8 @@ class KrakenAdapter(BrokerAdapter):
         self._market: Any = None
         self._user: Any = None
         self._trade: Any = None
+        self._last_health_check: float = 0.0
+        self._health_ok: bool = False
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
@@ -241,6 +246,8 @@ class KrakenAdapter(BrokerAdapter):
             logger.info("connect | Kraken | public only (no API keys)")
 
         self._connected = True
+        self._health_ok = True
+        self._last_health_check = time.monotonic()
         logger.info(
             "connect | Kraken | paper_mode={} | private={}",
             self.paper_mode,
@@ -257,7 +264,21 @@ class KrakenAdapter(BrokerAdapter):
         logger.info("disconnect | Kraken | done")
 
     async def is_connected(self) -> bool:
-        return self._connected
+        if not self._connected or self._market is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_health_check < self._HEALTH_CHECK_INTERVAL:
+            return self._health_ok
+        self._last_health_check = now
+        try:
+            await self._run_sync(lambda: self._market.get_system_status())
+            self._health_ok = True
+            return True
+        except Exception:
+            logger.warning("is_connected | Kraken | health check failed — marking disconnected")
+            self._connected = False
+            self._health_ok = False
+            return False
 
     async def get_balance(self) -> list[Balance]:
         if not self._private_ok or self._user is None:
