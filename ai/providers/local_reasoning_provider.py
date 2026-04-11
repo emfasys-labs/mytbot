@@ -8,6 +8,7 @@ Used when rules + FinBERT are insufficient.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -44,17 +45,23 @@ Rules:
 
 
 class LocalReasoningProvider(AIProvider):
-    """Local LLM (Ollama or OpenAI-compatible) for full news classification."""
+    """Local LLM (Ollama or OpenAI-compatible) for full news classification.
+
+    Supports a primary model with an optional fallback model.
+    If the primary model fails or is unavailable, the fallback is tried automatically.
+    """
 
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
         self._base_url = str(cfg.get("base_url", "http://localhost:11434")).rstrip("/")
-        self._model = str(cfg.get("model_name", "llama3.1:8b"))
+        self._model = str(cfg.get("model_name", "qwen2.5:7b"))
+        self._fallback_model: str | None = cfg.get("fallback_model") or None
         self._temperature = float(cfg.get("temperature", 0.1))
         self._max_tokens = int(cfg.get("max_tokens", 400))
         self._timeout = float(cfg.get("timeout_seconds", 15))
         self._use_json_mode = bool(cfg.get("use_json_mode", True))
         self._available = False
+        self._active_model: str | None = None
 
         is_openai_compat = "/v1" in self._base_url
         if is_openai_compat:
@@ -73,18 +80,62 @@ class LocalReasoningProvider(AIProvider):
                     resp = await client.get(f"{self._base_url}/api/tags")
                 else:
                     resp = await client.get(f"{self._base_url}/models")
-                if resp.status_code == 200:
+                if resp.status_code != 200:
+                    logger.warning("local_reasoning | endpoint returned {} — disabled", resp.status_code)
+                    return False
+
+            installed = self._parse_installed_models(resp)
+            candidates = [self._model]
+            if self._fallback_model:
+                candidates.append(self._fallback_model)
+
+            for model in candidates:
+                if self._model_available(model, installed):
+                    self._active_model = model
                     self._available = True
+                    label = "primary" if model == self._model else "fallback"
                     logger.info(
-                        "local_reasoning | connected | url={} model={} style={}",
-                        self._base_url, self._model, self._api_style,
+                        "local_reasoning | {} model active | model={} url={} style={}",
+                        label, model, self._base_url, self._api_style,
                     )
+                    if model != self._model:
+                        logger.warning(
+                            "local_reasoning | primary model '{}' not found, using fallback '{}'",
+                            self._model, model,
+                        )
                     return True
-                logger.warning("local_reasoning | endpoint returned {} — disabled", resp.status_code)
-                return False
+
+            logger.warning(
+                "local_reasoning | none of {} found at {} — disabled",
+                candidates, self._base_url,
+            )
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.warning("local_reasoning | endpoint unreachable — disabled | {}", exc)
             return False
+
+    def _parse_installed_models(self, resp: httpx.Response) -> set[str]:
+        """Extract installed model names from Ollama /api/tags or OpenAI /models."""
+        try:
+            data = resp.json()
+            if self._api_style == "ollama":
+                return {m.get("name", "") for m in data.get("models", [])}
+            else:
+                return {m.get("id", "") for m in data.get("data", [])}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    @staticmethod
+    def _model_available(target: str, installed: set[str]) -> bool:
+        """Check if target model is in installed set (handles tag variants)."""
+        if target in installed:
+            return True
+        if ":" not in target and f"{target}:latest" in installed:
+            return True
+        for name in installed:
+            if name.split(":")[0] == target.split(":")[0]:
+                return True
+        return False
 
     async def score_headline(
         self,
@@ -106,18 +157,87 @@ class LocalReasoningProvider(AIProvider):
             "Return JSON only."
         )
 
-        try:
-            raw_text = await self._call_llm(user_msg)
-            data = self._extract_json(raw_text)
-            elapsed = int((time.monotonic() - t0) * 1000)
-            return self._parse_into_result(data, elapsed)
-        except Exception as exc:  # noqa: BLE001
-            elapsed = int((time.monotonic() - t0) * 1000)
-            logger.warning("local_reasoning | scoring failed ({}ms) | {}", elapsed, exc)
-            return ProviderResult(
-                provider_name=self.name, success=False,
-                error=str(exc)[:200], latency_ms=elapsed,
+        models_to_try = [self._active_model or self._model]
+        if self._fallback_model and self._fallback_model != models_to_try[0]:
+            models_to_try.append(self._fallback_model)
+
+        last_error = ""
+        for model in models_to_try:
+            try:
+                raw_text = await self._call_llm(user_msg, model_override=model)
+                data = self._extract_json(raw_text)
+                elapsed = int((time.monotonic() - t0) * 1000)
+                result = self._parse_into_result(data, elapsed)
+                result.provider_name = f"local_reasoning({model})"
+                return result
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)[:200]
+                if model != models_to_try[-1]:
+                    logger.warning(
+                        "local_reasoning | model '{}' failed, trying fallback | {}",
+                        model, last_error,
+                    )
+
+        elapsed = int((time.monotonic() - t0) * 1000)
+        logger.warning("local_reasoning | all models failed ({}ms) | {}", elapsed, last_error)
+        return ProviderResult(
+            provider_name=self.name, success=False,
+            error=last_error, latency_ms=elapsed,
+        )
+
+    async def score_headline_ensemble(
+        self,
+        headline: str,
+        body: str | None,
+        source: str,
+        published_at: str,
+    ) -> tuple[ProviderResult, ProviderResult | None]:
+        """Run both primary and fallback models in parallel, return both results.
+
+        Returns (primary_result, secondary_result). secondary is None if
+        no fallback model is configured or only one model is installed.
+        """
+        if not self._available:
+            return (
+                ProviderResult(provider_name=self.name, success=False, error="endpoint_unavailable"),
+                None,
             )
+
+        body_preview = (body or "").strip()[:800]
+        user_msg = (
+            f"Headline: {headline}\n"
+            f"Source: {source}\n"
+            f"PublishedAt: {published_at}\n"
+            f"BodyPreview: {body_preview}\n"
+            "Return JSON only."
+        )
+
+        primary = self._active_model or self._model
+        secondary = self._fallback_model if (self._fallback_model and self._fallback_model != primary) else None
+
+        async def _run_model(model: str) -> ProviderResult:
+            t0 = time.monotonic()
+            try:
+                raw = await self._call_llm(user_msg, model_override=model)
+                data = self._extract_json(raw)
+                elapsed = int((time.monotonic() - t0) * 1000)
+                result = self._parse_into_result(data, elapsed)
+                result.provider_name = f"local_reasoning({model})"
+                return result
+            except Exception as exc:  # noqa: BLE001
+                elapsed = int((time.monotonic() - t0) * 1000)
+                return ProviderResult(
+                    provider_name=f"local_reasoning({model})",
+                    success=False, error=str(exc)[:200], latency_ms=elapsed,
+                )
+
+        if secondary:
+            primary_r, secondary_r = await asyncio.gather(
+                _run_model(primary), _run_model(secondary),
+            )
+            return primary_r, secondary_r
+
+        return await _run_model(primary), None
 
     async def generate_rationale(self, signal_context: dict[str, Any]) -> str | None:
         if not self._available:
@@ -140,12 +260,15 @@ class LocalReasoningProvider(AIProvider):
             logger.warning("local_reasoning | rationale failed | {}", exc)
             return None
 
-    async def _call_llm(self, user_msg: str, system: str | None = None) -> str:
+    async def _call_llm(
+        self, user_msg: str, system: str | None = None, model_override: str | None = None,
+    ) -> str:
         system_prompt = system or _SYSTEM_PROMPT
+        model = model_override or self._active_model or self._model
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             if self._api_style == "ollama":
                 payload: dict[str, Any] = {
-                    "model": self._model,
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_msg},
@@ -164,7 +287,7 @@ class LocalReasoningProvider(AIProvider):
                 return str(data.get("message", {}).get("content", ""))
             else:
                 payload = {
-                    "model": self._model,
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_msg},

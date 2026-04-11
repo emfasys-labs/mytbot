@@ -128,3 +128,22 @@ reduces latency, improves resilience, and removes vendor lock-in — while keepi
 as an escalation path for genuinely ambiguous or high-impact events.
 **Status:** Implemented. Provider architecture in `ai/providers/`, router in `ai/router.py`,
 escalation engine in `ai/escalation.py`, config in `config/ai.yaml`.
+
+---
+
+## D013 — Dual-model ensemble consensus for LLM escalation
+**Date:** 2026-04-11
+**Decision:** When rules + FinBERT are insufficient and local LLM escalation triggers,
+run BOTH Qwen 2.5:7b and Llama 3.1:8b in parallel on the same headline. Compare results:
+- **Agree** (same direction, both confident): accept with boosted confidence, skip premium.
+- **Soft disagree** (same direction, weak): average scores, accept locally.
+- **Hard disagree** (opposite directions): this IS the complexity signal — escalate to premium.
+LLM disagreement is now 25% of the premium escalation score, making it the strongest single factor.
+**Reason:** The user's insight: "how does the system know a task is complex if it's not powerful
+enough to understand it?" Two independent architectures (Alibaba Qwen vs Meta Llama) trained on
+different data disagreeing is a far more reliable complexity signal than any single model's
+self-reported confidence. Agreement between independent models is also more trustworthy than
+any single model's high confidence. This turns the fallback model from a crash-only backup
+into an active participant in quality control.
+**Status:** Implemented in `ai/router.py` (Phase 4 ensemble), `ai/escalation.py`
+(`evaluate_ensemble`), `ai/schemas.py` (`EnsembleVerdict`), `config/ai.yaml` (ensemble settings).

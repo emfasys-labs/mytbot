@@ -66,10 +66,10 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: Replaced Claude-first AI layer with local-first provider chain (rules → FinBERT → Ollama local LLM → optional Claude fallback). No hard daily API caps — escalation is necessity-based. New files: `ai/router.py`, `ai/providers/`, `ai/escalation.py`, `ai/schemas.py`. Updated: `config/ai.yaml`, `ai/pipeline.py`, `system/trading_loop.py`, `storage/models.py`.
-- Next task: Install Ollama + pull model, install transformers+torch, test provider chain end-to-end
-- Blockers: GPU server setup for production inference; IBKR stream/order need local IB Gateway/TWS
-- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml
+- Last completed task: Ensemble consensus — Qwen2.5:7b + Llama 3.1:8b run in parallel when escalated. Agreement = boosted confidence (skip premium). Hard disagreement = strongest escalation signal to Claude. New: `EnsembleVerdict` in schemas, `evaluate_ensemble()` in escalation, router Phase 4 rewritten for consensus.
+- Next task: Operational soak — test full provider chain under real news load, tune escalation thresholds
+- Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS
+- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
 1. Never change `brokers/base.py` interface — it is frozen

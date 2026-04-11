@@ -43,12 +43,27 @@ class EscalationContext:
     rules_result: ProviderResult | None = None
     sentiment_result: ProviderResult | None = None
     local_llm_result: ProviderResult | None = None
+    local_llm_secondary: ProviderResult | None = None
     merged_confidence: float = 0.0
     materiality: str = "medium"
     novelty_score: float = 0.0
     provider_disagreement: float = 0.0
+    llm_disagreement: float = 0.0
     headline: str = ""
     source: str = ""
+
+
+@dataclass
+class EnsembleVerdict:
+    """Result of comparing two local LLM outputs."""
+
+    outcome: str  # "agree" | "soft_disagree" | "hard_disagree" | "single"
+    merged_sentiment: float = 0.0
+    merged_confidence: float = 0.0
+    merged_bias: str = "neutral"
+    disagreement: float = 0.0
+    winner: ProviderResult | None = None
+    rationale: str = ""
 
 
 # ── AI task identifiers (narrow, explicit, never vague) ─────────────────────

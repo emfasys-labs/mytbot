@@ -25,6 +25,7 @@ from loguru import logger
 from ai.escalation import (
     EscalationContext,
     compute_provider_disagreement,
+    evaluate_ensemble,
     should_escalate_to_local_llm,
     should_escalate_to_premium,
 )
@@ -33,7 +34,7 @@ from ai.providers.fin_sentiment_provider import FinSentimentProvider
 from ai.providers.local_reasoning_provider import LocalReasoningProvider
 from ai.providers.premium_fallback_provider import PremiumFallbackProvider
 from ai.providers.rules_provider import RulesProvider
-from ai.schemas import ProviderResult
+from ai.schemas import EnsembleVerdict, ProviderResult
 
 
 class AIRouter:
@@ -72,12 +73,19 @@ class AIRouter:
             escalation_cfg.get("suppression", {}).get("suppress_if_local_providers_agree", True)
         )
 
+        ensemble_cfg = providers_cfg.get("local_reasoning", {}).get("ensemble", {})
+        self._ensemble_enabled = bool(ensemble_cfg.get("enabled", True))
+        self._ensemble_hard_disagree_threshold = float(ensemble_cfg.get("hard_disagree_threshold", 0.4))
+        self._ensemble_confidence_boost = float(ensemble_cfg.get("confidence_boost", 0.15))
+
         self._max_local_concurrency = 3
         self._startup_validated = False
 
         self._stats: dict[str, int] = {
             "rules_calls": 0, "finbert_calls": 0,
             "local_llm_calls": 0, "premium_calls": 0,
+            "ensemble_agree": 0, "ensemble_soft_disagree": 0,
+            "ensemble_hard_disagree": 0,
             "total_scored": 0,
         }
 
@@ -158,32 +166,56 @@ class AIRouter:
             if should_escalate_to_local_llm(ctx, min_confidence=self._min_confidence_local):
                 needs_local_llm.append(i)
 
-        # ── Phase 4: Local LLM (selective) ──────────────────────────────────
+        # ── Phase 4: Local LLM ensemble (selective) ────────────────────────
         if needs_local_llm and self._providers_enabled.get("local_reasoning"):
             semaphore = asyncio.Semaphore(self._max_local_concurrency)
+            use_ensemble = self._ensemble_enabled and self._local_llm._fallback_model is not None
 
-            async def _run_local(idx: int) -> tuple[int, ProviderResult]:
+            async def _run_local(idx: int) -> tuple[int, ProviderResult, ProviderResult | None]:
                 async with semaphore:
                     d = item_dicts[idx]
-                    return idx, await self._local_llm.score_headline(
-                        d["headline"], d.get("body"), d["source"], d["published_at"],
-                    )
+                    if use_ensemble:
+                        primary_r, secondary_r = await self._local_llm.score_headline_ensemble(
+                            d["headline"], d.get("body"), d["source"], d["published_at"],
+                        )
+                        return idx, primary_r, secondary_r
+                    else:
+                        r = await self._local_llm.score_headline(
+                            d["headline"], d.get("body"), d["source"], d["published_at"],
+                        )
+                        return idx, r, None
 
             tasks = [asyncio.create_task(_run_local(i)) for i in needs_local_llm]
             llm_results = await asyncio.gather(*tasks, return_exceptions=True)
-            self._stats["local_llm_calls"] += len(needs_local_llm)
+            self._stats["local_llm_calls"] += len(needs_local_llm) * (2 if use_ensemble else 1)
 
             needs_premium: list[int] = []
             for result in llm_results:
                 if isinstance(result, Exception):
                     continue
-                idx, llm_r = result
-                if llm_r.success and (llm_r.confidence or 0) > (merged[idx].confidence if merged[idx] else 0):
-                    merged[idx] = self._provider_result_to_score(items[idx], llm_r, merged[idx])
-                else:
+                idx, primary_r, secondary_r = result
+
+                verdict = evaluate_ensemble(
+                    primary_r, secondary_r,
+                    hard_disagree_threshold=self._ensemble_hard_disagree_threshold,
+                    confidence_boost=self._ensemble_confidence_boost,
+                )
+
+                if verdict.outcome == "agree":
+                    self._stats["ensemble_agree"] += 1
+                    merged[idx] = self._ensemble_verdict_to_score(
+                        items[idx], verdict, primary_r, secondary_r, merged[idx],
+                    )
+                elif verdict.outcome == "soft_disagree":
+                    self._stats["ensemble_soft_disagree"] += 1
+                    merged[idx] = self._ensemble_verdict_to_score(
+                        items[idx], verdict, primary_r, secondary_r, merged[idx],
+                    )
+                elif verdict.outcome == "hard_disagree":
+                    self._stats["ensemble_hard_disagree"] += 1
                     ctx = self._build_escalation_context(
                         items[idx], rules_results[idx], finbert_results[idx],
-                        merged[idx], llm_r,
+                        merged[idx], primary_r, secondary_r, verdict,
                     )
                     if should_escalate_to_premium(
                         ctx,
@@ -193,6 +225,27 @@ class AIRouter:
                         fallback_enabled=self._providers_enabled.get("premium_fallback", False),
                     ):
                         needs_premium.append(idx)
+                    else:
+                        merged[idx] = self._ensemble_verdict_to_score(
+                            items[idx], verdict, primary_r, secondary_r, merged[idx],
+                        )
+                elif verdict.outcome == "single":
+                    winner = verdict.winner
+                    if winner and winner.success and (winner.confidence or 0) > (merged[idx].confidence if merged[idx] else 0):
+                        merged[idx] = self._provider_result_to_score(items[idx], winner, merged[idx])
+                    else:
+                        ctx = self._build_escalation_context(
+                            items[idx], rules_results[idx], finbert_results[idx],
+                            merged[idx], primary_r,
+                        )
+                        if should_escalate_to_premium(
+                            ctx,
+                            escalation_threshold=self._escalation_threshold,
+                            weights=self._escalation_weights or None,
+                            emergency_keywords=self._emergency_keywords,
+                            fallback_enabled=self._providers_enabled.get("premium_fallback", False),
+                        ):
+                            needs_premium.append(idx)
         else:
             needs_premium = []
             if needs_local_llm and not self._providers_enabled.get("local_reasoning"):
@@ -226,8 +279,10 @@ class AIRouter:
         self._stats["total_scored"] += n
         if needs_local_llm or needs_premium:
             logger.info(
-                "ai_router | batch={} rules={} finbert={} llm_escalated={} premium_escalated={}",
-                n, n, n, len(needs_local_llm), len(needs_premium),
+                "ai_router | batch={} llm_escalated={} ensemble[agree={} soft={} hard={}] premium={}",
+                n, len(needs_local_llm),
+                self._stats["ensemble_agree"], self._stats["ensemble_soft_disagree"],
+                self._stats["ensemble_hard_disagree"], len(needs_premium),
             )
         return merged
 
@@ -301,6 +356,45 @@ class AIRouter:
             cost_estimate_gbp=cost,
         )
 
+    def _ensemble_verdict_to_score(
+        self,
+        item: NewsItem,
+        verdict: EnsembleVerdict,
+        primary: ProviderResult,
+        secondary: ProviderResult | None,
+        existing: NewsScore | None,
+    ) -> NewsScore:
+        """Convert an EnsembleVerdict into a final NewsScore."""
+        winner = verdict.winner or primary
+        affected = list(winner.affected_symbols) if winner.affected_symbols else (
+            list(existing.affected_symbols) if existing else []
+        )
+        if secondary and secondary.success:
+            for sym in (secondary.affected_symbols or []):
+                if sym not in affected:
+                    affected.append(sym)
+
+        total_latency = (primary.latency_ms if primary.success else 0) + (
+            secondary.latency_ms if secondary and secondary.success else 0
+        ) + (existing.latency_ms if existing else 0)
+
+        provider_label = f"ensemble({verdict.outcome})"
+
+        return NewsScore(
+            headline=item.headline,
+            sentiment=verdict.merged_sentiment,
+            confidence=verdict.merged_confidence,
+            affected_symbols=sorted(set(affected)),
+            event_type=winner.event_type or (existing.event_type if existing else "other"),
+            directional_bias=verdict.merged_bias,
+            rationale=winner.rationale or (existing.rationale if existing else ""),
+            scored_at=datetime.now(timezone.utc).isoformat(),
+            decay_hours=winner.decay_hours or (existing.decay_hours if existing else 12),
+            provider=provider_label,
+            latency_ms=total_latency,
+            cost_estimate_gbp=existing.cost_estimate_gbp if existing else 0.0,
+        )
+
     def _provider_result_to_score(
         self,
         item: NewsItem,
@@ -333,6 +427,8 @@ class AIRouter:
         finbert_r: ProviderResult | None,
         merged_score: NewsScore | None,
         llm_r: ProviderResult | None = None,
+        llm_secondary: ProviderResult | None = None,
+        verdict: EnsembleVerdict | None = None,
     ) -> EscalationContext:
         disagreement = compute_provider_disagreement(rules_r, finbert_r)
         merged_conf = merged_score.confidence if merged_score else 0.0
@@ -340,14 +436,18 @@ class AIRouter:
         if self._suppress_if_agree and disagreement < 0.1 and merged_conf >= self._min_confidence_local:
             merged_conf = max(merged_conf, self._min_confidence_local)
 
+        llm_disagree = verdict.disagreement if verdict else 0.0
+
         return EscalationContext(
             rules_result=rules_r,
             sentiment_result=finbert_r,
             local_llm_result=llm_r,
+            local_llm_secondary=llm_secondary,
             merged_confidence=merged_conf,
             materiality=(rules_r.materiality if rules_r else "medium"),
             novelty_score=(rules_r.novelty_score if rules_r else 0.0),
             provider_disagreement=disagreement,
+            llm_disagreement=llm_disagree,
             headline=item.headline,
             source=item.source,
         )

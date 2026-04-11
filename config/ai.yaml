@@ -65,11 +65,16 @@ providers:
     enabled: true
     provider: ollama
     base_url: http://localhost:11434
-    model_name: llama3.1:8b
+    model_name: qwen2.5:7b         # primary: strong structured JSON, multilingual
+    fallback_model: llama3.1:8b     # secondary: runs in parallel for consensus
     temperature: 0.1
     max_tokens: 400
-    timeout_seconds: 15
+    timeout_seconds: 60
     use_json_mode: true
+    ensemble:
+      enabled: true                 # run both models in parallel when escalated
+      hard_disagree_threshold: 0.4  # sentiment distance for soft → hard disagree
+      confidence_boost: 0.15        # bonus confidence when both models agree
 
   premium_fallback:
     enabled: false          # off by default — enable only if you want paid escalation
@@ -89,11 +94,14 @@ escalation:
   escalation_threshold: 0.55
 
   # Weights for escalation score computation (starting heuristics).
+  # llm_disagreement is the ensemble signal — when Qwen and Llama disagree,
+  # that's the strongest indicator the task genuinely needs premium AI.
   weights:
-    ambiguity: 0.35
-    materiality: 0.30
-    novelty: 0.20
-    disagreement: 0.15
+    ambiguity: 0.25
+    materiality: 0.25
+    novelty: 0.15
+    disagreement: 0.10
+    llm_disagreement: 0.25
 
   # Minimum confidence from rules+FinBERT to skip local LLM.
   min_confidence_for_local_acceptance: 0.55
