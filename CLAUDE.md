@@ -66,8 +66,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: Ensemble consensus — Qwen2.5:7b + Llama 3.1:8b run in parallel when escalated. Agreement = boosted confidence (skip premium). Hard disagreement = strongest escalation signal to Claude. New: `EnsembleVerdict` in schemas, `evaluate_ensemble()` in escalation, router Phase 4 rewritten for consensus.
-- Next task: Operational soak — test full provider chain under real news load, tune escalation thresholds
+- Last completed task: GPU-optimized materiality-based tier routing. HIGH materiality (macro, geopolitical, M&A) always goes to LLM ensemble regardless of FinBERT confidence. MEDIUM uses 0.75 confidence bar. LOW keeps original 0.55 bar. Concurrency configurable (8 for GPU). Materiality map configurable in ai.yaml.
+- Next task: Deploy on RTX 5080 GPU PC, end-to-end soak test under real news load
 - Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS
 - Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b
 

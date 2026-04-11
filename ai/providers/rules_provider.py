@@ -83,6 +83,19 @@ _EVENT_DECAY: dict[str, int] = {
 }
 
 
+_DEFAULT_MATERIALITY_MAP: dict[str, str] = {
+    "macro": "high",
+    "geopolitical": "high",
+    "mna": "high",
+    "earnings": "medium",
+    "regulatory": "medium",
+    "crypto": "medium",
+    "sector": "low",
+    "company": "low",
+    "other": "low",
+}
+
+
 class RulesProvider(AIProvider):
     """Fast deterministic rules: tickers, events, materiality, dedup."""
 
@@ -96,6 +109,7 @@ class RulesProvider(AIProvider):
             "crypto": ["bitcoin", "ethereum", "crypto", "blockchain", "defi", "nft", "stablecoin", "binance", "coinbase"],
             "mna": ["acquire", "merger", "deal", "takeover", "buyout", "acquisition"],
         })
+        self._materiality_map: dict[str, str] = cfg.get("materiality_map", _DEFAULT_MATERIALITY_MAP)
         self._dedup_enabled = bool(cfg.get("deduplicate_headlines", True))
         self._dedup_window_min = int(cfg.get("deduplicate_window_minutes", 120))
         self._dedup_cache: OrderedDict[str, float] = OrderedDict()
@@ -192,13 +206,10 @@ class RulesProvider(AIProvider):
     def _assess_materiality(self, event_type: str, credibility: str, headline_lower: str) -> str:
         if any(kw in headline_lower for kw in self._emergency_keywords):
             return "high"
-        if event_type in ("macro", "geopolitical", "mna") and credibility == "high":
-            return "high"
-        if event_type in ("macro", "geopolitical") or credibility == "high":
+        base = self._materiality_map.get(event_type, "low")
+        if base == "low" and credibility == "high":
             return "medium"
-        if event_type == "other" and credibility == "low":
-            return "low"
-        return "medium"
+        return base
 
     def _keyword_sentiment(self, lower_text: str) -> float:
         positive = ["surge", "soar", "rally", "beat", "strong", "upgrade",

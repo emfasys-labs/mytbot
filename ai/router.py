@@ -65,6 +65,8 @@ class AIRouter:
 
         self._escalation_threshold = float(escalation_cfg.get("escalation_threshold", 0.55))
         self._min_confidence_local = float(escalation_cfg.get("min_confidence_for_local_acceptance", 0.55))
+        self._min_confidence_medium = float(escalation_cfg.get("min_confidence_for_medium_acceptance", 0.75))
+        self._always_escalate_high = bool(escalation_cfg.get("always_escalate_high_materiality", True))
         self._escalation_weights = escalation_cfg.get("weights", {})
         self._emergency_keywords = (
             escalation_cfg.get("emergency_override", {}).get("always_escalate_keywords", [])
@@ -73,12 +75,13 @@ class AIRouter:
             escalation_cfg.get("suppression", {}).get("suppress_if_local_providers_agree", True)
         )
 
-        ensemble_cfg = providers_cfg.get("local_reasoning", {}).get("ensemble", {})
+        local_cfg = providers_cfg.get("local_reasoning", {})
+        ensemble_cfg = local_cfg.get("ensemble", {})
         self._ensemble_enabled = bool(ensemble_cfg.get("enabled", True))
         self._ensemble_hard_disagree_threshold = float(ensemble_cfg.get("hard_disagree_threshold", 0.4))
         self._ensemble_confidence_boost = float(ensemble_cfg.get("confidence_boost", 0.15))
 
-        self._max_local_concurrency = 3
+        self._max_local_concurrency = int(local_cfg.get("gpu_concurrency", 8))
         self._startup_validated = False
 
         self._stats: dict[str, int] = {
@@ -163,7 +166,12 @@ class AIRouter:
             merged[i] = score
 
             ctx = self._build_escalation_context(items[i], rules_r, finbert_r, score)
-            if should_escalate_to_local_llm(ctx, min_confidence=self._min_confidence_local):
+            if should_escalate_to_local_llm(
+                ctx,
+                min_confidence=self._min_confidence_local,
+                min_confidence_medium=self._min_confidence_medium,
+                always_escalate_high_materiality=self._always_escalate_high,
+            ):
                 needs_local_llm.append(i)
 
         # ── Phase 4: Local LLM ensemble (selective) ────────────────────────

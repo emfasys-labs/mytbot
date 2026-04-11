@@ -53,6 +53,16 @@ providers:
       geopolitical: [war, sanctions, tariff, embargo, nato, summit, ceasefire]
       crypto: [bitcoin, ethereum, crypto, blockchain, defi, nft, stablecoin, binance, coinbase]
       mna: [acquire, merger, deal, takeover, buyout, acquisition]
+    materiality_map:
+      macro: high
+      geopolitical: high
+      mna: high
+      earnings: medium
+      regulatory: medium
+      crypto: medium
+      sector: low
+      company: low
+      other: low
 
   fin_sentiment:
     enabled: true
@@ -69,7 +79,8 @@ providers:
     fallback_model: llama3.1:8b     # secondary: runs in parallel for consensus
     temperature: 0.1
     max_tokens: 400
-    timeout_seconds: 60
+    timeout_seconds: 15            # GPU: 2-3s typical; 60s for CPU fallback
+    gpu_concurrency: 8              # parallel LLM calls (GPU can handle 8; use 3 for CPU)
     use_json_mode: true
     ensemble:
       enabled: true                 # run both models in parallel when escalated
@@ -103,8 +114,13 @@ escalation:
     disagreement: 0.10
     llm_disagreement: 0.25
 
-  # Minimum confidence from rules+FinBERT to skip local LLM.
+  # Materiality-aware gating for local LLM escalation:
+  #   HIGH materiality → always escalate (FinBERT alone is not trusted)
+  #   MEDIUM materiality → escalate unless confidence >= 0.75
+  #   LOW materiality → escalate only if confidence < 0.55
+  always_escalate_high_materiality: true
   min_confidence_for_local_acceptance: 0.55
+  min_confidence_for_medium_acceptance: 0.75
 
   # Suppression rules to avoid wasting escalations on noise.
   suppression:

@@ -71,13 +71,31 @@ def should_escalate_to_local_llm(
     ctx: EscalationContext,
     *,
     min_confidence: float = 0.55,
+    min_confidence_medium: float = 0.75,
+    always_escalate_high_materiality: bool = True,
 ) -> bool:
     """
-    Should we send this item to the local LLM?
-    Triggered when rules + FinBERT result is insufficient.
+    Should we send this item to the local LLM ensemble?
+
+    Materiality-aware gating:
+        HIGH materiality  — ALWAYS escalate (macro, geopolitical, M&A).
+                            FinBERT is not trusted alone on portfolio-moving events.
+        MEDIUM materiality — escalate if FinBERT confidence < 0.75 OR providers disagree.
+        LOW materiality    — escalate only if FinBERT confidence < 0.55 (original behavior).
     """
     if ctx.rules_result is not None and ctx.rules_result.is_duplicate:
         return False
+
+    materiality = ctx.materiality
+
+    if materiality == "high" and always_escalate_high_materiality:
+        return True
+
+    if materiality == "medium":
+        if ctx.merged_confidence >= min_confidence_medium and ctx.provider_disagreement < 0.2:
+            return False
+        return True
+
     if ctx.merged_confidence >= min_confidence and ctx.provider_disagreement < 0.3:
         return False
     return True

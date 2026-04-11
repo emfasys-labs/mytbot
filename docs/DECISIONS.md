@@ -147,3 +147,24 @@ any single model's high confidence. This turns the fallback model from a crash-o
 into an active participant in quality control.
 **Status:** Implemented in `ai/router.py` (Phase 4 ensemble), `ai/escalation.py`
 (`evaluate_ensemble`), `ai/schemas.py` (`EnsembleVerdict`), `config/ai.yaml` (ensemble settings).
+
+---
+
+## D014 — Materiality-based tier gating (GPU-optimized)
+**Date:** 2026-04-11
+**Decision:** Replace confidence-only LLM escalation gate with materiality-aware routing:
+- HIGH materiality (macro, geopolitical, M&A): ALWAYS escalate to LLM ensemble,
+  regardless of FinBERT confidence. FinBERT is a 110M-param model that only does
+  surface sentiment — it should never make final decisions on portfolio-moving events.
+- MEDIUM materiality (earnings, regulatory, crypto): escalate if FinBERT confidence < 0.75.
+- LOW materiality (other, sector, company): escalate only if FinBERT confidence < 0.55.
+Materiality is classified by the rules engine using a configurable event_type-to-materiality
+map. GPU concurrency raised to 8 (from 3) and timeout reduced to 15s (from 60s) for
+RTX 5080 deployment.
+**Reason:** With GPU inference (2-3s per headline vs 60-90s on CPU), there is no longer a
+performance reason to skip the LLM ensemble on material headlines. FinBERT remains valuable
+as a fast pre-filter for noise (~40% of headlines) and as an independent data point, but should
+not be the sole decision maker for events that could move the portfolio.
+**Status:** Implemented in `ai/escalation.py` (`should_escalate_to_local_llm`),
+`ai/providers/rules_provider.py` (configurable `materiality_map`), `ai/router.py`
+(new config params passed through), `config/ai.yaml` (materiality_map, confidence bars, gpu settings).
