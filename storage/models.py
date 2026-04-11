@@ -228,6 +228,8 @@ class AIOutputLog(Base):
     payload = Column(JSON, nullable=True)
     source = Column(String(32), nullable=False, default="system")
     signal_id = Column(String(128), nullable=True, index=True)
+    latency_ms = Column(Integer, nullable=True)
+    cost_estimate_gbp = Column(Numeric(12, 6), nullable=True)
 
 
 class AnomalyLog(Base):

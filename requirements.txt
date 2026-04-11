@@ -36,8 +36,14 @@ timeseriescv>=0.2               # Purged / combinatorial time-series CV (M3)
 # mlfinlab is currently unavailable on this Python environment; M3 includes in-repo fallback
 # for triple-barrier/meta-labeling. Re-enable strict dependency when a compatible build is available.
 
-# ── AI ────────────────────────────────────────────────────────────────────────
-anthropic==0.28.0               # Claude API for news classification
+# ── AI (local-first) ──────────────────────────────────────────────────────────
+# Local providers (rules + FinBERT + Ollama) are the default.
+# Claude API is optional premium fallback (disabled by default in config/ai.yaml).
+anthropic==0.28.0               # Premium fallback only — off by default
+transformers>=4.40.0            # FinBERT local sentiment (ProsusAI/finbert)
+torch>=2.0.0                    # PyTorch backend for transformers
+# For CPU-only (smaller install): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Ollama (local LLM) is accessed via HTTP — no Python package needed
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 # 2.0.30 breaks on Python 3.13 (__firstlineno__ vs FastIntFlag); use 2.0.36+.

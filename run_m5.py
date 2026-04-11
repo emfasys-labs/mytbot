@@ -20,6 +20,7 @@ from loguru import logger
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
+from ai.router import AIRouter
 from ai.thesis_generator import ThesisGenerator
 from ai.regime import filter_by_allowed_strategies
 from control.command_bus import CommandBus
@@ -210,7 +211,13 @@ async def _run_loop(args: argparse.Namespace) -> int:
     risk_engine = RiskEngine(risk_cfg)
     set_risk_engine(risk_engine)
     ai_enabled = bool(ai_cfg.get("enabled", True))
-    ai_classifier = NewsClassifier() if ai_enabled else None
+    ai_mode = str(ai_cfg.get("mode", "local_first")).strip().lower()
+    if ai_enabled and ai_mode != "api_only":
+        ai_classifier = AIRouter(ai_cfg)
+    elif ai_enabled:
+        ai_classifier = NewsClassifier()
+    else:
+        ai_classifier = None
     ai_pipeline = AIPipeline(ai_cfg.get("pipeline", {}), classifier=ai_classifier) if ai_enabled else None
     discovery_enabled = bool(discovery_cfg.get("enabled", False)) and os.getenv("DISCOVERY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
     discovery_pipeline = None
@@ -324,7 +331,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
                             "sample_count": ai_result.news_details.get(s_key, {}).get("sample_count", 0),
                             "macro_confidence": ai_result.macro_confidence,
                         },
-                        source="claude",
+                        source=str(ai_result.news_details.get(s_key, {}).get("provider", "local")),
                         signal_id=signal.signal_id,
                     )
                 )

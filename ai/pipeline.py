@@ -96,7 +96,9 @@ class AIPipeline:
                         decay_hours=int(d.get("decay_hours", 24)),
                         rationale=str(d.get("rationale", ""))[:4000],
                         payload=d,
-                        source="claude",
+                        source=str(d.get("provider", "local")),
+                        latency_ms=int(d.get("latency_ms", 0)) or None,
+                        cost_estimate_gbp=Decimal(str(d.get("cost_estimate_gbp", 0))) or None,
                     )
                 )
             session.add(
@@ -270,6 +272,9 @@ class AIPipeline:
                 "headline": top.headline,
                 "sample_count": len(sym_scores),
                 "disagreement_ratio": disagree_ratio,
+                "provider": getattr(top, "provider", "unknown"),
+                "latency_ms": getattr(top, "latency_ms", 0),
+                "cost_estimate_gbp": getattr(top, "cost_estimate_gbp", 0.0),
             }
             if len(sym_scores) >= min_sample and disagree_ratio >= disagreement_threshold:
                 anomalies.append(

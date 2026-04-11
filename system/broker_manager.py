@@ -329,6 +329,7 @@ class BrokerManager:
 
     _RECONNECT_BASE = 60
     _RECONNECT_MAX = 300
+    _HEALTH_POLL_SEC = 5
 
     def start_reconnect_loop(self) -> None:
         """Start a background task that retries failed broker connections."""
@@ -348,8 +349,9 @@ class BrokerManager:
         return min(self._RECONNECT_BASE * (2 ** fails), self._RECONNECT_MAX)
 
     async def _reconnect_loop(self) -> None:
-        await asyncio.sleep(self._RECONNECT_BASE)
+        await asyncio.sleep(self._HEALTH_POLL_SEC)
         while True:
+            await self._prune_disconnected_adapters()
             failed = [
                 name for name, s in list(self.report.brokers.items())
                 if s.configured and not s.connected and name not in self.adapters
@@ -358,14 +360,7 @@ class BrokerManager:
                 cfg = self.configs.get(name, {})
                 status = self.report.brokers[name]
                 if name == "ibkr":
-                    backoff = self._ibkr_backoff()
-                    elapsed = time.monotonic() - self._ibkr_last_attempt if self._ibkr_last_attempt else backoff
-                    if elapsed < backoff:
-                        logger.debug(
-                            "broker | ibkr | backoff {:.0f}s (next in {:.0f}s)",
-                            backoff, backoff - elapsed,
-                        )
-                        continue
+                    # Fast reconnect path: if IB Gateway comes back, reconnect immediately.
                     await self._handle_ibkr(cfg, status)
                     if self._late_connect_task:
                         try:
@@ -373,15 +368,7 @@ class BrokerManager:
                         except Exception:
                             pass
                 else:
-                    backoff = self._broker_backoff(name)
-                    last = self._broker_last_attempt.get(name, 0)
-                    elapsed = time.monotonic() - last if last else backoff
-                    if elapsed < backoff:
-                        logger.debug(
-                            "broker | {} | backoff {:.0f}s (next in {:.0f}s)",
-                            name, backoff, backoff - elapsed,
-                        )
-                        continue
+                    # Fast reconnect path for all brokers: retry on each health loop.
                     timeout = self._BROKER_TIMEOUTS.get(name, 30)
                     await self._try_connect(name, cfg, status, timeout)
 
@@ -389,7 +376,30 @@ class BrokerManager:
             if newly:
                 logger.info("broker | reconnected: {}", ", ".join(newly))
 
-            await asyncio.sleep(self._RECONNECT_BASE)
+            await asyncio.sleep(self._HEALTH_POLL_SEC)
+
+    async def _prune_disconnected_adapters(self) -> None:
+        """
+        Actively verify adapter connectivity and immediately mark/report disconnects.
+        Without this, a broker can stay "green" in UI after dropping.
+        """
+        for name, adapter in list(self.adapters.items()):
+            alive = False
+            try:
+                alive = bool(await asyncio.wait_for(adapter.is_connected(), timeout=3))
+            except Exception:
+                alive = False
+
+            if alive:
+                continue
+
+            self.adapters.pop(name, None)
+            status = self.report.brokers.get(name)
+            if status is not None:
+                status.connected = False
+                status.error = "Disconnected"
+            self._broker_fail_count[name] = max(1, self._broker_fail_count.get(name, 0))
+            logger.warning("broker | {} | disconnected (health poll)", name)
 
     async def disconnect_all(self) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():

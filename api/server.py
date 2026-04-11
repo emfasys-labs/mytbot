@@ -197,7 +197,7 @@ async def readyz():
 async def get_status():
     risk_engine = get_risk_engine()
     execution_engine = get_execution_engine()
-    connected_brokers = list(getattr(execution_engine, "_brokers", {}).keys()) if execution_engine is not None else []
+    exec_connected = list(getattr(execution_engine, "_brokers", {}).keys()) if execution_engine is not None else []
     bus = getattr(app.state, "command_bus", None)
     runtime = {}
     strategies: dict[str, bool] = {}
@@ -209,6 +209,7 @@ async def get_status():
     orch = _get_orchestrator()
     system_state = orch.state.value if orch else "off"
     orch_brokers = orch.status().get("active_brokers", []) if orch else []
+    connected_brokers = orch_brokers if orch_brokers else exec_connected
 
     return {
         "status": "running",

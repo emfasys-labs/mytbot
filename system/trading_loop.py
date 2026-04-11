@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
+from ai.router import AIRouter
 from ai.regime import filter_by_allowed_strategies
 from ai.thesis_generator import ThesisGenerator
 from control.command_bus import CommandBus
@@ -268,7 +269,13 @@ class TradingLoop:
                 discovery_pipeline = DiscoveryPipeline(scanner, graph, thesis_generator, self.sig_engine)
 
             ai_enabled = bool(ai_cfg.get("enabled", True))
-            ai_classifier = NewsClassifier() if ai_enabled else None
+            ai_mode = str(ai_cfg.get("mode", "local_first")).strip().lower()
+            if ai_enabled and ai_mode != "api_only":
+                ai_classifier = AIRouter(ai_cfg)
+            elif ai_enabled:
+                ai_classifier = NewsClassifier()
+            else:
+                ai_classifier = None
             ai_pipeline = AIPipeline(ai_cfg.get("pipeline", {}), classifier=ai_classifier) if ai_enabled else None
             ai_cycle_timeout_sec = float(ai_cfg.get("pipeline", {}).get("cycle_timeout_seconds", 45))
 

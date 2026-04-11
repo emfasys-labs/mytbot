@@ -110,3 +110,21 @@ and lowest effective cost for equities ($0.005/share vs % fees on crypto exchang
 **Decision:** Store OHLCV plus JSON feature payloads in `feature_snapshots` (unique on symbol, timeframe, bar timestamp). Ingest historical and incremental bars via yfinance into Postgres; NewsAPI and FRED are optional parallel feeds with dedupe (headline hash) and macro upsert.
 **Reason:** Single queryable store for backtests and live features; yfinance is sufficient for milestone research data before paid market-data vendors. Validation metadata attaches to the latest bar per ingest batch to limit row bloat.
 **Status:** Implemented in M2 (`storage/models.py`, `data/`, `run_pipeline.py`).
+
+---
+
+## D012 — Local-first AI architecture (rules + FinBERT + local LLM)
+**Date:** 2026-04-11
+**Decision:** Replace Claude-first AI layer with local-first provider chain:
+rules → FinBERT → local LLM (Ollama) → optional premium fallback (Claude, disabled by default).
+No hard daily API call caps. Escalation is necessity-based using materiality, ambiguity,
+novelty, and provider disagreement scores. Thresholds are starting heuristics that should
+evolve into dynamic parameters via ParameterManager with regime/exposure overrides.
+**Reason:** Claude API cost was economically irrational at current scale (~£20 spend for ~£20 profit).
+The AI tasks (headline sentiment, event classification, rationale) are structured classification
+problems that do not require frontier-model intelligence. FinBERT is purpose-built for financial
+sentiment. Local LLMs (Llama, Gemma, Qwen) handle nuance. This eliminates recurring API cost,
+reduces latency, improves resilience, and removes vendor lock-in — while keeping Claude available
+as an escalation path for genuinely ambiguous or high-impact events.
+**Status:** Implemented. Provider architecture in `ai/providers/`, router in `ai/router.py`,
+escalation engine in `ai/escalation.py`, config in `config/ai.yaml`.

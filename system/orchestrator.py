@@ -208,14 +208,6 @@ class Orchestrator:
         """Current system status for the API."""
         paper_mode = os.getenv("APP_ENV", "paper").strip().lower() != "live"
 
-        if self._broker_report:
-            for name in list(self._broker_report.brokers):
-                bs = self._broker_report.brokers[name]
-                if name in self._broker_manager.adapters:
-                    if not bs.connected or bs.error:
-                        bs.connected = True
-                        bs.error = None
-
         broker_status = self._broker_report.to_dict() if self._broker_report else {}
         active_brokers = self._broker_report.active_names if self._broker_report else []
         dep_status = self._dep_report.to_dict() if self._dep_report else {}

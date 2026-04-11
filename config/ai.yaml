@@ -1,10 +1,22 @@
-enabled: true
+# config/ai.yaml
+# ==============
+# Local-first AI configuration for mytbot.
+#
+# Architecture: rules → FinBERT → local LLM → optional premium fallback.
+# NO hard daily API call caps — escalation is necessity-based.
+# Threshold values are starting heuristics, not sacred constants.
+# They should evolve into dynamic parameters via ParameterManager.
 
+enabled: true
+mode: local_first    # local_first | api_only | hybrid
+
+# ── Pipeline settings (unchanged from M6) ──────────────────────────────────
 pipeline:
   news_lookback_hours: 24
   news_limit: 200
   max_news_items_per_cycle: 40
   cycle_timeout_seconds: 45
+  cache_ttl_seconds: 300
   macro_series:
     - FEDFUNDS
     - CPIAUCSL
@@ -28,6 +40,98 @@ pipeline:
     high_impact_score_abs: 0.75
     low_confidence_threshold: 0.45
 
+# ── Providers ───────────────────────────────────────────────────────────────
+providers:
+  rules:
+    enabled: true
+    deduplicate_headlines: true
+    deduplicate_window_minutes: 120
+    keyword_event_map:
+      earnings: [earnings, guidance, revenue, eps, forecast, profit, loss, quarterly, dividend]
+      macro: [cpi, inflation, payrolls, fomc, fed, rates, gdp, unemployment, nonfarm, pce, ppi]
+      regulatory: [sec, lawsuit, approval, ban, etf, regulation, investigation, fine, antitrust]
+      geopolitical: [war, sanctions, tariff, embargo, nato, summit, ceasefire]
+      crypto: [bitcoin, ethereum, crypto, blockchain, defi, nft, stablecoin, binance, coinbase]
+      mna: [acquire, merger, deal, takeover, buyout, acquisition]
+
+  fin_sentiment:
+    enabled: true
+    model_name: ProsusAI/finbert
+    local_only: true
+    batch_size: 16
+    max_text_length: 512
+
+  local_reasoning:
+    enabled: true
+    provider: ollama
+    base_url: http://localhost:11434
+    model_name: llama3.1:8b
+    temperature: 0.1
+    max_tokens: 400
+    timeout_seconds: 15
+    use_json_mode: true
+
+  premium_fallback:
+    enabled: false          # off by default — enable only if you want paid escalation
+    provider: anthropic
+    model_name: claude-sonnet-4-5
+    timeout_seconds: 20
+    max_tokens: 500
+
+# ── Escalation policy ──────────────────────────────────────────────────────
+# No hard daily call caps. Escalation is gated by necessity criteria.
+# These thresholds are starting heuristics — should become dynamic via
+# ParameterManager with regime/exposure overrides.
+escalation:
+  mode: necessity_only
+
+  # Escalation score threshold (0..1). Higher = harder to escalate.
+  escalation_threshold: 0.55
+
+  # Weights for escalation score computation (starting heuristics).
+  weights:
+    ambiguity: 0.35
+    materiality: 0.30
+    novelty: 0.20
+    disagreement: 0.15
+
+  # Minimum confidence from rules+FinBERT to skip local LLM.
+  min_confidence_for_local_acceptance: 0.55
+
+  # Suppression rules to avoid wasting escalations on noise.
+  suppression:
+    suppress_duplicate_window_minutes: 90
+    suppress_if_local_providers_agree: true
+    suppress_same_symbol_same_event_minutes: 120
+
+  # Emergency: always escalate regardless of score.
+  emergency_override:
+    enabled: true
+    always_escalate_keywords:
+      - emergency rate cut
+      - unscheduled fed
+      - exchange hack
+      - war declared
+      - market halt
+      - flash crash
+      - bank failure
+      - sovereign default
+      - nuclear
+      - pandemic declared
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+logging:
+  persist_all_outputs: true
+  persist_failed_outputs: true
+  include_latency_ms: true
+  include_provider_name: true
+  include_cost_estimate: true
+
+# ── Cost tracking (no caps — tracking only) ─────────────────────────────────
+cost_controls:
+  log_all_costs: true
+
+# ── Sources (unchanged from M6) ────────────────────────────────────────────
 sources:
   news:
     enabled: true

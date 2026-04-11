@@ -37,6 +37,9 @@ class NewsScore:
     rationale: str              # plain English explanation
     scored_at: str
     decay_hours: int            # how long before this signal loses relevance
+    provider: str = "claude"    # which provider produced this score
+    latency_ms: int = 0         # end-to-end scoring latency
+    cost_estimate_gbp: float = 0.0  # estimated cost of this score
 
 
 class NewsClassifier:

@@ -24,7 +24,7 @@ Approved signals go to the execution engine which routes to the best broker.
 Everything is logged. Runtime broker permissions support graceful fallback routing.
 Risk parameters are managed by `ParameterManager` with layered overrides
 (regime > AI > defaults) and bounded, auditable changes.
-AI (Claude API) classifies news and generates rationale — never places orders.
+AI is local-first (rules → FinBERT → local LLM → optional paid fallback) — never places orders.
 
 ## KEY FILES
 - `run.py`                   — **THE entry point** (`python run.py` starts everything)
@@ -49,9 +49,13 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 - `config/fundamentals.yaml` — parameter defaults, absolute bounds, AI policy
 - `config/broker_permissions.yaml` — runtime broker permission/fallback map
 - `config/data_pipeline.yaml` — M2 symbols, intervals, News/FRED toggles
-- `config/ai.yaml`          — M6 AI toggles and pipeline settings
+- `config/ai.yaml`          — local-first AI config: providers, escalation policy, no daily caps
 - `run_pipeline.py`          — M2: yfinance → features → Postgres; NewsAPI + FRED
-- `ai/news_classifier.py`    — Claude-first news scoring + rationale generation
+- `ai/router.py`             — local-first AI router (drop-in for NewsClassifier)
+- `ai/providers/`            — provider implementations (rules, FinBERT, Ollama, Claude fallback)
+- `ai/escalation.py`         — necessity-based escalation engine (no hard daily caps)
+- `ai/schemas.py`            — shared AI types (ProviderResult, EscalationContext)
+- `ai/news_classifier.py`    — legacy Claude classifier (kept for backward compat)
 - `ai/pipeline.py`           — M6 orchestration: symbol news score + macro regime
 - `docs/DECISIONS.md`        — architectural decision log
 - `docs/M2_READINESS.md`     — M1 verification summary + M2 prep checklist
@@ -61,11 +65,11 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 
 ## CURRENT STATE
 <!-- Update this section after each work session -->
-- Milestone: M9 — One-Button System ✅
-- Last completed task: Full orchestrator redesign — `run.py` single entry point, `system/` package (orchestrator, dependency_manager, broker_manager, trading_loop), API endpoints (`/system/start`, `/system/stop`, `/system/status`), UI MasterControl wired to system start/stop with real-time state
-- Next task: Operational soak — `python run.py` end-to-end testing, broker credential setup, live validation
-- Blockers: IBKR stream/order need local IB Gateway/TWS; exchange live keys
-- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed to run the entire system
+- Milestone: M10 — Local-First AI Architecture ✅
+- Last completed task: Replaced Claude-first AI layer with local-first provider chain (rules → FinBERT → Ollama local LLM → optional Claude fallback). No hard daily API caps — escalation is necessity-based. New files: `ai/router.py`, `ai/providers/`, `ai/escalation.py`, `ai/schemas.py`. Updated: `config/ai.yaml`, `ai/pipeline.py`, `system/trading_loop.py`, `storage/models.py`.
+- Next task: Install Ollama + pull model, install transformers+torch, test provider chain end-to-end
+- Blockers: GPU server setup for production inference; IBKR stream/order need local IB Gateway/TWS
+- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
 1. Never change `brokers/base.py` interface — it is frozen
@@ -74,7 +78,7 @@ AI (Claude API) classifies news and generates rationale — never places orders.
 4. paper_mode=True is always the default
 5. Every new broker = one new file + one line in registry.py, nothing else
 6. Log every signal, risk decision, order, and fill
-7. AI (Claude API) only scores and explains — never executes
+7. AI only scores and explains — never executes (local-first; paid API is optional fallback)
 8. Check `docs/DECISIONS.md` before making architectural choices
 
 ## HOW TO USE THIS FILE
