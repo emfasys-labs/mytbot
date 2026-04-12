@@ -1,5 +1,35 @@
-const CONFIGURED_BASE = import.meta.env.VITE_API_BASE || '';
 const CANDIDATE_PORTS = [8000, 8001, 8002, 8003, 8004];
+
+/** Must be absolute `http(s)://host:port` — relative values break fetches (browser loads SPA HTML → JSON parse error). */
+function getSafeConfiguredBase(): string {
+  const raw = (import.meta.env.VITE_API_BASE || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/$/, '');
+  console.warn(
+    `[api] VITE_API_BASE must be a full URL (e.g. http://127.0.0.1:8000). Ignoring invalid value: ${raw}`,
+  );
+  return '';
+}
+
+async function parseJsonBody<T>(r: Response, path: string): Promise<T> {
+  const text = await r.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error(`${path}: empty response`);
+  }
+  if (trimmed.startsWith('<!') || trimmed.toLowerCase().startsWith('<html')) {
+    throw new Error(
+      `${path}: API returned HTML, not JSON — usually the wrong base URL (UI talked to the static/Vite server). ` +
+        `Set VITE_API_BASE=http://127.0.0.1:PORT in ui/.env.local (same port as FastAPI) and restart Vite.`,
+    );
+  }
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${path}: invalid JSON (${msg})`);
+  }
+}
 
 /** Same token source as `ws.ts` — required when API sets `DASHBOARD_READ_TOKEN`. */
 const DASHBOARD_TOKEN_LS_KEY = 'dashboardReadToken';
@@ -45,8 +75,9 @@ let _resolvedBase: string | null = null;
 async function resolveApiBase(): Promise<string> {
   if (_resolvedBase) return _resolvedBase;
 
-  if (CONFIGURED_BASE) {
-    _resolvedBase = CONFIGURED_BASE;
+  const cfg = getSafeConfiguredBase();
+  if (cfg) {
+    _resolvedBase = cfg;
     return _resolvedBase;
   }
 
@@ -74,7 +105,8 @@ async function resolveApiBase(): Promise<string> {
 }
 
 function getBase(): string {
-  return _resolvedBase ?? (CONFIGURED_BASE || `http://${window.location.hostname || 'localhost'}:8000`);
+  const cfg = getSafeConfiguredBase();
+  return _resolvedBase ?? (cfg || `http://${window.location.hostname || 'localhost'}:8000`);
 }
 
 export type PnlPeriodRollup = {
@@ -303,7 +335,7 @@ async function getJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, { headers: dashboardReadHeaders() });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
-  return (await r.json()) as T;
+  return parseJsonBody<T>(r, path);
 }
 
 async function postJson<T>(path: string): Promise<T> {
@@ -313,7 +345,7 @@ async function postJson<T>(path: string): Promise<T> {
     headers: dashboardReadHeaders(),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
-  return (await r.json()) as T;
+  return parseJsonBody<T>(r, path);
 }
 
 async function postJsonBody<T>(path: string, body: unknown): Promise<T> {
@@ -324,7 +356,7 @@ async function postJsonBody<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
-  return (await r.json()) as T;
+  return parseJsonBody<T>(r, path);
 }
 
 async function putJson<T>(path: string, body: unknown): Promise<T> {
@@ -335,7 +367,7 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
-  return (await r.json()) as T;
+  return parseJsonBody<T>(r, path);
 }
 
 export const api = {
