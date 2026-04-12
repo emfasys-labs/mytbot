@@ -1,8 +1,8 @@
 # BUILD_PLAN.md
 # ==============
-# 8 milestones from zero to live autonomous trading.
+# Milestones M1–M10: from foundation through local-first AI and signal accumulation.
 # Each milestone has a clear goal, task list, and deliverable.
-# Do not start M(n+1) until M(n) deliverable is met.
+# Do not start M(n+1) until M(n) deliverable is met (historical); post-M8 work is tracked as platform depth + ops gates.
 
 ---
 
@@ -10,7 +10,7 @@
 
 | ID | Name | Duration | Status |
 |----|------|----------|--------|
-| M1 | Foundation | Weeks 1–3 | ✅ Complete (run `main.py` + Postgres to verify) |
+| M1 | Foundation | Weeks 1–3 | ✅ Complete |
 | M2 | Data Pipeline | Weeks 4–5 | ✅ Complete |
 | M3 | First Strategy + Signal Engine | Weeks 6–8 | ✅ Complete |
 | M4 | Risk Engine | Weeks 9–10 | ✅ Complete |
@@ -18,14 +18,18 @@
 | M6 | AI Intelligence Layer | Weeks 13–15 | ✅ Complete |
 | M7 | Dashboard + Control | Weeks 16–17 | ✅ Complete |
 | M8 | Micro-Live + Iteration | Weeks 18+ | ✅ Complete (code); ongoing ops: soak, scale capital slowly |
+| M9 | D015 allocator + opportunity path | — | ✅ Complete (primary path default; see D004 amendment) |
+| M10 | Local-first AI + signal accumulation | — | ✅ Complete (`ai/router.py`, `signals/accumulator.py`, D012–D017) |
 
-**Post-M8 extension:** IBKR single-leg options (D016) — chain fetch, structured `OptionContractSpec`, risk gate `options_trading`, order/position `instrument_metadata` in storage; not a new milestone, does not replace M8 soak requirements.
+**Post-M10 extensions:** IBKR single-leg options (**D016**, opt-in `ENABLE_OPTIONS`); paper soak and capital scaling remain operational gates, not new milestone IDs.
+
+**Note:** `docs/DECISIONS.md` contains a **duplicate numbering block** (second D012–D014 vs earlier entries). Treat **first D012–D014** as local-first AI / allocator-era IDs; follow-up renumbering is tracked as doc hygiene — do not implement against the wrong heading.
 
 ---
 
 ## System build vs operational activation
 
-Milestones (M1–M8) describe **delivery history**. Going forward, treat new subsystems as parts of the full platform that are **built once** and then **gated for live use**: configuration, capital, and soak evidence control what runs in production—not “temporary MVP” code paths.
+Milestones **M1–M10** describe **delivery history** (M9–M10 = allocator primary path + local-first AI / accumulation). Going forward, treat new subsystems as parts of the full platform that are **built once** and then **gated for live use**: configuration, capital, and soak evidence control what runs in production—not throwaway prototypes.
 
 ---
 
@@ -51,14 +55,14 @@ Mandatory gates from research:
 2. Purged/combinatorial CV in M3 before strategy acceptance.
 3. Square-root impact model in M5 before live capital scale-up.
 
-### G5 — Signal accumulation engine stability (operational gate)
+### G5 — Signal accumulation engine (shipped)
 
-Before relying on accumulated conviction for sizing or narrative-heavy regimes:
+Stateful accumulation is **implemented** and on by default (`config/strategies.yaml` → `signal_engine.use_signal_accumulator`). Ongoing operational gate: validate logs and behaviour during paper soak (see **D017**, `signals/accumulator.py`, trading loop `feed_ai_pipeline_result`).
 
-- [ ] Per-symbol state implemented (`signals/accumulator.py`) with half-life decay and bounded net score.
-- [ ] Quant + AI news rollup + macro inputs wired from the trading loop / runners when `use_signal_accumulator` is enabled.
-- [ ] Conflicting horizon behaviour and dual AI veto policy validated in logs/tests.
-- [ ] Observable structured logs (`signal_accumulator_update`) and dashboard/API fields as needed.
+- [x] Per-symbol state (`signals/accumulator.py`) — half-life decay, bounded net score, alignment / conflict.
+- [x] Quant + rolled-up AI / macro wired from `system/trading_loop.py` (and `run_m3` / `run_m5` paths) when accumulator enabled.
+- [x] Dual AI veto + legacy modifier behaviour covered by engine tests / logs (continue to monitor in soak).
+- [x] Metadata on `Signal` / logs for accumulator snapshot (extend dashboard fields only when product needs them).
 
 ---
 
@@ -244,7 +248,7 @@ Before relying on accumulated conviction for sizing or narrative-heavy regimes:
 - `run_m5` applies control commands on a fast interval (default 5s) in addition to each main loop iteration.
 - Optional `DASHBOARD_READ_TOKEN` / `DASHBOARD_PASSWORD` for read-path auth; live CORS warning when `APP_ENV=live` and origins are `*`.
 - Risk regime overrides persisted to `control_state` and `config/risk_parameter_overrides.yaml` (gitignored).
-- Dashboard: drawdown overlay on PnL chart, WebSocket reconnect with backoff, recent event strip.
+- Dashboard (`ui/`): drawdown overlay on PnL chart, WebSocket reconnect with backoff, single-flight refresh to avoid stop/start flicker, broker pills **green** only when `balance_ready` (usable `get_balance` snapshot) — see `system/broker_manager.py` + `/system/status`.
 
 ---
 
@@ -255,7 +259,7 @@ Before relying on accumulated conviction for sizing or narrative-heavy regimes:
 **Tasks:**
 - [x] Switch IBKR from paper to live account — operational: `APP_ENV=live`, IBKR port 7496, `run_m5 --live` (see `docs/M8_MICRO_LIVE.md`)
 - [x] Start with single strategy, single asset, tight notional — enforced when `m8_micro_live.enabled: true` + `APP_ENV=live` (`config/m8_micro_live.yaml`)
-- [x] Weekly review template — `docs/M8_WEEKLY_REVIEW.md`
+- [x] Operational reviews while micro-live — use your own offline checklist (PnL, risk ratio, incidents, config changes); no template file in-repo
 - [x] Add second exchange adapter — Binance (existing) + **Bybit** (`brokers/bybit/adapter.py`, `pybit`, registry/router/permissions)
 - [x] Expand asset universe gradually — `config/data_pipeline.yaml` + M8 whitelist patterns (e.g. IWM, QQQ alongside SPY; tighten live whitelist manually)
 - [x] Add second strategy sleeve with separate capital allocation — `strategy_sleeve_caps` per strategy under M8 live (`risk/engine.py`)

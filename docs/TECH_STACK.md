@@ -280,7 +280,7 @@ Policy summary:
 | Technology | Why |
 |-----------|-----|
 | FastAPI | REST + WebSocket for dashboard. Async native. |
-| React + Vite | M7 dashboard UI with control-plane actions and realtime status updates. |
+| React + Vite | Dashboard in `ui/` — control plane, PnL, discovery/intelligence, WebSocket-driven status (`balance_ready` on broker badges). |
 | Grafana (optional) | Operational metrics — API latency, error rates. |
 
 M7 control-plane implementation notes:

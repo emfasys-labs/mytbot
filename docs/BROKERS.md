@@ -13,7 +13,7 @@
 | 2 | **Kraken** | Crypto primary — 640+ pairs, GBP-native | ✅ Have account |
 | 3 | **Binance** | Crypto secondary — highest liquidity | ✅ Have account |
 | 4 | **Alpaca** | US equities paper trading | ✅ Adapter + `test_alpaca.py` |
-| 5 | **Bybit** | Crypto futures/derivatives | ⏳ Later (M8) |
+| 5 | **Bybit** | Crypto spot + USDT linear perps | ✅ Adapter (`brokers/bybit/`, `pybit`) |
 | 6 | **Deribit** | Crypto options only | ⏳ Much later |
 
 ---
@@ -200,16 +200,28 @@ Free, real-time data, up to $1M simulated capital.
 
 ---
 
-## Bybit (Future — M8)
+## Bybit
 
-**What it trades:** Crypto spot, perpetual futures, options
+**What it trades:** Crypto **spot** and **USDT-margined linear perpetuals** (V5 API). Options on Bybit are out of scope for this adapter unless extended later.
 
-**Fees:**
-- Perpetual futures: 0.02% maker / 0.06% taker
-- Spot: 0.10% maker / 0.10% taker
+**Fees (typical):**
+- Perpetual futures: ~0.02% maker / ~0.06% taker (check Bybit fee schedule)
+- Spot: ~0.10% maker / ~0.10% taker
 
-**When to add:** When you want to short crypto or trade derivatives.
-Adding Bybit = copy `brokers/_template/adapter.py` to `brokers/bybit/`, implement, add one line to registry.
+**Python SDK:** `pybit` (REST + WebSocket)
+
+**ENV vars:**
+```
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+# optional
+BYBIT_TESTNET=false
+BYBIT_CATEGORY=linear    # linear | spot — matches routing for `asset_class=future` vs spot
+```
+
+**Implementation:** `brokers/bybit/adapter.py`, registered in `brokers/registry.py`. Router prefers Bybit for `asset_class=future` when configured (`execution/router.py`, `config/broker_permissions.yaml`).
+
+**Paper / safety:** Adapter respects `paper_mode`; use testnet keys with `BYBIT_TESTNET=true` for dry runs.
 
 ---
 

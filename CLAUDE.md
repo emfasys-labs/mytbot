@@ -79,7 +79,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `ai/news_classifier.py`    — legacy Claude classifier (kept for backward compat)
 - `ai/pipeline.py`           — M6 orchestration: symbol news score + macro regime
 - `docs/DECISIONS.md`        — architectural decision log
-- `docs/M2_READINESS.md`     — M1 verification summary + M2 prep checklist
+- `docs/BUILD_PLAN.md`       — milestones M1–M10 + task history
+- `docs/M8_MICRO_LIVE.md`    — micro-live guardrails (`APP_ENV=live`, YAML profile)
 - `alembic/`                 — DB migrations (URL from POSTGRES_* in env.py)
 - `tests/`                   — pytest smoke tests
 - `.cursorrules`             — Cursor AI alignment rules

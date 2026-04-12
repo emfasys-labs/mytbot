@@ -19,7 +19,7 @@ def _extract_readme_status(text: str) -> dict[str, str]:
             continue
         milestone = parts[1]
         status = parts[3]
-        if re.fullmatch(r"M[1-8]", milestone):
+        if re.fullmatch(r"M(?:10|[1-9])", milestone):
             out[milestone] = status
     return out
 
@@ -34,7 +34,7 @@ def _extract_build_status(text: str) -> dict[str, str]:
             continue
         milestone = parts[1]
         status = parts[4]
-        if re.fullmatch(r"M[1-8]", milestone):
+        if re.fullmatch(r"M(?:10|[1-9])", milestone):
             out[milestone] = status
     return out
 
@@ -45,12 +45,13 @@ def main() -> int:
     build = (root / "docs" / "BUILD_PLAN.md").read_text(encoding="utf-8")
     a = _extract_readme_status(readme)
     b = _extract_build_status(build)
-    missing = [k for k in [f"M{i}" for i in range(1, 9)] if k not in a or k not in b]
+    milestones = [f"M{i}" for i in range(1, 11)]  # M1 … M10
+    missing = [k for k in milestones if k not in a or k not in b]
     if missing:
         print(f"Missing milestone rows in docs: {missing}")
         return 1
     mismatches: list[str] = []
-    for k in [f"M{i}" for i in range(1, 9)]:
+    for k in milestones:
         ra = "done" if "✅" in a[k] else "not_done"
         rb = "done" if "✅" in b[k] else "not_done"
         if ra != rb:

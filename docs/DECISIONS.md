@@ -4,6 +4,8 @@
 # Add to this file whenever a decision is made.
 # This file keeps Claude, Cursor, and the developer aligned.
 
+**Hygiene note:** A later block reuses labels **D012–D014** for funding / coordination topics while **D012–D014** already appear as local-first AI / tier gating. When implementing, read the **heading title and date**, not the number alone. Renumbering is a planned doc cleanup.
+
 ---
 
 ## D001 — Adapter pattern for all brokers
@@ -21,7 +23,7 @@ Bybit, Deribit, OKX, or any future exchange can be added with one new file.
 **Decision:** Interactive Brokers Pro is the primary broker for all non-crypto assets.
 **Reason:** Only single platform that covers US stocks, UK stocks, bonds, ETFs, forex, options,
 futures, and now 11 crypto assets. Full API access. Used by professional firms.
-**Status:** Account to be opened. M1 implementation pending.
+**Status:** Primary non-crypto venue; IBKR adapter implemented (`brokers/ibkr/`). Account setup is operational (owner).
 
 ---
 
@@ -30,7 +32,7 @@ futures, and now 11 crypto assets. Full API access. Used by professional firms.
 **Decision:** Kraken is primary crypto exchange, Binance is secondary for liquidity/coverage.
 **Reason:** IBKR crypto covers only 11 coins. Kraken adds 640+ pairs, GBP-native, UK-friendly.
 Binance adds highest liquidity and widest coin selection.
-**Status:** Accounts already exist. API keys to be generated.
+**Status:** Adapters implemented; live use requires valid API keys in `.env`.
 
 ---
 
@@ -48,12 +50,13 @@ orders the human would not have approved. Risk engine is the last line of defenc
 
 ## D005 — AI advises, rules execute
 **Date:** 2026-04-04
-**Decision:** Claude API is used for news classification, sentiment scoring, and
-trade rationale generation only. It never has direct access to order placement.
+**Decision:** AI/LLM components are used for news classification, sentiment scoring,
+and trade rationale generation only. They never have direct access to order placement.
 **Reason:** LLMs are not deterministic and cannot be audited the same way rule-based
-systems can. AI output is a score that feeds into the signal engine, which feeds
-into the risk engine. Every trade must have a traceable, auditable decision path.
-**Status:** Architecture defined. Implementation in M6.
+systems can. AI output is a score that feeds into the signal engine (and optionally
+the signal accumulator), which feeds into the risk engine. Every trade must have a
+traceable, auditable decision path.
+**Status:** Implemented (M6); **superseded in provider choice** by **D012** (local-first routing). Invariant unchanged: **AI never executes orders.**
 
 ---
 

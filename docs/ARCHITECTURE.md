@@ -6,9 +6,9 @@
 ## Overview
 
 mytbot is a personal autonomous multi-asset trading system.
-It monitors markets 24/7, generates trading signals, validates them
-through a strict risk engine, and executes orders across multiple
-brokers — all without human intervention.
+**Primary runtime:** `python run.py` — orchestrator (`system/orchestrator.py`) brings up Docker-backed Postgres/Redis (via dependency manager), discovers brokers (`system/broker_manager.py`), runs the trading loop and optional pipeline, and serves **FastAPI** + **WebSocket** for the **React** dashboard in `ui/`.
+
+Signals are produced by strategies (and optional D015 opportunity path), may pass through **stateful signal accumulation** (`signals/accumulator.py`), then the signal engine; every tradable intent is **veto-capable** by the risk engine before execution routes to adapters.
 
 **Assets traded:** US equities, UK equities, ETFs, bonds, forex, crypto; **IBKR single-leg options** (opt-in via `options_trading` / `ENABLE_OPTIONS`, same Signal → Risk → Execution path)
 **Primary broker:** Interactive Brokers Pro (IBKR)
@@ -107,9 +107,10 @@ Reference docs:
 ┌────────────────────▼────────────────────────────────┐
 │           OBSERVABILITY & CONTROL                    │
 │  Audit log (every decision stored)                   │
-│  Dashboard (FastAPI + React)                         │
-│  Alerts (Telegram/email on failures)                 │
-│  Kill switch (one button halts everything)           │
+│  Dashboard (FastAPI + React in `ui/`)              │
+│  WebSocket ticks + `/system/status` (incl. `balance_ready`) │
+│  Alerts (e.g. Telegram on failures)                 │
+│  Kill switch (API + UI)                            │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -121,7 +122,7 @@ Every broker implements one identical interface defined in `brokers/base.py`.
 The rest of the system never knows which broker it's talking to.
 
 ```
-brokers/base.py          ← interface (FROZEN — never changes)
+brokers/base.py          ← interface (FROZEN — backward-compatible extensions only; see CLAUDE.md)
 brokers/registry.py      ← one-line registration of new brokers
 brokers/ibkr/adapter.py  ← IBKR implementation
 brokers/kraken/adapter.py
@@ -141,44 +142,43 @@ brokers/_template/adapter.py  ← copy this for any new exchange
 ## Data Flow in Detail
 
 ```
-1. Market data arrives via WebSocket (prices, candles, order book)
-2. Feature engine computes indicators (RSI, MACD, ATR, momentum)
-3. News arrives via NewsAPI/RSS → Claude API classifies it
-4. Strategy engine runs on every new candle:
+1. Market data arrives via adapters / pipeline (prices, candles; optional WebSocket streams)
+2. Feature engine computes indicators (RSI, MACD, ATR, momentum); features stored in Postgres (`feature_snapshots`, etc.)
+3. News arrives via NewsAPI / pipeline → **local-first AI** (`ai/router.py`, `config/ai.yaml`) classifies and scores; optional paid fallback
+4. Strategy engine runs on loop / bar updates:
       features → strategy.generate_signal() → RawSignal or None
-5. Signal engine:
-      RawSignal + news_score → Signal (with adjusted confidence)
-      If news strongly negative → Signal vetoed before risk engine
-6. Risk engine evaluates Signal:
+5. Optional: D015 opportunity / allocator batch produces or constrains portfolio-level intent (primary path when enabled)
+6. Signal accumulation (optional, default on): updates per-symbol decayed conviction from quant + AI/macro rollups
+7. Signal engine:
+      RawSignal + accumulator state + news_score → Signal (with adjusted confidence)
+      Strong negative news / dual veto policy may veto before risk
+8. Risk engine evaluates Signal:
       Runs all checks → APPROVED or REJECTED
       Logs decision either way
-7. Execution engine (approved only):
+9. Execution engine (approved only):
       Builds Order from Signal
       Router picks best broker
       Places order with idempotency key
       Tracks fill
-8. Portfolio tracker updates positions and P&L
-9. Everything written to audit log
-10. Dashboard reflects real-time state
+10. Portfolio tracker updates positions and P&L
+11. Everything written to audit log / DB
+12. Dashboard reflects state via REST + WebSocket (`/system/status` includes broker `balance_ready` for honest “connected” UI)
 ```
 
 ---
 
-## AI Layer — What It Does and Doesn't Do
+## AI layer — what it does and does not do
 
-**Does:**
-- Reads news headlines every few minutes
-- Classifies event type (earnings, macro, regulatory, etc.)
-- Scores sentiment per asset (-1.0 to +1.0)
-- Boosts or vetoes signals based on news context
-- Generates plain-English rationale for every trade
-- Detects unusual narrative patterns (anomaly detection)
+**Does (local-first, `config/ai.yaml`):**
+- Routes through **rules → FinBERT → local LLM → optional escalation / paid fallback** (`ai/router.py`, `ai/escalation.py`)
+- Classifies headlines, scores sentiment / materiality per symbol, supports macro regime inputs
+- Feeds **bounded** scores into the signal engine and accumulator; can contribute to vetoes **before** risk (policy in `signals/engine.py`)
+- Produces rationale text stored in audit tables where configured
 
-**Does NOT:**
-- Place orders (ever)
-- Access broker APIs directly
-- Make portfolio allocation decisions
-- Override risk engine decisions
+**Does not:**
+- Place orders or call broker APIs
+- Override an approved risk veto or bypass `risk/engine.py`
+- Replace the allocator’s role: it **informs** signals and parameters; execution still follows risk-approved orders only
 
 ---
 
@@ -187,7 +187,7 @@ brokers/_template/adapter.py  ← copy this for any new exchange
 | Principle | Rule |
 |-----------|------|
 | Risk engine is law | No order bypasses it. No exceptions. |
-| AI advises, rules execute | AI scores signals. Rules place orders. |
+| AI advises, rules execute | Local-first (or fallback) models **score**; only execution places orders after risk. |
 | Paper mode first | 2+ weeks paper before any real capital |
 | Adapters are isolated | No broker-specific code outside `brokers/` |
 | Everything logged | Every signal, veto, order, fill — stored |
@@ -202,17 +202,18 @@ brokers/_template/adapter.py  ← copy this for any new exchange
 brokers/      Adapter layer only. No business logic.
 data/         Market data ingestion, news, macro, features.
 strategies/   Signal generation only. No broker calls.
-signals/      Signal aggregation and AI modifier.
-ai/           Claude API calls only. No trading decisions.
+signals/      Signal aggregation, accumulator, opportunity/D015 hooks, AI modifier.
+ai/           Provider routing, scoring, rationale — no order placement.
 risk/         Risk checks and kill switch only.
 execution/    Order management and routing only.
 portfolio/    Position tracking and P&L only.
 storage/      Database models and queries only.
-api/          FastAPI endpoints only. Read-only mostly.
+api/          FastAPI + WebSocket; thin controllers — domain logic in system/core.
+system/       Orchestrator, trading loop, broker manager, dependency startup.
+ui/           React (Vite) dashboard; production build → `ui/dist`.
 monitoring/   Alerts and uptime checks only.
 config/       Configuration files only.
 docs/         Documentation only.
-dashboard/    React frontend only.
 ```
 
 **Import direction (one way only):**

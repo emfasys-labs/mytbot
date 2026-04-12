@@ -35,5 +35,5 @@ US equity notionals are evaluated in **USD**. For a rough **£100** cap, use `ma
 
 ## What stays manual / iterative
 
-- Weekly review cadence and metrics: see **`docs/M8_WEEKLY_REVIEW.md`**.
-- Adding a second exchange adapter (Binance/Bybit) or volatility-only sizing changes are **follow-up work**, not required to call M8 “started.”
+- **Operational reviews** while micro-live (weekly or as needed): track PnL, risk approve/reject ratio, incidents, slippage, config changes — keep notes **outside the repo** if they contain account-specific detail.
+- Further venue or strategy expansion remains **configuration + soak**, not a separate code milestone.
