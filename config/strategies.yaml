@@ -1,6 +1,10 @@
 # M3 strategy + signal engine configuration.
 
 signal_engine:
+  # Stateful time-decayed quant + news + macro conviction (see signals/accumulator.py)
+  use_signal_accumulator: true
+  # When accumulator is on, still veto if point-in-time AI rollup is below threshold
+  accumulator_dual_ai_veto: true
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true

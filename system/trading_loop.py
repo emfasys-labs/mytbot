@@ -71,6 +71,7 @@ from run_m3 import (
     _pick_best_signal,
     _upsert_daily_pnl,
 )
+from signals.accumulator import SignalAccumulator
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.discovery import persist_anomaly_log, persist_thesis_log
@@ -338,7 +339,13 @@ class TradingLoop:
                 paper_mode=self.paper_mode,
                 allowed_brokers=list(self.available_brokers),
             )
-            self.sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
+            _se_cfg = strategies_cfg.get("signal_engine", {}) or {}
+            _acc = (
+                SignalAccumulator()
+                if bool(_se_cfg.get("use_signal_accumulator", False))
+                else None
+            )
+            self.sig_engine = SignalEngine(_se_cfg, accumulator=_acc)
             self.risk_engine = RiskEngine(risk_cfg)
             # Starting the system from OFF should begin from a clean trading state.
             # Clear any stale latched kill switch from prior runs.
@@ -564,6 +571,16 @@ class TradingLoop:
                             ai_result = None
                         except Exception as exc:
                             logger.warning("trading_loop | AI pipeline error (continuing): {}", exc)
+
+                    if (
+                        self.sig_engine.accumulator is not None
+                        and ai_result is not None
+                    ):
+                        self.sig_engine.accumulator.feed_ai_pipeline_result(
+                            ai_result,
+                            symbols,
+                            now=datetime.now(timezone.utc),
+                        )
 
                     mode_raw = "trader"
                     try:

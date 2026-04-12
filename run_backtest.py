@@ -25,6 +25,7 @@ from backtest.harness import (
 )
 from backtest.labels import TripleBarrierSpec, train_meta_label_model, triple_barrier_labels
 from backtest.validation import deflated_sharpe_ratio, pbo_from_path_scores
+from signals.accumulator import SignalAccumulator
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.models import FeatureSnapshot
@@ -90,7 +91,9 @@ async def _amain(args: argparse.Namespace) -> int:
             print(f"No feature rows for {args.symbol} {args.timeframe}")
             return 2
 
-        se = SignalEngine(cfg.get("signal_engine", {}))
+        _se_cfg = cfg.get("signal_engine", {}) or {}
+        _acc = SignalAccumulator() if bool(_se_cfg.get("use_signal_accumulator", False)) else None
+        se = SignalEngine(_se_cfg, accumulator=_acc)
         strat_cfg = cfg.get("strategies", {})
         if args.strategy == "momentum_breakout":
             strategy = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))

@@ -18,7 +18,8 @@ Docker (Postgres, Redis), auto-discovers available brokers (skipping unavailable
 runs the trading loop and data pipeline, and exposes an API+WebSocket for the UI.
 The UI has a single ON/OFF button (`POST /system/start`, `POST /system/stop`).
 All brokers implement a single abstract interface in `brokers/base.py`.
-The signal engine aggregates strategy outputs into a Signal.
+Signals pass through an optional **Signal Accumulation Engine** (`signals/accumulator.py`) that maintains time-decayed, multi-source conviction per asset (quant + news + macro) before the signal engine emits a unified Signal.
+The signal engine aggregates strategy outputs into a Signal (with legacy point-in-time AI modifier and optional accumulated overlay).
 Every Signal passes through the risk engine (unconditional veto power).
 Approved signals go to the execution engine which routes to the best broker.
 Everything is logged. Runtime broker permissions support graceful fallback routing.
@@ -41,7 +42,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `brokers/_template/`       — copy this to add any new exchange
 - `risk/engine.py`           — risk checks, kill switch
 - `risk/parameters.py`       — parameter manager (defaults + overrides + expiry)
-- `signals/engine.py`        — signal aggregation
+- `signals/accumulator.py`   — stateful time-decayed conviction per symbol (optional; YAML-gated)
+- `signals/engine.py`        — signal aggregation + accumulator integration
 - `strategies/momentum.py`   — first strategy (momentum breakout)
 - `execution/engine.py`      — order placement
 - `execution/router.py`      — smart order routing
@@ -85,7 +87,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: **D016 IBKR single-leg options** — `core/instruments.OptionContractSpec`, optional `instrument_metadata` on `Order`/`Position` in `brokers/base.py` (serialization only; defaults preserve existing adapters), `IBKRAdapter.get_option_chain` / `qualify_option_contract` / `get_option_market_data`, `ExecutionEngine` passes option payload into `Order`, `RiskEngine._check_options_trading_policy` + `config/risk_limits.yaml` `options_trading` + `risk/options_env.py`, portfolio `option_premium_exposure` in `run_m3._load_portfolio_state`, Alembic `c8f2a1d0e4aa`, smoke script `scripts/smoke_ibkr_options.py`. Default **options disabled** (`ENABLE_OPTIONS=false`).
+- Last completed task: **D017 Stateful signal accumulation** — `signals/accumulator.py` (`SignalAccumulator`, half-life decay, alignment/conflict), `SignalEngine` optional integration + metadata (`accumulator_*`), `feed_ai_pipeline_result` after AI compute in `system/trading_loop.py`, `run_m3.py`, `run_m5.py`; `config/strategies.yaml` `signal_engine.use_signal_accumulator` (default on). Docs: `docs/ARCHITECTURE.md`, `docs/BUILD_PLAN.md` G5, `docs/DECISIONS.md` D017.
+- Prior: **D016 IBKR single-leg options** — `core/instruments.OptionContractSpec`, optional `instrument_metadata` on `Order`/`Position` in `brokers/base.py` (serialization only; defaults preserve existing adapters), `IBKRAdapter.get_option_chain` / `qualify_option_contract` / `get_option_market_data`, `ExecutionEngine` passes option payload into `Order`, `RiskEngine._check_options_trading_policy` + `config/risk_limits.yaml` `options_trading` + `risk/options_env.py`, portfolio `option_premium_exposure` in `run_m3._load_portfolio_state`, Alembic `c8f2a1d0e4aa`, smoke script `scripts/smoke_ibkr_options.py`. Default **options disabled** (`ENABLE_OPTIONS=false`).
 - Prior: D015 **primary** operational path (allocator batch → risk → execution); see DECISIONS D004 amendment.
 - Next task: Paper soak on primary path; IBKR options paper validation with `scripts/smoke_ibkr_options.py` when enabled.
 - Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS

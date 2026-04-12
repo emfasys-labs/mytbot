@@ -6,18 +6,25 @@ and produces a unified Signal ready for the Risk Engine.
 
 Flow:
     Strategy A → raw signal
-    Strategy B → raw signal       → Signal Engine → Signal → Risk Engine
-    AI modifier → news score
+    Strategy B → raw signal
+    Optional SignalAccumulator (time-decayed quant + news + macro)
+       → Signal Engine → Signal → Risk Engine
+    AI modifier → news score (legacy path) or accumulated net overlay
 """
 
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 import uuid
 from datetime import datetime, timezone
 import logging
 
 from core.models_runtime import AssetClass, Side, SignalCandidate
+
+from signals.accumulator import NetSignal, raw_signal_to_input_signal
+
+if TYPE_CHECKING:
+    from signals.accumulator import SignalAccumulator
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +62,103 @@ class Signal:
 class SignalEngine:
     """
     Receives raw signals from strategies.
-    Applies AI news modifier (M6).
+    Applies AI news modifier (M6) and optional SignalAccumulator overlay.
     Outputs a unified Signal for the Risk Engine.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, accumulator: Optional["SignalAccumulator"] = None):
         self.config = config
+        self.accumulator = accumulator
+
+    def _apply_accumulator(
+        self,
+        raw: RawSignal,
+        *,
+        news_score: Optional[float],
+        now: datetime,
+    ) -> tuple[Optional[NetSignal], Optional[float]]:
+        """
+        Push quant raw signal into accumulator and return (net_signal, overlay_for_legacy_fields).
+
+        ``overlay_for_legacy_fields`` is the score used for veto/confidence when accumulator
+        is enabled (else None, caller uses point-in-time ``news_score``).
+        """
+        if self.accumulator is None:
+            return None, None
+        inp = raw_signal_to_input_signal(raw, timestamp=now)
+        if inp is None:
+            net = self.accumulator.compute_net_for_symbol(raw.symbol, now)
+            if net is None:
+                return None, news_score
+            return net, float(net.score)
+        net = self.accumulator.update(inp, now)
+        return net, float(net.score)
+
+    @staticmethod
+    def _enrich_metadata_with_net(md: dict, net: Optional[NetSignal], ai_news_score: Optional[float]) -> None:
+        if ai_news_score is not None:
+            md["ai_news_score"] = ai_news_score
+        if net is None:
+            return
+        md["accumulator_score"] = float(net.score)
+        md["accumulator_confidence"] = float(net.confidence)
+        md["accumulator_direction"] = net.direction
+        md["accumulator_horizon_bias"] = net.horizon_bias
+        md["accumulator_aligned_sources"] = list(net.aligned_sources)
+        md["accumulator_conflicting_sources"] = list(net.conflicting_sources)
+
+    def _veto_and_confidence(
+        self,
+        raw: RawSignal,
+        *,
+        news_score: Optional[float],
+        net: Optional[NetSignal],
+        apply_news_overlay: bool,
+    ) -> tuple[bool, float]:
+        """Returns (news_veto, adjusted_confidence)."""
+        if not apply_news_overlay:
+            return False, float(raw.confidence)
+
+        veto_threshold = float(self.config.get("news_veto_threshold", -0.7))
+        w = float(self.config.get("news_confidence_weight", 0.15))
+        dual_ai = bool(self.config.get("accumulator_dual_ai_veto", True))
+
+        if self.accumulator is not None and net is not None:
+            overlay = float(net.score)
+        elif news_score is not None:
+            overlay = float(news_score)
+        else:
+            overlay = None
+
+        news_veto = False
+        if overlay is not None and overlay < veto_threshold:
+            logger.info(
+                "Signal vetoed by overlay score %.2f (threshold %.2f) | %s",
+                overlay,
+                veto_threshold,
+                raw.symbol,
+            )
+            news_veto = True
+
+        if (
+            dual_ai
+            and self.accumulator is not None
+            and news_score is not None
+            and news_score < veto_threshold
+        ):
+            logger.info(
+                "Signal vetoed by point AI news score %.2f (threshold %.2f) | %s",
+                news_score,
+                veto_threshold,
+                raw.symbol,
+            )
+            news_veto = True
+
+        adjusted_confidence = float(raw.confidence)
+        if overlay is not None:
+            adjusted_confidence = max(0.0, min(1.0, adjusted_confidence + overlay * w))
+
+        return news_veto, adjusted_confidence
 
     def process(
         self,
@@ -76,20 +174,15 @@ class SignalEngine:
         if (raw.side or "").strip().upper().startswith("ARBITRAGE_"):
             return self._process_arbitrage(raw, portfolio_value, news_score)
 
-        # AI news modifier — if news score is strongly negative, veto
-        news_veto = False
-        if news_score is not None:
-            veto_threshold = self.config.get("news_veto_threshold", -0.7)
-            if news_score < veto_threshold:
-                logger.info(f"Signal vetoed by news score {news_score:.2f} | {raw.symbol}")
-                news_veto = True
+        now = datetime.now(timezone.utc)
+        net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
 
-        # Adjust confidence with news score
-        adjusted_confidence = raw.confidence
-        if news_score is not None:
-            # News boosts or reduces confidence
-            adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
-            adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
+        news_veto, adjusted_confidence = self._veto_and_confidence(
+            raw,
+            news_score=news_score,
+            net=net,
+            apply_news_overlay=True,
+        )
 
         # Size the position (fixed fraction; optional ATR scaling; M4 risk refines further)
         position_pct = self.config.get("default_position_pct", 0.05)
@@ -119,6 +212,10 @@ class SignalEngine:
                 except (TypeError, ValueError, InvalidOperation):
                     pass
 
+        md = dict(raw.metadata or {})
+        self._enrich_metadata_with_net(md, net, news_score)
+        effective_news = float(net.score) if net is not None else news_score
+
         signal = Signal(
             signal_id=str(uuid.uuid4()),
             symbol=raw.symbol,
@@ -130,8 +227,8 @@ class SignalEngine:
             broker=raw.broker,
             asset_class=raw.asset_class,
             timestamp=datetime.now(timezone.utc).isoformat(),
-            metadata=raw.metadata,
-            news_score=news_score,
+            metadata=md,
+            news_score=effective_news,
             news_veto=news_veto,
         )
 
@@ -155,18 +252,19 @@ class SignalEngine:
         News veto optional (default: do not veto carry on headline sentiment alone).
         """
         skip_news = bool(self.config.get("arbitrage_skip_news_veto", True))
-        news_veto = False
-        if not skip_news and news_score is not None:
-            veto_threshold = self.config.get("news_veto_threshold", -0.7)
-            if news_score < veto_threshold:
-                news_veto = True
+        now = datetime.now(timezone.utc)
+        net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
 
-        adjusted_confidence = raw.confidence
-        if news_score is not None and not skip_news:
-            adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
-            adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
+        news_veto, adjusted_confidence = self._veto_and_confidence(
+            raw,
+            news_score=news_score,
+            net=net,
+            apply_news_overlay=not skip_news,
+        )
 
         md = dict(raw.metadata or {})
+        self._enrich_metadata_with_net(md, net, news_score)
+        effective_news = float(net.score) if net is not None else news_score
         qty_decimals = int(self.config.get("quantity_decimals", 8))
         tick = Decimal("1").scaleb(-qty_decimals)
 
@@ -221,7 +319,7 @@ class SignalEngine:
             asset_class=raw.asset_class,
             timestamp=datetime.now(timezone.utc).isoformat(),
             metadata=md,
-            news_score=news_score,
+            news_score=effective_news,
             news_veto=news_veto,
         )
 
@@ -242,15 +340,17 @@ class SignalEngine:
         """
         D015 path: same news gating and confidence adjustment as ``process``, without legacy sizing.
         """
-        news_veto = False
-        if news_score is not None:
-            veto_threshold = self.config.get("news_veto_threshold", -0.7)
-            if news_score < veto_threshold:
-                return None
-        adjusted_confidence = raw.confidence
-        if news_score is not None:
-            adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
-            adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
+        now = datetime.now(timezone.utc)
+        net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
+
+        news_veto, adjusted_confidence = self._veto_and_confidence(
+            raw,
+            news_score=news_score,
+            net=net,
+            apply_news_overlay=True,
+        )
+        if news_veto:
+            return None
         ac = (raw.asset_class or "other").strip().lower()
         if ac not in (
             "equity",
@@ -264,6 +364,8 @@ class SignalEngine:
         ):
             ac = "other"
         side: Side = "long" if (raw.side or "").lower() in ("buy", "long") else "short"
+        md = dict(raw.metadata or {})
+        self._enrich_metadata_with_net(md, net, news_score)
         return SignalCandidate(
             symbol=raw.symbol,
             asset_class=cast(AssetClass, ac),
@@ -273,7 +375,7 @@ class SignalEngine:
             adjusted_signal_strength=Decimal(str(adjusted_confidence)),
             confidence=Decimal(str(adjusted_confidence)),
             strategy_name=raw.strategy,
-            metadata=dict(raw.metadata or {}),
+            metadata=md,
         )
 
     def _calculate_quantity(

@@ -44,6 +44,7 @@ from run_m3 import (
     _pick_best_signal,
     _upsert_daily_pnl,
 )
+from signals.accumulator import SignalAccumulator
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.discovery import persist_anomaly_log, persist_thesis_log
@@ -209,7 +210,9 @@ async def _run_loop(args: argparse.Namespace) -> int:
         fill_poll_timeout_sec=args.fill_poll_timeout_sec,
         fill_poll_interval_sec=args.fill_poll_interval_sec,
     )
-    sig_engine = SignalEngine(strategies_cfg.get("signal_engine", {}))
+    _se_cfg = strategies_cfg.get("signal_engine", {}) or {}
+    _acc = SignalAccumulator() if bool(_se_cfg.get("use_signal_accumulator", False)) else None
+    sig_engine = SignalEngine(_se_cfg, accumulator=_acc)
     risk_engine = RiskEngine(risk_cfg)
     set_risk_engine(risk_engine)
     ai_enabled = bool(ai_cfg.get("enabled", True))
@@ -410,6 +413,12 @@ async def _run_loop(args: argparse.Namespace) -> int:
                     if ai_pipeline is not None:
                         ai_result = await ai_pipeline.compute(session_factory, symbols)
                         await ai_pipeline.persist(session_factory, ai_result)
+                    if sig_engine.accumulator is not None and ai_result is not None:
+                        sig_engine.accumulator.feed_ai_pipeline_result(
+                            ai_result,
+                            symbols,
+                            now=datetime.now(timezone.utc),
+                        )
                     for symbol in symbols:
                         df, feature_ts = await _load_recent_features(
                             session_factory,

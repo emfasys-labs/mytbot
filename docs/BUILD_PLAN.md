@@ -23,6 +23,12 @@
 
 ---
 
+## System build vs operational activation
+
+Milestones (M1–M8) describe **delivery history**. Going forward, treat new subsystems as parts of the full platform that are **built once** and then **gated for live use**: configuration, capital, and soak evidence control what runs in production—not “temporary MVP” code paths.
+
+---
+
 ## Research Integration (2026-04)
 
 The external research package is now tracked in:
@@ -44,6 +50,15 @@ Mandatory gates from research:
 1. Fractional differencing in M2 before ML model training.
 2. Purged/combinatorial CV in M3 before strategy acceptance.
 3. Square-root impact model in M5 before live capital scale-up.
+
+### G5 — Signal accumulation engine stability (operational gate)
+
+Before relying on accumulated conviction for sizing or narrative-heavy regimes:
+
+- [ ] Per-symbol state implemented (`signals/accumulator.py`) with half-life decay and bounded net score.
+- [ ] Quant + AI news rollup + macro inputs wired from the trading loop / runners when `use_signal_accumulator` is enabled.
+- [ ] Conflicting horizon behaviour and dual AI veto policy validated in logs/tests.
+- [ ] Observable structured logs (`signal_accumulator_update`) and dashboard/API fields as needed.
 
 ---
 

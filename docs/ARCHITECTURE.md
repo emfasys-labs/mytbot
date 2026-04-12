@@ -17,6 +17,12 @@ brokers — all without human intervention.
 
 ---
 
+## Production philosophy
+
+The system is built as a **final-form production architecture**: components are modular, testable, and intended for long-term operation. Work proceeds in **phased activation** (what is enabled in live trading, capital exposure, soak gates), not throwaway prototypes. There is no planned rewrite of core layers; new capability deepens implementations inside this structure.
+
+---
+
 ## Research-Driven Architecture Notes (2026-04)
 
 The research package does **not** change the top-level system architecture.
@@ -59,9 +65,17 @@ Reference docs:
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
+│         SIGNAL ACCUMULATION ENGINE                   │
+│  Persistent per-symbol state (`signals/accumulator`) │
+│  Quant + rolled-up AI news + macro (half-life decay) │
+│  Alignment bonus · conflict penalty · net score      │
+│  Optional: `signal_engine.use_signal_accumulator`  │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
 │              SIGNAL ENGINE                           │
-│  Aggregates strategy outputs                         │
-│  Applies AI news modifier (boost or veto)            │
+│  RawSignal → accumulator update → unified Signal     │
+│  AI news modifier (legacy point score + dual veto) │
 │  Outputs unified Signal object                       │
 └────────────────────┬────────────────────────────────┘
                      │
