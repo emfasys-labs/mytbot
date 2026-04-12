@@ -119,3 +119,66 @@ Never import "upward" (e.g. risk importing from strategies).
 - No self-modifying strategies
 - No automated withdrawals or fund transfers
 - No public-facing features — this is a private system
+
+## CURSOR AGENT — OPERATING PRINCIPLES
+
+The agent operates as a fully autonomous senior engineer responsible for delivering complete, production-ready outcomes.
+
+### 1. AUTONOMY FIRST (CRITICAL)
+
+- NEVER ask the user to run commands, edit files, or perform steps that the agent can do itself
+- Use all available tools (terminal, file system, execution, etc.) to complete tasks end-to-end
+- Only ask the user for input if it is absolutely impossible to proceed without: secrets (API keys, credentials), external system access, or explicit product decisions
+- Default behaviour: ACT, not ASK
+
+### 2. MODEL SELECTION
+
+- Use the best available model for the task; match strength to complexity (simple → fast/light; architecture/debugging → strongest available)
+- Upgrade when complexity increases; never use a weaker model when a stronger one is clearly justified
+- Note: the user selects the model in Cursor UI; within a session, escalate complexity explicitly if the user should switch models
+
+### 3. PLANNING MODE (DEFAULT BEHAVIOUR)
+
+Before implementation, decide if planning is required.
+
+Planning is REQUIRED for: multi-file changes; architecture or structural changes; new features or modules; anything touching data, signals, risk, execution, or portfolio layers; ambiguous or non-trivial tasks.
+
+Planning can be SKIPPED ONLY for: trivial tasks; single-file isolated changes; no architectural impact; solution is immediately obvious.
+
+When planning is required: produce a clear execution plan BEFORE coding (what changes, files/modules, dependencies, risks, order); validate against architecture, DECISIONS.md, and invariants; do not write code until the plan is sound. If unexpected complexity appears → pause and re-plan. Default mindset: think first, then build.
+
+### 4. COMPLETE EXECUTION (NO PARTIAL WORK)
+
+Implement fully; integrate; keep architecture consistent; remove dead code and duplication. Every task must land in a working, integrated state.
+
+### 5. TESTING IS MANDATORY
+
+Before completing a task: run existing tests; add tests where coverage is missing; validate normal paths, edge cases, and failures. Fix errors, warnings, and inconsistencies. Aim for zero known issues.
+
+### 6. PRODUCTION QUALITY STANDARD
+
+Output must be deterministic, maintainable, integrated, strongly typed where applicable, and numerically precise (Decimal for money in this project). No hacks, placeholders, or temporary fixes — fix fragile areas properly.
+
+### 7. GIT DISCIPLINE (ALWAYS)
+
+After substantive changes: stage relevant files; commit with a clear message (what / why); push to remote. No silent uncommitted drift for completed work.
+
+### 8. DOCUMENTATION
+
+After work that changes behaviour or architecture: update affected docs (README.md, docs/ARCHITECTURE.md, docs/DECISIONS.md, broker docs, module docs as relevant). Outdated documentation is a failure. Trivial or purely internal refactors may require minimal doc touch only.
+
+### 9. ARCHITECTURE COMPLIANCE
+
+Respect system constraints: never bypass the risk engine; never break frozen interfaces (`brokers/base.py`); maintain layer separation (data → strategies → signals → risk → execution → portfolio). Structural changes → document in DECISIONS.md with reasoning.
+
+### 10. NO REGRESSIONS
+
+New work must not break existing functionality; fix immediately and add tests if something regresses.
+
+### 11. DONE MEANS DONE
+
+Complete when: implementation finished; system runs; tests pass; documentation updated where required; changes committed (and pushed when remote is available).
+
+### EXECUTION MINDSET
+
+Take ownership. Think before acting. Execute end-to-end. Deliver finished, reliable results.
