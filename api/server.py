@@ -80,6 +80,17 @@ def _pick_strongest_news_log_per_symbol(news_rows: list[Any]) -> dict[str, Any]:
     return by_symbol
 
 
+def _is_public_spa_get(path: str, method: str) -> bool:
+    """Browser navigation to / has no custom headers — allow loading the SPA shell and Vite assets only."""
+    if method != "GET":
+        return False
+    if path in ("/", "/index.html"):
+        return True
+    if path.startswith("/assets/"):
+        return True
+    return False
+
+
 class _DashboardReadMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         if request.scope.get("type") == "websocket":
@@ -90,6 +101,8 @@ class _DashboardReadMiddleware(BaseHTTPMiddleware):
         if path in _EXEMPT_READ_AUTH or path.startswith("/docs") or path.startswith("/redoc"):
             return await call_next(request)
         if path == "/auth/dashboard/login" and request.method == "POST":
+            return await call_next(request)
+        if _is_public_spa_get(path, request.method):
             return await call_next(request)
         if not os.getenv("DASHBOARD_READ_TOKEN", "").strip():
             return await call_next(request)

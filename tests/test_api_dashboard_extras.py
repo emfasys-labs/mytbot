@@ -40,7 +40,8 @@ def test_dashboard_login_bad_password(monkeypatch, client: TestClient):
     assert r.status_code == 401
 
 
-def test_get_control_command_by_id(client: TestClient):
+def test_get_control_command_by_id(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
     row = SimpleNamespace(
         id=42,
         command_type="kill",
@@ -68,7 +69,8 @@ def test_get_control_command_by_id(client: TestClient):
         app.dependency_overrides.pop(_command_bus, None)
 
 
-def test_get_control_command_404(client: TestClient):
+def test_get_control_command_404(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
     def override_bus():
         return _FakeBus(None)
 
@@ -86,6 +88,13 @@ def test_read_requires_dashboard_token_when_set(monkeypatch, client: TestClient)
     assert r.status_code == 401
     ok = client.get("/status", headers={"X-Dashboard-Token": "secret-read"})
     assert ok.status_code == 200
+
+
+def test_spa_shell_get_allowed_without_token_when_read_token_set(monkeypatch, client: TestClient):
+    """Browser open of / has no X-Dashboard-Token — must still load the SPA shell."""
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "secret-read")
+    r = client.get("/")
+    assert r.status_code != 401
 
 
 def test_healthz_unauthenticated_with_dashboard_token(monkeypatch, client: TestClient):
