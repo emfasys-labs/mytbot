@@ -99,7 +99,7 @@ function App() {
     }
   };
 
-  /** Clears live-trading UI slices only. Intelligence/discovery/equity stay on DB-backed refresh so the dashboard is not blank when the system is off. */
+  /** Clears anything that should not look “live” when the orchestrator is off (side panels, tickers, headline equity). */
   const clearLiveData = useCallback(() => {
     setActiveBrokers([]);
     setNewsItems([]);
@@ -107,7 +107,14 @@ function App() {
     setTradesToday(0);
     setLastTradeMinutes(0);
     lastTradeTs.current = 0;
-    // Do not reset lastIntelRefresh — that caused every in-flight refresh to hit the intel API at once (WS tick storm).
+    setDiscoverySummary(null);
+    setDiscoveryAnomalies(null);
+    setIntelligenceRegime(null);
+    setIntelligenceSignals(null);
+    setEquityHistory([]);
+    setTotalCapital(0);
+    setDailyPnL(0);
+    setTradableCapital(null);
   }, []);
 
   const handleSystemStop = async () => {
@@ -197,11 +204,13 @@ function App() {
         }
       }
 
+      const sysState = (sysStatus?.state as SystemState | undefined) ?? systemStateRef.current;
+      const feedsLive = sysState === 'running';
+
       const killActive = !!status?.kill_switch;
       if (killActive) {
         setControlState('flatten');
       } else {
-        const sysState = (sysStatus?.state as SystemState | undefined) ?? systemStateRef.current;
         if (sysState === 'running') {
           setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
         } else if (sysState === 'off' || sysState === 'error') {
@@ -212,7 +221,7 @@ function App() {
         }
       }
 
-      if (pnl) {
+      if (feedsLive && pnl) {
         const portfolioValue = toNumber(pnl.today?.portfolio_value, 0);
         const realised = toNumber(pnl.today?.realised, 0);
         const unrealised = toNumber(pnl.today?.unrealised, 0);
@@ -224,14 +233,14 @@ function App() {
         setTradableCapital(tc >= 0 ? tc : null);
       }
 
-      if (hist) {
+      if (feedsLive && hist) {
         const historyValues = (hist.history || [])
           .map((x) => toNumber(x.portfolio_value, 0))
           .filter((v) => v > 0);
         setEquityHistory(historyValues.length > 1 ? historyValues : []);
       }
 
-      if (pos) {
+      if (feedsLive && pos) {
         const mappedPositions: Position[] = (pos.positions || []).slice(0, 8).map((p) => {
           const entry = toNumber(p.avg_entry_price, 0);
           const current = toNumber(p.current_price, 0);
@@ -242,7 +251,7 @@ function App() {
         setLivePositions(mappedPositions);
       }
 
-      if (news) {
+      if (feedsLive && news) {
         const headlines = news.headlines ?? [];
         const aiMap = new Map<string, { score: number; sentiment: 'positive' | 'negative' | 'neutral' }>();
         for (const ai of news.ai_scores ?? []) {
@@ -264,7 +273,7 @@ function App() {
         if (tickerItems.length > 0) setNewsItems(tickerItems);
       }
 
-      if (sig) {
+      if (feedsLive && sig) {
         const signalRows = sig.signals || [];
         const lastSignalTs = signalRows.find((s) => s.timestamp)?.timestamp;
         if (lastSignalTs) {
@@ -276,22 +285,24 @@ function App() {
         }
       }
 
-      // Discovery + intelligence: DB-backed; refresh every poll so panels stay warm even when the runner is off.
-      const now = Date.now();
-      if (now - lastIntelRefresh.current > 12_000) {
-        lastIntelRefresh.current = now;
-        const [ds, da, ir, is_, modeRes] = await Promise.allSettled([
-          api.getDiscoverySummary(),
-          api.getDiscoveryAnomalies(8),
-          api.getIntelligenceRegime(),
-          api.getIntelligenceSignals(8),
-          api.getSystemMode(),
-        ]);
-        if (ds.status === 'fulfilled') setDiscoverySummary(ds.value);
-        if (da.status === 'fulfilled') setDiscoveryAnomalies(da.value);
-        if (ir.status === 'fulfilled') setIntelligenceRegime(ir.value);
-        if (is_.status === 'fulfilled') setIntelligenceSignals(is_.value);
-        if (modeRes.status === 'fulfilled' && modeRes.value.mode) setMode(modeRes.value.mode);
+      // Discovery + intelligence: only while RUNNING so “off” matches a quiet dashboard (no stale DB snapshots masquerading as live).
+      if (feedsLive) {
+        const now = Date.now();
+        if (now - lastIntelRefresh.current > 12_000) {
+          lastIntelRefresh.current = now;
+          const [ds, da, ir, is_, modeRes] = await Promise.allSettled([
+            api.getDiscoverySummary(),
+            api.getDiscoveryAnomalies(8),
+            api.getIntelligenceRegime(),
+            api.getIntelligenceSignals(8),
+            api.getSystemMode(),
+          ]);
+          if (ds.status === 'fulfilled') setDiscoverySummary(ds.value);
+          if (da.status === 'fulfilled') setDiscoveryAnomalies(da.value);
+          if (ir.status === 'fulfilled') setIntelligenceRegime(ir.value);
+          if (is_.status === 'fulfilled') setIntelligenceSignals(is_.value);
+          if (modeRes.status === 'fulfilled' && modeRes.value.mode) setMode(modeRes.value.mode);
+        }
       }
     } catch {
       // Keep UI running with last known data.
@@ -368,16 +379,18 @@ function App() {
             clearLiveData();
           }
 
-          const events = msg.payload.events ?? [];
-          for (let i = events.length - 1; i >= 0; i -= 1) {
-            const ts = eventTimestamp(events[i]);
-            if (ts) {
-              const tsMs = new Date(ts).getTime();
-              if (tsMs > lastTradeTs.current) {
-                lastTradeTs.current = tsMs;
-                setLastTradeMinutes(Math.max(0, Math.round((Date.now() - tsMs) / 60000)));
+          if (sysPayload?.state === 'running') {
+            const events = msg.payload.events ?? [];
+            for (let i = events.length - 1; i >= 0; i -= 1) {
+              const ts = eventTimestamp(events[i]);
+              if (ts) {
+                const tsMs = new Date(ts).getTime();
+                if (tsMs > lastTradeTs.current) {
+                  lastTradeTs.current = tsMs;
+                  setLastTradeMinutes(Math.max(0, Math.round((Date.now() - tsMs) / 60000)));
+                }
+                break;
               }
-              break;
             }
           }
           void refresh();
@@ -423,7 +436,11 @@ function App() {
 
           {/* ── DISCOVERY (left) ─────────────────────────────────── */}
           <aside className="hidden xl:flex flex-col w-72 shrink-0 border-r border-white/5 overflow-y-auto px-5 py-6">
-            <DiscoveryPanel summary={discoverySummary} anomalies={discoveryAnomalies} />
+            <DiscoveryPanel
+              summary={discoverySummary}
+              anomalies={discoveryAnomalies}
+              dormant={systemState !== 'running'}
+            />
           </aside>
 
           {/* ── CENTER (equity + controls) ───────────────────────── */}
@@ -558,10 +575,18 @@ function App() {
               {/* On screens < xl, show compact Discovery + Intelligence inline */}
               <div className="xl:hidden grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="rounded-xl border border-white/5 bg-white/2 px-4 py-4">
-                  <DiscoveryPanel summary={discoverySummary} anomalies={discoveryAnomalies} />
+                  <DiscoveryPanel
+                    summary={discoverySummary}
+                    anomalies={discoveryAnomalies}
+                    dormant={systemState !== 'running'}
+                  />
                 </div>
                 <div className="rounded-xl border border-white/5 bg-white/2 px-4 py-4">
-                  <IntelligencePanel regime={intelligenceRegime} signals={intelligenceSignals} />
+                  <IntelligencePanel
+                    regime={intelligenceRegime}
+                    signals={intelligenceSignals}
+                    dormant={systemState !== 'running'}
+                  />
                 </div>
               </div>
             </div>
@@ -569,7 +594,11 @@ function App() {
 
           {/* ── INTELLIGENCE (right) ─────────────────────────────── */}
           <aside className="hidden xl:flex flex-col w-64 shrink-0 border-l border-white/5 overflow-y-auto px-5 py-6">
-            <IntelligencePanel regime={intelligenceRegime} signals={intelligenceSignals} />
+            <IntelligencePanel
+              regime={intelligenceRegime}
+              signals={intelligenceSignals}
+              dormant={systemState !== 'running'}
+            />
           </aside>
         </div>
 

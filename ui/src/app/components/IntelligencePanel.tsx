@@ -5,6 +5,7 @@ import { dedupeIntelligenceSignals } from '../lib/intelligenceSignals';
 interface IntelligencePanelProps {
   regime: IntelligenceRegimeResponse | null;
   signals: IntelligenceSignalsResponse | null;
+  dormant?: boolean;
 }
 
 function RegimeChip({ label, confidence }: { label: string; confidence: number }) {
@@ -26,7 +27,17 @@ function RegimeChip({ label, confidence }: { label: string; confidence: number }
   );
 }
 
-export function IntelligencePanel({ regime, signals }: IntelligencePanelProps) {
+export function IntelligencePanel({ regime, signals, dormant }: IntelligencePanelProps) {
+  if (dormant) {
+    return (
+      <div className="space-y-3 py-10 px-2 text-center">
+        <p className="text-[11px] text-gray-600 leading-relaxed">
+          Regime, news movers, and the signal queue refresh only while the system is <span className="text-gray-500">RUNNING</span>.
+        </p>
+      </div>
+    );
+  }
+
   const reg = regime?.regime;
   const movers = regime?.top_movers ?? [];
   const signalList = dedupeIntelligenceSignals(signals?.signals, 8);

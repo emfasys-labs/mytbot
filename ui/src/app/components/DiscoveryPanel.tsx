@@ -4,6 +4,8 @@ import type { DiscoverySummaryResponse, DiscoveryAnomaliesResponse } from '../li
 interface DiscoveryPanelProps {
   summary: DiscoverySummaryResponse | null;
   anomalies: DiscoveryAnomaliesResponse | null;
+  /** When true, system orchestrator is not RUNNING — show idle copy instead of DB snapshot. */
+  dormant?: boolean;
 }
 
 function FunnelBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
@@ -24,7 +26,18 @@ function FunnelBar({ label, value, max, color }: { label: string; value: number;
   );
 }
 
-export function DiscoveryPanel({ summary, anomalies }: DiscoveryPanelProps) {
+export function DiscoveryPanel({ summary, anomalies, dormant }: DiscoveryPanelProps) {
+  if (dormant) {
+    return (
+      <div className="space-y-3 py-10 px-2 text-center">
+        <p className="text-[11px] text-gray-600 leading-relaxed">
+          Discovery runs only while the trading system is <span className="text-gray-500">RUNNING</span>. Start from
+          the power control to load universe coverage and scans.
+        </p>
+      </div>
+    );
+  }
+
   const u = summary?.universe;
   const stats = summary?.last_24h;
   const totalBroker = u?.total_broker_instruments ?? 0;
