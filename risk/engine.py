@@ -142,6 +142,14 @@ class RiskEngine:
                 logger.warning(f"RISK REJECTED {signal.signal_id} | {label}")
                 return decision
 
+        arb_ok, arb_label = self._check_arbitrage_bundle(signal, portfolio_state)
+        if not arb_ok:
+            checks_failed.append(arb_label)
+            decision = self._reject(signal, f"Failed: {arb_label}", checks_passed, checks_failed)
+            logger.warning(f"RISK REJECTED {signal.signal_id} | {arb_label}")
+            return decision
+        checks_passed.append(arb_label)
+
         logger.info(f"RISK APPROVED {signal.signal_id} | {signal.symbol} {signal.side}")
         return RiskDecision(
             verdict=RiskVerdict.APPROVED,
@@ -607,7 +615,59 @@ class RiskEngine:
         return Decimal("0")
 
     def _requested_notional(self, signal: Signal) -> Decimal:
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        override = meta.get("risk_notional_override")
+        if override is not None:
+            try:
+                d = Decimal(str(override))
+                if d >= 0:
+                    return d
+            except Exception:  # noqa: BLE001
+                pass
         return abs(signal.suggested_quantity) * self._resolve_signal_price(signal)
+
+    @staticmethod
+    def _is_arbitrage_signal(signal: Signal) -> bool:
+        return (getattr(signal, "side", "") or "").strip().upper().startswith("ARBITRAGE_")
+
+    def _check_arbitrage_bundle(self, signal: Signal, portfolio: dict) -> tuple[bool, str]:
+        if not self._is_arbitrage_signal(signal):
+            return (True, "arbitrage_skipped")
+
+        arb_cfg = self.config.get("arbitrage")
+        if not isinstance(arb_cfg, dict) or not arb_cfg.get("enabled", False):
+            return (True, "arbitrage_checks_disabled")
+
+        side_u = (signal.side or "").upper()
+        conc_raw = portfolio.get("venue_concentration", {})
+        conc: dict = {}
+        if isinstance(conc_raw, dict):
+            from decimal import Decimal as D
+
+            for k, v in conc_raw.items():
+                try:
+                    conc[str(k).strip().lower()] = D(str(v))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        from risk.arbitrage_checks import ArbitrageRiskChecks, ArbitrageVenueState
+        from risk.cross_exchange_checks import CrossExchangeRiskChecks
+
+        venue_state = ArbitrageVenueState(concentrations=conc)
+
+        if "SPOT_SPREAD" in side_u:
+            ccfg = arb_cfg.get("cross_spot") if isinstance(arb_cfg.get("cross_spot"), dict) else arb_cfg
+            sig_d = {
+                "symbol": signal.symbol,
+                "buy_venue": (signal.metadata or {}).get("buy_venue", ""),
+                "sell_venue": (signal.metadata or {}).get("sell_venue", ""),
+                "metadata": signal.metadata or {},
+            }
+            ok, reason = CrossExchangeRiskChecks(ccfg).validate(sig_d, portfolio, venue_state)
+            return (ok, f"cross_exchange_{reason}")
+
+        ok, reason = ArbitrageRiskChecks(arb_cfg).validate_funding_signal(signal, portfolio, venue_state)
+        return (ok, f"arbitrage_{reason}")
 
     def _infer_expected_loss_pct(self, signal: Signal) -> Optional[Decimal]:
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}

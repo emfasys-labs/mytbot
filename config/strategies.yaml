@@ -2,6 +2,8 @@
 
 signal_engine:
   default_position_pct: 0.05
+  arbitrage_position_pct: 0.02
+  arbitrage_skip_news_veto: true
   news_veto_threshold: -0.70
   news_confidence_weight: 0.15
   min_quantity: 0.0001
@@ -42,3 +44,71 @@ strategies:
     rsi_buy_threshold: 42
     rsi_sell_threshold: 58
     band_epsilon: 0.003
+
+# Broker capability map for arbitrage (YAML-driven; extend when adding venues).
+arbitrage_capabilities:
+  brokers:
+    kraken:
+      name: kraken
+      supports_spot: true
+      supports_perpetuals: false
+      supports_options: false
+      supports_margin: true
+      supports_shorting: false
+      supported_symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+      fee_bps: "25"
+      latency_ms: 120
+      liquidity_score: "0.85"
+    binance:
+      name: binance
+      supports_spot: true
+      supports_perpetuals: false
+      supports_options: false
+      supports_margin: true
+      supports_shorting: false
+      supported_symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+      fee_bps: "10"
+      latency_ms: 80
+      liquidity_score: "0.95"
+    bybit:
+      name: bybit
+      supports_spot: false
+      supports_perpetuals: true
+      supports_options: false
+      supports_margin: true
+      supports_shorting: true
+      supported_symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+      fee_bps: "6"
+      latency_ms: 90
+      liquidity_score: "0.90"
+
+funding_rate_arbitrage:
+  enabled: true
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+  min_funding_rate: "0.00025"
+  min_annualised_net_yield: "0.08"
+  max_basis_bps: "30"
+  max_hold_hours: 120
+  min_liquidity_notional: "5000"
+  required_margin_buffer_ratio: "1.50"
+  max_hedge_mismatch_ratio: "0.02"
+  expected_funding_events_min: 3
+  slippage_buffer_bps: "8"
+  fee_buffer_bps: "12"
+  cooldown_minutes_after_failed_pair: 30
+  min_liquidity_score: "0.5"
+  max_latency_ms_pair_sum: 10000
+
+cross_exchange_arbitrage:
+  enabled: true
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  min_spread_bps: "15"
+  fee_buffer_bps: "10"
+  slippage_buffer_bps: "10"
+  max_latency_ms: 500
+  min_liquidity_score: "0.7"

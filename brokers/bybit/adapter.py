@@ -713,3 +713,49 @@ class BybitAdapter(BrokerAdapter):
         if self.category == "linear":
             return AssetClass.FUTURE
         return AssetClass.CRYPTO
+
+    async def fetch_funding_market_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        """
+        Optional capability (not on ``BrokerAdapter`` ABC): linear perp funding + mark + top of book.
+        Used by ``data.funding_rates.FundingRateDataProvider`` for funding-rate arbitrage scanning.
+        """
+        if self.category != "linear" or self._client is None:
+            return None
+        sym = _bybit_symbol(symbol)
+
+        def _go() -> dict[str, Any]:
+            assert self._client is not None
+            return self._client.get_tickers(category="linear", symbol=sym)
+
+        try:
+            raw = await self._run_sync(_go)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_funding_market_snapshot | Bybit | error={}", exc)
+            return None
+
+        lst = (raw.get("result", {}) or {}).get("list") or []
+        if not lst:
+            return None
+        row = lst[0]
+        fr = row.get("fundingRate")
+        nft = row.get("nextFundingTime")
+        mark = row.get("markPrice") or row.get("lastPrice")
+        bid = row.get("bid1Price")
+        ask = row.get("ask1Price")
+        next_dt: datetime | None = None
+        if nft is not None:
+            try:
+                next_dt = datetime.fromtimestamp(int(nft) / 1000.0, tz=timezone.utc)
+            except (TypeError, ValueError, OSError):
+                next_dt = None
+
+        return {
+            "symbol": sym,
+            "funding_rate": _d(fr) if fr is not None else Decimal("0"),
+            "funding_interval_hours": 8,
+            "next_funding_time": next_dt,
+            "mark_price": _d(mark) if mark is not None else Decimal("0"),
+            "bid": _d(bid) if bid is not None else Decimal("0"),
+            "ask": _d(ask) if ask is not None else Decimal("0"),
+        }
+

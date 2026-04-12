@@ -73,6 +73,9 @@ class SignalEngine:
         Returns None if signal should be discarded (e.g. news veto).
         """
 
+        if (raw.side or "").strip().upper().startswith("ARBITRAGE_"):
+            return self._process_arbitrage(raw, portfolio_value, news_score)
+
         # AI news modifier — if news score is strongly negative, veto
         news_veto = False
         if news_score is not None:
@@ -137,6 +140,96 @@ class SignalEngine:
             f"{signal.symbol} {signal.side} | "
             f"confidence={signal.confidence:.2f} | "
             f"strategy={signal.strategy}"
+        )
+
+        return signal if not news_veto else None
+
+    def _process_arbitrage(
+        self,
+        raw: RawSignal,
+        portfolio_value: Decimal,
+        news_score: Optional[float] = None,
+    ) -> Optional[Signal]:
+        """
+        Structural arbitrage: skip directional conflict sizing; carry venue metadata for paired execution.
+        News veto optional (default: do not veto carry on headline sentiment alone).
+        """
+        skip_news = bool(self.config.get("arbitrage_skip_news_veto", True))
+        news_veto = False
+        if not skip_news and news_score is not None:
+            veto_threshold = self.config.get("news_veto_threshold", -0.7)
+            if news_score < veto_threshold:
+                news_veto = True
+
+        adjusted_confidence = raw.confidence
+        if news_score is not None and not skip_news:
+            adjustment = news_score * self.config.get("news_confidence_weight", 0.15)
+            adjusted_confidence = max(0.0, min(1.0, raw.confidence + adjustment))
+
+        md = dict(raw.metadata or {})
+        qty_decimals = int(self.config.get("quantity_decimals", 8))
+        tick = Decimal("1").scaleb(-qty_decimals)
+
+        last_price = self._extract_last_price(md)
+        if last_price is None or last_price <= 0:
+            try:
+                sm = md.get("spot_mid")
+                if sm is not None:
+                    last_price = Decimal(str(sm))
+            except (InvalidOperation, TypeError, ValueError):
+                last_price = None
+
+        suggested_quantity: Decimal
+        if md.get("arbitrage_quantity") is not None:
+            try:
+                suggested_quantity = Decimal(str(md["arbitrage_quantity"])).quantize(tick)
+            except (InvalidOperation, TypeError, ValueError):
+                suggested_quantity = Decimal("0")
+        elif md.get("target_notional") is not None and last_price and last_price > 0:
+            try:
+                n = Decimal(str(md["target_notional"]))
+                suggested_quantity = (n / last_price).quantize(tick)
+            except (InvalidOperation, TypeError, ValueError):
+                suggested_quantity = Decimal("0")
+        else:
+            suggested_quantity = self._calculate_quantity(
+                portfolio_value,
+                float(self.config.get("arbitrage_position_pct", self.config.get("default_position_pct", 0.02))),
+                raw.symbol,
+                last_price=last_price,
+            )
+
+        min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
+        if suggested_quantity < min_qty:
+            suggested_quantity = min_qty
+
+        risk_notional = md.get("risk_notional_override")
+        if risk_notional is None and last_price and last_price > 0:
+            risk_notional = str(abs(suggested_quantity * last_price))
+        if risk_notional is not None:
+            md["risk_notional_override"] = str(risk_notional)
+
+        signal = Signal(
+            signal_id=str(uuid.uuid4()),
+            symbol=raw.symbol,
+            side=raw.side,
+            strategy=raw.strategy,
+            confidence=adjusted_confidence,
+            suggested_quantity=suggested_quantity,
+            suggested_price=last_price,
+            broker=raw.broker,
+            asset_class=raw.asset_class,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            metadata=md,
+            news_score=news_score,
+            news_veto=news_veto,
+        )
+
+        logger.info(
+            f"Signal {'VETOED' if news_veto else 'GENERATED'} | "
+            f"{signal.symbol} {signal.side} | "
+            f"confidence={signal.confidence:.2f} | "
+            f"strategy={signal.strategy} | arbitrage"
         )
 
         return signal if not news_veto else None

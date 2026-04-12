@@ -76,23 +76,10 @@ def _iso_now() -> str:
 
 
 def _pair_altname(symbol: str) -> str:
-    """
-    Map human symbol to Kraken REST pair code (altname), e.g. BTC/USD -> XBTUSD.
-    """
-    s = symbol.strip().upper().replace(" ", "")
-    if "/" in s:
-        base, quote = s.split("/", 1)
-    else:
-        for suf in ("USDT", "USD", "EUR", "GBP", "JPY"):
-            if s.endswith(suf) and len(s) > len(suf):
-                base, quote = s[: -len(suf)], suf
-                break
-        else:
-            return s
+    """Map human symbol to Kraken REST pair code (altname). Delegates to shared mapper."""
+    from data.symbol_mapper import kraken_pair_altname
 
-    if base == "BTC":
-        base = "XBT"
-    return f"{base}{quote}"
+    return kraken_pair_altname(symbol)
 
 
 def _userref_from_client_id(client_order_id: str | None) -> int | None:

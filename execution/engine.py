@@ -20,7 +20,7 @@ import logging
 import os
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 import asyncio
 
 import httpx
@@ -28,6 +28,9 @@ from brokers.registry import get_broker
 from control.runtime import get_risk_engine, set_execution_engine
 from brokers.base import Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
 from risk.engine import Signal, RiskDecision, RiskVerdict
+
+from execution.arbitrage_executor import ArbitrageExecutor
+from execution.arbitrage_spot_executor import SpotArbitrageExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,9 @@ class ExecutionEngine:
         if risk_decision.verdict != RiskVerdict.APPROVED:
             logger.warning(f"Attempted to execute rejected signal {signal.signal_id}")
             return None
+
+        if (signal.side or "").strip().upper().startswith("ARBITRAGE_"):
+            return await self._execute_arbitrage(signal, session_factory=session_factory)
 
         order = self._build_order(signal)
 
@@ -173,6 +179,99 @@ class ExecutionEngine:
             quantity=order.quantity,
             filled_quantity=order.quantity,
             avg_fill_price=fill_price,
+            fee=Decimal("0"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+    async def _execute_arbitrage(
+        self,
+        signal: Signal,
+        *,
+        session_factory=None,
+    ) -> Optional[OrderResult]:
+        """Paired-leg routing: funding (spot+perp) or cross-spot; paper mode simulates a single audit leg."""
+        md = signal.metadata if isinstance(signal.metadata, dict) else {}
+        side_u = (signal.side or "").strip().upper()
+        qty = signal.suggested_quantity
+
+        logger.info(
+            "ARBITRAGE | signal_id=%s | %s | %s | qty=%s | paper=%s",
+            signal.signal_id,
+            signal.symbol,
+            side_u,
+            qty,
+            self.paper_mode,
+        )
+
+        paper_order = Order(
+            symbol=signal.symbol,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=qty,
+            client_order_id=str(uuid.uuid4()),
+        )
+
+        if self.paper_mode:
+            result = self._simulate_fill(paper_order, signal)
+            await self._persist_result(session_factory, paper_order, result, signal)
+            logger.info(
+                "ARBITRAGE PAPER | audit fill on primary broker=%s | paired venues in metadata",
+                signal.broker,
+            )
+            return result
+
+        if "SPOT_SPREAD" in side_u:
+            buy_v = str(md.get("buy_venue", "")).strip().lower()
+            sell_v = str(md.get("sell_venue", "")).strip().lower()
+            brokers: dict[str, Any] = {}
+            for n in (buy_v, sell_v):
+                if n and n not in brokers:
+                    b = await self._get_broker(n)
+                    if b is not None:
+                        brokers[n] = b
+            ex = SpotArbitrageExecutor(brokers, logger)
+            sig_d = {
+                "symbol": signal.symbol,
+                "buy_venue": buy_v,
+                "sell_venue": sell_v,
+                "metadata": md,
+            }
+            await ex.execute(sig_d, qty)
+            return OrderResult(
+                broker_order_id=f"arb-spot-{uuid.uuid4().hex[:12]}",
+                client_order_id=paper_order.client_order_id,
+                status=OrderStatus.FILLED,
+                symbol=signal.symbol,
+                side=OrderSide.BUY,
+                quantity=qty,
+                filled_quantity=qty,
+                avg_fill_price=signal.suggested_price,
+                fee=Decimal("0"),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+        spot_v = str(md.get("spot_venue", signal.broker)).strip().lower()
+        perp_v = str(md.get("perp_venue", "")).strip().lower()
+        brokers2: dict[str, Any] = {}
+        for n in (spot_v, perp_v):
+            if n and n not in brokers2:
+                b = await self._get_broker(n)
+                if b is not None:
+                    brokers2[n] = b
+        rk = get_risk_engine()
+        acfg = (getattr(rk, "config", {}) or {}).get("arbitrage") if rk is not None else {}
+        flatten = bool((acfg or {}).get("flatten_on_leg_failure", True))
+        arb = ArbitrageExecutor(brokers2, logger, flatten_on_failure=flatten)
+        await arb.open_pair(signal, qty)
+        return OrderResult(
+            broker_order_id=f"arb-fund-{uuid.uuid4().hex[:12]}",
+            client_order_id=paper_order.client_order_id,
+            status=OrderStatus.FILLED,
+            symbol=signal.symbol,
+            side=OrderSide.BUY,
+            quantity=qty,
+            filled_quantity=qty,
+            avg_fill_price=signal.suggested_price,
             fee=Decimal("0"),
             timestamp=datetime.now(timezone.utc).isoformat(),
         )

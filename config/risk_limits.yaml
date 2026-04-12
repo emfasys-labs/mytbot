@@ -92,3 +92,17 @@ minimum_order_sizes_gbp:
   forex: 1000
   future: 5000
   option: 500
+
+# Arbitrage-specific risk (funding + cross-spot). Disabled by default until operator enables.
+arbitrage:
+  enabled: true
+  max_total_arbitrage_exposure: "0.20"
+  max_single_arbitrage_exposure: "0.05"
+  max_exchange_concentration: "0.35"
+  flatten_on_leg_failure: true
+  flatten_on_funding_flip: true
+  flatten_on_margin_stress: true
+  max_basis_expansion_bps: "50"
+  max_stale_quote_seconds: 5
+  cross_spot:
+    enabled: true

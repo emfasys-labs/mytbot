@@ -77,6 +77,26 @@ from storage.models import AIOutputLog, FeatureSnapshot
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
+from data.arb_observability import log_arb_event
+from data.capability_registry import CapabilityRegistry
+from data.funding_rates import FundingRateDataProvider
+from execution.execution_planner import ExecutionPlanner
+from execution.latency_predictor import LatencyPredictor
+from execution.orderbook_analyzer import OrderBookAnalyzer
+from execution.venue_selector import VenueSelector
+from portfolio.global_edge_coordinator import (
+    GlobalEdgeCoordinator,
+    cross_exchange_dict_to_strategy_opportunity,
+    funding_arb_signal_to_strategy_opportunity,
+    held_positions_from_portfolio,
+    signal_candidate_to_strategy_opportunity,
+)
+from portfolio.treasury_manager import TreasuryManager, merge_treasury_into_portfolio_state
+from signals.arb_bridge import process_coordinator_action
+from signals.microstructure.liquidity_tracker import LiquidityTracker
+from strategies.arbitrage.cross_exchange import CrossExchangeArbitrageStrategy
+from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
+
 
 _CRYPTO_SUFFIXES = ("-USD", "-USDT", "-EUR", "-GBP", "/USD", "/USDT", "/EUR", "/GBP")
 _CRYPTO_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "UNI", "LTC"}
@@ -227,6 +247,13 @@ class TradingLoop:
         self.iterations: int = 0
         self.last_error: str | None = None
 
+        self._global_edge_cfg: dict[str, Any] = {}
+        self._enable_arbitrage: bool = False
+        self._use_global_edge: bool = False
+        self._treasury: Any = None
+        self._latency_predictor: LatencyPredictor | None = None
+        self._arb_stack: dict[str, Any] | None = None
+
     @property
     def is_running(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
@@ -320,6 +347,15 @@ class TradingLoop:
             # Apply persisted mode overrides (if user selected a mode before this start)
             _apply_saved_mode_to_risk_cfg(self.risk_engine)
             set_risk_engine(self.risk_engine)
+            ge_yaml = _load_yaml("config/global_edge.yaml")
+            self._global_edge_cfg = ge_yaml if isinstance(ge_yaml, dict) else {}
+            self._enable_arbitrage = os.getenv("ENABLE_ARBITRAGE", "").strip().lower() in ("1", "true", "yes")
+            self._use_global_edge = (
+                os.getenv("GLOBAL_EDGE_COORDINATOR", "").strip().lower() in ("1", "true", "yes")
+                or bool(self._global_edge_cfg.get("enabled"))
+            )
+            self._treasury = TreasuryManager(logger=logger)
+            self._latency_predictor = LatencyPredictor()
             discovery_enabled = bool(discovery_cfg.get("enabled", False)) and os.getenv("DISCOVERY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
             discovery_pipeline = None
             if discovery_enabled:
@@ -772,85 +808,101 @@ class TradingLoop:
                                 mode=mode_raw,
                                 capital_pct=float(self.capital_pct),
                             )
-                            async with session_factory() as session:
-                                feat_extra = await drain_volume_refresh_features(
-                                    session,
-                                    bus,
-                                    universe_symbols=list(symbols),
-                                    timeframe=self.timeframe,
-                                    allocation_cfg=alloc_cfg,
+                            tradable_nav = total_equity * Decimal(str(self.capital_pct))
+                            if self._use_global_edge and not use_legacy:
+                                executed = await self._run_global_edge_tick(
+                                    batch_candidates=batch_candidates,
+                                    portfolio_dict=portfolio_dict,
+                                    tradable=tradable_nav,
+                                    mode_raw=mode_raw,
+                                    bus=bus,
+                                    session_factory=session_factory,
+                                    strategies_cfg=strategies_cfg,
+                                    symbols=list(symbols),
+                                    total_equity=total_equity,
+                                    resolve_price=_resolve_price_for_symbol,
+                                    strat_cfg=strat_cfg,
                                 )
-                                regime = await compute_regime_state_async(
+                            else:
+                                async with session_factory() as session:
+                                    feat_extra = await drain_volume_refresh_features(
+                                        session,
+                                        bus,
+                                        universe_symbols=list(symbols),
+                                        timeframe=self.timeframe,
+                                        allocation_cfg=alloc_cfg,
+                                    )
+                                    regime = await compute_regime_state_async(
+                                        portfolio_state=ps_rt,
+                                        allocation_cfg=alloc_cfg,
+                                        session=session,
+                                        universe_symbols=list(symbols),
+                                        timeframe=self.timeframe,
+                                    )
+                                    opps = await build_opportunities_async(
+                                        signals=batch_candidates,
+                                        regime_state=regime,
+                                        allocation_cfg=alloc_cfg,
+                                        session=session,
+                                        timeframe=self.timeframe,
+                                        profile_cfg=profile_modes_cfg,
+                                        active_profile_mode=mode_raw
+                                        if mode_raw in profile_modes_cfg.modes
+                                        else profile_modes_cfg.defaults.active_mode,
+                                        feature_json_by_symbol=feat_extra,
+                                    )
+                                esc_syms = [o.symbol for o in opps if o.metadata.get("d015_escalate_context")]
+                                await enqueue_volume_escalation_symbols(bus, esc_syms, alloc_cfg)
+                                repl_ctx = await load_replacement_context_from_bus(bus)
+                                dec = build_allocation_decision(
+                                    opportunities=opps,
                                     portfolio_state=ps_rt,
-                                    allocation_cfg=alloc_cfg,
-                                    session=session,
-                                    universe_symbols=list(symbols),
-                                    timeframe=self.timeframe,
-                                )
-                                opps = await build_opportunities_async(
-                                    signals=batch_candidates,
                                     regime_state=regime,
                                     allocation_cfg=alloc_cfg,
-                                    session=session,
-                                    timeframe=self.timeframe,
                                     profile_cfg=profile_modes_cfg,
-                                    active_profile_mode=mode_raw
-                                    if mode_raw in profile_modes_cfg.modes
-                                    else profile_modes_cfg.defaults.active_mode,
-                                    feature_json_by_symbol=feat_extra,
+                                    replacement_context=repl_ctx,
                                 )
-                            esc_syms = [o.symbol for o in opps if o.metadata.get("d015_escalate_context")]
-                            await enqueue_volume_escalation_symbols(bus, esc_syms, alloc_cfg)
-                            repl_ctx = await load_replacement_context_from_bus(bus)
-                            dec = build_allocation_decision(
-                                opportunities=opps,
-                                portfolio_state=ps_rt,
-                                regime_state=regime,
-                                allocation_cfg=alloc_cfg,
-                                profile_cfg=profile_modes_cfg,
-                                replacement_context=repl_ctx,
-                            )
-                            smooth_prev = await load_smoothing_prev_from_bus(bus)
-                            dec = apply_allocation_smoothing(
-                                dec,
-                                prev=smooth_prev,
-                                stability_cfg=alloc_cfg.allocation_stability,
-                                nav=ps_rt.nav,
-                            )
-                            merge_replacement_events_from_decision(
-                                repl_ctx,
-                                decision=dec,
-                                now=datetime.now(timezone.utc),
-                            )
-                            await save_replacement_context_to_bus(bus, repl_ctx)
-                            await save_smoothing_prev_to_bus(bus, allocation_smoothing_snapshot(dec))
-                            plan = build_execution_plan(
-                                decision=dec,
-                                portfolio_state=ps_rt,
-                                allocation_cfg=alloc_cfg,
-                            )
-                            logger.info(
-                                "d015_primary | ge={} instructions={} turnover_est={}",
-                                dec.gross_exposure_target,
-                                len(plan.instructions),
-                                plan.estimated_turnover,
-                            )
-                            for instr in plan.instructions:
-                                px = await _resolve_price_for_symbol(instr.symbol)
-                                ac = _asset_class_lookup(instr.symbol, batch_candidates)
-                                routed = self.router.route(ac, instr.symbol)
-                                if routed is None:
-                                    continue
-                                rs = risk_signal_from_execution_instruction(
-                                    instr,
-                                    signal_id=str(uuid.uuid4()),
-                                    broker=routed,
-                                    asset_class=ac,
-                                    price=px,
+                                smooth_prev = await load_smoothing_prev_from_bus(bus)
+                                dec = apply_allocation_smoothing(
+                                    dec,
+                                    prev=smooth_prev,
+                                    stability_cfg=alloc_cfg.allocation_stability,
+                                    nav=ps_rt.nav,
                                 )
-                                ok = await _process_signal(rs, symbol_hint=instr.symbol)
-                                if ok:
-                                    executed += 1
+                                merge_replacement_events_from_decision(
+                                    repl_ctx,
+                                    decision=dec,
+                                    now=datetime.now(timezone.utc),
+                                )
+                                await save_replacement_context_to_bus(bus, repl_ctx)
+                                await save_smoothing_prev_to_bus(bus, allocation_smoothing_snapshot(dec))
+                                plan = build_execution_plan(
+                                    decision=dec,
+                                    portfolio_state=ps_rt,
+                                    allocation_cfg=alloc_cfg,
+                                )
+                                logger.info(
+                                    "d015_primary | ge={} instructions={} turnover_est={}",
+                                    dec.gross_exposure_target,
+                                    len(plan.instructions),
+                                    plan.estimated_turnover,
+                                )
+                                for instr in plan.instructions:
+                                    px = await _resolve_price_for_symbol(instr.symbol)
+                                    ac = _asset_class_lookup(instr.symbol, batch_candidates)
+                                    routed = self.router.route(ac, instr.symbol)
+                                    if routed is None:
+                                        continue
+                                    rs = risk_signal_from_execution_instruction(
+                                        instr,
+                                        signal_id=str(uuid.uuid4()),
+                                        broker=routed,
+                                        asset_class=ac,
+                                        price=px,
+                                    )
+                                    ok = await _process_signal(rs, symbol_hint=instr.symbol)
+                                    if ok:
+                                        executed += 1
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     if now_ts >= next_reconcile_at:
@@ -899,6 +951,234 @@ class TradingLoop:
                     await dispose_engine(engine)
                 except Exception:
                     pass
+
+    def _ensure_arb_stack(self, strategies_cfg: dict[str, Any]) -> None:
+        if self._arb_stack is not None:
+            return
+        fcfg = dict(strategies_cfg.get("funding_rate_arbitrage") or {})
+        ccfg = dict(strategies_cfg.get("cross_exchange_arbitrage") or {})
+        reg = CapabilityRegistry(logger=logger)
+        reg.load_from_config(strategies_cfg.get("arbitrage_capabilities") or {})
+
+        async def _broker_getter(name: str) -> Any:
+            if self._broker_manager and name in getattr(self._broker_manager, "adapters", {}):
+                return self._broker_manager.adapters[name]
+            return None
+
+        prov = FundingRateDataProvider(_broker_getter, logger=logger, liquidity_tracker=LiquidityTracker())
+        vs = VenueSelector(
+            reg,
+            prov,
+            logger,
+            fcfg,
+            latency_predictor=self._latency_predictor,
+        )
+        self._arb_stack = {
+            "registry": reg,
+            "provider": prov,
+            "venue_selector": vs,
+            "funding": FundingRateArbitrageStrategy(fcfg, vs, logger=logger),
+            "cross": CrossExchangeArbitrageStrategy(reg, prov, ccfg, logger=logger),
+            "fcfg": fcfg,
+            "ccfg": ccfg,
+        }
+
+    async def _run_global_edge_tick(
+        self,
+        *,
+        batch_candidates: list[Any],
+        portfolio_dict: dict[str, Any],
+        tradable: Decimal,
+        mode_raw: str,
+        bus: CommandBus,
+        session_factory: Any,
+        strategies_cfg: dict[str, Any],
+        symbols: list[str],
+        total_equity: Decimal,
+        resolve_price,
+        strat_cfg: dict[str, Any],
+    ) -> int:
+        """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution."""
+        self._ensure_arb_stack(strategies_cfg)
+        assert self._treasury is not None
+        assert self.sig_engine is not None
+        assert self.execution_engine is not None
+
+        if self._broker_manager:
+            await self._treasury.refresh(self._broker_manager)
+        merge_treasury_into_portfolio_state(portfolio_dict, self._treasury)
+
+        held = held_positions_from_portfolio(portfolio_dict, decay=Decimal(str(self._global_edge_cfg.get("held_edge_decay_per_day", "0.08"))))
+        new_opps: list[Any] = []
+        pos_pct = Decimal(str(strategies_cfg.get("signal_engine", {}).get("default_position_pct", "0.05")))
+        for cand in batch_candidates:
+            try:
+                px = await resolve_price(cand.symbol)
+            except Exception:  # noqa: BLE001
+                px = Decimal("1")
+            so = signal_candidate_to_strategy_opportunity(
+                cand,
+                nav=tradable,
+                position_pct=pos_pct,
+                price=px,
+            )
+            if so is not None:
+                new_opps.append(so)
+
+        stack = self._arb_stack or {}
+        fcfg = stack.get("fcfg") or {}
+        ccfg = stack.get("ccfg") or {}
+        boost_f = Decimal(str(self._global_edge_cfg.get("arbitrage_edge_boost", {}).get("funding_rate_arbitrage", "0.01")))
+        boost_x = Decimal(str(self._global_edge_cfg.get("arbitrage_edge_boost", {}).get("cross_exchange_arbitrage", "0.015")))
+        notional = Decimal(str(fcfg.get("min_liquidity_notional", "5000")))
+
+        if self._enable_arbitrage and fcfg.get("enabled"):
+            funding = stack.get("funding")
+            if funding is not None:
+                for sym in fcfg.get("symbols") or []:
+                    fs = await funding.evaluate_symbol(sym, notional)
+                    if fs is not None:
+                        new_opps.append(funding_arb_signal_to_strategy_opportunity(fs, capital=notional, edge_boost=boost_f))
+                        log_arb_event("detect", strategy="funding_rate_arbitrage", symbol=sym)
+
+        if self._enable_arbitrage and ccfg.get("enabled"):
+            cross = stack.get("cross")
+            if cross is not None:
+                for sym in ccfg.get("symbols") or []:
+                    d = await cross.evaluate_symbol(sym, notional)
+                    if isinstance(d, dict):
+                        new_opps.append(cross_exchange_dict_to_strategy_opportunity(d, capital=notional, edge_boost=boost_x))
+                        log_arb_event("detect", strategy="cross_exchange_arbitrage", symbol=sym)
+
+        coord = GlobalEdgeCoordinator(self._global_edge_cfg, logger=logger)
+        repl_ctx = await load_replacement_context_from_bus(bus)
+        actions = coord.propose_actions(
+            held,
+            new_opps,
+            active_mode=mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader",
+            replacement_context=repl_ctx,
+        )
+        log_arb_event("rank", ranked=len(actions), opportunities=len(new_opps), held=len(held))
+
+        executed = 0
+        planner_cfg = {
+            "size_fractions": self._global_edge_cfg.get("size_fractions", [0.25, 0.5, 0.75, 1.0]),
+            "max_slippage_bps": self._global_edge_cfg.get("max_slippage_bps", "25"),
+            "min_simulated_edge_bps": self._global_edge_cfg.get("min_simulated_edge_bps", "0"),
+        }
+        planner = ExecutionPlanner(OrderBookAnalyzer(), planner_cfg)
+
+        for action in actions:
+            sig = process_coordinator_action(
+                action,
+                self.sig_engine,
+                portfolio_value=tradable,
+                news_score=None,
+            )
+            if sig is None:
+                log_arb_event("reject", reason="signal_null", symbol=action.symbol)
+                continue
+            if action.strategy_name == "cross_exchange_arbitrage" and self._broker_manager:
+                md = sig.metadata or {}
+                buy_v = str(md.get("buy_venue", "")).strip().lower()
+                sell_v = str(md.get("sell_venue", "")).strip().lower()
+                ba = self._broker_manager.adapters.get(buy_v)
+                sa = self._broker_manager.adapters.get(sell_v)
+                if ba and sa:
+                    try:
+                        ob_b = await ba.get_order_book(sig.symbol, depth=25)
+                        ob_s = await sa.get_order_book(sig.symbol, depth=25)
+                        plan = planner.plan_trade(ob_b, ob_s, min(sig.suggested_quantity * (sig.suggested_price or Decimal("1")), tradable * Decimal("0.15")))
+                        if plan is None:
+                            log_arb_event("reject", reason="execution_planner", symbol=sig.symbol)
+                            continue
+                        sig.suggested_quantity = plan["quantity"]
+                        sig.metadata = dict(sig.metadata or {})
+                        sig.metadata["buy_limit_from_ask"] = str(plan["buy_price"])
+                        sig.metadata["sell_limit_from_bid"] = str(plan["sell_price"])
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("global_edge | planner failed | {}", exc)
+                        log_arb_event("reject", reason="planner_error", symbol=sig.symbol)
+                        continue
+
+            ok = await self._process_signal_global(sig, session_factory, portfolio_dict, total_equity, tradable)
+            if ok:
+                executed += 1
+                log_arb_event("execute", symbol=sig.symbol, strategy=sig.strategy, side=sig.side)
+        return executed
+
+    async def _process_signal_global(
+        self,
+        signal: Any,
+        session_factory: Any,
+        portfolio_dict: dict[str, Any],
+        total_equity: Decimal,
+        tradable: Decimal,
+    ) -> bool:
+        """Single-signal processing mirroring _process_signal for coordinator path."""
+        if self.router is None or self.risk_engine is None or self.execution_engine is None:
+            return False
+        routed = self.router.route(signal.asset_class, signal.symbol)
+        if routed is None:
+            return False
+        signal.broker = routed
+        self.risk_engine.update_high_watermark(
+            Decimal(str(portfolio_dict.get("high_watermark_value", total_equity)))
+        )
+        self.risk_engine.restore_runtime_state(portfolio_dict)
+        risk_decision = await self.risk_engine.evaluate_and_persist(
+            session_factory,
+            signal,
+            portfolio_dict,
+        )
+        if risk_decision.verdict != RiskVerdict.APPROVED:
+            await _persist_signal(
+                session_factory,
+                signal,
+                paper_mode=self.paper_mode,
+                timeframe=self.timeframe,
+                feature_ts=datetime.now(timezone.utc),
+            )
+            return False
+        await _persist_signal(
+            session_factory,
+            signal,
+            paper_mode=self.paper_mode,
+            timeframe=self.timeframe,
+            feature_ts=datetime.now(timezone.utc),
+        )
+        result = await self.execution_engine.execute(
+            signal,
+            risk_decision,
+            session_factory=session_factory,
+        )
+        if result is None:
+            return False
+        status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
+        if status_val != "filled":
+            return False
+        filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
+        if filled_qty <= 0:
+            return False
+        post_trade_state = await _load_portfolio_state(
+            session_factory,
+            fallback_portfolio_value=total_equity,
+            signal_price_fallback=signal.suggested_price,
+            capital_pct=Decimal(str(self.capital_pct)),
+        )
+        signal.suggested_quantity = filled_qty
+        avg_fill = getattr(result, "avg_fill_price", None)
+        if avg_fill is not None:
+            try:
+                avg_fill_d = Decimal(str(avg_fill))
+                if avg_fill_d > 0:
+                    signal.suggested_price = avg_fill_d
+            except Exception:  # noqa: BLE001
+                pass
+        _apply_signal_to_portfolio_state(post_trade_state, signal)
+        await _persist_position_snapshot(session_factory, post_trade_state)
+        await _upsert_daily_pnl(session_factory, post_trade_state)
+        return True
 
     def status_dict(self) -> dict[str, Any]:
         return {

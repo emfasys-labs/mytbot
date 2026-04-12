@@ -1,0 +1,26 @@
+# Global edge coordinator: ranks held vs new opportunities (see DECISIONS.md).
+# Displacement only when new_edge > held_edge + threshold(mode).
+
+version: 1
+
+enabled: true
+
+# Relative edge advantage required to prefer a new opportunity over the weakest held position.
+edge_advantage:
+  hunter: "0.02"
+  trader: "0.05"
+  defender: "0.12"
+
+# Max coordinator-emitted actions per tick (incremental only).
+max_actions_per_tick: 3
+
+# Optional capital cap per action as fraction of tradable capital.
+max_notional_fraction_per_action: "0.15"
+
+# Arbitrage short-horizon boost applied to expected_edge before compare (Decimal add).
+arbitrage_edge_boost:
+  funding_rate_arbitrage: "0.01"
+  cross_exchange_arbitrage: "0.015"
+
+# Held position: decay applied to opportunity_score proxy for expected_remaining_edge (0-1).
+held_edge_decay_per_day: "0.08"
