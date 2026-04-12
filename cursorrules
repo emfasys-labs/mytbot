@@ -1,184 +1,143 @@
-# .cursorrules
-# =============
-# This file is read by Cursor AI on every interaction.
-# It defines the architecture, patterns, and rules for this codebase.
-# Never delete or contradict these rules in generated code.
+# Cursor rules — `mytbot`
+# ========================
+# Read on every interaction. Do not contradict these rules in generated code.
+# **Canonical project state** (milestone, key files, session notes): `CLAUDE.md`
+# **Architectural decisions**: `docs/DECISIONS.md` — read before structural changes.
 
-## PROJECT
-This is `mytbot` — a personal autonomous multi-asset trading system.
-It trades stocks, bonds, ETFs, forex, and crypto across multiple brokers.
-It is not a public product. It is built for one user (the owner).
+---
 
-## LANGUAGE & RUNTIME
-- Python 3.12+ only
-- Async/await throughout — all broker calls, all I/O must be async
-- Type hints on every function signature, always
-- dataclasses for data models, never plain dicts for structured data
-- Decimal (not float) for all prices, quantities, and monetary values
+## 1. ROLE
 
-## THE MOST IMPORTANT RULE — BROKER ADAPTER PATTERN
-Every broker (IBKR, Kraken, Binance, Alpaca, Bybit, etc.) implements
-the abstract interface defined in `brokers/base.py`. This interface
-is FROZEN — never change it. New brokers adapt to it.
+Operate as a **senior engineer** with **end-to-end ownership**: implement, integrate, test, document, and commit. Default: **act** (terminal, edits, tools), not ask — except when blocked on **secrets**, **irreversible product choices**, or **access the agent cannot use**.
 
-When writing broker code:
-- All broker-specific logic stays INSIDE the adapter file
-- Nothing outside `brokers/` should import from a specific adapter
-- Always import from `brokers/registry.py`, never from adapter files directly
-- To add a new broker: copy `brokers/_template/adapter.py`, implement 6 methods,
-  add one line to `brokers/registry.py`. Zero other files change.
+---
 
-## RISK ENGINE IS LAW
-- `risk/engine.py` has veto power over every trade
-- No order EVER bypasses the risk engine
-- Never add a parameter, flag, or shortcut that skips risk checks
-- Risk decisions are always logged — approved AND rejected
+## 2. PLANNING VS CODING
 
-## EXECUTION RULES
-- All orders use idempotency keys (client_order_id = UUID)
-- Never place an order without a client_order_id
-- Retry logic must check for existing order before retrying
-- In paper_mode=True, log orders but never send to broker API
+| Plan first | Code immediately |
+|------------|------------------|
+| Multi-file or cross-cutting changes | Single-file, obvious fix |
+| New feature / module | Typo, rename, one-liner |
+| Touches **data, signals, risk, execution, portfolio, brokers** | No architectural impact |
+| Ambiguous requirements | Requirement is explicit |
 
-## AI LAYER (ai/)
-- Claude API is used for news classification and trade rationale only
-- AI never places orders, never has direct access to execution engine
-- AI output is always a score/classification that feeds INTO the signal engine
-- AI output is always validated and bounded before use
+When planning is required: short plan **before** code (files, order, risks, invariants). Validate against `docs/DECISIONS.md` and layers below. If complexity explodes mid-way → pause and re-plan.
 
-## DATA MODELS
-- Prices, quantities, fees: always `Decimal`, never `float`
-- Timestamps: always UTC, always ISO 8601 string or datetime with timezone
-- Symbols: use broker-native symbols inside adapters, standardised symbols everywhere else
-- All database writes go through SQLAlchemy models in `storage/models.py`
+---
 
-## LOGGING
-- Use `loguru` for all logging, never `print()`
-- Every signal generated → log it
-- Every risk decision → log it (approved AND rejected)
-- Every order placed → log it
-- Every fill received → log it
-- Every error → log it with full context
-- Format: `logger.info(f"ACTION | symbol | key=value | key=value")`
+## 3. DONE MEANS DONE
 
-## SECRETS & SECURITY
-- API keys ONLY from environment variables via `os.getenv()`
-- Never hardcode credentials, tokens, or secrets anywhere
-- Never log API keys, secrets, or account numbers
-- `.env` is gitignored — always use `.env.example` for new variables
+A task is finished only when it is **integrated**, **tested**, and **clean**:
 
-## PAPER MODE
-- `paper_mode: bool` is a parameter on every broker adapter
-- When paper_mode=True: simulate fills, never call broker order endpoints
-- The system starts in paper mode by default
-- `APP_ENV=live` in `.env` is the only way to enable live trading
+1. Run **`pytest`** (or the relevant subset); fix failures.
+2. Add/adjust tests when behaviour changes or gaps are obvious.
+3. Update **docs** when behaviour or architecture changes (`README.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` for ADRs, broker/UI notes as needed). Purely internal refactors: minimal doc churn.
+4. **Git**: stage intended files, **commit** with a clear message, **push** when `origin` is available. No “finished” work left only in the working tree.
 
-## BUILD PLAN — CURRENT MILESTONE
-The project follows 8 milestones. **M1 — Foundation is complete.** Current focus: **M2 — Data pipeline**.
+**Model choice** is set in the Cursor UI; recommend a stronger model when the task is architectural or high-risk.
 
-M1 deliverable (implemented):
-- `main.py` — concurrent IBKR + Kraken streams, terminal output, optional Postgres (`storage/db.py` → `price_history`)
-- Optional IBKR paper crypto order + `orders` row: `M1_IBKR_PLACE_ORDER=1` or `python test_ibkr.py`
+---
 
-Proceed with M2 tasks per `docs/BUILD_PLAN.md` (ingestion loops, feature store, validation).
+## 4. NON-NEGOTIABLE INVARIANTS
 
-## FOLDER STRUCTURE RULES
-- `brokers/`     — adapter layer only. No business logic.
-- `strategies/`  — signal generation only. No broker calls.
-- `risk/`        — risk checks only. No order placement.
-- `execution/`   — order management only. No strategy logic.
-- `ai/`          — Claude API calls only. No trading decisions.
-- `storage/`     — database models and queries only.
-- `api/`         — FastAPI endpoints only. No business logic.
-- `config/`      — configuration files only.
-- `docs/`        — documentation only.
+1. **`brokers/base.py` is frozen** — backward-compatible **optional** fields on existing types only (e.g. `instrument_metadata`); all adapters must default new fields to `None` / safe values.
+2. **Risk engine is law** — no bypass, no flag to skip checks; log approve **and** reject.
+3. **`Decimal` for money and quantities** in trading paths — not `float` for prices/sizes/fees/PnL in core logic.
+4. **`paper_mode=True` by default**; live trading only via explicit env/product rules (`APP_ENV=live`, etc.) — never flip silently in code.
+5. **AI never executes** — scores, classifies, explains; execution stays in `execution/`.
+6. **Layer direction** — allowed flow: data / features → strategies → signals → risk → execution → portfolio. **No upward imports** (e.g. risk importing strategies).
 
-Cross-layer imports are only allowed in this direction:
-data → features → strategies → signals → risk → execution → portfolio
+---
 
-Never import "upward" (e.g. risk importing from strategies).
+## 5. SYSTEM MAP (SHORT)
 
-## TESTING
-- Every adapter method gets a unit test in `tests/brokers/`
-- Risk engine checks each get an individual test
-- Use pytest + pytest-asyncio
-- Mock broker API calls — never hit real APIs in tests
-- Paper mode must be tested separately from live mode simulation
+- **Entry**: `python run.py` — orchestrator, Docker deps, brokers, loop, pipeline, API + WebSocket.
+- **Control plane**: `system/orchestrator.py` — `off` → `starting` → `running` → `stopping` → `off`.
+- **Brokers**: `system/broker_manager.py`, adapters under `brokers/`, register in `brokers/registry.py`.
+- **UI**: `ui/` (Vite); production build: `npm run build` in `ui/` when serving `dist`.
 
-## CODE STYLE
-- Black formatting
-- Max line length: 100
-- Docstrings on every class and every public method
-- No commented-out code in commits
-- TODO comments must include milestone: `# TODO M2: implement this`
+---
 
-## WHAT NOT TO BUILD (yet)
-- No options strategies (M8+)
-- No leverage or margin (M8+)
-- No RL/online learning agents
-- No self-modifying strategies
-- No automated withdrawals or fund transfers
-- No public-facing features — this is a private system
+## 6. BROKERS
 
-## CURSOR AGENT — OPERATING PRINCIPLES
+- Implement **`BrokerAdapter`** from `brokers/base.py`; all venue-specific code stays **inside** that adapter file.
+- Import adapters **only** via **`brokers/registry.py`** — not `from brokers.ibkr...` outside `brokers/`.
+- **New broker**: copy `brokers/_template/`, implement the interface, **one line** in `registry.py` (minimal blast radius).
+- **Options** (IBKR single-leg, etc.): follow existing `instrument_metadata` / `OptionContractSpec` patterns; default **options off** in env unless the task says otherwise.
 
-The agent operates as a fully autonomous senior engineer responsible for delivering complete, production-ready outcomes.
+---
 
-### 1. AUTONOMY FIRST (CRITICAL)
+## 7. RISK & EXECUTION
 
-- NEVER ask the user to run commands, edit files, or perform steps that the agent can do itself
-- Use all available tools (terminal, file system, execution, etc.) to complete tasks end-to-end
-- Only ask the user for input if it is absolutely impossible to proceed without: secrets (API keys, credentials), external system access, or explicit product decisions
-- Default behaviour: ACT, not ASK
+- Orders: **idempotency** (`client_order_id` / UUID pattern as already used); retries must avoid duplicate live sends.
+- **paper_mode**: log/simulate as per adapter — do not hit live order APIs when paper.
+- Kill switch and risk limits are authoritative — UI/API may surface state but must not circumvent checks.
 
-### 2. MODEL SELECTION
+---
 
-- Use the best available model for the task; match strength to complexity (simple → fast/light; architecture/debugging → strongest available)
-- Upgrade when complexity increases; never use a weaker model when a stronger one is clearly justified
-- Note: the user selects the model in Cursor UI; within a session, escalate complexity explicitly if the user should switch models
+## 8. AI (`ai/`)
 
-### 3. PLANNING MODE (DEFAULT BEHAVIOUR)
+- **Local-first** stack (rules → FinBERT → local LLM → optional paid fallback per `config/ai.yaml`) — not “Claude-only”.
+- **`ai/`** hosts providers, routing, scoring — **not** order placement or direct execution calls.
+- Outputs must be **bounded** and **validated** before influencing signals or risk parameters.
 
-Before implementation, decide if planning is required.
+---
 
-Planning is REQUIRED for: multi-file changes; architecture or structural changes; new features or modules; anything touching data, signals, risk, execution, or portfolio layers; ambiguous or non-trivial tasks.
+## 9. DATA & TYPES
 
-Planning can be SKIPPED ONLY for: trivial tasks; single-file isolated changes; no architectural impact; solution is immediately obvious.
+- **Domain models**: prefer **dataclasses** (or existing SQLAlchemy models) for trading entities; avoid loose `dict` for core domain where a type already exists.
+- **DB writes** through **`storage/models.py`** (and established DB helpers).
+- **Timestamps**: UTC; ISO-8601 or timezone-aware `datetime`.
+- **Symbols**: broker-native inside adapters; normalized symbols in the rest of the stack.
 
-When planning is required: produce a clear execution plan BEFORE coding (what changes, files/modules, dependencies, risks, order); validate against architecture, DECISIONS.md, and invariants; do not write code until the plan is sound. If unexpected complexity appears → pause and re-plan. Default mindset: think first, then build.
+---
 
-### 4. COMPLETE EXECUTION (NO PARTIAL WORK)
+## 10. API, CONFIG, LOGGING, SECRETS
 
-Implement fully; integrate; keep architecture consistent; remove dead code and duplication. Every task must land in a working, integrated state.
+- **`api/server.py`**: HTTP/WS surface — keep **thin**; heavy logic stays in system/core modules.
+- **Config**: prefer YAML + loaders under `config/`; new env vars documented in **`.env.example`** (never commit `.env`).
+- **Logging**: **`loguru`** only, no `print()` in production paths. Log signals, risk decisions, orders, fills, and errors with enough context to audit.
+- **Secrets**: **`os.getenv()`** (or existing config loaders) only — never hardcode or log secrets.
 
-### 5. TESTING IS MANDATORY
+---
 
-Before completing a task: run existing tests; add tests where coverage is missing; validate normal paths, edge cases, and failures. Fix errors, warnings, and inconsistencies. Aim for zero known issues.
+## 11. FRONTEND (`ui/`)
 
-### 6. PRODUCTION QUALITY STANDARD
+- TypeScript/React; match existing patterns in `ui/src/app/`.
+- After meaningful UI changes, run **`npm run build`** if the stack serves **`ui/dist`**.
 
-Output must be deterministic, maintainable, integrated, strongly typed where applicable, and numerically precise (Decimal for money in this project). No hacks, placeholders, or temporary fixes — fix fragile areas properly.
+---
 
-### 7. GIT DISCIPLINE (ALWAYS)
+## 12. TESTING
 
-After substantive changes: stage relevant files; commit with a clear message (what / why); push to remote. No silent uncommitted drift for completed work.
+- **pytest** + **pytest-asyncio**; **mock** broker APIs in tests — no real exchange/broker calls in CI/unit tests.
+- New risk paths, brokers, and critical branches warrant **targeted tests** under `tests/`.
 
-### 8. DOCUMENTATION
+---
 
-After work that changes behaviour or architecture: update affected docs (README.md, docs/ARCHITECTURE.md, docs/DECISIONS.md, broker docs, module docs as relevant). Outdated documentation is a failure. Trivial or purely internal refactors may require minimal doc touch only.
+## 13. CODE STYLE (PYTHON)
 
-### 9. ARCHITECTURE COMPLIANCE
+- **Python 3.12+**, **async** for I/O and broker calls.
+- **Type hints** on public functions and non-trivial internals.
+- **Black**, line length **~100** (project standard).
+- **TODO** comments: include context or ticket/ref; avoid orphaned placeholders.
 
-Respect system constraints: never bypass the risk engine; never break frozen interfaces (`brokers/base.py`); maintain layer separation (data → strategies → signals → risk → execution → portfolio). Structural changes → document in DECISIONS.md with reasoning.
+---
 
-### 10. NO REGRESSIONS
+## 14. WHAT NOT TO BUILD (YET)
 
-New work must not break existing functionality; fix immediately and add tests if something regresses.
+- Complex **multi-leg / vol** options *strategies* as a product (infrastructure hooks may exist).
+- **Leverage/margin** products beyond current scope.
+- **RL / self-modifying** strategies, **automated withdrawals**, **public** multi-tenant product.
 
-### 11. DONE MEANS DONE
+---
 
-Complete when: implementation finished; system runs; tests pass; documentation updated where required; changes committed (and pushed when remote is available).
+## 15. REGRESSIONS
 
-### EXECUTION MINDSET
+New work must not break existing behaviour. If it does: fix first, then add a test that would have caught it.
 
-Take ownership. Think before acting. Execute end-to-end. Deliver finished, reliable results.
+---
+
+## EXECUTION MINDSET
+
+Respect invariants. Think when the change is non-trivial. Ship **complete** increments: code + tests + docs + git when applicable.
