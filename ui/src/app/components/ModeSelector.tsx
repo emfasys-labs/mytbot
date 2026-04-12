@@ -9,6 +9,8 @@ interface ModeSelectorProps {
   selectedMode: Mode;
   onModeChange: (mode: Mode) => void;
   onHaptic?: () => void;
+  /** When true (e.g. control flattened / system not live-trading), no mode shows the active glow — all icons look idle. */
+  inactiveVisual?: boolean;
 }
 
 const MODE_META: Record<Mode, { icon: typeof Shield; label: string; description: string; color: string }> = {
@@ -17,7 +19,12 @@ const MODE_META: Record<Mode, { icon: typeof Shield; label: string; description:
   defender: { icon: Shield, label: 'Defender', description: 'Conservative — smaller positions, higher confidence required, fewer trades', color: 'text-sky-300' },
 };
 
-export function ModeSelector({ selectedMode, onModeChange, onHaptic }: ModeSelectorProps) {
+export function ModeSelector({
+  selectedMode,
+  onModeChange,
+  onHaptic,
+  inactiveVisual = false,
+}: ModeSelectorProps) {
   const [tooltip, setTooltip] = useState<Mode | null>(null);
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
 
@@ -43,6 +50,7 @@ export function ModeSelector({ selectedMode, onModeChange, onHaptic }: ModeSelec
       {modes.map((id) => {
         const { icon: Icon, label, description, color } = MODE_META[id];
         const isSelected = selectedMode === id;
+        const showActive = isSelected && !inactiveVisual;
         const isPending = pendingMode === id;
         const isHovered = tooltip === id;
         return (
@@ -57,22 +65,22 @@ export function ModeSelector({ selectedMode, onModeChange, onHaptic }: ModeSelec
             >
               <motion.div
                 className="relative z-10"
-                animate={{ scale: isSelected ? 1.1 : 1, opacity: isPending ? 0.5 : 1 }}
-                whileHover={{ scale: 1.15 }}
+                animate={{ scale: showActive ? 1.1 : 1, opacity: isPending ? 0.5 : 1 }}
+                whileHover={{ scale: inactiveVisual ? 1.05 : 1.15 }}
                 whileTap={{ scale: 0.95 }}
               >
                 <Icon
                   size={28}
                   strokeWidth={1.5}
                   className={`transition-colors ${
-                    isSelected
+                    showActive
                       ? `${color} drop-shadow-[0_0_8px_rgba(255,255,255,0.8)]`
                       : 'text-gray-500'
                   }`}
                 />
               </motion.div>
 
-              {isSelected && (
+              {showActive && (
                 <motion.div
                   className="absolute inset-0 -m-2 rounded-full bg-white/10 blur-xl"
                   initial={{ opacity: 0 }}
@@ -93,7 +101,10 @@ export function ModeSelector({ selectedMode, onModeChange, onHaptic }: ModeSelec
                   className="absolute left-12 top-1/2 -translate-y-1/2 z-50 pointer-events-none"
                 >
                   <div className="bg-[#111]/90 backdrop-blur-xl border border-white/10 px-3 py-2 rounded-xl shadow-xl max-w-[200px]">
-                    <div className={`text-sm font-medium ${color}`}>{label}</div>
+                    <div className={`text-sm font-medium ${isSelected ? color : 'text-gray-400'}`}>
+                      {label}
+                      {inactiveVisual && isSelected ? ' (saved for next start)' : ''}
+                    </div>
                     <div className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">{description}</div>
                     {isPending && (
                       <div className="text-[10px] text-amber-400 mt-1">Applying…</div>

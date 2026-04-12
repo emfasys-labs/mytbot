@@ -452,6 +452,7 @@ function App() {
                   selectedMode={mode}
                   onModeChange={setMode}
                   onHaptic={() => triggerHaptic('medium')}
+                  inactiveVisual={isFlattened}
                 />
               </div>
 
