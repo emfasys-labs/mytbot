@@ -176,14 +176,52 @@ class ExecutionEngine:
         except Exception:  # noqa: BLE001
             return Decimal("10")
 
+    def _paper_slippage_bps(self) -> Decimal:
+        """Return one-way slippage applied in the trade direction (default 2 bps)."""
+        risk_engine = get_risk_engine()
+        cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+        try:
+            return Decimal(str(cfg.get("paper_slippage_bps", 2)))
+        except Exception:  # noqa: BLE001
+            return Decimal("2")
+
+    def _paper_partial_fill_rate(self) -> float:
+        """
+        Probability [0.0, 1.0] that a paper fill is partial rather than full.
+        Default 0.0 (deterministic full fill) — set ``paper_partial_fill_rate``
+        in risk_limits.yaml to simulate realistic partial fills in paper testing.
+        """
+        risk_engine = get_risk_engine()
+        cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+        try:
+            return float(cfg.get("paper_partial_fill_rate", 0.0))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     async def _simulate_fill(
         self,
         order: Order,
         signal: Signal,
         broker: Any | None = None,
     ) -> OrderResult:
-        """Create a synthetic filled order for paper mode (fee + limit sanity + last price)."""
+        """
+        Create a synthetic filled order for paper mode.
+
+        Modelling features:
+        - Fee: applies ``paper_fee_bps`` on filled notional (default 10 bps).
+        - Slippage: applies ``paper_slippage_bps`` in trade direction — BUY fills
+          slightly above mid, SELL slightly below (default 2 bps).
+        - Limit bounds: LIMIT orders never fill worse than their limit price.
+        - Partial fills: when ``paper_partial_fill_rate`` > 0, fills a random
+          fraction (50-95%) of the order with probability equal to the rate.
+        """
+        import random
+
         fee_bps = self._paper_fee_bps()
+        slippage_bps = self._paper_slippage_bps()
+        partial_fill_rate = self._paper_partial_fill_rate()
+
+        # ── 1. Determine base fill price ──────────────────────────────────────
         fill_price: Decimal | None = None
         if signal.suggested_price is not None and signal.suggested_price > 0:
             fill_price = signal.suggested_price
@@ -204,26 +242,48 @@ class ExecutionEngine:
             else:
                 fill_price = Decimal("0")
 
+        # ── 2. Apply directional slippage ─────────────────────────────────────
+        if fill_price is not None and fill_price > 0 and slippage_bps > 0:
+            slip_factor = slippage_bps / Decimal("10000")
+            if order.side == OrderSide.BUY:
+                fill_price = fill_price * (Decimal("1") + slip_factor)
+            else:
+                fill_price = fill_price * (Decimal("1") - slip_factor)
+
+        # ── 3. Enforce limit price bounds ─────────────────────────────────────
         if order.order_type == OrderType.LIMIT and order.limit_price is not None and order.limit_price > 0:
             lp = order.limit_price
-            if fill_price <= 0:
+            if fill_price is None or fill_price <= 0:
                 fill_price = lp
             elif order.side == OrderSide.BUY:
+                # BUY limit: must not fill above the limit price
                 fill_price = min(fill_price, lp)
             else:
+                # SELL limit: must not fill below the limit price
                 fill_price = max(fill_price, lp)
 
-        notional = abs(order.quantity * fill_price) if fill_price > 0 else Decimal("0")
+        # ── 4. Simulate partial fill ──────────────────────────────────────────
+        filled_qty = order.quantity
+        status = OrderStatus.FILLED
+        if partial_fill_rate > 0.0 and random.random() < partial_fill_rate:
+            # Fill between 50% and 95% of the requested quantity
+            ratio = Decimal(str(round(0.50 + random.random() * 0.45, 6)))
+            filled_qty = (order.quantity * ratio).quantize(Decimal("0.00000001"))
+            status = OrderStatus.PARTIALLY_FILLED
+
+        # ── 5. Compute fee on filled notional ─────────────────────────────────
+        notional = abs(filled_qty * fill_price) if (fill_price is not None and fill_price > 0) else Decimal("0")
         fee = (notional * fee_bps / Decimal("10000")).quantize(Decimal("0.00000001"))
-        avg = fill_price if fill_price > 0 else None
+        avg = fill_price if (fill_price is not None and fill_price > 0) else None
+
         return OrderResult(
             broker_order_id=f"paper-{uuid.uuid4().hex[:12]}",
             client_order_id=order.client_order_id,
-            status=OrderStatus.FILLED,
+            status=status,
             symbol=order.symbol,
             side=order.side,
             quantity=order.quantity,
-            filled_quantity=order.quantity,
+            filled_quantity=filled_qty,
             avg_fill_price=avg,
             fee=fee,
             timestamp=datetime.now(timezone.utc).isoformat(),

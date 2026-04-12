@@ -461,8 +461,10 @@ async def test_paper_simulate_fill_uses_last_price_when_no_suggested() -> None:
         client_order_id="x",
     )
     res = await engine._simulate_fill(order, sig, broker=broker)
-    assert res.avg_fill_price == Decimal("100.25")
-    notional = Decimal("2") * Decimal("100.25")
+    mid = Decimal("100.25")
+    expected_fill = mid * (Decimal("1") + Decimal("2") / Decimal("10000"))  # default paper_slippage_bps
+    assert res.avg_fill_price == expected_fill
+    notional = Decimal("2") * expected_fill
     assert res.fee == (notional * Decimal("10") / Decimal("10000")).quantize(Decimal("0.00000001"))
 
 

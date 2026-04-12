@@ -19,6 +19,8 @@ from typing import Any, AsyncIterator, Callable, TypeVar
 
 from loguru import logger
 
+from brokers.rest_rate_limit import AsyncRestGap
+
 
 def _kraken_sdk_classes() -> tuple[Any, Any, Any]:
     """Import python-kraken-sdk on first use so ``main.py`` can start without it (e.g. IBKR-only)."""
@@ -174,9 +176,13 @@ class KrakenAdapter(BrokerAdapter):
         self._trade: Any = None
         self._last_health_check: float = 0.0
         self._health_ok: bool = False
+        # Proactive REST rate limiting — Kraken private API uses a counter-based
+        # system; ≥100 ms between calls keeps the counter from accumulating.
+        self._rest_gap = AsyncRestGap.from_env("KRAKEN", default_seconds=0.1)
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
+            await self._rest_gap.wait()
             return await asyncio.to_thread(fn)
 
     def _require_private(self) -> None:
