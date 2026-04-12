@@ -52,7 +52,9 @@ function App() {
   const lastTradeTs = useRef<number>(0);
   const [livePositions, setLivePositions] = useState<Position[]>([]);
   const [activeBrokers, setActiveBrokers] = useState<string[]>([]);
-  const [allBrokers, setAllBrokers] = useState<Record<string, { configured: boolean; connected: boolean }>>({});
+  const [allBrokers, setAllBrokers] = useState<
+    Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean }>
+  >({});
 
   // Discovery & Intelligence state
   const [discoverySummary, setDiscoverySummary] = useState<DiscoverySummaryResponse | null>(null);
@@ -105,7 +107,7 @@ function App() {
     setTradesToday(0);
     setLastTradeMinutes(0);
     lastTradeTs.current = 0;
-    lastIntelRefresh.current = 0;
+    // Do not reset lastIntelRefresh — that caused every in-flight refresh to hit the intel API at once (WS tick storm).
   }, []);
 
   const handleSystemStop = async () => {
@@ -120,7 +122,12 @@ function App() {
   };
 
   const isActive = controlState === 'live' && systemState === 'running';
-  const isFlattened = controlState === 'flatten' || systemState === 'off';
+  /** Pause tickers / dormant chrome while shutting down or flat — avoids run/stop flicker from WS+HTTP races. */
+  const isFlattened =
+    controlState === 'flatten' ||
+    systemState === 'off' ||
+    systemState === 'stopping' ||
+    systemState === 'error';
 
   const handlePctChange = useCallback((pct: number) => {
     const clamped = Math.max(0, Math.min(1, pct));
@@ -139,7 +146,20 @@ function App() {
     wsConnectedRef.current = wsConnected;
   }, [wsConnected]);
 
+  const systemStateRef = useRef<SystemState>(systemState);
+  useEffect(() => {
+    systemStateRef.current = systemState;
+  }, [systemState]);
+
+  const refreshLock = useRef(false);
+  const refreshPending = useRef(false);
+
   const refresh = useCallback(async () => {
+    if (refreshLock.current) {
+      refreshPending.current = true;
+      return;
+    }
+    refreshLock.current = true;
     try {
       const results = await Promise.allSettled([
         api.getPnl(),
@@ -163,7 +183,13 @@ function App() {
         const newState = sysStatus.state ?? 'off';
         setSystemState(newState);
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
-        if (sysStatus.brokers) setAllBrokers(sysStatus.brokers as Record<string, { configured: boolean; connected: boolean }>);
+        if (sysStatus.brokers)
+          setAllBrokers(
+            sysStatus.brokers as Record<
+              string,
+              { configured: boolean; connected: boolean; balance_ready?: boolean }
+            >,
+          );
         if (typeof sysStatus.capital_pct === 'number' && Number.isFinite(sysStatus.capital_pct)) {
           const c = Math.max(0, Math.min(1, sysStatus.capital_pct));
           setCapitalPct(c);
@@ -175,12 +201,14 @@ function App() {
       if (killActive) {
         setControlState('flatten');
       } else {
-        const sysState = sysStatus?.state ?? systemState;
+        const sysState = (sysStatus?.state as SystemState | undefined) ?? systemStateRef.current;
         if (sysState === 'running') {
           setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
         } else if (sysState === 'off' || sysState === 'error') {
           setControlState('flatten');
           clearLiveData();
+        } else if (sysState === 'stopping') {
+          setControlState('flatten');
         }
       }
 
@@ -267,6 +295,12 @@ function App() {
       }
     } catch {
       // Keep UI running with last known data.
+    } finally {
+      refreshLock.current = false;
+      if (refreshPending.current) {
+        refreshPending.current = false;
+        void refresh();
+      }
     }
   }, [clearLiveData]);
 
@@ -315,17 +349,23 @@ function App() {
             setActiveBrokers(sysPayload.active_brokers as string[]);
           }
           if (sysPayload?.brokers && typeof sysPayload.brokers === 'object') {
-            setAllBrokers(sysPayload.brokers as Record<string, { configured: boolean; connected: boolean }>);
+            setAllBrokers(
+              sysPayload.brokers as Record<
+                string,
+                { configured: boolean; connected: boolean; balance_ready?: boolean }
+              >,
+            );
           }
 
           if (wsKill) {
             setControlState('flatten');
           } else if (sysPayload?.state === 'running') {
             setControlState((prev) => (prev === 'flatten' ? 'live' : prev));
+          } else if (sysPayload?.state === 'stopping') {
+            setControlState('flatten');
           } else if (sysPayload?.state === 'off' || sysPayload?.state === 'error') {
             setControlState('flatten');
             clearLiveData();
-            void refresh();
           }
 
           const events = msg.payload.events ?? [];
@@ -405,16 +445,25 @@ function App() {
                       .sort(([a], [b]) => a.localeCompare(b))
                       .map(([name, v]) => {
                         const err = 'error' in v && v.error ? String(v.error) : '';
-                        const cls =
-                          v.configured && v.connected
-                            ? 'bg-emerald-400/10 text-emerald-300/70'
-                            : v.configured
+                        const warmingUp = v.configured && v.connected && v.balance_ready === false;
+                        const cls = !v.configured
+                          ? 'bg-zinc-800/40 text-zinc-600'
+                          : !v.connected
+                            ? 'bg-amber-400/10 text-amber-200/60'
+                            : v.balance_ready === false
                               ? 'bg-amber-400/10 text-amber-200/60'
-                              : 'bg-zinc-800/40 text-zinc-600';
+                              : 'bg-emerald-400/10 text-emerald-300/70';
+                        const defaultTitle = v.configured
+                          ? v.connected
+                            ? warmingUp
+                              ? 'Connected — loading account balance'
+                              : 'Connected'
+                            : 'Configured, not connected'
+                          : 'Not configured';
                         return (
                           <span
                             key={name}
-                            title={err || (v.configured ? (v.connected ? 'Connected' : 'Configured, not connected') : 'Not configured')}
+                            title={err || defaultTitle}
                             className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${cls}`}
                           >
                             {name}

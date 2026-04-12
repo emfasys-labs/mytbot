@@ -28,11 +28,25 @@ from brokers.base import BrokerAdapter
 from brokers.registry import BROKER_REGISTRY, get_broker
 
 
+def _balance_rows_mean_ready(balances: list[Any]) -> bool:
+    """True when snapshot looks complete (not [] while account summary is still loading)."""
+    if not balances:
+        return False
+    for b in balances:
+        cy = str(getattr(b, "currency", "") or "").strip()
+        if cy:
+            return True
+    return False
+
+
 @dataclass
 class BrokerStatus:
+    """Per-broker row for status; balance_ready after first non-empty get_balance snapshot."""
+
     name: str
     configured: bool = False
     connected: bool = False
+    balance_ready: bool = False
     error: str | None = None
 
 
@@ -53,6 +67,7 @@ class BrokerReport:
             name: {
                 "configured": s.configured,
                 "connected": s.connected,
+                "balance_ready": s.balance_ready,
                 "error": s.error,
             }
             for name, s in self.brokers.items()
@@ -286,6 +301,22 @@ class BrokerManager:
             name="ibkr-background-connect",
         )
 
+    async def _mark_balance_ready(self, name: str, adapter: BrokerAdapter, status: BrokerStatus) -> None:
+        """Set balance_ready after a successful account snapshot (may lag connect for IBKR)."""
+        if not status.connected:
+            return
+        timeout = 60.0 if name == "ibkr" else 35.0
+        try:
+            balances = await asyncio.wait_for(adapter.get_balance(), timeout=timeout)
+            if balances is not None and _balance_rows_mean_ready(list(balances)):
+                status.balance_ready = True
+                logger.info("broker | {} | balance snapshot ready ({} rows)", name, len(balances))
+            else:
+                status.balance_ready = False
+        except Exception as exc:  # noqa: BLE001
+            status.balance_ready = False
+            logger.debug("broker | {} | balance snapshot not ready: {}", name, exc)
+
     async def _background_ibkr_connect(
         self, cfg: dict[str, Any], status: BrokerStatus
     ) -> None:
@@ -301,9 +332,11 @@ class BrokerManager:
                 if connected:
                     status.connected = True
                     status.error = None
+                    status.balance_ready = False
                     self.adapters["ibkr"] = adapter
                     self._ibkr_fail_count = 0
                     logger.info("broker | ibkr | connected (background)")
+                    await self._mark_balance_ready("ibkr", adapter, status)
                 else:
                     self._ibkr_fail_count += 1
                     status.error = "connect() returned False"
@@ -340,9 +373,11 @@ class BrokerManager:
             if connected:
                 status.connected = True
                 status.error = None
+                status.balance_ready = False
                 self.adapters[name] = adapter
                 self._broker_fail_count[name] = 0
                 logger.info("broker | {} | connected", name)
+                await self._mark_balance_ready(name, adapter, status)
             else:
                 self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
                 status.error = "connect() returned False"
@@ -446,9 +481,19 @@ class BrokerManager:
             status = self.report.brokers.get(name)
             if status is not None:
                 status.connected = False
+                status.balance_ready = False
                 status.error = "Disconnected"
             self._broker_fail_count[name] = max(1, self._broker_fail_count.get(name, 0))
             logger.warning("broker | {} | disconnected (health poll)", name)
+
+        # Connected but still waiting for first usable account snapshot (common for IBKR).
+        refresh_tasks = []
+        for name, adapter in list(self.adapters.items()):
+            st = self.report.brokers.get(name)
+            if st is not None and st.connected and not st.balance_ready:
+                refresh_tasks.append(self._mark_balance_ready(name, adapter, st))
+        if refresh_tasks:
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
 
     async def disconnect_all(self) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():
@@ -463,13 +508,20 @@ class BrokerManager:
                 await self._late_connect_task
             except (asyncio.CancelledError, Exception):
                 pass
+        disconnected_names: list[str] = []
         for name, adapter in list(self.adapters.items()):
             try:
                 await adapter.disconnect()
                 logger.info("broker | {} | disconnected", name)
             except Exception as exc:
                 logger.warning("broker | {} | disconnect error: {}", name, exc)
+            disconnected_names.append(name)
         self.adapters.clear()
+        for name in disconnected_names:
+            st = self.report.brokers.get(name)
+            if st is not None:
+                st.connected = False
+                st.balance_ready = False
 
     def get_adapter(self, name: str) -> BrokerAdapter | None:
         return self.adapters.get(name)

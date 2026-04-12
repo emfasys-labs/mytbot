@@ -188,7 +188,10 @@ export type SystemStatusResponse = {
   state_changed_at?: string;
   paper_mode?: boolean;
   active_brokers?: string[];
-  brokers?: Record<string, { configured: boolean; connected: boolean; error?: string | null }>;
+  brokers?: Record<
+    string,
+    { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
+  >;
   infrastructure?: Record<string, { healthy: boolean; error?: string | null }>;
   trading?: { running: boolean; iterations?: number; last_error?: string | null };
   errors?: string[];
