@@ -133,6 +133,12 @@ export function PerformancePanel({
         </span>
         <span className="text-zinc-600">Dots on curve = fill days (green/red ≈ day portfolio Δ)</span>
       </div>
+      {!isFlattened ? (
+        <p className="mb-2 text-[9px] leading-snug text-zinc-600">
+          P&amp;L uses realised + MTM unrealised. Week/month rollups now include the same live MTM for today as the
+          header. &quot;Trades today&quot; is the daily ledger fill count — you can have MTM P&amp;L with zero fills.
+        </p>
+      ) : null}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-zinc-400">
         <div>
           <div className="text-[10px] text-zinc-600">Week Σ</div>

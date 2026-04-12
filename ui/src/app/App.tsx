@@ -496,6 +496,13 @@ function App() {
     [dashboardSnapshot, intelligenceSignals, positions],
   );
 
+  const bookNavFromSnapshot = useMemo(() => {
+    const raw = dashboardSnapshot?.portfolio?.nav;
+    if (raw == null || raw === '') return null;
+    const n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace(/,/g, ''));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [dashboardSnapshot?.portfolio]);
+
   return (
     <div className="min-h-screen overflow-hidden bg-[#0a0a0a] text-white relative">
       <HapticFeedback />
@@ -512,6 +519,7 @@ function App() {
 
         <LiveStrip
           totalCapital={totalCapital}
+          bookNav={bookNavFromSnapshot}
           dailyPnL={dailyPnL}
           weekPnL={weekPnL}
           monthPnL={monthPnL}

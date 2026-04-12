@@ -7,7 +7,10 @@ type BrokerRow = { configured: boolean; connected: boolean; balance_ready?: bool
 type ControlState = 'live' | 'pause' | 'flatten';
 
 type Props = {
+  /** Headline NAV from GET /pnl (broker / configured / DB max). */
   totalCapital: number;
+  /** Optional allocator book NAV from dashboard snapshot — shown when it differs from headline. */
+  bookNav?: number | null;
   dailyPnL: number;
   weekPnL: number;
   monthPnL: number;
@@ -31,6 +34,7 @@ type Props = {
 
 export function LiveStrip({
   totalCapital,
+  bookNav = null,
   dailyPnL,
   weekPnL,
   monthPnL,
@@ -55,16 +59,33 @@ export function LiveStrip({
   const loopIt = snapshot?.loop_iteration;
 
   const d24 = discoverySummary?.last_24h;
+  const navMismatch =
+    bookNav != null &&
+    Number.isFinite(bookNav) &&
+    bookNav > 0 &&
+    Number.isFinite(totalCapital) &&
+    totalCapital > 0 &&
+    Math.abs(bookNav - totalCapital) / totalCapital > 0.0005;
 
   return (
     <div className="shrink-0 border-b border-white/10 bg-black/40 px-3 py-2 md:px-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-3 text-[11px] md:text-xs text-zinc-300">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="flex items-baseline gap-2">
-          <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
-          <span className="text-lg font-light text-white tabular-nums">
-            {isFlattened ? '—' : fmtDashMoneySigned(totalCapital)}
-          </span>
+        <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
+          <div className="flex items-baseline gap-2">
+            <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
+            <span className="text-lg font-light text-white tabular-nums">
+              {isFlattened ? '—' : fmtDashMoneySigned(totalCapital)}
+            </span>
+          </div>
+          {navMismatch && !isFlattened ? (
+            <span className="text-[9px] leading-tight text-zinc-500 sm:max-w-[14rem]">
+              Book (allocator){' '}
+              <span className="font-mono text-zinc-400">{fmtDashMoneySigned(bookNav!)}</span>
+              {' — '}
+              can differ from broker headline
+            </span>
+          ) : null}
         </div>
         <div className="h-4 w-px bg-white/10 hidden sm:block" />
         <div className="flex flex-wrap gap-3">
@@ -132,8 +153,10 @@ export function LiveStrip({
         </div>
       </div>
       {d24 && !isFlattened ? (
-        <div className="mt-1 text-[10px] text-zinc-600">
-          24h discovery · signals {d24.signals_produced ?? '—'} · anomalies {d24.anomalies_detected ?? '—'}
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-600">
+          <span>
+            24h discovery · signals {d24.signals_produced ?? '—'} · anomalies {d24.anomalies_detected ?? '—'}
+          </span>
         </div>
       ) : null}
       {Object.keys(allBrokers).length > 0 ? (

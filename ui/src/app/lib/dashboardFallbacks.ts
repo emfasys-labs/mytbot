@@ -10,12 +10,15 @@ export const OPPORTUNITY_THRESHOLD_HINT = 0.6;
 
 export function parseAccumulatorScore(row: Record<string, unknown>): number {
   const s = row.score;
-  if (typeof s === 'number' && Number.isFinite(s)) return s;
-  if (typeof s === 'string') {
-    const n = parseFloat(s);
-    if (Number.isFinite(n)) return n;
+  let n = 0;
+  if (typeof s === 'number' && Number.isFinite(s)) n = s;
+  else if (typeof s === 'string') {
+    const p = parseFloat(s);
+    if (Number.isFinite(p)) n = p;
   }
-  return 0;
+  // Net conviction is defined on [-1, 1]; clamp defensively if backend sends a bad float.
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(-1, Math.min(1, n));
 }
 
 const SCORE_KEYS = ['opportunity_score', 'priority_score', 'expected_edge'] as const;

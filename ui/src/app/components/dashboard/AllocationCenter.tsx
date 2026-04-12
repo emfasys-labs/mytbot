@@ -332,6 +332,11 @@ export function AllocationCenter({
 
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
+        {!dormant && instr.length > 0 ? (
+          <div className="mb-1.5 text-[9px] leading-snug text-zinc-600">
+            Deployment intent from the coordinator — the risk gate can still reject (see right column).
+          </div>
+        ) : null}
         {dormant || instr.length === 0 ? (
           <div className="text-xs text-zinc-500 space-y-1.5">
             {dormant ? (

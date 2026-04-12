@@ -22,6 +22,20 @@ def month_to_date_range(today: date) -> tuple[date, date]:
     return start, today
 
 
+def merge_live_today_unrealised_into_period(
+    period_unrealised: Decimal,
+    *,
+    db_today_unrealised: Decimal,
+    live_today_unrealised: Decimal,
+) -> Decimal:
+    """
+    ``aggregate_daily_pnl_range`` sums stored ``DailyPnL.unrealised`` per day.
+    The live GET /pnl \"today\" block uses MTM for today instead of the DB row.
+    Replace today's contribution so week/month unrealised matches that semantics.
+    """
+    return period_unrealised - db_today_unrealised + live_today_unrealised
+
+
 async def aggregate_daily_pnl_range(session: Any, start: date, end: date) -> dict[str, Any]:
     start_s = start.isoformat()
     end_s = end.isoformat()

@@ -29,6 +29,7 @@ from api.dashboard_layer import gather_ws_events, log_cors_live_warning, merge_r
 from api.pnl_periods import (
     aggregate_daily_pnl_range,
     equity_max_drawdown_pct,
+    merge_live_today_unrealised_into_period,
     month_to_date_range,
     week_to_date_range,
     win_rate_from_daily_rows,
@@ -803,6 +804,18 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             cap_pct = 1.0
     cap_pct = max(0.0, min(1.0, cap_pct))
     tradable_value = display_value * Decimal(str(cap_pct))
+
+    if today_row is not None:
+        db_today_u = Decimal(str(today_row.unrealised_pnl or 0))
+        for agg in (week_agg, month_agg):
+            u = Decimal(str(agg["unrealised"]))
+            agg["unrealised"] = str(
+                merge_live_today_unrealised_into_period(
+                    u,
+                    db_today_unrealised=db_today_u,
+                    live_today_unrealised=today_unrealised,
+                )
+            )
 
     return {
         "today": {
