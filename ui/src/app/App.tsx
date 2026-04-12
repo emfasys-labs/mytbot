@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NewsTicker, type TickerItem } from './components/NewsTicker';
 import { CapitalSlider } from './components/CapitalSlider';
-import { MasterControl } from './components/MasterControl';
 import { PositionChips } from './components/PositionChips';
 import { SystemHeartbeat } from './components/SystemHeartbeat';
 import { HapticFeedback, useHaptic } from './components/HapticFeedback';
@@ -466,47 +465,30 @@ function App() {
       <div className="w-full h-screen flex flex-col min-h-0">
         <NewsTicker items={newsItems} paused={isFlattened} />
 
-        <div className="flex shrink-0 items-center justify-end gap-2 border-b border-white/5 px-3 py-2 md:px-4">
-          <MasterControl
-            currentState={controlState}
-            systemState={systemState}
-            onStateChange={handleControlStateChange}
-            onSystemStart={handleSystemStart}
-            onSystemStop={handleSystemStop}
-            onHaptic={() => triggerHaptic('light')}
-          />
-        </div>
-
         <LiveStrip
           totalCapital={totalCapital}
           dailyPnL={dailyPnL}
           weekPnL={weekPnL}
           monthPnL={monthPnL}
           systemState={systemState}
+          controlState={controlState}
+          onControlStateChange={handleControlStateChange}
+          onSystemStart={handleSystemStart}
+          onSystemStop={handleSystemStop}
+          onControlHaptic={() => triggerHaptic('light')}
           mode={mode}
           onModeChange={setMode}
           onModeHaptic={() => triggerHaptic('medium')}
           modeInactiveVisual={isFlattened}
           modeDisabled={systemState === 'off'}
           allBrokers={allBrokers}
-          intelligenceRegime={intelligenceRegime}
           snapshot={dashboardSnapshot}
           discoverySummary={discoverySummary}
           snapshotStale={snapshotStale}
           isFlattened={isFlattened}
         />
 
-        <div className="flex flex-1 min-h-0 flex-col relative">
-          <div className="hidden xl:block absolute right-3 top-3 z-20">
-            <CapitalSlider
-              totalCapital={totalCapital}
-              pct={capitalPct}
-              onPctChange={handlePctChange}
-              onHaptic={() => triggerHaptic('light')}
-              dormant={isFlattened}
-            />
-          </div>
-
+        <div className="flex flex-1 min-h-0 flex-col">
           <div className="flex flex-1 min-h-0 flex-col lg:flex-row gap-2 p-2 overflow-hidden">
             <aside className="lg:w-80 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none z-0">
               <SignalBrain
@@ -517,7 +499,18 @@ function App() {
               />
             </aside>
 
-            <main className="flex-1 flex flex-col gap-2 min-w-0 min-h-0 overflow-y-auto isolate z-0">
+            <main className="relative flex-1 flex flex-col gap-2 min-w-0 min-h-0 overflow-y-auto isolate z-0 xl:pr-14">
+              <div className="pointer-events-none hidden xl:block absolute right-0 top-0 z-10 h-96">
+                <div className="pointer-events-auto">
+                  <CapitalSlider
+                    totalCapital={totalCapital}
+                    pct={capitalPct}
+                    onPctChange={handlePctChange}
+                    onHaptic={() => triggerHaptic('light')}
+                    dormant={isFlattened}
+                  />
+                </div>
+              </div>
               <AllocationCenter
                 snapshot={dashboardSnapshot}
                 dormant={systemState !== 'running'}

@@ -71,7 +71,7 @@ export function PerformancePanel({
           ))}
         </div>
       </div>
-      <div className="h-[120px] w-full mb-2 overflow-hidden rounded-md bg-black/30 isolate">
+      <div className="h-[148px] w-full mb-2 overflow-hidden rounded-md bg-black/30 isolate">
         <EquityLine
           compact
           balance={totalCapital}

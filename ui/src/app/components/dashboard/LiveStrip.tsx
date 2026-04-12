@@ -1,18 +1,9 @@
-import type {
-  DashboardSnapshot,
-  DiscoverySummaryResponse,
-  IntelligenceRegimeResponse,
-  SystemState,
-  TradingMode,
-} from '../../lib/api';
+import type { DashboardSnapshot, DiscoverySummaryResponse, SystemState, TradingMode } from '../../lib/api';
+import { MasterControl } from '../MasterControl';
 import { ModeSelector } from '../ModeSelector';
 
 type BrokerRow = { configured: boolean; connected: boolean; balance_ready?: boolean };
-
-const MACRO_TOOLTIP =
-  'AI macro stance for strategy filtering — not your risk mode (Hunter/Trader/Defender). ' +
-  'Typical labels: easing ≈ supportive liquidity / easier financial conditions; ' +
-  'tightening ≈ restrictive policy; neutral / risk_on / risk_off / swing = other AI bucket labels.';
+type ControlState = 'live' | 'pause' | 'flatten';
 
 function fmtMoney(n: number, currency = '£'): string {
   const sign = n < 0 ? '−' : '';
@@ -25,13 +16,17 @@ type Props = {
   weekPnL: number;
   monthPnL: number;
   systemState: SystemState;
+  controlState: ControlState;
+  onControlStateChange: (s: ControlState) => void;
+  onSystemStart: () => Promise<void>;
+  onSystemStop: () => Promise<void>;
+  onControlHaptic?: () => void;
   mode: TradingMode;
   onModeChange: (m: TradingMode) => void;
   onModeHaptic?: () => void;
   modeInactiveVisual: boolean;
   modeDisabled: boolean;
   allBrokers: Record<string, BrokerRow>;
-  intelligenceRegime: IntelligenceRegimeResponse | null;
   snapshot: DashboardSnapshot | null;
   discoverySummary: DiscoverySummaryResponse | null;
   snapshotStale: boolean;
@@ -44,23 +39,22 @@ export function LiveStrip({
   weekPnL,
   monthPnL,
   systemState,
+  controlState,
+  onControlStateChange,
+  onSystemStart,
+  onSystemStop,
+  onControlHaptic,
   mode,
   onModeChange,
   onModeHaptic,
   modeInactiveVisual,
   modeDisabled,
   allBrokers,
-  intelligenceRegime,
   snapshot,
   discoverySummary,
   snapshotStale,
   isFlattened,
 }: Props) {
-  const snapRegime = snapshot?.regime?.regime_label;
-  const macroLabel = intelligenceRegime?.regime?.label ?? '—';
-  const regimeLabel = snapRegime ?? macroLabel;
-  const comps = snapshot?.regime?.components ?? {};
-  const compEntries = Object.entries(comps).slice(0, 6);
   const path = snapshot?.path ?? '—';
   const loopIt = snapshot?.loop_iteration;
 
@@ -119,7 +113,15 @@ export function LiveStrip({
           ) : null}
         </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2 md:ml-auto">
+        <div className="flex shrink-0 items-center gap-3 md:ml-auto">
+          <MasterControl
+            currentState={controlState}
+            systemState={systemState}
+            onStateChange={onControlStateChange}
+            onSystemStart={onSystemStart}
+            onSystemStop={onSystemStop}
+            onHaptic={onControlHaptic}
+          />
           <span className="hidden sm:inline text-[10px] uppercase tracking-wider text-zinc-600 pr-1">
             Risk mode
           </span>
@@ -133,21 +135,6 @@ export function LiveStrip({
           />
         </div>
       </div>
-      {!isFlattened && (regimeLabel !== '—' || compEntries.length > 0) ? (
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/5 pt-2 text-[10px] text-zinc-500">
-          <span title={MACRO_TOOLTIP} className="cursor-help">
-            <span className="text-zinc-600">AI macro </span>
-            <span className="text-zinc-200">{regimeLabel}</span>
-            <span className="text-zinc-600"> · </span>
-            <span className="text-zinc-500 hidden md:inline">(policy/liquidity label, not Hunter/Trader/Defender)</span>
-          </span>
-          {compEntries.map(([k, v]) => (
-            <span key={k} className="text-zinc-500">
-              {k.replace(/_/g, ' ')} <span className="text-zinc-300 tabular-nums">{v}</span>
-            </span>
-          ))}
-        </div>
-      ) : null}
       {d24 && !isFlattened ? (
         <div className="mt-1 text-[10px] text-zinc-600">
           24h discovery · signals {d24.signals_produced ?? '—'} · anomalies {d24.anomalies_detected ?? '—'}
