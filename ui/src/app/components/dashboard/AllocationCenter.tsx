@@ -14,6 +14,7 @@ import {
   displayConviction01,
   fmtRawScore,
 } from '../../lib/scoreDisplay';
+import { formatCoordinatorKind } from '../../lib/coordinatorLabels';
 
 type Props = {
   snapshot: DashboardSnapshot | null;
@@ -54,6 +55,18 @@ function holdRowsAllZero(rows: Array<Record<string, unknown>>): boolean {
     const e = parseFloat(String(w.exit_pressure ?? '0'));
     return (Number.isFinite(h) ? h : 0) === 0 && (Number.isFinite(e) ? e : 0) === 0;
   });
+}
+
+/** Tags column: prefer snapshot tags, else strategy/side so global_edge rows are never blank. */
+function opportunityTagsLine(o: Record<string, unknown>): string {
+  const tags = Array.isArray(o.tags) ? (o.tags as string[]).filter(Boolean) : [];
+  const joined = tags.slice(0, 3).join(' · ');
+  if (joined) return joined;
+  const sn = o.strategy_name != null && String(o.strategy_name).trim();
+  if (sn) return String(o.strategy_name);
+  const side = o.side != null && String(o.side).trim();
+  if (side) return String(o.side);
+  return '—';
 }
 
 function urgencyLabel(d: number): string {
@@ -234,7 +247,6 @@ export function AllocationCenter({
                     {opps.slice(0, 12).map((o, i) => {
                       const d = rowDisplay01(o);
                       const raw = parseOpportunityRowScore(o);
-                      const tags = (Array.isArray(o.tags) ? o.tags : []) as string[];
                       const isFirst = i === 0;
                       return (
                         <motion.tr
@@ -254,7 +266,7 @@ export function AllocationCenter({
                             {d.toFixed(2)} {arrowForRaw(raw)}
                           </td>
                           <td className="py-1 text-zinc-400 truncate max-w-[100px] hidden sm:table-cell">
-                            {tags[0] ?? '—'}
+                            {opportunityTagsLine(o)}
                           </td>
                           <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
                             {urgencyLabel(d)} · {bandFromDisplay01(d)}
@@ -299,7 +311,7 @@ export function AllocationCenter({
                           {d.toFixed(2)} {arrowForRaw(raw)}
                         </td>
                         <td className="py-1 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
-                          {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 3).join(' · ') : ''}
+                          {opportunityTagsLine(o)}
                         </td>
                         <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
                           {urgencyLabel(d)}
@@ -391,10 +403,13 @@ export function AllocationCenter({
             <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300">
               {instr.slice(0, 14).map((x, i) => (
                 <li key={i} className="flex flex-wrap gap-x-2 border-b border-white/5 pb-0.5">
-                  <span className="text-white/90">{String(x.action ?? x.kind ?? '')}</span>
+                  <span className="text-white/90">{formatCoordinatorKind(String(x.action ?? x.kind ?? ''))}</span>
                   <span>{String(x.symbol ?? '')}</span>
+                  {x.strategy_name != null && String(x.strategy_name).trim() ? (
+                    <span className="text-zinc-500 truncate max-w-[140px]">{String(x.strategy_name)}</span>
+                  ) : null}
                   <span className="text-zinc-500">{String(x.side ?? '')}</span>
-                  <span className="text-emerald-300/80 tabular-nums">{String(x.target_notional ?? '')}</span>
+                  <span className="text-emerald-300/80 tabular-nums">{String(x.capital ?? x.target_notional ?? '')}</span>
                 </li>
               ))}
             </ul>

@@ -208,7 +208,8 @@ def serialize_strategy_opportunity(o: StrategyOpportunity) -> dict[str, Any]:
         "priority_score": ps,
         # Dashboard parity with D015 opportunity rows (UI ranks on opportunity_score).
         "opportunity_score": ps,
-        "tags": [o.strategy_name] if o.strategy_name else [],
+        # Always expose at least one tag so the dashboard column is not blank when strategy_name is empty.
+        "tags": [o.strategy_name] if (o.strategy_name or "").strip() else ["global_edge"],
         "created_at": o.created_at.isoformat() if o.created_at else None,
     }
 

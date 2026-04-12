@@ -66,7 +66,24 @@ async def gather_ws_events(bus, session_factory) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
         if _ws_poll_state["signal_ts"] is None:
-            _ws_poll_state["signal_ts"] = now
+            # Cold start: without a backlog, Live Flow stays empty until a *new* row arrives after API boot.
+            q_boot = await session.execute(select(SignalLog).order_by(SignalLog.timestamp.desc()).limit(15))
+            sig_boot = list(reversed(list(q_boot.scalars().all())))
+            for r in sig_boot:
+                events.append(
+                    {
+                        "type": "signal_generated",
+                        "payload": {
+                            "id": r.id,
+                            "symbol": r.symbol,
+                            "side": r.side,
+                            "strategy": r.strategy,
+                            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                        },
+                        "ts": r.timestamp.isoformat() if r.timestamp else now.isoformat(),
+                    }
+                )
+            _ws_poll_state["signal_ts"] = sig_boot[-1].timestamp if sig_boot else now
         else:
             q = await session.execute(
                 select(SignalLog)
@@ -93,7 +110,31 @@ async def gather_ws_events(bus, session_factory) -> list[dict[str, Any]]:
                 _ws_poll_state["signal_ts"] = sig_rows[-1].timestamp
 
         if _ws_poll_state["order_ts"] is None:
-            _ws_poll_state["order_ts"] = now
+            qo_boot = await session.execute(select(OrderLog).order_by(OrderLog.timestamp.desc()).limit(40))
+            ord_boot_raw = list(qo_boot.scalars().all())
+            ord_boot: list[Any] = []
+            for o in ord_boot_raw:
+                st = (o.status or "").lower()
+                if st in ("filled", "partially_filled"):
+                    ord_boot.append(o)
+                if len(ord_boot) >= 25:
+                    break
+            ord_boot = list(reversed(ord_boot))
+            for o in ord_boot:
+                events.append(
+                    {
+                        "type": "order_filled",
+                        "payload": {
+                            "id": o.id,
+                            "symbol": o.symbol,
+                            "status": o.status,
+                            "filled_quantity": str(o.filled_quantity) if o.filled_quantity is not None else None,
+                            "timestamp": o.timestamp.isoformat() if o.timestamp else None,
+                        },
+                        "ts": o.timestamp.isoformat() if o.timestamp else now.isoformat(),
+                    }
+                )
+            _ws_poll_state["order_ts"] = ord_boot[-1].timestamp if ord_boot else now
         else:
             qo = await session.execute(
                 select(OrderLog)

@@ -52,6 +52,11 @@ export function SignalBrain({
     if (lines.length >= 18) break;
   }
 
+  const snapshotFlowHint =
+    !dormant && lines.length === 0 && snapshot?.updated_at
+      ? `HTTP snapshot · ${String(snapshot.updated_at)}${snapshot.fingerprint ? ` · ${String(snapshot.fingerprint).slice(0, 10)}…` : ''}`
+      : null;
+
   const Row = ({ row, positive }: { row: Record<string, unknown>; positive: boolean }) => {
     const raw = parseAccumulatorScore(row);
     const d = displayConviction01(raw);
@@ -124,8 +129,11 @@ export function SignalBrain({
       <ScrollArea className="h-[min(180px,26vh)] rounded border border-white/5 bg-black/20">
         <div className="p-2 space-y-1 font-mono text-[10px] text-zinc-400">
           {lines.length === 0 ? (
-            <div className="text-zinc-600">
-              {dormant ? 'Quiet — system not running.' : 'Waiting for signals, fills, and bus events…'}
+            <div className="space-y-1 text-zinc-600">
+              <div>{dormant ? 'Quiet — system not running.' : 'Waiting for signals, fills, and bus events…'}</div>
+              {snapshotFlowHint ? (
+                <div className="text-zinc-500/90 leading-snug">{snapshotFlowHint}</div>
+              ) : null}
             </div>
           ) : (
             lines.map((ln, i) => (

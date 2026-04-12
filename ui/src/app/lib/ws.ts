@@ -62,6 +62,24 @@ export function formatWsEventLine(ev: WsTickEvent): string | null {
     if (!sym) return null;
     return `${sym} filled · ${st || 'filled'}`;
   }
+  if (ev.type === 'kill_activated') {
+    return `Kill switch · activated${p.killed != null ? ` (${p.killed ? 'on' : 'off'})` : ''}`;
+  }
+  if (ev.type === 'kill_reset') {
+    return `Kill switch · reset${p.killed != null ? ` (${p.killed ? 'on' : 'off'})` : ''}`;
+  }
+  if (ev.type === 'command_completed') {
+    const t = String((p as { type?: string }).type ?? '');
+    const param = (p as { parameter?: string }).parameter;
+    if (param) return `Control · set ${param}`;
+    return t ? `Control · ${t.replace(/_/g, ' ')}` : 'Control · completed';
+  }
+  if (ev.type === 'command_failed') {
+    const err = String((p as { error?: string }).error ?? '').slice(0, 120);
+    return err ? `Control · failed · ${err}` : 'Control · failed';
+  }
+  const raw = ev.type?.trim();
+  if (raw) return `Bus · ${raw.replace(/_/g, ' ')}`;
   return null;
 }
 
