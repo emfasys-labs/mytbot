@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { EquityLine } from '../EquityLine';
-import type { ApiPnlResponse } from '../../lib/api';
+import type { ApiOrderRow, ApiPnlResponse } from '../../lib/api';
 import { toNumber } from '../../lib/api';
+import { buildEquityTradeMarkers } from '../../lib/dashboardFallbacks';
 
 type Horizon = 'today' | 'week' | 'month' | 'all';
 
@@ -10,6 +11,11 @@ type Props = {
   dailyPnL: number;
   pnl: ApiPnlResponse | null;
   equityHistory: number[];
+  /** Date-aligned series (same order as equity history from API) — used for trade markers on the curve. */
+  equitySeries?: Array<{ date: string; value: number }>;
+  recentOrders?: ApiOrderRow[];
+  tradesToday?: number;
+  lastTradeMinutes?: number;
   trendState: 'positive' | 'mixed' | 'drawdown';
   isActive: boolean;
   isFlattened: boolean;
@@ -25,6 +31,10 @@ export function PerformancePanel({
   dailyPnL,
   pnl,
   equityHistory,
+  equitySeries = [],
+  recentOrders = [],
+  tradesToday = 0,
+  lastTradeMinutes = 0,
   trendState,
   isActive,
   isFlattened,
@@ -33,6 +43,7 @@ export function PerformancePanel({
 
   const weekN = periodPnL(pnl?.week);
   const monthN = periodPnL(pnl?.month);
+  const todayN = periodPnL(pnl?.today);
   const winRate = pnl?.metrics?.win_rate_days;
   const maxDd = pnl?.metrics?.max_drawdown_pct;
 
@@ -45,6 +56,26 @@ export function PerformancePanel({
     return h.slice(-3);
   }, [equityHistory, horizon]);
 
+  const chartSeries = useMemo(() => {
+    const s = [...equitySeries].filter((x) => x.value > 0);
+    if (s.length <= 1) return s;
+    if (horizon === 'all') return s.slice(-120);
+    if (horizon === 'month') return s.slice(-31);
+    if (horizon === 'week') return s.slice(-8);
+    return s.slice(-3);
+  }, [equitySeries, horizon]);
+
+  const tradeMarkers = useMemo(() => {
+    if (chartSeries.length < 2 || !recentOrders.length) return undefined;
+    const raw = buildEquityTradeMarkers(chartSeries, recentOrders);
+    const n = chartSeries.length;
+    const startIdx = n > 80 ? n - 80 : 0;
+    const effLen = Math.min(80, n);
+    return raw
+      .map((m) => ({ ...m, index: m.index - startIdx }))
+      .filter((m) => m.index >= 0 && m.index < effLen);
+  }, [chartSeries, recentOrders]);
+
   const tabs: { id: Horizon; label: string }[] = [
     { id: 'today', label: 'Today' },
     { id: 'week', label: 'Week' },
@@ -53,7 +84,7 @@ export function PerformancePanel({
   ];
 
   return (
-    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 shrink-0">
+    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 shrink-0">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500">Performance</div>
         <div className="flex gap-1">
@@ -80,7 +111,26 @@ export function PerformancePanel({
           isActive={isActive}
           isFlattened={isFlattened}
           historyValues={chartValues.length > 1 ? chartValues : undefined}
+          tradeMarkers={tradeMarkers}
         />
+      </div>
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-500">
+        <span>
+          PnL today{' '}
+          <span className={todayN >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
+            {isFlattened ? '—' : `${todayN >= 0 ? '+' : ''}£${Math.round(todayN).toLocaleString()}`}
+          </span>
+        </span>
+        <span>
+          Trades today <span className="text-zinc-300 tabular-nums">{isFlattened ? '—' : tradesToday}</span>
+        </span>
+        <span>
+          Last trade{' '}
+          <span className="text-zinc-300 tabular-nums">
+            {isFlattened ? '—' : lastTradeMinutes < 1 ? '<1m' : `${lastTradeMinutes}m ago`}
+          </span>
+        </span>
+        <span className="text-zinc-600">Dots on curve = fill days (green/red ≈ day portfolio Δ)</span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-zinc-400">
         <div>

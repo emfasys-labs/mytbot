@@ -1,40 +1,53 @@
 import { ScrollArea } from '../ui/scroll-area';
 import type { DashboardSnapshot } from '../../lib/api';
+import {
+  OPPORTUNITY_THRESHOLD_HINT,
+  buildFallbackHoldPressure,
+  buildFallbackOpportunities,
+} from '../../lib/dashboardFallbacks';
 
 type Props = {
   snapshot: DashboardSnapshot | null;
   dormant: boolean;
-  /** True when GET /dashboard/snapshot failed while running (often missing X-Dashboard-Token). */
   snapshotFetchFailed?: boolean;
+  positions?: Array<{ symbol: string; change: number }>;
 };
 
-export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = false }: Props) {
-  const opps = (snapshot?.opportunities ?? []) as Array<Record<string, unknown>>;
-  const weakest = (snapshot?.portfolio?.weakest_by_hold_score ?? []) as Array<Record<string, unknown>>;
+export function AllocationCenter({
+  snapshot,
+  dormant,
+  snapshotFetchFailed = false,
+  positions = [],
+}: Props) {
+  const oppsRaw = (snapshot?.opportunities ?? []) as Array<Record<string, unknown>>;
+  const weakestRaw = (snapshot?.portfolio?.weakest_by_hold_score ?? []) as Array<Record<string, unknown>>;
   const instr = (snapshot?.execution_plan?.instructions ?? []) as Array<Record<string, unknown>>;
   const targets = (snapshot?.allocation?.allocation_targets as Array<Record<string, unknown>> | undefined) ?? [];
   const repl = (snapshot?.allocation?.replacement_candidates ?? []) as Array<Record<string, unknown>>;
 
+  const usingOppFallback = !dormant && !snapshotFetchFailed && oppsRaw.length === 0 && snapshot != null;
+  const opps = usingOppFallback ? buildFallbackOpportunities(snapshot, positions) : oppsRaw;
+
+  const usingHoldFallback =
+    !dormant && !snapshotFetchFailed && weakestRaw.length === 0 && positions.length > 0;
+  const weakest = usingHoldFallback ? buildFallbackHoldPressure(positions) : weakestRaw;
+
   return (
-    <div className="flex flex-col gap-3 min-h-0">
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
-        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Capital & targets</div>
+    <div className="flex flex-col gap-2 min-h-0">
+      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Capital & targets</div>
         {dormant ? (
           <div className="text-xs text-zinc-600">Start the system to load allocator data.</div>
         ) : snapshotFetchFailed ? (
           <div className="text-xs text-amber-200/90 leading-relaxed">
-            Snapshot API failed (often 401). Use the same token as the live socket: set{' '}
-            <code className="text-zinc-400">VITE_DASHBOARD_READ_TOKEN</code> in{' '}
-            <code className="text-zinc-400">ui/.env</code>, rebuild, or POST{' '}
-            <code className="text-zinc-400">/auth/dashboard/login</code> so{' '}
-            <code className="text-zinc-400">localStorage.dashboardReadToken</code> is set.
+            Snapshot blocked — use the amber banner to set the read token. Until then, allocator fields stay blank.
           </div>
         ) : !snapshot ? (
           <div className="text-xs text-zinc-600">Loading allocator snapshot…</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
             <div>
-              <div className="text-zinc-500 mb-1">Exposure targets</div>
+              <div className="text-zinc-500 mb-0.5 text-[10px]">Exposure targets</div>
               <div className="text-zinc-300 font-mono text-[10px] space-y-0.5">
                 <div>
                   gross{' '}
@@ -47,8 +60,8 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
               </div>
             </div>
             <div>
-              <div className="text-zinc-500 mb-1">Weights (top)</div>
-              <div className="space-y-1 max-h-[100px] overflow-y-auto">
+              <div className="text-zinc-500 mb-0.5 text-[10px]">Weights (top)</div>
+              <div className="space-y-0.5 max-h-[88px] overflow-y-auto">
                 {targets.slice(0, 8).map((t, i) => (
                   <div key={i} className="flex justify-between gap-2 font-mono text-[10px]">
                     <span className="truncate text-white/90">{String(t.symbol ?? '')}</span>
@@ -62,13 +75,44 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 min-h-0">
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 min-h-[140px]">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Top opportunities</div>
-          {dormant || opps.length === 0 ? (
-            <div className="text-xs text-zinc-600">No ranked opportunities</div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-h-0">
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-[120px]">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Top opportunities</div>
+          {dormant ? (
+            <div className="text-xs text-zinc-600">System off</div>
+          ) : usingOppFallback ? (
+            <>
+              <div className="text-[10px] text-zinc-500 mb-1">
+                No allocator rank this tick (threshold ~{OPPORTUNITY_THRESHOLD_HINT}) — showing next-best from accumulator
+                / positions.
+              </div>
+              <ScrollArea className="h-[140px]">
+                <table className="w-full text-[11px] font-mono">
+                  <thead>
+                    <tr className="text-left text-zinc-500 text-[10px]">
+                      <th className="pb-1">Sym</th>
+                      <th className="pb-1">Score</th>
+                      <th className="pb-1 hidden sm:table-cell">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {opps.slice(0, 12).map((o, i) => (
+                      <tr key={i} className="border-t border-white/5">
+                        <td className="py-0.5 text-white/90">{String(o.symbol ?? '')}</td>
+                        <td className="py-0.5 text-emerald-300/90 tabular-nums">{String(o.opportunity_score ?? '')}</td>
+                        <td className="py-0.5 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
+                          {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 2).join(' · ') : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ScrollArea>
+            </>
+          ) : opps.length === 0 ? (
+            <div className="text-xs text-zinc-600">No opportunities in snapshot.</div>
           ) : (
-            <ScrollArea className="h-[160px]">
+            <ScrollArea className="h-[140px]">
               <table className="w-full text-[11px] font-mono">
                 <thead>
                   <tr className="text-left text-zinc-500 text-[10px]">
@@ -80,9 +124,9 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
                 <tbody>
                   {opps.slice(0, 12).map((o, i) => (
                     <tr key={i} className="border-t border-white/5">
-                      <td className="py-1 text-white/90">{String(o.symbol ?? '')}</td>
-                      <td className="py-1 text-emerald-300/90 tabular-nums">{String(o.opportunity_score ?? '')}</td>
-                      <td className="py-1 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
+                      <td className="py-0.5 text-white/90">{String(o.symbol ?? '')}</td>
+                      <td className="py-0.5 text-emerald-300/90 tabular-nums">{String(o.opportunity_score ?? '')}</td>
+                      <td className="py-0.5 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
                         {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 3).join(' · ') : ''}
                       </td>
                     </tr>
@@ -93,12 +137,38 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
           )}
         </div>
 
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 min-h-[140px]">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Hold pressure</div>
-          {dormant || weakest.length === 0 ? (
-            <div className="text-xs text-zinc-600">No weak holdings flagged</div>
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-[120px]">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Hold pressure</div>
+          {dormant ? (
+            <div className="text-xs text-zinc-600">System off</div>
+          ) : usingHoldFallback ? (
+            <>
+              <div className="text-[10px] text-zinc-500 mb-1">No allocator “weak” list — weakest positions by P&amp;L proxy.</div>
+              <ScrollArea className="h-[140px]">
+                <table className="w-full text-[11px] font-mono">
+                  <thead>
+                    <tr className="text-left text-zinc-500 text-[10px]">
+                      <th className="pb-1">Sym</th>
+                      <th className="pb-1">Hold</th>
+                      <th className="pb-1">Exit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weakest.slice(0, 10).map((w, i) => (
+                      <tr key={i} className="border-t border-white/5">
+                        <td className="py-0.5 text-white/90">{String(w.symbol ?? '')}</td>
+                        <td className="py-0.5 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
+                        <td className="py-0.5 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ScrollArea>
+            </>
+          ) : weakest.length === 0 ? (
+            <div className="text-xs text-zinc-600">No weak holdings flagged.</div>
           ) : (
-            <ScrollArea className="h-[160px]">
+            <ScrollArea className="h-[140px]">
               <table className="w-full text-[11px] font-mono">
                 <thead>
                   <tr className="text-left text-zinc-500 text-[10px]">
@@ -110,9 +180,9 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
                 <tbody>
                   {weakest.slice(0, 10).map((w, i) => (
                     <tr key={i} className="border-t border-white/5">
-                      <td className="py-1 text-white/90">{String(w.symbol ?? '')}</td>
-                      <td className="py-1 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
-                      <td className="py-1 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
+                      <td className="py-0.5 text-white/90">{String(w.symbol ?? '')}</td>
+                      <td className="py-0.5 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
+                      <td className="py-0.5 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -122,15 +192,17 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
         </div>
       </div>
 
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
-        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Planned actions (allocator)</div>
+      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
         {dormant || instr.length === 0 ? (
-          <div className="text-xs text-zinc-600">No instructions this tick</div>
+          <div className="text-xs text-zinc-600">
+            {dormant ? 'System off — no instructions.' : 'No instructions this tick (allocator may be flat or waiting).'}
+          </div>
         ) : (
-          <ScrollArea className="h-[120px]">
-            <ul className="space-y-1 font-mono text-[11px] text-zinc-300">
+          <ScrollArea className="h-[100px]">
+            <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300">
               {instr.slice(0, 14).map((x, i) => (
-                <li key={i} className="flex flex-wrap gap-x-2 border-b border-white/5 pb-1">
+                <li key={i} className="flex flex-wrap gap-x-2 border-b border-white/5 pb-0.5">
                   <span className="text-white/90">{String(x.action ?? '')}</span>
                   <span>{String(x.symbol ?? '')}</span>
                   <span className="text-zinc-500">{String(x.side ?? '')}</span>
@@ -141,7 +213,7 @@ export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = fals
           </ScrollArea>
         )}
         {repl.length > 0 ? (
-          <div className="mt-2 text-[10px] text-zinc-500">
+          <div className="mt-1.5 text-[10px] text-zinc-500">
             Replacements ·{' '}
             {repl.slice(0, 4).map((r, i) => (
               <span key={i} className="mr-2">

@@ -12,6 +12,8 @@ interface EquityLineProps {
   historyValues?: number[];
   /** Shorter viewBox so the chart fits embedded panels without overflowing siblings. */
   compact?: boolean;
+  /** Indices into the rendered series for filled-trade markers (green = positive, red = loss). */
+  tradeMarkers?: Array<{ index: number; positive: boolean }>;
 }
 
 export function EquityLine({
@@ -22,6 +24,7 @@ export function EquityLine({
   isFlattened = false,
   historyValues,
   compact = false,
+  tradeMarkers,
 }: EquityLineProps) {
   const [dataPoints, setDataPoints] = useState<number[]>([]);
 
@@ -91,17 +94,20 @@ export function EquityLine({
   const maxValue = Math.max(...dataPoints);
   const range = maxValue - minValue || 1;
 
-  const points = dataPoints.map((value, index) => {
+  const pointPairs = dataPoints.map((value, index) => {
     const x = padding + (index / (dataPoints.length - 1)) * (width - padding * 2);
     const y = height - padding - ((value - minValue) / range) * (height - padding * 2);
-    return `${x},${y}`;
+    return { x, y };
   });
+
+  const points = pointPairs.map((p) => `${p.x},${p.y}`);
 
   const pathD = `M ${points.join(' L ')}`;
   const areaD = `${pathD} L ${width - padding},${height - padding} L ${padding},${height - padding} Z`;
 
-  const currentX = padding + (width - padding * 2);
-  const currentY = height - padding - ((dataPoints[dataPoints.length - 1] - minValue) / range) * (height - padding * 2);
+  const lastPt = pointPairs[pointPairs.length - 1];
+  const currentX = lastPt?.x ?? padding + (width - padding * 2);
+  const currentY = lastPt?.y ?? height - padding;
 
   return (
     <div className="relative w-full h-full min-h-0 flex items-center justify-center overflow-hidden">
@@ -133,6 +139,15 @@ export function EquityLine({
           animate={{ pathLength: 1 }}
           transition={{ duration: 2, ease: 'easeOut' }}
         />
+
+        {tradeMarkers?.map((m, i) => {
+          const pt = pointPairs[m.index];
+          if (!pt) return null;
+          const fill = m.positive ? 'rgba(74, 222, 128, 0.95)' : 'rgba(248, 113, 113, 0.95)';
+          return (
+            <circle key={`tm-${m.index}-${i}`} cx={pt.x} cy={pt.y} r={3} fill={fill} opacity={0.9} />
+          );
+        })}
 
         {/* Current position dot */}
         <motion.circle

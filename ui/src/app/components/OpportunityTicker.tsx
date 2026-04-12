@@ -17,6 +17,8 @@ interface TickerItem {
 interface OpportunityTickerProps {
   signals: IntelligenceSignalsResponse | null;
   regime: IntelligenceRegimeResponse | null;
+  /** Ranked watchlist (conviction → signals → positions). When set, replaces symbol soup with decision-relevant order. */
+  watchlist?: Array<{ symbol: string; score: number; note: string }>;
 }
 
 function buildItems(signals: IntelligenceSignalsResponse | null): TickerItem[] {
@@ -33,6 +35,12 @@ function buildItems(signals: IntelligenceSignalsResponse | null): TickerItem[] {
     verdict: s.verdict,
     timestamp: s.timestamp,
   }));
+}
+
+function formatRankScore(s: number): string {
+  if (!Number.isFinite(s)) return '—';
+  if (Math.abs(s) <= 1) return `${s >= 0 ? '+' : ''}${s.toFixed(2)}`;
+  return s.toFixed(2);
 }
 
 function TickerCell({ item }: { item: TickerItem }) {
@@ -69,16 +77,17 @@ function TickerCell({ item }: { item: TickerItem }) {
   );
 }
 
-export function OpportunityTicker({ signals, regime }: OpportunityTickerProps) {
+export function OpportunityTicker({ signals, regime, watchlist }: OpportunityTickerProps) {
   const items = buildItems(signals);
   const regimeLabel = regime?.regime?.label;
   const trackRef = useRef<HTMLDivElement>(null);
   const [translateX, setTranslateX] = useState(0);
   const animRef = useRef<number>(0);
   const startRef = useRef<number | null>(null);
-  const speedPx = 40; // px/s
+  const speedPx = 40;
 
   useEffect(() => {
+    if (watchlist?.length) return;
     if (!items.length) return;
     const track = trackRef.current;
     if (!track) return;
@@ -96,12 +105,33 @@ export function OpportunityTicker({ signals, regime }: OpportunityTickerProps) {
       cancelAnimationFrame(animRef.current);
       startRef.current = null;
     };
-  }, [items.length]);
+  }, [items.length, watchlist?.length]);
+
+  if (watchlist && watchlist.length > 0) {
+    return (
+      <div className="border-t border-white/5 py-2 px-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500 shrink-0">Watchlist (ranked)</span>
+        <div className="flex flex-wrap gap-2 min-w-0">
+          {watchlist.map((w, i) => (
+            <span
+              key={`${w.symbol}-${i}`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 tabular-nums"
+            >
+              <span className="text-zinc-500 w-4 text-right">{i + 1}</span>
+              <span className="text-zinc-100 font-medium">{w.symbol}</span>
+              <span className="text-emerald-300/90">{formatRankScore(w.score)}</span>
+              <span className="text-zinc-600 text-[10px] hidden sm:inline">{w.note}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (!items.length) {
     return (
-      <div className="border-t border-white/5 py-2 px-4 text-[11px] text-gray-700 text-center tracking-wide">
-        {regimeLabel ? `Regime: ${regimeLabel} · ` : ''}No active signals
+      <div className="border-t border-white/5 py-2 px-4 text-[11px] text-zinc-600 text-center tracking-wide">
+        {regimeLabel ? `Macro: ${regimeLabel} · ` : ''}No ranked watchlist — waiting for conviction or signals
       </div>
     );
   }

@@ -18,6 +18,24 @@ function dashboardReadHeaders(): Record<string, string> {
   return headers;
 }
 
+/** Persist read token (same value as server `DASHBOARD_READ_TOKEN`) and clear API base cache so the next probe uses the header. */
+export function setDashboardReadToken(token: string | null): void {
+  try {
+    if (token?.trim()) {
+      localStorage.setItem(DASHBOARD_TOKEN_LS_KEY, token.trim());
+    } else {
+      localStorage.removeItem(DASHBOARD_TOKEN_LS_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+  resetApiBaseCache();
+}
+
+export function resetApiBaseCache(): void {
+  _resolvedBase = null;
+}
+
 let _resolvedBase: string | null = null;
 
 async function resolveApiBase(): Promise<string> {
@@ -88,6 +106,21 @@ export type ApiPnlHistoryResponse = {
     date: string;
     portfolio_value?: string;
   }>;
+};
+
+export type ApiOrderRow = {
+  id?: number;
+  timestamp?: string | null;
+  symbol?: string;
+  side?: string;
+  status?: string;
+  filled_quantity?: string | null;
+  avg_fill_price?: string | null;
+  broker?: string | null;
+};
+
+export type ApiOrdersResponse = {
+  orders?: ApiOrderRow[];
 };
 
 export type ApiPositionsResponse = {
@@ -325,6 +358,7 @@ export const api = {
   getIntelligenceRegime: () => getJson<IntelligenceRegimeResponse>('/intelligence/regime'),
   getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
   getDashboardSnapshot: () => getJson<DashboardSnapshot>('/dashboard/snapshot'),
+  getOrders: (limit = 40) => getJson<ApiOrdersResponse>(`/orders?limit=${limit}`),
 };
 
 export function toNumber(v: unknown, fallback = 0): number {

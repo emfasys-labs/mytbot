@@ -10,9 +10,12 @@ import { SignalBrain } from './components/dashboard/SignalBrain';
 import { AllocationCenter } from './components/dashboard/AllocationCenter';
 import { RiskGate } from './components/dashboard/RiskGate';
 import { PerformancePanel } from './components/dashboard/PerformancePanel';
+import { DashboardAuthBanner } from './components/dashboard/DashboardAuthBanner';
 import {
   api,
+  setDashboardReadToken,
   toNumber,
+  type ApiOrderRow,
   type ApiPnlResponse,
   type DashboardSnapshot,
   type SystemState,
@@ -21,6 +24,7 @@ import {
   type IntelligenceRegimeResponse,
   type IntelligenceSignalsResponse,
 } from './lib/api';
+import { buildWatchlistRanked } from './lib/dashboardFallbacks';
 import { eventTimestamp, getWsUrl, type WsTickEvent, type WsTickMessage } from './lib/ws';
 
 type Mode = TradingMode;
@@ -46,6 +50,8 @@ function App() {
   });
   const [dailyPnL, setDailyPnL] = useState(0);
   const [equityHistory, setEquityHistory] = useState<number[]>([]);
+  const [equityHistorySeries, setEquityHistorySeries] = useState<Array<{ date: string; value: number }>>([]);
+  const [recentOrders, setRecentOrders] = useState<ApiOrderRow[]>([]);
   const [newsItems, setNewsItems] = useState<TickerItem[]>([]);
   const [tradesToday, setTradesToday] = useState(0);
   const [lastTradeMinutes, setLastTradeMinutes] = useState(0);
@@ -118,6 +124,8 @@ function App() {
     setSnapshotFetchFailed(false);
     setWsEvents([]);
     setEquityHistory([]);
+    setEquityHistorySeries([]);
+    setRecentOrders([]);
     setTotalCapital(0);
     setDailyPnL(0);
     setTradableCapital(null);
@@ -183,6 +191,7 @@ function App() {
         api.getSystemStatus(),
         api.getNews(30),
         api.getDashboardSnapshot(),
+        api.getOrders(50),
       ]);
 
       const pnl = results[0].status === 'fulfilled' ? results[0].value : null;
@@ -224,6 +233,13 @@ function App() {
         setSnapshotFetchFailed(true);
       }
 
+      if (results[8].status === 'fulfilled' && feedsLive) {
+        const or = results[8].value as { orders?: ApiOrderRow[] };
+        setRecentOrders(or.orders ?? []);
+      } else if (!feedsLive) {
+        setRecentOrders([]);
+      }
+
       const killActive = !!status?.kill_switch;
       if (killActive) {
         setControlState('flatten');
@@ -252,10 +268,11 @@ function App() {
       }
 
       if (feedsLive && hist) {
-        const historyValues = (hist.history || [])
-          .map((x) => toNumber(x.portfolio_value, 0))
-          .filter((v) => v > 0);
-        setEquityHistory(historyValues.length > 1 ? historyValues : []);
+        const series = (hist.history || [])
+          .map((x) => ({ date: String(x.date ?? ''), value: toNumber(x.portfolio_value, 0) }))
+          .filter((x) => x.value > 0);
+        setEquityHistory(series.length > 1 ? series.map((x) => x.value) : []);
+        setEquityHistorySeries(series.length > 1 ? series : []);
       }
 
       if (feedsLive && pos) {
@@ -332,6 +349,22 @@ function App() {
   }, [clearLiveData]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get('dashboard_token')?.trim();
+    if (!t) return;
+    setDashboardReadToken(t);
+    params.delete('dashboard_token');
+    const q = params.toString();
+    window.history.replaceState(
+      {},
+      '',
+      `${window.location.pathname}${q ? `?${q}` : ''}${window.location.hash}`,
+    );
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time token bootstrap from URL
+  }, []);
 
   useEffect(() => {
     if (wsConnected) return;
@@ -458,12 +491,24 @@ function App() {
     return Date.now() - t > 120_000;
   }, [systemState, dashboardSnapshot?.updated_at]);
 
+  const watchlistRanked = useMemo(
+    () => buildWatchlistRanked(dashboardSnapshot, intelligenceSignals, positions),
+    [dashboardSnapshot, intelligenceSignals, positions],
+  );
+
   return (
     <div className="min-h-screen overflow-hidden bg-[#0a0a0a] text-white relative">
       <HapticFeedback />
 
       <div className="w-full h-screen flex flex-col min-h-0">
         <NewsTicker items={newsItems} paused={isFlattened} />
+
+        <DashboardAuthBanner
+          visible={snapshotFetchFailed && systemState === 'running'}
+          onTokenSaved={() => {
+            void refresh();
+          }}
+        />
 
         <LiveStrip
           totalCapital={totalCapital}
@@ -496,6 +541,7 @@ function App() {
                 events={wsEvents}
                 dormant={systemState !== 'running'}
                 snapshotFetchFailed={snapshotFetchFailed}
+                positions={positions}
               />
             </aside>
 
@@ -515,6 +561,7 @@ function App() {
                 snapshot={dashboardSnapshot}
                 dormant={systemState !== 'running'}
                 snapshotFetchFailed={snapshotFetchFailed}
+                positions={positions}
               />
               <div className="flex flex-wrap items-center gap-4 px-1 shrink-0 relative z-[1]">
                 <PositionChips
@@ -539,6 +586,10 @@ function App() {
                 dailyPnL={dailyPnL}
                 pnl={pnlSnapshot}
                 equityHistory={equityHistory}
+                equitySeries={equityHistorySeries}
+                recentOrders={recentOrders}
+                tradesToday={tradesToday}
+                lastTradeMinutes={lastTradeMinutes}
                 trendState={getTrendState()}
                 isActive={isActive}
                 isFlattened={isFlattened}
@@ -551,7 +602,11 @@ function App() {
           </div>
         </div>
 
-        <OpportunityTicker signals={intelligenceSignals} regime={intelligenceRegime} />
+        <OpportunityTicker
+          signals={intelligenceSignals}
+          regime={intelligenceRegime}
+          watchlist={watchlistRanked}
+        />
       </div>
     </div>
   );
