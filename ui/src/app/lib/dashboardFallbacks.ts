@@ -18,12 +18,16 @@ export function parseAccumulatorScore(row: Record<string, unknown>): number {
   return 0;
 }
 
+const SCORE_KEYS = ['opportunity_score', 'priority_score', 'expected_edge'] as const;
+
 export function parseOpportunityRowScore(o: Record<string, unknown>): number {
-  const v = o.opportunity_score;
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = parseFloat(v);
-    if (Number.isFinite(n)) return n;
+  for (const k of SCORE_KEYS) {
+    const v = o[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string') {
+      const n = parseFloat(v);
+      if (Number.isFinite(n)) return n;
+    }
   }
   return 0;
 }

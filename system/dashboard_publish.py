@@ -197,6 +197,7 @@ def serialize_held_positions(portfolio: PortfolioState, *, limit: int = 12) -> d
 
 
 def serialize_strategy_opportunity(o: StrategyOpportunity) -> dict[str, Any]:
+    ps = _d(o.priority_score)
     return {
         "strategy_name": o.strategy_name,
         "symbol": o.symbol,
@@ -204,7 +205,10 @@ def serialize_strategy_opportunity(o: StrategyOpportunity) -> dict[str, Any]:
         "expected_edge": _d(o.expected_edge),
         "confidence": _d(o.confidence),
         "capital_required": _d(o.capital_required),
-        "priority_score": _d(o.priority_score),
+        "priority_score": ps,
+        # Dashboard parity with D015 opportunity rows (UI ranks on opportunity_score).
+        "opportunity_score": ps,
+        "tags": [o.strategy_name] if o.strategy_name else [],
         "created_at": o.created_at.isoformat() if o.created_at else None,
     }
 
@@ -227,9 +231,11 @@ def serialize_held_edges(edges: list[Any], *, limit: int = 12) -> list[dict[str,
 def serialize_coordinator_actions(actions: list[Any], *, limit: int = 20) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for a in actions[:limit]:
+        kind = getattr(a, "kind", "")
         out.append(
             {
-                "kind": getattr(a, "kind", ""),
+                "kind": kind,
+                "action": kind,
                 "symbol": getattr(a, "symbol", ""),
                 "strategy_name": getattr(a, "strategy_name", ""),
                 "capital": _d(getattr(a, "capital", None)),

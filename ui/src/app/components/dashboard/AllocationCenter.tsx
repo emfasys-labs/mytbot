@@ -34,6 +34,9 @@ function rowTooltip(o: Record<string, unknown>): string {
       ? o.raw_score
       : parseOpportunityRowScore(o);
   parts.push(`Raw: ${fmtRawScore(raw)}`);
+  if (o.strategy_name != null && String(o.strategy_name).trim()) {
+    parts.push(`strategy: ${String(o.strategy_name)}`);
+  }
   const comp = o.components;
   if (comp && typeof comp === 'object') {
     for (const [k, v] of Object.entries(comp as Record<string, string>)) {
@@ -42,6 +45,15 @@ function rowTooltip(o: Record<string, unknown>): string {
   }
   if (o.confidence != null) parts.push(`confidence: ${String(o.confidence)}`);
   return parts.join('\n');
+}
+
+function holdRowsAllZero(rows: Array<Record<string, unknown>>): boolean {
+  if (!rows.length) return false;
+  return rows.every((w) => {
+    const h = parseFloat(String(w.hold_score ?? '0'));
+    const e = parseFloat(String(w.exit_pressure ?? '0'));
+    return (Number.isFinite(h) ? h : 0) === 0 && (Number.isFinite(e) ? e : 0) === 0;
+  });
 }
 
 function urgencyLabel(d: number): string {
@@ -56,21 +68,56 @@ export function AllocationCenter({
   snapshotFetchFailed = false,
   positions = [],
 }: Props) {
+  const pathKind = snapshot?.path ?? '';
+  const isGlobalEdge = pathKind === 'global_edge';
+  const portfolio = (snapshot?.portfolio ?? {}) as Record<string, unknown>;
   const oppsRaw = (snapshot?.opportunities ?? []) as Array<Record<string, unknown>>;
   const weakestRaw = (snapshot?.portfolio?.weakest_by_hold_score ?? []) as Array<Record<string, unknown>>;
   const instr = (snapshot?.execution_plan?.instructions ?? []) as Array<Record<string, unknown>>;
-  const targets = (snapshot?.allocation?.allocation_targets as Array<Record<string, unknown>> | undefined) ?? [];
-  const repl = (snapshot?.allocation?.replacement_candidates ?? []) as Array<Record<string, unknown>>;
+  const allocRec =
+    snapshot?.allocation && typeof snapshot.allocation === 'object'
+      ? (snapshot.allocation as Record<string, unknown>)
+      : null;
+  const targets = (allocRec?.allocation_targets as Array<Record<string, unknown>> | undefined) ?? [];
+  const repl = (allocRec?.replacement_candidates ?? []) as Array<Record<string, unknown>>;
   const planRationale = snapshot?.execution_plan?.rationale;
-  const allocRationale = snapshot?.allocation && typeof snapshot.allocation === 'object'
-    ? (snapshot.allocation as Record<string, unknown>).rationale
-    : undefined;
+  const allocRationale = allocRec?.rationale;
+
+  const grossDisplay =
+    allocRec?.gross_exposure_target != null && String(allocRec.gross_exposure_target) !== ''
+      ? String(allocRec.gross_exposure_target)
+      : portfolio.gross_exposure != null && String(portfolio.gross_exposure) !== ''
+        ? String(portfolio.gross_exposure)
+        : '—';
+  const netDisplay =
+    allocRec?.net_exposure_target != null && String(allocRec.net_exposure_target) !== ''
+      ? String(allocRec.net_exposure_target)
+      : portfolio.net_exposure != null && String(portfolio.net_exposure) !== ''
+        ? String(portfolio.net_exposure)
+        : '—';
+  const navDisplay =
+    portfolio.nav != null && String(portfolio.nav) !== '' ? String(portfolio.nav) : null;
+
+  const weightRowsFromOpps = oppsRaw.slice(0, 8).map((o) => ({
+    symbol: o.symbol,
+    target_weight: o.priority_score ?? o.opportunity_score ?? o.expected_edge,
+  }));
+  const weightRows = targets.length > 0 ? targets : isGlobalEdge ? weightRowsFromOpps : [];
+  const weightsSub =
+    targets.length > 0
+      ? 'Weights (top)'
+      : isGlobalEdge && weightRowsFromOpps.length > 0
+        ? 'Strategy rank (priority)'
+        : 'Weights (top)';
 
   const usingOppFallback = !dormant && !snapshotFetchFailed && oppsRaw.length === 0 && snapshot != null;
   const opps = usingOppFallback ? buildFallbackOpportunities(snapshot, positions) : oppsRaw;
 
   const usingHoldFallback =
-    !dormant && !snapshotFetchFailed && weakestRaw.length === 0 && positions.length > 0;
+    !dormant &&
+    !snapshotFetchFailed &&
+    positions.length > 0 &&
+    (weakestRaw.length === 0 || holdRowsAllZero(weakestRaw));
   const weakest = usingHoldFallback ? buildFallbackHoldPressure(positions) : weakestRaw;
 
   const idleCopy =
@@ -82,7 +129,9 @@ export function AllocationCenter({
             : 'No single name cleared the replacement / risk gates for execution.',
           typeof allocRationale === 'string' && String(allocRationale).trim()
             ? String(allocRationale).trim()
-            : `Typical: no opportunity exceeds the replacement threshold (${OPPORTUNITY_THRESHOLD_HINT}) or portfolio is already near targets.`,
+            : planRationale === 'global_edge_coordinator'
+              ? 'On global_edge, D015 allocation targets are not emitted — Capital shows book exposure. Risk gate may still block adds under configured caps.'
+              : `Typical: no opportunity exceeds the replacement threshold (${OPPORTUNITY_THRESHOLD_HINT}) or portfolio is already near targets.`,
         ]
       : null;
 
@@ -120,29 +169,40 @@ export function AllocationCenter({
           <div className="text-xs text-zinc-600">Loading allocator snapshot…</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+            {isGlobalEdge && !allocRec ? (
+              <div className="md:col-span-2 text-[9px] text-zinc-500 leading-snug">
+                Book snapshot — global_edge path does not publish D015 allocator targets. Gross/net below reflect live
+                portfolio state.
+              </div>
+            ) : null}
             <div>
-              <div className="text-zinc-500 mb-0.5 text-[10px]">Exposure targets</div>
+              <div className="text-zinc-500 mb-0.5 text-[10px]">
+                {allocRec ? 'Exposure targets' : 'Exposure (book)'}
+              </div>
               <div className="text-zinc-300 font-mono text-[10px] space-y-0.5">
                 <div>
-                  gross{' '}
-                  <span className="text-white/90">{String(snapshot.allocation?.gross_exposure_target ?? '—')}</span>
+                  gross <span className="text-white/90">{grossDisplay}</span>
                 </div>
                 <div>
-                  net{' '}
-                  <span className="text-white/90">{String(snapshot.allocation?.net_exposure_target ?? '—')}</span>
+                  net <span className="text-white/90">{netDisplay}</span>
                 </div>
+                {navDisplay != null ? (
+                  <div>
+                    nav <span className="text-white/90">{navDisplay}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
             <div>
-              <div className="text-zinc-500 mb-0.5 text-[10px]">Weights (top)</div>
+              <div className="text-zinc-500 mb-0.5 text-[10px]">{weightsSub}</div>
               <div className="space-y-0.5 max-h-[88px] overflow-y-auto">
-                {targets.slice(0, 8).map((t, i) => (
+                {weightRows.slice(0, 8).map((t, i) => (
                   <div key={i} className="flex justify-between gap-2 font-mono text-[10px]">
                     <span className="truncate text-white/90">{String(t.symbol ?? '')}</span>
                     <span className="text-emerald-300/80 tabular-nums">{String(t.target_weight ?? '')}</span>
                   </div>
                 ))}
-                {targets.length === 0 ? <span className="text-zinc-600">—</span> : null}
+                {weightRows.length === 0 ? <span className="text-zinc-600">—</span> : null}
               </div>
             </div>
           </div>
@@ -331,7 +391,7 @@ export function AllocationCenter({
             <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300">
               {instr.slice(0, 14).map((x, i) => (
                 <li key={i} className="flex flex-wrap gap-x-2 border-b border-white/5 pb-0.5">
-                  <span className="text-white/90">{String(x.action ?? '')}</span>
+                  <span className="text-white/90">{String(x.action ?? x.kind ?? '')}</span>
                   <span>{String(x.symbol ?? '')}</span>
                   <span className="text-zinc-500">{String(x.side ?? '')}</span>
                   <span className="text-emerald-300/80 tabular-nums">{String(x.target_notional ?? '')}</span>
