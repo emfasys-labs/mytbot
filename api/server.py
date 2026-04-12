@@ -240,7 +240,7 @@ async def get_status():
         "system_state": system_state,
         "mode": APP_ENV,
         "paper_mode": APP_ENV != "live",
-        "kill_switch": bool(getattr(risk_engine, "is_killed", False)),
+        "kill_switch": bool(getattr(risk_engine, "is_killed", False)) if risk_engine is not None else False,
         "connected_brokers": connected_brokers or orch_brokers,
         "active_strategies": strategies,
         "runtime": runtime,

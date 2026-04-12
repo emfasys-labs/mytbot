@@ -170,15 +170,26 @@ class Orchestrator:
 
             self._set_state(SystemState.STOPPING)
 
-            # 1. Stop trading loop
-            if self._trading_loop is not None:
+            # Capture execution engine before clearing the loop (loop holds the live instance).
+            tl = self._trading_loop
+            execution_engine = getattr(tl, "execution_engine", None) if tl is not None else None
+
+            # 1. Stop trading loop (no new signals / iterations)
+            if tl is not None:
                 try:
-                    await self._trading_loop.stop()
+                    await tl.stop()
                 except Exception as exc:
                     logger.warning("orchestrator | trading loop stop error: {}", exc)
                 self._trading_loop = None
 
-            # 2. Cancel pipeline
+            # 2. Cancel open orders while broker adapters are still connected
+            if execution_engine is not None:
+                try:
+                    await execution_engine.cancel_all()
+                except Exception as exc:
+                    logger.warning("orchestrator | cancel_all error: {}", exc)
+
+            # 3. Stop data pipeline task
             if self._pipeline_task is not None and not self._pipeline_task.done():
                 self._pipeline_task.cancel()
                 try:
@@ -187,18 +198,20 @@ class Orchestrator:
                     pass
                 self._pipeline_task = None
 
-            # 3. Cancel all open orders via execution engine kill switch
-            if self._trading_loop and self._trading_loop.execution_engine:
-                try:
-                    await self._trading_loop.execution_engine.cancel_all()
-                except Exception as exc:
-                    logger.warning("orchestrator | cancel_all error: {}", exc)
-
-            # 4. Disconnect brokers
+            # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
                 await self._broker_manager.disconnect_all()
             except Exception as exc:
                 logger.warning("orchestrator | broker disconnect error: {}", exc)
+
+            # 5. Drop stale globals so /status and kill-switch paths do not see a dead engine
+            try:
+                from control.runtime import set_execution_engine, set_risk_engine
+
+                set_execution_engine(None)
+                set_risk_engine(None)
+            except Exception as exc:
+                logger.warning("orchestrator | runtime registry clear error: {}", exc)
 
             self._set_state(SystemState.OFF)
             logger.info("orchestrator | OFF — all components stopped")
