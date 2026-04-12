@@ -1,10 +1,19 @@
+import { motion } from 'motion/react';
 import { ScrollArea } from '../ui/scroll-area';
 import type { DashboardSnapshot } from '../../lib/api';
 import {
   OPPORTUNITY_THRESHOLD_HINT,
   buildFallbackHoldPressure,
   buildFallbackOpportunities,
+  parseOpportunityRowScore,
 } from '../../lib/dashboardFallbacks';
+import {
+  arrowForRaw,
+  bandFromDisplay01,
+  convictionTextClass,
+  displayConviction01,
+  fmtRawScore,
+} from '../../lib/scoreDisplay';
 
 type Props = {
   snapshot: DashboardSnapshot | null;
@@ -12,6 +21,34 @@ type Props = {
   snapshotFetchFailed?: boolean;
   positions?: Array<{ symbol: string; change: number }>;
 };
+
+function rowDisplay01(o: Record<string, unknown>): number {
+  if (typeof o.display01 === 'number' && Number.isFinite(o.display01)) return o.display01;
+  return displayConviction01(parseOpportunityRowScore(o));
+}
+
+function rowTooltip(o: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const raw =
+    typeof o.raw_score === 'number'
+      ? o.raw_score
+      : parseOpportunityRowScore(o);
+  parts.push(`Raw: ${fmtRawScore(raw)}`);
+  const comp = o.components;
+  if (comp && typeof comp === 'object') {
+    for (const [k, v] of Object.entries(comp as Record<string, string>)) {
+      parts.push(`${k.replace(/_/g, ' ')}: ${v}`);
+    }
+  }
+  if (o.confidence != null) parts.push(`confidence: ${String(o.confidence)}`);
+  return parts.join('\n');
+}
+
+function urgencyLabel(d: number): string {
+  if (d >= 0.7) return 'HIGH';
+  if (d >= 0.45) return 'MEDIUM';
+  return 'LOW';
+}
 
 export function AllocationCenter({
   snapshot,
@@ -24,6 +61,10 @@ export function AllocationCenter({
   const instr = (snapshot?.execution_plan?.instructions ?? []) as Array<Record<string, unknown>>;
   const targets = (snapshot?.allocation?.allocation_targets as Array<Record<string, unknown>> | undefined) ?? [];
   const repl = (snapshot?.allocation?.replacement_candidates ?? []) as Array<Record<string, unknown>>;
+  const planRationale = snapshot?.execution_plan?.rationale;
+  const allocRationale = snapshot?.allocation && typeof snapshot.allocation === 'object'
+    ? (snapshot.allocation as Record<string, unknown>).rationale
+    : undefined;
 
   const usingOppFallback = !dormant && !snapshotFetchFailed && oppsRaw.length === 0 && snapshot != null;
   const opps = usingOppFallback ? buildFallbackOpportunities(snapshot, positions) : oppsRaw;
@@ -32,8 +73,41 @@ export function AllocationCenter({
     !dormant && !snapshotFetchFailed && weakestRaw.length === 0 && positions.length > 0;
   const weakest = usingHoldFallback ? buildFallbackHoldPressure(positions) : weakestRaw;
 
+  const idleCopy =
+    !dormant && instr.length === 0 && snapshot
+      ? [
+          'No allocator instructions this tick.',
+          typeof planRationale === 'string' && planRationale.trim()
+            ? planRationale.trim()
+            : 'No single name cleared the replacement / risk gates for execution.',
+          typeof allocRationale === 'string' && String(allocRationale).trim()
+            ? String(allocRationale).trim()
+            : `Typical: no opportunity exceeds the replacement threshold (${OPPORTUNITY_THRESHOLD_HINT}) or portfolio is already near targets.`,
+        ]
+      : null;
+
   return (
     <div className="flex flex-col gap-2 min-h-0">
+      {repl.length > 0 ? (
+        <div className="rounded-xl border border-amber-500/25 bg-gradient-to-br from-amber-950/40 to-black/40 p-2.5 shadow-[0_0_24px_rgba(251,191,36,0.06)]">
+          <div className="text-[10px] uppercase tracking-widest text-amber-200/90 mb-1.5">Replacement view</div>
+          <ul className="space-y-1.5 text-[11px] font-mono text-zinc-200">
+            {repl.slice(0, 6).map((r, i) => (
+              <li key={i} className="flex flex-wrap items-baseline gap-x-2 border-b border-white/5 pb-1">
+                <span className="text-rose-300/90">SELL</span>
+                <span>{String(r.old_symbol ?? '')}</span>
+                <span className="text-zinc-500">→</span>
+                <span className="text-emerald-300/90">BUY</span>
+                <span>{String(r.new_symbol ?? '')}</span>
+                {r.recommended_action != null ? (
+                  <span className="text-zinc-500 text-[10px]">({String(r.recommended_action)})</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Capital & targets</div>
         {dormant ? (
@@ -83,28 +157,51 @@ export function AllocationCenter({
           ) : usingOppFallback ? (
             <>
               <div className="text-[10px] text-zinc-500 mb-1">
-                No allocator rank this tick (threshold ~{OPPORTUNITY_THRESHOLD_HINT}) — showing next-best from accumulator
-                / positions.
+                No allocator rank this tick (threshold ~{OPPORTUNITY_THRESHOLD_HINT}) — next-best from accumulator /
+                book.
               </div>
-              <ScrollArea className="h-[140px]">
+              <ScrollArea className="h-[150px]">
                 <table className="w-full text-[11px] font-mono">
                   <thead>
                     <tr className="text-left text-zinc-500 text-[10px]">
                       <th className="pb-1">Sym</th>
                       <th className="pb-1">Score</th>
-                      <th className="pb-1 hidden sm:table-cell">Source</th>
+                      <th className="pb-1 hidden sm:table-cell">Stance</th>
+                      <th className="pb-1 hidden md:table-cell">Urgency</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {opps.slice(0, 12).map((o, i) => (
-                      <tr key={i} className="border-t border-white/5">
-                        <td className="py-0.5 text-white/90">{String(o.symbol ?? '')}</td>
-                        <td className="py-0.5 text-emerald-300/90 tabular-nums">{String(o.opportunity_score ?? '')}</td>
-                        <td className="py-0.5 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
-                          {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 2).join(' · ') : ''}
-                        </td>
-                      </tr>
-                    ))}
+                    {opps.slice(0, 12).map((o, i) => {
+                      const d = rowDisplay01(o);
+                      const raw = parseOpportunityRowScore(o);
+                      const tags = (Array.isArray(o.tags) ? o.tags : []) as string[];
+                      const isFirst = i === 0;
+                      return (
+                        <motion.tr
+                          key={i}
+                          title={rowTooltip(o)}
+                          className={`border-t border-white/5 ${isFirst ? 'bg-emerald-500/[0.07]' : ''}`}
+                          initial={isFirst ? { backgroundColor: 'rgba(16,185,129,0.12)' } : undefined}
+                          animate={{ backgroundColor: isFirst ? 'rgba(16,185,129,0.07)' : 'transparent' }}
+                          transition={{ duration: 0.6 }}
+                        >
+                          <td className={`py-1 text-white/90 ${isFirst ? 'font-semibold' : ''}`}>
+                            {String(o.symbol ?? '')}
+                          </td>
+                          <td
+                            className={`py-1 tabular-nums ${convictionTextClass(d, true)}`}
+                          >
+                            {d.toFixed(2)} {arrowForRaw(raw)}
+                          </td>
+                          <td className="py-1 text-zinc-400 truncate max-w-[100px] hidden sm:table-cell">
+                            {tags[0] ?? '—'}
+                          </td>
+                          <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
+                            {urgencyLabel(d)} · {bandFromDisplay01(d)}
+                          </td>
+                        </motion.tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </ScrollArea>
@@ -112,25 +209,44 @@ export function AllocationCenter({
           ) : opps.length === 0 ? (
             <div className="text-xs text-zinc-600">No opportunities in snapshot.</div>
           ) : (
-            <ScrollArea className="h-[140px]">
+            <ScrollArea className="h-[150px]">
               <table className="w-full text-[11px] font-mono">
                 <thead>
                   <tr className="text-left text-zinc-500 text-[10px]">
                     <th className="pb-1">Sym</th>
                     <th className="pb-1">Score</th>
                     <th className="pb-1 hidden sm:table-cell">Tags</th>
+                    <th className="pb-1 hidden md:table-cell">Urgency</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {opps.slice(0, 12).map((o, i) => (
-                    <tr key={i} className="border-t border-white/5">
-                      <td className="py-0.5 text-white/90">{String(o.symbol ?? '')}</td>
-                      <td className="py-0.5 text-emerald-300/90 tabular-nums">{String(o.opportunity_score ?? '')}</td>
-                      <td className="py-0.5 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
-                        {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 3).join(' · ') : ''}
-                      </td>
-                    </tr>
-                  ))}
+                  {opps.slice(0, 12).map((o, i) => {
+                    const d = rowDisplay01(o);
+                    const raw = parseOpportunityRowScore(o);
+                    const isFirst = i === 0;
+                    return (
+                      <motion.tr
+                        key={i}
+                        title={rowTooltip(o)}
+                        className={`border-t border-white/5 ${isFirst ? 'bg-emerald-500/[0.07]' : ''}`}
+                          initial={isFirst ? { backgroundColor: 'rgba(16,185,129,0.1)' } : undefined}
+                          animate={{ backgroundColor: isFirst ? 'rgba(16,185,129,0.07)' : 'transparent' }}
+                      >
+                        <td className={`py-1 text-white/90 ${isFirst ? 'font-semibold' : ''}`}>
+                          {String(o.symbol ?? '')}
+                        </td>
+                        <td className={`py-1 tabular-nums ${convictionTextClass(d, true)}`}>
+                          {d.toFixed(2)} {arrowForRaw(raw)}
+                        </td>
+                        <td className="py-1 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
+                          {Array.isArray(o.tags) ? (o.tags as string[]).slice(0, 3).join(' · ') : ''}
+                        </td>
+                        <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
+                          {urgencyLabel(d)}
+                        </td>
+                      </motion.tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </ScrollArea>
@@ -143,8 +259,10 @@ export function AllocationCenter({
             <div className="text-xs text-zinc-600">System off</div>
           ) : usingHoldFallback ? (
             <>
-              <div className="text-[10px] text-zinc-500 mb-1">No allocator “weak” list — weakest positions by P&amp;L proxy.</div>
-              <ScrollArea className="h-[140px]">
+              <div className="text-[10px] text-zinc-500 mb-1">
+                Allocator weak list empty — spread from book P&amp;L proxy (hold vs exit tension).
+              </div>
+              <ScrollArea className="h-[150px]">
                 <table className="w-full text-[11px] font-mono">
                   <thead>
                     <tr className="text-left text-zinc-500 text-[10px]">
@@ -168,7 +286,7 @@ export function AllocationCenter({
           ) : weakest.length === 0 ? (
             <div className="text-xs text-zinc-600">No weak holdings flagged.</div>
           ) : (
-            <ScrollArea className="h-[140px]">
+            <ScrollArea className="h-[150px]">
               <table className="w-full text-[11px] font-mono">
                 <thead>
                   <tr className="text-left text-zinc-500 text-[10px]">
@@ -179,7 +297,7 @@ export function AllocationCenter({
                 </thead>
                 <tbody>
                   {weakest.slice(0, 10).map((w, i) => (
-                    <tr key={i} className="border-t border-white/5">
+                    <tr key={i} className="border-t border-white/5" title={String(w.symbol ?? '')}>
                       <td className="py-0.5 text-white/90">{String(w.symbol ?? '')}</td>
                       <td className="py-0.5 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
                       <td className="py-0.5 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
@@ -195,8 +313,18 @@ export function AllocationCenter({
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
         {dormant || instr.length === 0 ? (
-          <div className="text-xs text-zinc-600">
-            {dormant ? 'System off — no instructions.' : 'No instructions this tick (allocator may be flat or waiting).'}
+          <div className="text-xs text-zinc-500 space-y-1.5">
+            {dormant ? (
+              <p>System off — no instructions.</p>
+            ) : idleCopy ? (
+              <ul className="list-disc pl-4 space-y-1 font-mono text-[10px] text-zinc-400">
+                {idleCopy.map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-zinc-600">Waiting for allocator snapshot…</p>
+            )}
           </div>
         ) : (
           <ScrollArea className="h-[100px]">
@@ -212,16 +340,6 @@ export function AllocationCenter({
             </ul>
           </ScrollArea>
         )}
-        {repl.length > 0 ? (
-          <div className="mt-1.5 text-[10px] text-zinc-500">
-            Replacements ·{' '}
-            {repl.slice(0, 4).map((r, i) => (
-              <span key={i} className="mr-2">
-                {String(r.old_symbol)}→{String(r.new_symbol)} ({String(r.recommended_action ?? '')})
-              </span>
-            ))}
-          </div>
-        ) : null}
       </div>
     </div>
   );

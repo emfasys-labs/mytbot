@@ -24,8 +24,12 @@ function normalizeReason(raw: string | undefined): string {
   return raw.replace(/^Failed:\s*/i, '').replace(/^rejected:\s*/i, '').trim();
 }
 
-function humanizeReason(code: string): string {
+function humanizeReason(code: string, rawFull: string): string {
   const k = code.toLowerCase().replace(/\s+/g, '_');
+  const low = rawFull.toLowerCase();
+  if (k.includes('asset_class') || low.includes('crypto') || low.includes('asset class')) {
+    return 'Asset-class bucket is at its configured cap (e.g. max crypto vs equity allocation).';
+  }
   return REASON_LABEL[k] ?? REASON_LABEL[code] ?? REASON_LABEL.default;
 }
 
@@ -72,7 +76,7 @@ export function RiskGate({ signals, dormant }: Props) {
                   {rejected.map((s) => {
                     const raw = s.risk_reason || s.verdict || '';
                     const code = normalizeReason(raw) || raw;
-                    const explain = humanizeReason(code);
+                    const explain = humanizeReason(code, raw);
                     return (
                       <li key={s.id} className="text-[11px] border-b border-white/5 pb-2">
                         <div className="text-white/90">

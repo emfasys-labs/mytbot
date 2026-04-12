@@ -1,43 +1,29 @@
+import { motion } from 'motion/react';
 import { ScrollArea } from '../ui/scroll-area';
 import type { DashboardSnapshot } from '../../lib/api';
 import type { WsTickEvent } from '../../lib/ws';
+import { bullishBearishFromSnapshot, parseAccumulatorScore } from '../../lib/dashboardFallbacks';
 import { formatWsEventLine } from '../../lib/ws';
-import { convictionRowsFromSnapshot, parseAccumulatorScore } from '../../lib/dashboardFallbacks';
+import {
+  arrowForRaw,
+  convictionTextClass,
+  displayConviction01,
+  fmtRawScore,
+} from '../../lib/scoreDisplay';
 
 type Props = {
   snapshot: DashboardSnapshot | null;
   events: WsTickEvent[];
   dormant: boolean;
   snapshotFetchFailed?: boolean;
-  /** When conviction is empty, show position-based stand-ins. */
   positions?: Array<{ symbol: string; change: number }>;
 };
 
-function scoreCell(row: Record<string, unknown>): string {
-  const s = row.score;
-  if (typeof s === 'string') return s;
-  if (typeof s === 'number') return String(s);
-  return '—';
-}
-
-function scoreClass(row: Record<string, unknown>): string {
-  const d = String(row.direction ?? '').toLowerCase();
-  if (d === 'bullish' || d === 'long') return 'text-emerald-300/90';
-  if (d === 'bearish' || d === 'short') return 'text-rose-300/90';
-  const v = parseAccumulatorScore(row);
-  if (v > 0.05) return 'text-emerald-300/90';
-  if (v < -0.05) return 'text-rose-300/90';
-  return 'text-zinc-300';
-}
-
-function arrowForRow(row: Record<string, unknown>): string {
-  const d = String(row.direction ?? '').toLowerCase();
-  if (d === 'bullish' || d === 'long') return '↑';
-  if (d === 'bearish' || d === 'short') return '↓';
-  const v = parseAccumulatorScore(row);
-  if (v > 0.02) return '↑';
-  if (v < -0.02) return '↓';
-  return '·';
+function scoreLine(row: Record<string, unknown>): string {
+  const raw = parseAccumulatorScore(row);
+  const d = displayConviction01(raw);
+  const arrow = arrowForRaw(raw);
+  return `${d.toFixed(2)} ${arrow}`;
 }
 
 export function SignalBrain({
@@ -47,14 +33,16 @@ export function SignalBrain({
   snapshotFetchFailed = false,
   positions = [],
 }: Props) {
-  let rows = convictionRowsFromSnapshot(snapshot);
-  const usingPositionFallback = !dormant && rows.length === 0 && positions.length > 0;
+  let { bullish, bearish } = bullishBearishFromSnapshot(snapshot);
+  const usingPositionFallback = !dormant && bullish.length === 0 && bearish.length === 0 && positions.length > 0;
   if (usingPositionFallback) {
-    rows = positions.slice(0, 8).map((p) => ({
+    const posRows = positions.slice(0, 8).map((p) => ({
       symbol: p.symbol,
-      score: (p.change / 100).toFixed(3),
+      score: String((p.change / 100).toFixed(4)),
       direction: p.change >= 0 ? 'long' : 'short',
     })) as Array<Record<string, unknown>>;
+    bullish = posRows.filter((r) => parseAccumulatorScore(r) >= 0).slice(0, 6);
+    bearish = posRows.filter((r) => parseAccumulatorScore(r) < 0).slice(0, 6);
   }
 
   const lines: string[] = [];
@@ -63,6 +51,22 @@ export function SignalBrain({
     if (line) lines.push(line);
     if (lines.length >= 18) break;
   }
+
+  const Row = ({ row, positive }: { row: Record<string, unknown>; positive: boolean }) => {
+    const raw = parseAccumulatorScore(row);
+    const d = displayConviction01(raw);
+    return (
+      <div
+        className="flex justify-between gap-2 items-baseline"
+        title={`Raw net: ${fmtRawScore(raw)} · display: ${d.toFixed(2)}`}
+      >
+        <span className="text-white/90 truncate">{String(row.symbol ?? '')}</span>
+        <span className={`${convictionTextClass(d, positive)} shrink-0 tabular-nums font-medium`}>
+          {scoreLine(row)}
+        </span>
+      </div>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0 rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
@@ -73,29 +77,51 @@ export function SignalBrain({
         </div>
       ) : null}
 
-      <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-1">Top conviction</div>
-      <div className="space-y-0.5 mb-3 font-mono text-[11px] border-b border-white/5 pb-2">
+      <div className="text-[10px] uppercase tracking-wider text-emerald-600/90 mb-1">Top conviction</div>
+      <div className="space-y-0.5 mb-2 font-mono text-[11px] border-b border-white/5 pb-2 min-h-[4.5rem]">
         {dormant ? (
           <div className="text-zinc-600">System off — no live memory</div>
-        ) : rows.length === 0 ? (
-          <div className="text-zinc-600">No ranked conviction yet — start the loop or check data pipeline.</div>
+        ) : bullish.length === 0 ? (
+          <div className="text-zinc-600">No bullish edge in view.</div>
         ) : (
-          rows.map((r, i) => (
-            <div key={`${String(r.symbol)}-${i}`} className="flex justify-between gap-2 items-baseline">
-              <span className="text-white/90 truncate">{String(r.symbol ?? '')}</span>
-              <span className={`${scoreClass(r)} shrink-0 tabular-nums`}>
-                {scoreCell(r)} {arrowForRow(r)}
-              </span>
-            </div>
+          bullish.map((r, i) => (
+            <motion.div
+              key={`bull-${String(r.symbol)}-${i}`}
+              initial={{ opacity: 0, x: -4 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: i * 0.03 }}
+            >
+              <Row row={r} positive />
+            </motion.div>
           ))
         )}
-        {usingPositionFallback ? (
-          <div className="text-[9px] text-zinc-600 pt-1">Showing positions as proxy — accumulator empty.</div>
-        ) : null}
       </div>
 
+      <div className="text-[10px] uppercase tracking-wider text-rose-600/90 mb-1">Weakest</div>
+      <div className="space-y-0.5 mb-3 font-mono text-[11px] border-b border-white/5 pb-2 min-h-[4.5rem]">
+        {dormant ? (
+          <div className="text-zinc-600">—</div>
+        ) : bearish.length === 0 ? (
+          <div className="text-zinc-600">No bearish edge in view.</div>
+        ) : (
+          bearish.map((r, i) => (
+            <motion.div
+              key={`bear-${String(r.symbol)}-${i}`}
+              initial={{ opacity: 0, x: -4 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: i * 0.03 }}
+            >
+              <Row row={r} positive={false} />
+            </motion.div>
+          ))
+        )}
+      </div>
+      {usingPositionFallback ? (
+        <div className="text-[9px] text-zinc-600 mb-2">Book proxy — accumulator empty.</div>
+      ) : null}
+
       <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-1">Live flow</div>
-      <ScrollArea className="h-[min(200px,28vh)] rounded border border-white/5 bg-black/20">
+      <ScrollArea className="h-[min(180px,26vh)] rounded border border-white/5 bg-black/20">
         <div className="p-2 space-y-1 font-mono text-[10px] text-zinc-400">
           {lines.length === 0 ? (
             <div className="text-zinc-600">
