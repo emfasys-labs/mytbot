@@ -35,14 +35,10 @@ export function fmtScore01(d: number): string {
   return displayConviction01(d).toFixed(2);
 }
 
-/** Raw value for tooltips — avoids meaningless 0.0000 walls. */
+/** Raw value for tooltips (max two decimal places, same as rest of dashboard). */
 export function fmtRawScore(raw: number): string {
   const x = Number.isFinite(raw) ? raw : 0;
-  const a = Math.abs(x);
-  if (a === 0) return '0';
-  if (a >= 0.01) return x.toFixed(3);
-  if (a >= 0.0001) return x.toFixed(4);
-  return x.toExponential(2);
+  return x.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 0 });
 }
 
 export function arrowForRaw(raw: number): string {

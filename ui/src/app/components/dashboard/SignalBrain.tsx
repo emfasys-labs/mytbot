@@ -38,7 +38,7 @@ export function SignalBrain({
   if (usingPositionFallback) {
     const posRows = positions.slice(0, 8).map((p) => ({
       symbol: p.symbol,
-      score: String((p.change / 100).toFixed(4)),
+      score: String((p.change / 100).toFixed(2)),
       direction: p.change >= 0 ? 'long' : 'short',
     })) as Array<Record<string, unknown>>;
     bullish = posRows.filter((r) => parseAccumulatorScore(r) >= 0).slice(0, 6);

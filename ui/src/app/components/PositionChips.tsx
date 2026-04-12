@@ -52,7 +52,7 @@ export function PositionChips({ positions, isFlattened = false, onHaptic }: Posi
               <TrendingDown size={14} strokeWidth={2} />
             )}
             <span>
-              {isPositive ? '+' : ''}{position.change.toFixed(1)}%
+              {isPositive ? '+' : ''}{position.change.toFixed(2)}%
             </span>
           </motion.button>
         );

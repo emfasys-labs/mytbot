@@ -61,14 +61,14 @@ function TickerCell({ item }: { item: TickerItem }) {
       <span className="text-gray-500">·</span>
       <span className="text-gray-500 capitalize">{item.strategy.replace(/_/g, ' ')}</span>
       <span className="text-gray-500">·</span>
-      <span className="text-gray-400 tabular-nums">conf {(item.confidence * 100).toFixed(0)}%</span>
+      <span className="text-gray-400 tabular-nums">conf {(item.confidence * 100).toFixed(2)}%</span>
       <span className="text-gray-500">·</span>
       <span className={`font-medium ${approved ? 'text-emerald-400/70' : 'text-rose-400/70'}`}>
         {approved ? '✓ approved' : '✕ vetoed'}
       </span>
       {item.qualityScore !== null && (
         <span className="text-gray-600 tabular-nums">
-          Q{Math.round(item.qualityScore * 100)}
+          Q{(item.qualityScore * 100).toFixed(2)}
         </span>
       )}
       {age && <span className="text-gray-700">{age}</span>}

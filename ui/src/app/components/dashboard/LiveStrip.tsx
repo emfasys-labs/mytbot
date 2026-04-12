@@ -1,14 +1,10 @@
 import type { DashboardSnapshot, DiscoverySummaryResponse, SystemState, TradingMode } from '../../lib/api';
+import { fmtDashMoneySigned } from '../../lib/dashboardFormat';
 import { MasterControl } from '../MasterControl';
 import { ModeSelector } from '../ModeSelector';
 
 type BrokerRow = { configured: boolean; connected: boolean; balance_ready?: boolean };
 type ControlState = 'live' | 'pause' | 'flatten';
-
-function fmtMoney(n: number, currency = '£'): string {
-  const sign = n < 0 ? '−' : '';
-  return `${sign}${currency}${Math.abs(Math.round(n)).toLocaleString()}`;
-}
 
 type Props = {
   totalCapital: number;
@@ -67,7 +63,7 @@ export function LiveStrip({
         <div className="flex items-baseline gap-2">
           <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
           <span className="text-lg font-light text-white tabular-nums">
-            {isFlattened ? '—' : fmtMoney(totalCapital)}
+            {isFlattened ? '—' : fmtDashMoneySigned(totalCapital)}
           </span>
         </div>
         <div className="h-4 w-px bg-white/10 hidden sm:block" />
@@ -75,19 +71,19 @@ export function LiveStrip({
           <span>
             <span className="text-zinc-500">Today </span>
             <span className={dailyPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'} tabular-nums>
-              {isFlattened ? '—' : `${dailyPnL >= 0 ? '+' : ''}${fmtMoney(dailyPnL)}`}
+              {isFlattened ? '—' : `${dailyPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(dailyPnL)}`}
             </span>
           </span>
           <span>
             <span className="text-zinc-500">Week </span>
             <span className={weekPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
-              {isFlattened ? '—' : `${weekPnL >= 0 ? '+' : ''}${fmtMoney(weekPnL)}`}
+              {isFlattened ? '—' : `${weekPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(weekPnL)}`}
             </span>
           </span>
           <span>
             <span className="text-zinc-500">Month </span>
             <span className={monthPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
-              {isFlattened ? '—' : `${monthPnL >= 0 ? '+' : ''}${fmtMoney(monthPnL)}`}
+              {isFlattened ? '—' : `${monthPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(monthPnL)}`}
             </span>
           </span>
         </div>

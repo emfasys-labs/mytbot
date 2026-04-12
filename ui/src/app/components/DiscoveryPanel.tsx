@@ -112,9 +112,9 @@ export function DiscoveryPanel({ summary, anomalies, dormant }: DiscoveryPanelPr
                   {a.symbol}
                 </span>
                 <span className={`text-xs tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {isUp ? '+' : ''}{move.toFixed(1)}%
+                  {isUp ? '+' : ''}{move.toFixed(2)}%
                 </span>
-                <span className="text-[10px] text-gray-500 ml-auto tabular-nums">z={z.toFixed(1)}</span>
+                <span className="text-[10px] text-gray-500 ml-auto tabular-nums">z={z.toFixed(2)}</span>
                 {hot && <span className="text-[10px]">🔥</span>}
               </motion.div>
             );

@@ -15,6 +15,7 @@ import {
   fmtRawScore,
 } from '../../lib/scoreDisplay';
 import { formatCoordinatorKind } from '../../lib/coordinatorLabels';
+import { fmtDashNum } from '../../lib/dashboardFormat';
 
 type Props = {
   snapshot: DashboardSnapshot | null;
@@ -96,20 +97,23 @@ export function AllocationCenter({
   const planRationale = snapshot?.execution_plan?.rationale;
   const allocRationale = allocRec?.rationale;
 
-  const grossDisplay =
+  const grossRaw =
     allocRec?.gross_exposure_target != null && String(allocRec.gross_exposure_target) !== ''
-      ? String(allocRec.gross_exposure_target)
+      ? allocRec.gross_exposure_target
       : portfolio.gross_exposure != null && String(portfolio.gross_exposure) !== ''
-        ? String(portfolio.gross_exposure)
-        : '—';
-  const netDisplay =
+        ? portfolio.gross_exposure
+        : null;
+  const grossDisplay = grossRaw == null ? '—' : fmtDashNum(grossRaw);
+  const netRaw =
     allocRec?.net_exposure_target != null && String(allocRec.net_exposure_target) !== ''
-      ? String(allocRec.net_exposure_target)
+      ? allocRec.net_exposure_target
       : portfolio.net_exposure != null && String(portfolio.net_exposure) !== ''
-        ? String(portfolio.net_exposure)
-        : '—';
-  const navDisplay =
-    portfolio.nav != null && String(portfolio.nav) !== '' ? String(portfolio.nav) : null;
+        ? portfolio.net_exposure
+        : null;
+  const netDisplay = netRaw == null ? '—' : fmtDashNum(netRaw);
+  const navRaw =
+    portfolio.nav != null && String(portfolio.nav) !== '' ? portfolio.nav : null;
+  const navDisplay = navRaw == null ? null : fmtDashNum(navRaw);
 
   const weightRowsFromOpps = oppsRaw.slice(0, 8).map((o) => ({
     symbol: o.symbol,
@@ -212,7 +216,7 @@ export function AllocationCenter({
                 {weightRows.slice(0, 8).map((t, i) => (
                   <div key={i} className="flex justify-between gap-2 font-mono text-[10px]">
                     <span className="truncate text-white/90">{String(t.symbol ?? '')}</span>
-                    <span className="text-emerald-300/80 tabular-nums">{String(t.target_weight ?? '')}</span>
+                    <span className="text-emerald-300/80 tabular-nums">{fmtDashNum(t.target_weight)}</span>
                   </div>
                 ))}
                 {weightRows.length === 0 ? <span className="text-zinc-600">—</span> : null}
@@ -347,8 +351,8 @@ export function AllocationCenter({
                     {weakest.slice(0, 10).map((w, i) => (
                       <tr key={i} className="border-t border-white/5">
                         <td className="py-0.5 text-white/90">{String(w.symbol ?? '')}</td>
-                        <td className="py-0.5 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
-                        <td className="py-0.5 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
+                        <td className="py-0.5 text-zinc-300 tabular-nums">{fmtDashNum(w.hold_score)}</td>
+                        <td className="py-0.5 text-amber-300/80 tabular-nums">{fmtDashNum(w.exit_pressure)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -371,8 +375,8 @@ export function AllocationCenter({
                   {weakest.slice(0, 10).map((w, i) => (
                     <tr key={i} className="border-t border-white/5" title={String(w.symbol ?? '')}>
                       <td className="py-0.5 text-white/90">{String(w.symbol ?? '')}</td>
-                      <td className="py-0.5 text-zinc-300 tabular-nums">{String(w.hold_score ?? '')}</td>
-                      <td className="py-0.5 text-amber-300/80 tabular-nums">{String(w.exit_pressure ?? '')}</td>
+                      <td className="py-0.5 text-zinc-300 tabular-nums">{fmtDashNum(w.hold_score)}</td>
+                      <td className="py-0.5 text-amber-300/80 tabular-nums">{fmtDashNum(w.exit_pressure)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -409,7 +413,7 @@ export function AllocationCenter({
                     <span className="text-zinc-500 truncate max-w-[140px]">{String(x.strategy_name)}</span>
                   ) : null}
                   <span className="text-zinc-500">{String(x.side ?? '')}</span>
-                  <span className="text-emerald-300/80 tabular-nums">{String(x.capital ?? x.target_notional ?? '')}</span>
+                  <span className="text-emerald-300/80 tabular-nums">{fmtDashNum(x.capital ?? x.target_notional)}</span>
                 </li>
               ))}
             </ul>

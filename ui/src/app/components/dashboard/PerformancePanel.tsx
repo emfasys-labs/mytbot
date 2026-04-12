@@ -3,6 +3,7 @@ import { EquityLine } from '../EquityLine';
 import type { ApiOrderRow, ApiPnlResponse } from '../../lib/api';
 import { toNumber } from '../../lib/api';
 import { buildEquityTradeMarkers } from '../../lib/dashboardFallbacks';
+import { fmtDashMoneySigned } from '../../lib/dashboardFormat';
 
 type Horizon = 'today' | 'week' | 'month' | 'all';
 
@@ -118,7 +119,7 @@ export function PerformancePanel({
         <span>
           PnL today{' '}
           <span className={todayN >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
-            {isFlattened ? '—' : `${todayN >= 0 ? '+' : ''}£${Math.round(todayN).toLocaleString()}`}
+            {isFlattened ? '—' : `${todayN >= 0 ? '+' : ''}${fmtDashMoneySigned(todayN)}`}
           </span>
         </span>
         <span>
@@ -136,25 +137,25 @@ export function PerformancePanel({
         <div>
           <div className="text-[10px] text-zinc-600">Week Σ</div>
           <div className={weekN >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
-            {isFlattened ? '—' : `${weekN >= 0 ? '+' : ''}£${Math.round(weekN).toLocaleString()}`}
+            {isFlattened ? '—' : `${weekN >= 0 ? '+' : ''}${fmtDashMoneySigned(weekN)}`}
           </div>
         </div>
         <div>
           <div className="text-[10px] text-zinc-600">Month Σ</div>
           <div className={monthN >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
-            {isFlattened ? '—' : `${monthN >= 0 ? '+' : ''}£${Math.round(monthN).toLocaleString()}`}
+            {isFlattened ? '—' : `${monthN >= 0 ? '+' : ''}${fmtDashMoneySigned(monthN)}`}
           </div>
         </div>
         <div>
           <div className="text-[10px] text-zinc-600">Win days</div>
           <div className="text-zinc-300">
-            {winRate == null ? '—' : `${Math.round(winRate * 100)}%`}
+            {winRate == null ? '—' : `${(winRate * 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 0 })}%`}
           </div>
         </div>
         <div>
           <div className="text-[10px] text-zinc-600">Max DD</div>
           <div className="text-zinc-300">
-            {maxDd == null ? '—' : `${maxDd.toFixed(1)}%`}
+            {maxDd == null ? '—' : `${maxDd.toFixed(2)}%`}
           </div>
         </div>
       </div>

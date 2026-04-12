@@ -140,7 +140,7 @@ export function IntelligencePanel({ regime, signals, dormant }: IntelligencePane
                   <span className="text-gray-200 font-medium w-16 truncate">{s.symbol}</span>
                   {quality !== null && (
                     <span className={`tabular-nums text-[10px] font-medium ${qualityColor}`}>
-                      Q{Math.round(quality * 100)}
+                      Q{(quality * 100).toFixed(2)}
                     </span>
                   )}
                   <span className="text-gray-600 flex-1 truncate text-[10px]">{s.strategy.replace(/_/g, ' ')}</span>

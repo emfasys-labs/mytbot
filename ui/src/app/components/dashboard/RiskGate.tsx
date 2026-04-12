@@ -59,7 +59,7 @@ export function RiskGate({ signals, dormant }: Props) {
                         <span className="text-zinc-500">{s.side}</span>
                       </div>
                       <div className="text-zinc-500 text-[10px]">
-                        conf {(s.confidence * 100).toFixed(0)}%
+                        conf {(s.confidence * 100).toFixed(2)}%
                         {s.quality_score != null ? ` · q ${s.quality_score.toFixed(2)}` : ''}
                       </div>
                     </li>
