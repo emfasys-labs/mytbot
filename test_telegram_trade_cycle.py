@@ -4,9 +4,11 @@ Telegram + broker smoke: balances → open → notify → hold → close → not
 
 Loads `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, broker credentials).
 
-Default: IBKR paper. For a full open→hold→close check on IBKR paper, prefer FX
-(``EURUSD``) because many US ETFs (e.g. ``SPY``) are blocked for UK/EU retail (KID/PRIIPs),
-and PAXOS crypto often does **not** fill on IB paper.
+Default: IBKR paper. **PAXOS crypto** (e.g. ``BTC``, ``ETH``) frequently goes
+**Inactive** on IBKR paper and may not produce fills — do not rely on it for a
+full fill-cycle smoke test. For US paper accounts a liquid ETF such as ``SPY``
+is often best; for UK/EU retail (KID/PRIIPs) many US ETFs are blocked, so use
+FX (``EURUSD``) instead.
 
 Symbol hints: IBKR crypto often ``BTC``; Kraken ``BTC/USD``; Binance/Bybit spot or linear ``BTCUSDT``.
 

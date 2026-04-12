@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-import httpx
+from data.http_retry import httpx_get_with_retry
 
 
 @dataclass
@@ -33,16 +33,15 @@ def fetch_series_observations(
         params["observation_start"] = observation_start.isoformat()
 
     out: list[FredObservation] = []
-    with httpx.Client(timeout=timeout_sec) as client:
-        r = client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
-        for row in data.get("observations") or []:
-            d = row.get("date")
-            v = row.get("value")
-            if not d or v is None or v == ".":
-                continue
-            out.append(FredObservation(obs_date=str(d), value=str(v)))
+    r = httpx_get_with_retry(url, params=params, timeout_sec=timeout_sec)
+    r.raise_for_status()
+    data = r.json()
+    for row in data.get("observations") or []:
+        d = row.get("date")
+        v = row.get("value")
+        if not d or v is None or v == ".":
+            continue
+        out.append(FredObservation(obs_date=str(d), value=str(v)))
     return out
 
 

@@ -32,7 +32,7 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `system/orchestrator.py`   — state machine: OFF → STARTING → RUNNING → STOPPING → OFF
 - `system/dependency_manager.py` — auto-start Postgres/Redis via Docker
 - `system/broker_manager.py` — auto-discover and connect available brokers
-- `system/trading_loop.py`   — controllable async trading loop (start/stop)
+- `system/trading_loop/`    — controllable async trading loop package (`TradingLoop`, `helpers.py`)
 - `brokers/base.py`          — the adapter interface (FROZEN: backward-compatible optional fields only)
 - `brokers/registry.py`      — add new brokers here (one line)
 - `brokers/ibkr/adapter.py`  — IBKR + single-leg options (chain / qualify / `Order.instrument_metadata`)
@@ -93,7 +93,7 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - Prior: D015 **primary** operational path (allocator batch → risk → execution); see DECISIONS D004 amendment.
 - Next task: Paper soak on primary path; IBKR options paper validation with `scripts/smoke_ibkr_options.py` when enabled.
 - Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS
-- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b
+- Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b. **2026-04-12:** codebase assessment follow-up — IBKR `_remaining_safe` (NaN/stale `remaining`, PAXOS cash-qty fills), broker reconnect backoff jitter, `tests/test_ibkr_map_status.py` + execution `cancel_all` test, DECISIONS duplicate D012–D014 table. M2 already wraps yfinance/News/FRED in `_to_thread_with_retry`; Bollinger via `pandas_ta.bbands` in `data/features.py`.
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
 1. Never break `brokers/base.py` — the `BrokerAdapter` ABC and existing fields are frozen; backward-compatible optional dataclass fields (e.g. `instrument_metadata`) are allowed when all adapters default them to `None`

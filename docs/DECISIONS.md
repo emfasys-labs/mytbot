@@ -6,6 +6,12 @@
 
 **Hygiene note:** A later block reuses labels **D012–D014** for funding / coordination topics while **D012–D014** already appear as local-first AI / tier gating. When implementing, read the **heading title and date**, not the number alone. Renumbering is a planned doc cleanup.
 
+| Reused id | Earlier section | Later section (lower in file) |
+|-----------|-----------------|----------------------------------|
+| D012 | Local-first AI architecture | Funding rate arbitrage as first arbitrage strategy |
+| D013 | Dual-model ensemble consensus | Strategy coordination layer above strategy outputs |
+| D014 | Materiality-based tier gating | Global edge coordinator vs D015-as-final allocator |
+
 ---
 
 ## D001 — Adapter pattern for all brokers
@@ -244,6 +250,16 @@ The system must continuously compare (1) current positions using capital and (2)
 **Date:** 2026-04-12
 **Decision:** Trading signals are not purely point-in-time. The system maintains a **persistent, time-decayed signal state per symbol** in `signals/accumulator.py`, combining quantitative strategy inputs, rolled-up AI news scores, and macro regime bias before the unified `Signal` is produced. Decay uses half-lives per horizon; reinforcing horizons increase conviction; divergence reduces confidence. The risk engine remains the final authority; the accumulator does not bypass risk.
 **Reason:** Markets reflect accumulated information; several weak aligned inputs are often more meaningful than a single headline. Explicit state makes behaviour auditable and explainable.
-**Implication:** `SignalEngine` accepts an optional `SignalAccumulator`; `config/strategies.yaml` `signal_engine.use_signal_accumulator` enables the path; `system/trading_loop.py` / `run_m3.py` / `run_m5.py` ingest `AIPipelineResult` into the accumulator each AI cycle.
+**Implication:** `SignalEngine` accepts an optional `SignalAccumulator`; `config/strategies.yaml` `signal_engine.use_signal_accumulator` enables the path; `system/trading_loop/` / `run_m3.py` / `run_m5.py` ingest `AIPipelineResult` into the accumulator each AI cycle.
 **Note:** `docs/DECISIONS.md` currently contains duplicate **D012–D014** section numbers after D015 (arb / coordinator entries). Renumber those in a dedicated doc cleanup; do not reuse those IDs for new decisions.
+
+---
+
+## D018 — Trading loop package, fast control commands, broker degradation
+**Date:** 2026-04-12
+**Decision:** (1) The orchestrator trading loop lives in the `system/trading_loop/` package (`TradingLoop` in `loop.py`, shared YAML/volume helpers in `helpers.py`) instead of a single oversized `trading_loop.py` module. (2) Control commands (`kill`, `set_parameter`, etc.) are processed on a short interval (`CONTROL_COMMAND_POLL_SEC`, default 2s) via a dedicated asyncio task so long iterations do not delay kill/parameter updates. (3) Execution auto-fail and reconciliation auto-fail default to **per-broker disable** (`RiskEngine.disable_broker`) rather than global kill; `EXECUTION_AUTO_KILL_GLOBAL=true` restores the old global kill behavior. (4) Optional `brokers` lists on kill/reset API payloads disable or re-enable specific venues without a full global kill.
+**Reason:** Maintainability, operational responsiveness, and isolation when one venue fails while others remain healthy.
+**Status:** Implemented.
+
+**Risk parameter persistence (unchanged contract):** Regime overrides from the dashboard/API still merge into `ControlState`, persist to `config/risk_parameter_overrides.yaml` on successful `set_parameter`, and reload from disk on `ParameterManager` init; `hydrate_risk_parameters_from_bus` restores in-process state at runner startup.
 

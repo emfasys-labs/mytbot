@@ -1,4 +1,4 @@
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { Shield, Scale, Zap } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../lib/api';
@@ -11,12 +11,14 @@ interface ModeSelectorProps {
   onHaptic?: () => void;
   /** When true (e.g. control flattened / system not live-trading), no mode shows the active glow — all icons look idle. */
   inactiveVisual?: boolean;
+  /** When true, mode cannot be changed (system fully off). */
+  disabled?: boolean;
 }
 
-const MODE_META: Record<Mode, { icon: typeof Shield; label: string; description: string; color: string }> = {
-  hunter:   { icon: Zap,    label: 'Hunter',   description: 'Aggressive — larger positions, lower confidence bar, more trades', color: 'text-amber-300' },
-  trader:   { icon: Scale,  label: 'Trader',   description: 'Balanced — standard risk parameters', color: 'text-white' },
-  defender: { icon: Shield, label: 'Defender', description: 'Conservative — smaller positions, higher confidence required, fewer trades', color: 'text-sky-300' },
+const MODE_META: Record<Mode, { icon: typeof Shield; label: string; color: string }> = {
+  hunter:   { icon: Zap,    label: 'Hunter',   color: 'text-amber-300' },
+  trader:   { icon: Scale,  label: 'Trader',   color: 'text-white' },
+  defender: { icon: Shield, label: 'Defender', color: 'text-sky-300' },
 };
 
 export function ModeSelector({
@@ -24,11 +26,12 @@ export function ModeSelector({
   onModeChange,
   onHaptic,
   inactiveVisual = false,
+  disabled = false,
 }: ModeSelectorProps) {
-  const [tooltip, setTooltip] = useState<Mode | null>(null);
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
 
   const handleModeClick = async (mode: Mode) => {
+    if (disabled) return;
     if (mode === selectedMode) return;
     onHaptic?.();
     setPendingMode(mode);
@@ -46,28 +49,29 @@ export function ModeSelector({
   const modes = (['hunter', 'trader', 'defender'] as Mode[]);
 
   return (
-    <div className="flex flex-col gap-8">
+    <div
+      className={`flex flex-col gap-8 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+    >
       {modes.map((id) => {
-        const { icon: Icon, label, description, color } = MODE_META[id];
+        const { icon: Icon, label, color } = MODE_META[id];
         const isSelected = selectedMode === id;
         const showActive = isSelected && !inactiveVisual;
         const isPending = pendingMode === id;
-        const isHovered = tooltip === id;
         return (
           <div key={id} className="relative">
             <button
+              type="button"
               onClick={() => handleModeClick(id)}
-              onMouseEnter={() => setTooltip(id)}
-              onMouseLeave={() => setTooltip(null)}
               className="relative group"
               aria-label={label}
-              disabled={isPending}
+              aria-disabled={disabled}
+              disabled={disabled || isPending}
             >
               <motion.div
                 className="relative z-10"
                 animate={{ scale: showActive ? 1.1 : 1, opacity: isPending ? 0.5 : 1 }}
-                whileHover={{ scale: inactiveVisual ? 1.05 : 1.15 }}
-                whileTap={{ scale: 0.95 }}
+                whileHover={disabled ? undefined : { scale: inactiveVisual ? 1.05 : 1.15 }}
+                whileTap={disabled ? undefined : { scale: 0.95 }}
               >
                 <Icon
                   size={28}
@@ -89,30 +93,6 @@ export function ModeSelector({
                 />
               )}
             </button>
-
-            {/* Tooltip on hover — shows label + description */}
-            <AnimatePresence>
-              {(isHovered || isPending) && (
-                <motion.div
-                  initial={{ opacity: 0, x: 10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 10 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute left-12 top-1/2 -translate-y-1/2 z-50 pointer-events-none"
-                >
-                  <div className="bg-[#111]/90 backdrop-blur-xl border border-white/10 px-3 py-2 rounded-xl shadow-xl max-w-[200px]">
-                    <div className={`text-sm font-medium ${isSelected ? color : 'text-gray-400'}`}>
-                      {label}
-                      {inactiveVisual && isSelected ? ' (saved for next start)' : ''}
-                    </div>
-                    <div className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">{description}</div>
-                    {isPending && (
-                      <div className="text-[10px] text-amber-400 mt-1">Applying…</div>
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
         );
       })}

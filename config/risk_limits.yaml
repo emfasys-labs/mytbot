@@ -63,6 +63,8 @@ options_trading:
 max_slippage_pct: 0.005         # Reject if expected slippage > 0.5%
 min_liquidity_usd: 1000000      # Only trade assets with > $1M daily volume
 max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
+# Synthetic paper fills (ExecutionEngine): fee as bps of notional × |fill price|
+paper_fee_bps: 10
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
 # Kill switch is activated programmatically or via dashboard.

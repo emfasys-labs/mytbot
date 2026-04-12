@@ -36,6 +36,7 @@ class _Risk:
         self.killed = False
         self.reset = False
         self.is_killed = False
+        self.disabled: set[str] = set()
         self._parameters = SimpleNamespace(
             apply_regime_override=lambda name, value, reason, source: (name, value, reason, source),
             persist_regime_overrides_to_yaml=lambda: None,
@@ -45,9 +46,16 @@ class _Risk:
         self.killed = True
         self.is_killed = True
 
+    def disable_broker(self, name: str) -> None:
+        self.disabled.add(str(name).strip().lower())
+
+    def enable_broker(self, name: str) -> None:
+        self.disabled.discard(str(name).strip().lower())
+
     def reset_kill(self):
         self.reset = True
         self.is_killed = False
+        self.disabled.clear()
 
 
 class _Exec:
@@ -76,3 +84,16 @@ async def test_apply_control_commands_kill_and_toggle():
     assert strat.enabled is False
     assert bus.done == [1, 2]
     assert bus.failed == []
+
+
+@pytest.mark.asyncio
+async def test_apply_control_commands_targeted_kill_disables_broker_only():
+    rows = [SimpleNamespace(id=1, command_type="kill", payload={"brokers": ["kraken"]})]
+    bus = _Bus(rows)
+    risk = _Risk()
+    exe = _Exec()
+    await apply_control_commands(bus, risk_engine=risk, execution_engine=exe, strategies={})
+    assert risk.killed is False
+    assert "kraken" in risk.disabled
+    assert exe.cancelled is False
+    assert bus.done == [1]

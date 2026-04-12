@@ -8,7 +8,7 @@ Separation of concerns:
 
 Data sources today:
 - M2 `feature_snapshots.features` JSON (`vol_ratio`, `vpin_proxy_50`, … from `data/features.py`).
-- Strategy / loop metadata (e.g. `volume_z_score` from `system/trading_loop._enrich_signal_volume_z`).
+- Strategy / loop metadata (e.g. `volume_z_score` from `system.trading_loop.helpers.enrich_signal_volume_z`).
 - Optional metadata hints: `trade_count_z`, `volume_persistence_hint`, `orderbook_imbalance_bps`.
 
 Venues without L2 or prints leave fields at zero; scoring degrades gracefully.

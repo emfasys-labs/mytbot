@@ -79,11 +79,11 @@ export function DiscoveryPanel({ summary, anomalies, dormant }: DiscoveryPanelPr
       {/* 24h counts */}
       <div className="grid grid-cols-3 gap-2 pt-1">
         {[
-          { label: 'anomalies', value: stats?.anomalies_detected ?? 0, hot: (stats?.anomalies_detected ?? 0) > 0, title: 'Price/volume anomalies in 24h' },
-          { label: 'theses', value: stats?.theses_generated ?? 0, hot: false, title: 'AI-generated opportunity theses in 24h' },
-          { label: 'signals', value: stats?.signals_produced ?? 0, hot: (stats?.signals_produced ?? 0) > 0, title: 'Signals generated in 24h (inc. risk-vetoed)' },
-        ].map(({ label, value, hot, title }) => (
-          <div key={label} className="bg-white/3 rounded-lg px-3 py-2 text-center" title={title}>
+          { label: 'anomalies', value: stats?.anomalies_detected ?? 0, hot: (stats?.anomalies_detected ?? 0) > 0 },
+          { label: 'theses', value: stats?.theses_generated ?? 0, hot: false },
+          { label: 'signals', value: stats?.signals_produced ?? 0, hot: (stats?.signals_produced ?? 0) > 0 },
+        ].map(({ label, value, hot }) => (
+          <div key={label} className="bg-white/3 rounded-lg px-3 py-2 text-center">
             <div className={`text-lg font-light tabular-nums ${hot && value > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
               {value}
             </div>

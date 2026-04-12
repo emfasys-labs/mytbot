@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-import httpx
+from data.http_retry import httpx_get_with_retry
 
 
 def headline_content_hash(*, url: str, title: str) -> str:
@@ -45,36 +45,35 @@ def fetch_everything(
         "apiKey": api_key,
     }
     out: list[NormalizedArticle] = []
-    with httpx.Client(timeout=timeout_sec) as client:
-        r = client.get(url, params=params)
-        r.raise_for_status()
-        payload = r.json()
-        if payload.get("status") != "ok":
-            raise RuntimeError(f"NewsAPI error: {payload}")
-        for art in payload.get("articles") or []:
-            u = (art.get("url") or "").strip()
-            t = (art.get("title") or "").strip()
-            if not u or not t:
-                continue
-            pub = art.get("publishedAt")
-            if not pub:
-                continue
-            ts = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            src = (art.get("source") or {}) if isinstance(art.get("source"), dict) else {}
-            name = str(src.get("name") or "unknown")[:120]
-            desc = art.get("description")
-            desc_s = str(desc).strip() if desc else None
-            h = headline_content_hash(url=u, title=t)
-            out.append(
-                NormalizedArticle(
-                    content_hash=h,
-                    url=u,
-                    title=t,
-                    description=desc_s,
-                    source_name=name,
-                    published_at=ts,
-                )
+    r = httpx_get_with_retry(url, params=params, timeout_sec=timeout_sec)
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("status") != "ok":
+        raise RuntimeError(f"NewsAPI error: {payload}")
+    for art in payload.get("articles") or []:
+        u = (art.get("url") or "").strip()
+        t = (art.get("title") or "").strip()
+        if not u or not t:
+            continue
+        pub = art.get("publishedAt")
+        if not pub:
+            continue
+        ts = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        src = (art.get("source") or {}) if isinstance(art.get("source"), dict) else {}
+        name = str(src.get("name") or "unknown")[:120]
+        desc = art.get("description")
+        desc_s = str(desc).strip() if desc else None
+        h = headline_content_hash(url=u, title=t)
+        out.append(
+            NormalizedArticle(
+                content_hash=h,
+                url=u,
+                title=t,
+                description=desc_s,
+                source_name=name,
+                published_at=ts,
             )
+        )
     return out

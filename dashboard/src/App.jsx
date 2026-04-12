@@ -134,6 +134,10 @@ export default function App() {
   const [recentEvents, setRecentEvents] = useState([]);
   const wsRef = useRef(null);
   const reconnectAttempt = useRef(0);
+  const shouldReconnectWs = useRef(true);
+  const reconnectTimer = useRef(null);
+  const [wsStale, setWsStale] = useState(false);
+  const MAX_WS_RECONNECT = 18;
 
   const cards = useMemo(
     () => [
@@ -186,6 +190,10 @@ export default function App() {
   }, [refresh]);
 
   const connectWs = useCallback(() => {
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
     if (wsRef.current) {
       try {
         wsRef.current.close();
@@ -209,11 +217,19 @@ export default function App() {
       };
       socket.onopen = () => {
         reconnectAttempt.current = 0;
+        setWsStale(false);
       };
       socket.onclose = () => {
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt.current);
+        if (!shouldReconnectWs.current) return;
+        if (reconnectAttempt.current >= MAX_WS_RECONNECT) {
+          setWsStale(true);
+          return;
+        }
+        const base = Math.min(30000, 1000 * 2 ** reconnectAttempt.current);
+        const jitter = Math.min(1500, base * 0.15) * Math.random();
+        const delay = base + jitter;
         reconnectAttempt.current += 1;
-        setTimeout(() => connectWs(), delay);
+        reconnectTimer.current = setTimeout(() => connectWs(), delay);
       };
     } catch {
       /* polling fallback */
@@ -221,10 +237,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    shouldReconnectWs.current = true;
     localStorage.setItem(LS_DASH, dashToken);
     connectWs();
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      shouldReconnectWs.current = false;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          /* ignore */
+        }
+      }
     };
   }, [dashToken, connectWs]);
 
@@ -324,6 +349,24 @@ export default function App() {
     <div className="page">
       <h1>mytbot M7 Dashboard</h1>
       <p className="muted">{msg}</p>
+      {wsStale && (
+        <div className="panel">
+          <p className="muted">
+            Live WebSocket stopped after {MAX_WS_RECONNECT} reconnect attempts (API may have restarted). HTTP refresh still runs every 5s.
+            <button
+              type="button"
+              style={{ marginLeft: 8 }}
+              onClick={() => {
+                reconnectAttempt.current = 0;
+                setWsStale(false);
+                connectWs();
+              }}
+            >
+              Retry WebSocket
+            </button>
+          </p>
+        </div>
+      )}
       {commandStatus && (
         <p className="muted">
           Command {commandStatus.id}: <strong>{commandStatus.status}</strong>

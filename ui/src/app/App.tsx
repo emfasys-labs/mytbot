@@ -453,6 +453,7 @@ function App() {
                   onModeChange={setMode}
                   onHaptic={() => triggerHaptic('medium')}
                   inactiveVisual={isFlattened}
+                  disabled={systemState === 'off'}
                 />
               </div>
 
@@ -462,8 +463,6 @@ function App() {
                     {Object.entries(allBrokers)
                       .sort(([a], [b]) => a.localeCompare(b))
                       .map(([name, v]) => {
-                        const err = 'error' in v && v.error ? String(v.error) : '';
-                        const warmingUp = v.configured && v.connected && v.balance_ready === false;
                         const cls = !v.configured
                           ? 'bg-zinc-800/40 text-zinc-600'
                           : !v.connected
@@ -471,17 +470,9 @@ function App() {
                             : v.balance_ready === false
                               ? 'bg-amber-400/10 text-amber-200/60'
                               : 'bg-emerald-400/10 text-emerald-300/70';
-                        const defaultTitle = v.configured
-                          ? v.connected
-                            ? warmingUp
-                              ? 'Connected — loading account balance'
-                              : 'Connected'
-                            : 'Configured, not connected'
-                          : 'Not configured';
                         return (
                           <span
                             key={name}
-                            title={err || defaultTitle}
                             className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${cls}`}
                           >
                             {name}

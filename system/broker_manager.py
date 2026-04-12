@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import socket
 import struct
 import time
@@ -405,12 +406,14 @@ class BrokerManager:
 
     def _ibkr_backoff(self) -> float:
         """Exponential backoff: 60 -> 120 -> 240 -> 300 (capped)."""
-        return min(self._RECONNECT_BASE * (2 ** self._ibkr_fail_count), self._RECONNECT_MAX)
+        base = min(self._RECONNECT_BASE * (2 ** self._ibkr_fail_count), self._RECONNECT_MAX)
+        return base + random.uniform(0, min(5.0, base * 0.2))
 
     def _broker_backoff(self, name: str) -> float:
         """Exponential backoff for any broker: 60 -> 120 -> 240 -> 300 (capped)."""
         fails = self._broker_fail_count.get(name, 0)
-        return min(self._RECONNECT_BASE * (2 ** fails), self._RECONNECT_MAX)
+        base = min(self._RECONNECT_BASE * (2 ** fails), self._RECONNECT_MAX)
+        return base + random.uniform(0, min(5.0, base * 0.2))
 
     async def _reconnect_loop(self) -> None:
         await asyncio.sleep(self._HEALTH_POLL_SEC)

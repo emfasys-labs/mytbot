@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -9,10 +9,12 @@ import pytest
 
 from brokers.base import (
     AssetClass,
+    Order,
     OrderBook,
     OrderResult,
     OrderSide,
     OrderStatus,
+    OrderType,
     Position,
 )
 from control.runtime import set_risk_engine
@@ -24,9 +26,17 @@ from risk.engine import RiskDecision, RiskVerdict, Signal
 class _FakeRiskEngine:
     config: dict
     killed: bool = False
+    disabled: set[str] = field(default_factory=set)
 
     def kill(self) -> None:
         self.killed = True
+
+    def disable_broker(self, name: str) -> None:
+        self.disabled.add(str(name).strip().lower())
+
+    def reset_kill(self) -> None:
+        self.killed = False
+        self.disabled.clear()
 
 
 class _FakeBroker:
@@ -48,6 +58,7 @@ class _FakeBroker:
         self.place_calls = 0
         self.get_order_calls = 0
         self.cancel_calls = 0
+        self.open_order_results: list[OrderResult] = []
         self.order_status_sequence = order_status_sequence or [OrderStatus.FILLED]
 
     async def connect(self) -> bool:
@@ -91,7 +102,7 @@ class _FakeBroker:
         )
 
     async def get_open_orders(self):
-        return []
+        return list(self.open_order_results)
 
     async def cancel_order(self, broker_order_id: str):
         self.cancel_calls += 1
@@ -109,6 +120,9 @@ class _FakeBroker:
                 broker="ibkr",
             )
         ]
+
+    async def get_last_price(self, symbol: str) -> Decimal:
+        return Decimal("100.25")
 
     async def get_order(self, broker_order_id: str):
         self.get_order_calls += 1
@@ -164,7 +178,7 @@ async def test_auto_kill_on_api_failure(monkeypatch) -> None:
     engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     result = await engine.execute(_signal(), _approved_decision())
     assert result is None
-    assert risk.killed is True
+    assert "ibkr" in risk.disabled
 
 
 @pytest.mark.asyncio
@@ -268,7 +282,7 @@ async def test_reconcile_positions_mismatch_auto_kills(monkeypatch) -> None:
     await engine._get_broker("ibkr")
     ok = await engine.reconcile_positions()
     assert ok is False
-    assert risk.killed is True
+    assert "ibkr" in risk.disabled
 
 
 @pytest.mark.asyncio
@@ -408,4 +422,105 @@ async def test_rejects_on_liquidity_and_slippage_limits(monkeypatch) -> None:
     res2 = await engine2.execute(s, _approved_decision())
     assert res2 is None
     assert thin_book_broker.place_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_paper_simulate_fill_applies_fee_and_buy_limit_cap() -> None:
+    risk = _FakeRiskEngine({"paper_fee_bps": 100})
+    set_risk_engine(risk)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    broker = _FakeBroker()
+    sig = _signal()
+    sig.suggested_price = Decimal("200")
+    order = Order(
+        symbol="SPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("10"),
+        limit_price=Decimal("150"),
+        client_order_id="x",
+    )
+    res = await engine._simulate_fill(order, sig, broker=broker)
+    assert res.avg_fill_price == Decimal("150")
+    assert res.fee == (Decimal("10") * Decimal("150") * Decimal("100") / Decimal("10000"))
+
+
+@pytest.mark.asyncio
+async def test_paper_simulate_fill_uses_last_price_when_no_suggested() -> None:
+    risk = _FakeRiskEngine({"paper_fee_bps": 10})
+    set_risk_engine(risk)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    broker = _FakeBroker()
+    sig = _signal()
+    sig.suggested_price = None
+    order = Order(
+        symbol="SPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("2"),
+        client_order_id="x",
+    )
+    res = await engine._simulate_fill(order, sig, broker=broker)
+    assert res.avg_fill_price == Decimal("100.25")
+    notional = Decimal("2") * Decimal("100.25")
+    assert res.fee == (notional * Decimal("10") / Decimal("10000")).quantize(Decimal("0.00000001"))
+
+
+@pytest.mark.asyncio
+async def test_paper_simulate_fill_sell_limit_respects_floor() -> None:
+    risk = _FakeRiskEngine({"paper_fee_bps": 10})
+    set_risk_engine(risk)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    broker = _FakeBroker()
+    sig = _signal()
+    sig.side = "sell"
+    sig.suggested_price = Decimal("90")
+    order = Order(
+        symbol="SPY",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("1"),
+        limit_price=Decimal("100"),
+        client_order_id="x",
+    )
+    res = await engine._simulate_fill(order, sig, broker=broker)
+    assert res.avg_fill_price == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_invokes_cancel_for_each_open_order() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    o_a = OrderResult(
+        broker_order_id="open-a",
+        client_order_id=None,
+        status=OrderStatus.OPEN,
+        symbol="SPY",
+        side=OrderSide.BUY,
+        quantity=Decimal("1"),
+        filled_quantity=Decimal("0"),
+        avg_fill_price=None,
+        fee=None,
+        timestamp=now,
+    )
+    o_b = OrderResult(
+        broker_order_id="open-b",
+        client_order_id=None,
+        status=OrderStatus.OPEN,
+        symbol="BTC",
+        side=OrderSide.SELL,
+        quantity=Decimal("1"),
+        filled_quantity=Decimal("0"),
+        avg_fill_price=None,
+        fee=None,
+        timestamp=now,
+    )
+    ibkr = _FakeBroker()
+    ibkr.open_order_results = [o_a]
+    kraken = _FakeBroker()
+    kraken.open_order_results = [o_b]
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine._brokers = {"ibkr": ibkr, "kraken": kraken}
+    await engine.cancel_all()
+    assert ibkr.cancel_calls == 1
+    assert kraken.cancel_calls == 1
 

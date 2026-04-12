@@ -61,6 +61,12 @@ from brokers.base import (
 util.patchAsyncio()
 
 # Paxos crypto on IBKR: bare symbol like "BTC" implies USD quote.
+#
+# Paper trading caveat: PAXOS-routed crypto orders often stay Inactive or do not
+# complete a realistic open→fill→close cycle on IBKR paper accounts. For an
+# end-to-end broker smoke (Telegram + open/hold/close), prefer a liquid
+# equity/FX symbol (e.g. ``SPY`` where your jurisdiction allows it, or
+# ``EURUSD``); see repo root ``test_telegram_trade_cycle.py`` docstring.
 _KNOWN_PAXOS_CRYPTO: frozenset[str] = frozenset(
     {
         "BTC",
@@ -298,6 +304,20 @@ class IBKRAdapter(BrokerAdapter):
         os_filled = _d(trade.orderStatus.filled)
         return max(os_filled, self._filled_from_executions(trade))
 
+    @staticmethod
+    def _remaining_safe(trade: Trade) -> float:
+        """IBKR ``remaining`` can be NaN or unset for PAXOS cash-qty orders; treat as 0 when invalid."""
+        r = trade.orderStatus.remaining
+        if r is None:
+            return 0.0
+        try:
+            v = float(r)
+        except (TypeError, ValueError):
+            return 0.0
+        if v != v:  # NaN
+            return 0.0
+        return v
+
     def _map_ib_status(self, trade: Trade) -> OrderStatus:
         s = trade.orderStatus.status or ""
         if s in ("Cancelled", "ApiCancelled"):
@@ -310,13 +330,13 @@ class IBKRAdapter(BrokerAdapter):
             return OrderStatus.PENDING
         qty = _d(trade.order.totalQuantity)
         filled_e = self._effective_filled_qty(trade)
-        remaining = trade.orderStatus.remaining or 0.0
+        rem = self._remaining_safe(trade)
         if qty > 0 and filled_e >= qty:
             return OrderStatus.FILLED
         # PAXOS crypto: IB uses totalQuantity=0 + cashQty; fills still land on orderStatus / executions
-        if qty == 0 and filled_e > 0 and remaining <= 0:
+        if qty == 0 and filled_e > 0 and rem <= 0:
             return OrderStatus.FILLED
-        if filled_e > 0 and remaining > 0:
+        if filled_e > 0 and rem > 0:
             return OrderStatus.PARTIALLY_FILLED
         if s in ("PendingSubmit", "ApiPending", "PreSubmitted"):
             return OrderStatus.PENDING
@@ -1252,10 +1272,10 @@ class IBKRAdapter(BrokerAdapter):
             return True
         qty = _d(trade.order.totalQuantity)
         filled_e = self._effective_filled_qty(trade)
-        remaining = trade.orderStatus.remaining or 0.0
+        rem = self._remaining_safe(trade)
         if qty > 0 and filled_e >= qty:
             return True
-        if qty == 0 and filled_e > 0 and remaining <= 0:
+        if qty == 0 and filled_e > 0 and rem <= 0:
             return True
         return False
 

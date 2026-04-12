@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # POSTGRES_* and API_CONTROL_TOKEN are missing when starting `uvicorn api.server:app`.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -102,9 +102,24 @@ app.add_middleware(
 app.add_middleware(_DashboardReadMiddleware)
 
 
+def _require_dashboard_read_token_if_live() -> None:
+    """In live mode, refuse to start the API without a dashboard read token (optional escape hatch for dev)."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    if os.getenv("ALLOW_MISSING_DASHBOARD_READ_TOKEN_LIVE", "").strip().lower() in ("1", "true", "yes"):
+        return
+    if os.getenv("APP_ENV", "paper").strip().lower() == "live":
+        if not os.getenv("DASHBOARD_READ_TOKEN", "").strip():
+            raise RuntimeError(
+                "APP_ENV=live requires DASHBOARD_READ_TOKEN for dashboard/API read protection. "
+                "Set it in .env or set ALLOW_MISSING_DASHBOARD_READ_TOKEN_LIVE=1 for local dev only."
+            )
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     log_cors_live_warning()
+    _require_dashboard_read_token_if_live()
     # Gracefully try DB — orchestrator may not have started infra yet when
     # the API is loaded standalone (e.g. uvicorn api.server:app).
     try:
@@ -235,12 +250,15 @@ async def get_status():
     orch_brokers = orch.status().get("active_brokers", []) if orch else []
     connected_brokers = orch_brokers if orch_brokers else exec_connected
 
+    disabled = sorted(getattr(risk_engine, "disabled_brokers", frozenset())) if risk_engine is not None else []
+
     return {
         "status": "running",
         "system_state": system_state,
         "mode": APP_ENV,
         "paper_mode": APP_ENV != "live",
         "kill_switch": bool(getattr(risk_engine, "is_killed", False)) if risk_engine is not None else False,
+        "disabled_brokers": disabled,
         "connected_brokers": connected_brokers or orch_brokers,
         "active_strategies": strategies,
         "runtime": runtime,
@@ -863,37 +881,51 @@ async def set_risk_parameter(
 @app.post("/kill")
 async def activate_kill_switch(
     _: None = Depends(_require_mutation_token),
+    payload: dict[str, Any] | None = Body(default=None),
 ):
-    """Immediately halt all trading."""
+    """Halt trading: global kill + cancel all (default), or disable specific brokers only when ``brokers`` is set."""
+    body = dict(payload or {})
     bus = getattr(app.state, "command_bus", None)
     if bus is not None:
-        cmd_id = await bus.enqueue("kill", {}, source="api")
+        cmd_id = await bus.enqueue("kill", body, source="api")
         return {"kill_switch": True, "command_id": cmd_id, "message": "Kill command enqueued"}
     # fallback for single-process mode
     risk_engine = get_risk_engine()
     execution_engine = get_execution_engine()
     if risk_engine is None:
         raise HTTPException(status_code=503, detail="Risk engine not registered")
-    risk_engine.kill()
-    if execution_engine is not None:
-        await execution_engine.cancel_all()
-    return {"kill_switch": True, "message": "Kill switch activated; open orders cancelled"}
+    raw_brokers = body.get("brokers")
+    if isinstance(raw_brokers, list) and raw_brokers:
+        for b in raw_brokers:
+            risk_engine.disable_broker(str(b))
+    else:
+        risk_engine.kill()
+        if execution_engine is not None:
+            await execution_engine.cancel_all()
+    return {"kill_switch": True, "message": "Kill applied"}
 
 
 @app.post("/kill/reset")
 async def reset_kill_switch(
     _: None = Depends(_require_mutation_token),
+    payload: dict[str, Any] | None = Body(default=None),
 ):
-    """Re-enable trading after kill switch."""
+    """Re-enable trading: full reset (default) or re-enable specific brokers."""
+    body = dict(payload or {})
     bus = getattr(app.state, "command_bus", None)
     if bus is not None:
-        cmd_id = await bus.enqueue("reset_kill", {}, source="api")
+        cmd_id = await bus.enqueue("reset_kill", body, source="api")
         return {"kill_switch": False, "command_id": cmd_id, "message": "Reset command enqueued"}
     risk_engine = get_risk_engine()
     if risk_engine is None:
         raise HTTPException(status_code=503, detail="Risk engine not registered")
-    risk_engine.reset_kill()
-    return {"kill_switch": False, "message": "Kill switch reset"}
+    raw_brokers = body.get("brokers")
+    if isinstance(raw_brokers, list) and raw_brokers:
+        for b in raw_brokers:
+            risk_engine.enable_broker(str(b))
+    else:
+        risk_engine.reset_kill()
+    return {"kill_switch": False, "message": "Kill reset applied"}
 
 
 @app.post("/strategy/{name}/toggle")

@@ -1,8 +1,5 @@
 """
-system/trading_loop.py
-======================
-Wraps the M5 trading loop as a controllable async task that the orchestrator
-can start and stop on demand.  Reuses all existing strategy/risk/execution logic.
+Controllable async trading loop (orchestrator). Implementation: :class:`TradingLoop` in this package.
 """
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
 from loguru import logger
 from sqlalchemy import select
 
@@ -99,111 +95,14 @@ from signals.microstructure.liquidity_tracker import LiquidityTracker
 from strategies.arbitrage.cross_exchange import CrossExchangeArbitrageStrategy
 from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
 
-
-_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-EUR", "-GBP", "/USD", "/USDT", "/EUR", "/GBP")
-_CRYPTO_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "UNI", "LTC"}
-
-
-def _is_crypto_symbol(symbol: str) -> bool:
-    s = symbol.upper().strip()
-    if any(s.endswith(suf) for suf in _CRYPTO_SUFFIXES):
-        base = s.split("-")[0].split("/")[0]
-        if base in _CRYPTO_BASES:
-            return True
-    return False
-
-
-def _load_yaml(path: str | Path) -> dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    with p.open(encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def _enrich_signal_volume_z(signal: Any, df: Any) -> None:
-    """
-    Compute rolling volume z-score from the feature DataFrame and store in
-    signal.metadata["volume_z_score"].  Used by the quality gate in the risk engine.
-    Safe — never raises; leaves metadata unchanged on any error.
-    """
-    try:
-        import pandas as pd  # already available in this module's env
-        if df is None or not hasattr(df, "empty") or df.empty:
-            return
-        if "volume" not in df.columns:
-            return
-        vol = df["volume"].dropna()
-        if len(vol) < 5:
-            return
-        mean_v = float(vol.mean())
-        std_v = float(vol.std())
-        if std_v <= 0:
-            return
-        latest_v = float(vol.iloc[-1])
-        z = (latest_v - mean_v) / std_v
-        # Ensure metadata is a real dict (not None) before writing
-        if not isinstance(getattr(signal, "metadata", None), dict):
-            signal.metadata = {}
-        signal.metadata["volume_z_score"] = round(z, 4)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _apply_saved_mode_to_risk_cfg(risk_engine: "RiskEngine") -> None:
-    """Apply the last-saved mode profile to the risk engine config dict at startup."""
-    import json as _json
-
-    mode_file = Path("data/runtime/active_mode.json")
-    if not mode_file.is_file():
-        return
-    try:
-        mode = _json.loads(mode_file.read_text(encoding="utf-8")).get("mode", "trader")
-    except Exception:  # noqa: BLE001
-        return
-    modes = _load_yaml("config/risk_modes.yaml")
-    profile = modes.get(mode, {})
-    if risk_engine.config.get("allocator_d015_primary"):
-        for key in ("label", "description"):
-            if key in profile:
-                risk_engine.config[key] = profile[key]
-        if profile:
-            logger.info("trading_loop | applied mode labels only (D015 primary) | mode={}", mode)
-        return
-    for key, value in profile.items():
-        if key in ("label", "description"):
-            continue
-        risk_engine.config[key] = value
-    if profile:
-        logger.info("trading_loop | applied mode profile | mode={}", mode)
-
-
-def _d015_legacy_fallback() -> bool:
-    return os.getenv("ALLOCATOR_D015_LEGACY_FALLBACK", "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _enrich_candidate_volume_z(candidate: Any, df: Any) -> None:
-    try:
-        import pandas as pd  # noqa: F401
-
-        if df is None or not hasattr(df, "empty") or df.empty:
-            return
-        if "volume" not in df.columns:
-            return
-        vol = df["volume"].dropna()
-        if len(vol) < 5:
-            return
-        mean_v = float(vol.mean())
-        std_v = float(vol.std())
-        if std_v <= 0:
-            return
-        latest_v = float(vol.iloc[-1])
-        z = (latest_v - mean_v) / std_v
-        if not isinstance(getattr(candidate, "metadata", None), dict):
-            candidate.metadata = {}
-        candidate.metadata["volume_z_score"] = round(z, 4)
-    except Exception:  # noqa: BLE001
-        pass
+from system.trading_loop.helpers import (
+    apply_saved_mode_to_risk_cfg,
+    d015_legacy_fallback,
+    enrich_candidate_volume_z,
+    enrich_signal_volume_z,
+    is_crypto_symbol,
+    load_yaml,
+)
 
 
 class TradingLoop:
@@ -238,6 +137,9 @@ class TradingLoop:
         self.reconcile_interval_sec = reconcile_interval_sec
 
         self._task: asyncio.Task | None = None
+        self._control_poll_task: asyncio.Task | None = None
+        self._control_bus: CommandBus | None = None
+        self._strategies: dict[str, Any] = {}
         self._stop_event = asyncio.Event()
         self._running = False
 
@@ -286,6 +188,13 @@ class TradingLoop:
             return
         logger.info("trading_loop | stopping...")
         self._stop_event.set()
+        if self._control_poll_task is not None:
+            self._control_poll_task.cancel()
+            try:
+                await self._control_poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._control_poll_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -295,16 +204,41 @@ class TradingLoop:
         self._running = False
         logger.info("trading_loop | stopped")
 
+    async def _control_command_poll(self) -> None:
+        """Process DB control commands on a short interval so kill/params are not blocked by long loop iterations."""
+        try:
+            poll_sec = max(0.5, float(os.getenv("CONTROL_COMMAND_POLL_SEC", "2")))
+        except ValueError:
+            poll_sec = 2.0
+        while not self._stop_event.is_set():
+            bus = self._control_bus
+            strat = self._strategies
+            if bus is not None and self.risk_engine is not None:
+                try:
+                    await apply_control_commands(
+                        bus,
+                        risk_engine=self.risk_engine,
+                        execution_engine=self.execution_engine,
+                        strategies=strat or {},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("trading_loop | control poll failed: {}", exc)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=poll_sec)
+                return
+            except asyncio.TimeoutError:
+                pass
+
     async def _run(self) -> None:
         self._running = True
         engine = None
         try:
-            strategies_cfg = _load_yaml("config/strategies.yaml")
-            pipeline_cfg = _load_yaml("config/data_pipeline.yaml")
-            risk_cfg = _load_yaml("config/risk_limits.yaml")
+            strategies_cfg = load_yaml("config/strategies.yaml")
+            pipeline_cfg = load_yaml("config/data_pipeline.yaml")
+            risk_cfg = load_yaml("config/risk_limits.yaml")
             merge_m8_into_risk_cfg(risk_cfg, "config/m8_micro_live.yaml")
             merge_options_env_into_risk_cfg(risk_cfg)
-            legacy_fb = _d015_legacy_fallback()
+            legacy_fb = d015_legacy_fallback()
             if legacy_fb:
                 risk_cfg["allocator_d015_primary"] = False
                 risk_cfg["allocator_d015_enabled"] = (
@@ -313,8 +247,8 @@ class TradingLoop:
             else:
                 risk_cfg["allocator_d015_enabled"] = True
                 risk_cfg["allocator_d015_primary"] = True
-            ai_cfg = _load_yaml("config/ai.yaml")
-            discovery_cfg = _load_yaml("config/discovery.yaml")
+            ai_cfg = load_yaml("config/ai.yaml")
+            discovery_cfg = load_yaml("config/discovery.yaml")
 
             symbols_raw = pipeline_cfg.get("symbols", [])
             symbols = [s.strip() for s in symbols_raw if s.strip()] if isinstance(symbols_raw, list) else []
@@ -354,9 +288,9 @@ class TradingLoop:
             except Exception:  # noqa: BLE001
                 pass
             # Apply persisted mode overrides (if user selected a mode before this start)
-            _apply_saved_mode_to_risk_cfg(self.risk_engine)
+            apply_saved_mode_to_risk_cfg(self.risk_engine)
             set_risk_engine(self.risk_engine)
-            ge_yaml = _load_yaml("config/global_edge.yaml")
+            ge_yaml = load_yaml("config/global_edge.yaml")
             self._global_edge_cfg = ge_yaml if isinstance(ge_yaml, dict) else {}
             self._enable_arbitrage = os.getenv("ENABLE_ARBITRAGE", "").strip().lower() in ("1", "true", "yes")
             self._use_global_edge = (
@@ -402,6 +336,10 @@ class TradingLoop:
                 if state_v is not None:
                     strategy.enabled = bool(state_v)
             await hydrate_risk_parameters_from_bus(bus, self.risk_engine)
+
+            self._control_bus = bus
+            self._strategies = strategies
+            self._control_poll_task = asyncio.create_task(self._control_command_poll(), name="control-command-poll")
 
             next_reconcile_at = datetime.now(timezone.utc).timestamp()
             universe_mode = str(pipeline_cfg.get("universe_mode", "static")).strip().lower()
@@ -545,12 +483,6 @@ class TradingLoop:
                 try:
                     generated = 0
                     executed = 0
-                    await apply_control_commands(
-                        bus,
-                        risk_engine=self.risk_engine,
-                        execution_engine=self.execution_engine,
-                        strategies=strategies,
-                    )
 
                     ai_result = None
                     if ai_pipeline is not None:
@@ -657,14 +589,14 @@ class TradingLoop:
                             if signal is None:
                                 continue
 
-                            if _is_crypto_symbol(symbol) and signal.asset_class != "crypto":
+                            if is_crypto_symbol(symbol) and signal.asset_class != "crypto":
                                 signal.asset_class = "crypto"
 
                             if ai_result is not None:
                                 signal.metadata["ai_macro_regime"] = ai_result.macro_regime
                                 signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
 
-                            _enrich_signal_volume_z(signal, df)
+                            enrich_signal_volume_z(signal, df)
 
                             await log_d015_shadow_for_signal(
                                 session_factory,
@@ -768,14 +700,14 @@ class TradingLoop:
                             if cand is None:
                                 continue
 
-                            if _is_crypto_symbol(symbol) and str(cand.asset_class) != "crypto":
+                            if is_crypto_symbol(symbol) and str(cand.asset_class) != "crypto":
                                 cand.asset_class = cast(AssetClass, "crypto")
 
                             if ai_result is not None:
                                 cand.metadata["ai_macro_regime"] = ai_result.macro_regime
                                 cand.metadata["ai_macro_confidence"] = ai_result.macro_confidence
 
-                            _enrich_candidate_volume_z(cand, df)
+                            enrich_candidate_volume_z(cand, df)
                             batch_candidates.append(cand)
 
                         if discovery_pipeline is not None:
@@ -951,6 +883,7 @@ class TradingLoop:
                         logger.error("trading_loop | DB reconnect failed — will retry next iteration")
                     else:
                         bus = CommandBus(session_factory)
+                        self._control_bus = bus
 
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.loop_interval_sec)

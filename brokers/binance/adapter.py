@@ -32,6 +32,7 @@ from brokers.base import (
     Position,
     Tick,
 )
+from brokers.rest_rate_limit import AsyncRestGap
 
 T = TypeVar("T")
 
@@ -148,12 +149,17 @@ class BinanceAdapter(BrokerAdapter):
         tld: str = "com",
         **kwargs: Any,
     ) -> None:
+        rest_iv = kwargs.pop("rest_min_interval_sec", None)
         _ = kwargs
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
         self.paper_mode = paper_mode
         self.testnet = testnet
         self.tld = tld
+        if rest_iv is not None:
+            self._rest_gap = AsyncRestGap(float(rest_iv))
+        else:
+            self._rest_gap = AsyncRestGap.from_env("BINANCE", default_seconds=0.055)
         self._lock = asyncio.Lock()
         self._connected = False
         self._private_ok = False
@@ -162,6 +168,7 @@ class BinanceAdapter(BrokerAdapter):
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
+            await self._rest_gap.wait()
             return await asyncio.to_thread(fn)
 
     def _require_private(self) -> None:

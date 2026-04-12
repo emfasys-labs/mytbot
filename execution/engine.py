@@ -92,7 +92,7 @@ class ExecutionEngine:
                     "PAPER FILL (no broker) | %s %s qty=%s broker=%s",
                     signal.symbol, signal.side, signal.suggested_quantity, signal.broker,
                 )
-                result = self._simulate_fill(order, signal)
+                result = await self._simulate_fill(order, signal, broker=None)
                 await self._persist_result(session_factory, order, result, signal)
                 return result
             logger.error("Broker unavailable | signal_id=%s broker=%s", signal.signal_id, signal.broker)
@@ -109,13 +109,13 @@ class ExecutionEngine:
             signal.broker, "PAPER" if self.paper_mode else "LIVE",
         )
 
-        if not await self._passes_execution_limits(broker, order):
+        if not await self._passes_execution_limits(broker, order, broker_name=str(signal.broker or "").strip().lower()):
             if self.paper_mode:
                 logger.info(
                     "PAPER FILL (limits bypassed) | %s %s qty=%s",
                     signal.symbol, signal.side, signal.suggested_quantity,
                 )
-                result = self._simulate_fill(order, signal)
+                result = await self._simulate_fill(order, signal, broker=broker)
                 await self._persist_result(session_factory, order, result, signal)
                 return result
             logger.warning(
@@ -146,10 +146,10 @@ class ExecutionEngine:
                     continue
                 if self.paper_mode:
                     logger.info("PAPER FILL (broker error) | %s %s", signal.symbol, signal.side)
-                    result = self._simulate_fill(order, signal)
+                    result = await self._simulate_fill(order, signal, broker=broker)
                     await self._persist_result(session_factory, order, result, signal)
                     return result
-                self._maybe_auto_kill("place_order failure")
+                self._maybe_auto_kill("place_order failure", broker=str(signal.broker or "").strip().lower())
                 await self._send_critical_alert(
                     f"Order placement failed for signal {signal.signal_id} ({signal.symbol})"
                 )
@@ -168,9 +168,54 @@ class ExecutionEngine:
         await self._persist_result(session_factory, order, result, signal)
         return result
 
-    def _simulate_fill(self, order: Order, signal: Signal) -> OrderResult:
-        """Create a synthetic filled order for paper mode."""
-        fill_price = signal.suggested_price or Decimal("0")
+    def _paper_fee_bps(self) -> Decimal:
+        risk_engine = get_risk_engine()
+        cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+        try:
+            return Decimal(str(cfg.get("paper_fee_bps", 10)))
+        except Exception:  # noqa: BLE001
+            return Decimal("10")
+
+    async def _simulate_fill(
+        self,
+        order: Order,
+        signal: Signal,
+        broker: Any | None = None,
+    ) -> OrderResult:
+        """Create a synthetic filled order for paper mode (fee + limit sanity + last price)."""
+        fee_bps = self._paper_fee_bps()
+        fill_price: Decimal | None = None
+        if signal.suggested_price is not None and signal.suggested_price > 0:
+            fill_price = signal.suggested_price
+        elif order.limit_price is not None and order.limit_price > 0:
+            fill_price = order.limit_price
+
+        if fill_price is None or fill_price <= 0:
+            if broker is not None:
+                try:
+                    fill_price = await broker.get_last_price(order.symbol)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Paper fill: get_last_price failed | symbol=%s | %s",
+                        order.symbol,
+                        exc,
+                    )
+                    fill_price = Decimal("0")
+            else:
+                fill_price = Decimal("0")
+
+        if order.order_type == OrderType.LIMIT and order.limit_price is not None and order.limit_price > 0:
+            lp = order.limit_price
+            if fill_price <= 0:
+                fill_price = lp
+            elif order.side == OrderSide.BUY:
+                fill_price = min(fill_price, lp)
+            else:
+                fill_price = max(fill_price, lp)
+
+        notional = abs(order.quantity * fill_price) if fill_price > 0 else Decimal("0")
+        fee = (notional * fee_bps / Decimal("10000")).quantize(Decimal("0.00000001"))
+        avg = fill_price if fill_price > 0 else None
         return OrderResult(
             broker_order_id=f"paper-{uuid.uuid4().hex[:12]}",
             client_order_id=order.client_order_id,
@@ -179,8 +224,8 @@ class ExecutionEngine:
             side=order.side,
             quantity=order.quantity,
             filled_quantity=order.quantity,
-            avg_fill_price=fill_price,
-            fee=Decimal("0"),
+            avg_fill_price=avg,
+            fee=fee,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -213,7 +258,8 @@ class ExecutionEngine:
         )
 
         if self.paper_mode:
-            result = self._simulate_fill(paper_order, signal)
+            arb_broker = await self._get_broker(signal.broker)
+            result = await self._simulate_fill(paper_order, signal, broker=arb_broker)
             await self._persist_result(session_factory, paper_order, result, signal)
             logger.info(
                 "ARBITRAGE PAPER | audit fill on primary broker=%s | paired venues in metadata",
@@ -324,10 +370,8 @@ class ExecutionEngine:
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("Position reconciliation failed | %s", exc)
-            self._maybe_auto_kill_reconciliation("reconciliation exception")
+            self._maybe_auto_kill_reconciliation("reconciliation exception", broker=None)
             return False
-        if not ok:
-            self._maybe_auto_kill_reconciliation("position mismatch")
         return ok
 
     def _build_order(self, signal: Signal) -> Order:
@@ -399,7 +443,7 @@ class ExecutionEngine:
             "auto_kill_on_reconciliation_failure": bool(cfg.get("auto_kill_on_reconciliation_failure", False)),
         }
 
-    async def _passes_execution_limits(self, broker, order: Order) -> bool:
+    async def _passes_execution_limits(self, broker, order: Order, *, broker_name: str) -> bool:
         if self.paper_mode:
             return True
 
@@ -408,7 +452,7 @@ class ExecutionEngine:
             ob: OrderBook = await broker.get_order_book(order.symbol, depth=10)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Order book fetch failed | symbol=%s | %s", order.symbol, exc)
-            self._maybe_auto_kill("order book fetch failure")
+            self._maybe_auto_kill("order book fetch failure", broker=broker_name or None)
             return False
 
         best_bid = ob.bids[0][0] if ob.bids else Decimal("0")
@@ -608,18 +652,26 @@ class ExecutionEngine:
             return result
         return result
 
-    def _maybe_auto_kill(self, reason: str) -> None:
+    def _maybe_auto_kill(self, reason: str, *, broker: str | None = None) -> None:
         limits = self._execution_limits()
         if not limits["auto_kill_on_api_failure"]:
             return
         risk_engine = get_risk_engine()
         if risk_engine is None:
             return
+        use_global = os.getenv("EXECUTION_AUTO_KILL_GLOBAL", "").strip().lower() in ("1", "true", "yes")
         try:
-            risk_engine.kill()
-            logger.critical("Auto-kill triggered by execution failure: %s", reason)
+            if use_global:
+                risk_engine.kill()
+                logger.critical("Auto-kill (global) triggered by execution failure: %s", reason)
+            elif broker:
+                risk_engine.disable_broker(broker)
+                logger.critical("Auto-disable broker triggered by execution failure: %s | broker=%s", reason, broker)
+            else:
+                risk_engine.kill()
+                logger.critical("Auto-kill (global) triggered by execution failure: %s", reason)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to auto-kill risk engine: %s", exc)
+            logger.error("Failed to auto-kill/disable on execution failure: %s", exc)
 
     async def _reconcile_positions_internal(self, *, session_factory=None, max_quantity_diff: Decimal) -> bool:
         from sqlalchemy import func, select
@@ -662,6 +714,7 @@ class ExecutionEngine:
                     positions: list[Position] = await broker.get_positions()
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Broker positions fetch failed | broker=%s | %s", broker_name, exc)
+                    self._maybe_auto_kill_reconciliation("reconciliation exception", broker=broker_name.strip().lower())
                     return False
                 for p in positions:
                     key = (broker_name.strip().lower(), str(p.symbol).strip().upper())
@@ -680,6 +733,7 @@ class ExecutionEngine:
                         lq,
                         rq,
                     )
+                    self._maybe_auto_kill_reconciliation("position mismatch", broker=key[0])
                     return False
 
             # Persist latest remote broker positions as a fresh snapshot so API/UI can show real holdings.
@@ -719,18 +773,26 @@ class ExecutionEngine:
             return bool(str(cfg.get("api_key", "")).strip() and str(cfg.get("api_secret", "")).strip())
         return True
 
-    def _maybe_auto_kill_reconciliation(self, reason: str) -> None:
+    def _maybe_auto_kill_reconciliation(self, reason: str, *, broker: str | None) -> None:
         limits = self._execution_limits()
         if not limits["auto_kill_on_reconciliation_failure"]:
             return
         risk_engine = get_risk_engine()
         if risk_engine is None:
             return
+        use_global = os.getenv("EXECUTION_AUTO_KILL_GLOBAL", "").strip().lower() in ("1", "true", "yes")
         try:
-            risk_engine.kill()
-            logger.critical("Auto-kill triggered by reconciliation failure: %s", reason)
+            if use_global:
+                risk_engine.kill()
+                logger.critical("Auto-kill (global) triggered by reconciliation failure: %s", reason)
+            elif broker:
+                risk_engine.disable_broker(broker)
+                logger.critical("Auto-disable broker triggered by reconciliation failure: %s | broker=%s", reason, broker)
+            else:
+                risk_engine.kill()
+                logger.critical("Auto-kill (global) triggered by reconciliation failure: %s", reason)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to auto-kill risk engine on reconciliation failure: %s", exc)
+            logger.error("Failed to auto-kill/disable on reconciliation failure: %s", exc)
 
     @staticmethod
     async def _init_db():

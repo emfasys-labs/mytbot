@@ -83,6 +83,7 @@ class RiskEngine:
         self._consecutive_losses = 0
         self._cooldown_until: Optional[datetime] = None
         self._is_killed = False
+        self._disabled_brokers: set[str] = set()
         self._high_watermark = Decimal("0")
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -99,6 +100,7 @@ class RiskEngine:
 
         checks = [
             self._check_kill_switch,
+            self._check_broker_disabled,
             self._check_options_trading_policy,
             self._check_m8_symbol_whitelist,
             self._check_m8_strategy_whitelist,
@@ -176,7 +178,29 @@ class RiskEngine:
     def reset_kill(self) -> None:
         """Deactivate kill switch. Must be deliberate manual action."""
         self._is_killed = False
+        self._disabled_brokers.clear()
         logger.warning("Kill switch deactivated")
+
+    def disable_broker(self, name: str) -> None:
+        """Stop new orders routed to this broker (execution auto-fail / targeted control)."""
+        n = (name or "").strip().lower()
+        if not n:
+            return
+        self._disabled_brokers.add(n)
+        logger.critical("RISK | broker disabled for new orders | broker=%s", n)
+
+    def enable_broker(self, name: str) -> None:
+        n = (name or "").strip().lower()
+        if n:
+            self._disabled_brokers.discard(n)
+            logger.warning("RISK | broker re-enabled | broker=%s", n)
+
+    def is_broker_disabled(self, name: str) -> bool:
+        return (name or "").strip().lower() in self._disabled_brokers
+
+    @property
+    def disabled_brokers(self) -> frozenset[str]:
+        return frozenset(self._disabled_brokers)
 
     @property
     def is_killed(self) -> bool:
@@ -232,6 +256,12 @@ class RiskEngine:
 
     def _check_kill_switch(self, signal, portfolio) -> tuple[bool, str]:
         return (not self._is_killed, "kill_switch")
+
+    def _check_broker_disabled(self, signal, portfolio) -> tuple[bool, str]:
+        name = (getattr(signal, "broker", None) or "").strip().lower()
+        if name and name in self._disabled_brokers:
+            return False, "broker_disabled"
+        return True, "broker_operational"
 
     @staticmethod
     def _is_option_signal(signal: Signal) -> bool:

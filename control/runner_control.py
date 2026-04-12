@@ -41,13 +41,25 @@ async def apply_control_commands(
         try:
             payload = row.payload or {}
             if row.command_type == "kill":
-                if risk_engine is not None:
-                    risk_engine.kill()
-                if execution_engine is not None:
-                    await execution_engine.cancel_all()
+                raw_brokers = (payload or {}).get("brokers")
+                if isinstance(raw_brokers, list) and raw_brokers:
+                    if risk_engine is not None:
+                        for b in raw_brokers:
+                            risk_engine.disable_broker(str(b))
+                else:
+                    if risk_engine is not None:
+                        risk_engine.kill()
+                    if execution_engine is not None:
+                        await execution_engine.cancel_all()
             elif row.command_type == "reset_kill":
-                if risk_engine is not None:
-                    risk_engine.reset_kill()
+                raw_brokers = (payload or {}).get("brokers")
+                if isinstance(raw_brokers, list) and raw_brokers:
+                    if risk_engine is not None:
+                        for b in raw_brokers:
+                            risk_engine.enable_broker(str(b))
+                else:
+                    if risk_engine is not None:
+                        risk_engine.reset_kill()
             elif row.command_type == "toggle_strategy":
                 name = str(payload.get("name", "")).strip()
                 enabled = bool(payload.get("enabled", True))

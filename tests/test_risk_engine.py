@@ -282,6 +282,23 @@ def test_rejects_when_kill_switch_active() -> None:
     assert decision.checks_failed == ["kill_switch"]
 
 
+def test_rejects_when_broker_disabled() -> None:
+    engine = RiskEngine(_risk_cfg())
+    engine.disable_broker("ibkr")
+    decision = engine.evaluate(
+        _signal(),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["broker_disabled"]
+
+
 def test_rejects_on_consecutive_losses_and_enters_cooldown() -> None:
     cfg = _risk_cfg()
     cfg["max_consecutive_losses"] = 2
