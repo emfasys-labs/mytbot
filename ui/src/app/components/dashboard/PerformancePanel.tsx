@@ -71,8 +71,9 @@ export function PerformancePanel({
           ))}
         </div>
       </div>
-      <div className="h-[120px] w-full mb-2">
+      <div className="h-[120px] w-full mb-2 overflow-hidden rounded-md bg-black/30 isolate">
         <EquityLine
+          compact
           balance={totalCapital}
           dailyPnL={dailyPnL}
           state={trendState}

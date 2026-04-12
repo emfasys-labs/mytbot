@@ -10,6 +10,8 @@ interface EquityLineProps {
   isActive: boolean;
   isFlattened?: boolean;
   historyValues?: number[];
+  /** Shorter viewBox so the chart fits embedded panels without overflowing siblings. */
+  compact?: boolean;
 }
 
 export function EquityLine({
@@ -19,6 +21,7 @@ export function EquityLine({
   isActive,
   isFlattened = false,
   historyValues,
+  compact = false,
 }: EquityLineProps) {
   const [dataPoints, setDataPoints] = useState<number[]>([]);
 
@@ -77,10 +80,10 @@ export function EquityLine({
   const colors = getColorScheme();
   const shouldPulse = isActive && !isFlattened;
 
-  // Generate SVG path
+  // Generate SVG path (compact = short chart for dashboard panels — must match wrapper max-h)
   const width = 800;
-  const height = 300;
-  const padding = 40;
+  const height = compact ? 120 : 300;
+  const padding = compact ? 16 : 40;
   
   if (dataPoints.length === 0) return null;
 
@@ -101,12 +104,13 @@ export function EquityLine({
   const currentY = height - padding - ((dataPoints[dataPoints.length - 1] - minValue) / range) * (height - padding * 2);
 
   return (
-    <div className="relative w-full flex items-center justify-center">
+    <div className="relative w-full h-full min-h-0 flex items-center justify-center overflow-hidden">
       <svg
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        className="max-w-full"
+        className="max-h-full w-full max-w-full"
+        preserveAspectRatio="xMidYMid meet"
       >
         {/* Area fill */}
         <motion.path

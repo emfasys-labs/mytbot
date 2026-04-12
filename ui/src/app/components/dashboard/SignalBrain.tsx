@@ -7,6 +7,7 @@ type Props = {
   snapshot: DashboardSnapshot | null;
   events: WsTickEvent[];
   dormant: boolean;
+  snapshotFetchFailed?: boolean;
 };
 
 function scoreCell(row: Record<string, unknown>): string {
@@ -23,7 +24,7 @@ function scoreClass(row: Record<string, unknown>): string {
   return 'text-zinc-300';
 }
 
-export function SignalBrain({ snapshot, events, dormant }: Props) {
+export function SignalBrain({ snapshot, events, dormant, snapshotFetchFailed = false }: Props) {
   const acc = snapshot?.accumulator;
   const rows = (acc?.top_by_magnitude ?? []).slice(0, 8) as Array<Record<string, unknown>>;
 
@@ -37,6 +38,11 @@ export function SignalBrain({ snapshot, events, dormant }: Props) {
   return (
     <div className="flex flex-col h-full min-h-0 rounded-xl border border-white/5 bg-white/[0.02] p-3">
       <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Signal brain</div>
+      {snapshotFetchFailed ? (
+        <div className="text-[10px] text-amber-400/90 mb-2 leading-snug">
+          Snapshot blocked — configure <code className="text-zinc-500">VITE_DASHBOARD_READ_TOKEN</code> or login.
+        </div>
+      ) : null}
       <div className="text-[11px] text-zinc-400 mb-2">Conviction (accumulator)</div>
       <div className="space-y-1 mb-3 font-mono text-[11px]">
         {dormant ? (

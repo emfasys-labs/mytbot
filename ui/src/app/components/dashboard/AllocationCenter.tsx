@@ -4,9 +4,11 @@ import type { DashboardSnapshot } from '../../lib/api';
 type Props = {
   snapshot: DashboardSnapshot | null;
   dormant: boolean;
+  /** True when GET /dashboard/snapshot failed while running (often missing X-Dashboard-Token). */
+  snapshotFetchFailed?: boolean;
 };
 
-export function AllocationCenter({ snapshot, dormant }: Props) {
+export function AllocationCenter({ snapshot, dormant, snapshotFetchFailed = false }: Props) {
   const opps = (snapshot?.opportunities ?? []) as Array<Record<string, unknown>>;
   const weakest = (snapshot?.portfolio?.weakest_by_hold_score ?? []) as Array<Record<string, unknown>>;
   const instr = (snapshot?.execution_plan?.instructions ?? []) as Array<Record<string, unknown>>;
@@ -17,8 +19,18 @@ export function AllocationCenter({ snapshot, dormant }: Props) {
     <div className="flex flex-col gap-3 min-h-0">
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Capital & targets</div>
-        {dormant || !snapshot ? (
-          <div className="text-xs text-zinc-600">Start the system for allocator snapshot</div>
+        {dormant ? (
+          <div className="text-xs text-zinc-600">Start the system to load allocator data.</div>
+        ) : snapshotFetchFailed ? (
+          <div className="text-xs text-amber-200/90 leading-relaxed">
+            Snapshot API failed (often 401). Use the same token as the live socket: set{' '}
+            <code className="text-zinc-400">VITE_DASHBOARD_READ_TOKEN</code> in{' '}
+            <code className="text-zinc-400">ui/.env</code>, rebuild, or POST{' '}
+            <code className="text-zinc-400">/auth/dashboard/login</code> so{' '}
+            <code className="text-zinc-400">localStorage.dashboardReadToken</code> is set.
+          </div>
+        ) : !snapshot ? (
+          <div className="text-xs text-zinc-600">Loading allocator snapshot…</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
             <div>

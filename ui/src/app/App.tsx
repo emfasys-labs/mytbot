@@ -65,6 +65,7 @@ function App() {
   const lastIntelRefresh = useRef<number>(0);
   const [pnlSnapshot, setPnlSnapshot] = useState<ApiPnlResponse | null>(null);
   const [dashboardSnapshot, setDashboardSnapshot] = useState<DashboardSnapshot | null>(null);
+  const [snapshotFetchFailed, setSnapshotFetchFailed] = useState(false);
   const [wsEvents, setWsEvents] = useState<WsTickEvent[]>([]);
 
   const triggerHaptic = useHaptic();
@@ -116,6 +117,7 @@ function App() {
     setIntelligenceSignals(null);
     setPnlSnapshot(null);
     setDashboardSnapshot(null);
+    setSnapshotFetchFailed(false);
     setWsEvents([]);
     setEquityHistory([]);
     setTotalCapital(0);
@@ -192,7 +194,6 @@ function App() {
       const status = results[4].status === 'fulfilled' ? results[4].value : null;
       const sysStatus = results[5].status === 'fulfilled' ? results[5].value : null;
       const news = results[6].status === 'fulfilled' ? results[6].value : null;
-      const dashSnap = results[7].status === 'fulfilled' ? results[7].value : null;
 
       if (sysStatus) {
         const newState = sysStatus.state ?? 'off';
@@ -214,6 +215,16 @@ function App() {
 
       const sysState = (sysStatus?.state as SystemState | undefined) ?? systemStateRef.current;
       const feedsLive = sysState === 'running';
+
+      if (results[7].status === 'fulfilled') {
+        setSnapshotFetchFailed(false);
+        const raw = results[7].value;
+        if (feedsLive && raw != null && typeof raw === 'object') {
+          setDashboardSnapshot(raw as DashboardSnapshot);
+        }
+      } else if (feedsLive) {
+        setSnapshotFetchFailed(true);
+      }
 
       const killActive = !!status?.kill_switch;
       if (killActive) {
@@ -240,10 +251,6 @@ function App() {
         setTradesToday(todayTrades);
         const tc = toNumber(pnl.today?.tradable_capital, -1);
         setTradableCapital(tc >= 0 ? tc : null);
-      }
-
-      if (feedsLive && dashSnap && typeof dashSnap === 'object') {
-        setDashboardSnapshot(dashSnap as DashboardSnapshot);
       }
 
       if (feedsLive && hist) {
@@ -507,26 +514,22 @@ function App() {
           </div>
 
           <div className="flex flex-1 min-h-0 flex-col lg:flex-row gap-2 p-2 overflow-hidden">
-            <aside className="lg:w-80 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none">
+            <aside className="lg:w-80 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none z-0">
               <SignalBrain
                 snapshot={dashboardSnapshot}
                 events={wsEvents}
                 dormant={systemState !== 'running'}
+                snapshotFetchFailed={snapshotFetchFailed}
               />
             </aside>
 
-            <main className="flex-1 flex flex-col gap-2 min-w-0 min-h-0 overflow-y-auto">
-              <AllocationCenter snapshot={dashboardSnapshot} dormant={systemState !== 'running'} />
-              <PerformancePanel
-                totalCapital={totalCapital}
-                dailyPnL={dailyPnL}
-                pnl={pnlSnapshot}
-                equityHistory={equityHistory}
-                trendState={getTrendState()}
-                isActive={isActive}
-                isFlattened={isFlattened}
+            <main className="flex-1 flex flex-col gap-2 min-w-0 min-h-0 overflow-y-auto isolate z-0">
+              <AllocationCenter
+                snapshot={dashboardSnapshot}
+                dormant={systemState !== 'running'}
+                snapshotFetchFailed={snapshotFetchFailed}
               />
-              <div className="flex flex-wrap items-center gap-4 px-1">
+              <div className="flex flex-wrap items-center gap-4 px-1 shrink-0 relative z-[1]">
                 <PositionChips
                   positions={positions}
                   isFlattened={isFlattened}
@@ -544,6 +547,15 @@ function App() {
                   </span>
                 ) : null}
               </div>
+              <PerformancePanel
+                totalCapital={totalCapital}
+                dailyPnL={dailyPnL}
+                pnl={pnlSnapshot}
+                equityHistory={equityHistory}
+                trendState={getTrendState()}
+                isActive={isActive}
+                isFlattened={isFlattened}
+              />
             </main>
 
             <aside className="lg:w-72 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none">

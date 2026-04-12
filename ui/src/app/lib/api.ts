@@ -1,6 +1,23 @@
 const CONFIGURED_BASE = import.meta.env.VITE_API_BASE || '';
 const CANDIDATE_PORTS = [8000, 8001, 8002, 8003, 8004];
 
+/** Same token source as `ws.ts` — required when API sets `DASHBOARD_READ_TOKEN`. */
+const DASHBOARD_TOKEN_LS_KEY = 'dashboardReadToken';
+
+function dashboardReadHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const env = import.meta.env.VITE_DASHBOARD_READ_TOKEN;
+  let tok: string | undefined;
+  if (typeof env === 'string' && env.trim()) {
+    tok = env.trim();
+  } else if (typeof localStorage !== 'undefined') {
+    const ls = localStorage.getItem(DASHBOARD_TOKEN_LS_KEY);
+    if (ls?.trim()) tok = ls.trim();
+  }
+  if (tok) headers['X-Dashboard-Token'] = tok;
+  return headers;
+}
+
 let _resolvedBase: string | null = null;
 
 async function resolveApiBase(): Promise<string> {
@@ -17,6 +34,7 @@ async function resolveApiBase(): Promise<string> {
     try {
       const r = await fetch(`${candidate}/status`, {
         signal: AbortSignal.timeout(1500),
+        headers: dashboardReadHeaders(),
       });
       if (r.ok) {
         _resolvedBase = candidate;
@@ -246,14 +264,17 @@ export type SystemStatusResponse = {
 
 async function getJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
-  const r = await fetch(`${base}${path}`);
+  const r = await fetch(`${base}${path}`, { headers: dashboardReadHeaders() });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
   return (await r.json()) as T;
 }
 
 async function postJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
-  const r = await fetch(`${base}${path}`, { method: 'POST' });
+  const r = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: dashboardReadHeaders(),
+  });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
   return (await r.json()) as T;
 }
@@ -262,7 +283,7 @@ async function postJsonBody<T>(path: string, body: unknown): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...dashboardReadHeaders() },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
@@ -273,7 +294,7 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...dashboardReadHeaders() },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
