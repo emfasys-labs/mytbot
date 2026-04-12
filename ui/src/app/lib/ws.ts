@@ -8,10 +8,18 @@ export type WsTickEvent = {
   ts?: string;
 };
 
+export type WsDashboardHint = {
+  updated_at?: string;
+  fingerprint?: string;
+  path?: string;
+  loop_iteration?: number;
+};
+
 export type WsTickPayload = {
   status?: { kill_switch?: boolean; system_state?: string };
   system?: { state?: string; active_brokers?: string[]; errors?: string[] };
   events?: WsTickEvent[];
+  dashboard?: WsDashboardHint | null;
 };
 
 export type WsTickMessage = {

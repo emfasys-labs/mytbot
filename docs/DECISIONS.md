@@ -263,3 +263,11 @@ The system must continuously compare (1) current positions using capital and (2)
 
 **Risk parameter persistence (unchanged contract):** Regime overrides from the dashboard/API still merge into `ControlState`, persist to `config/risk_parameter_overrides.yaml` on successful `set_parameter`, and reload from disk on `ParameterManager` init; `hydrate_risk_parameters_from_bus` restores in-process state at runner startup.
 
+---
+
+## D019 — Dashboard “control tower” snapshot + period P&L
+**Date:** 2026-04-12
+**Decision:** The React dashboard (`ui/`) prioritises **decision transparency** over decorative charts. The trading loop persists a JSON snapshot to Postgres `ControlState` under key `dashboard.snapshot` (`system/dashboard_publish.py`): D015 path publishes opportunities, `RegimeState` components, `AllocationDecision` (including `allocation_targets`), `ExecutionPlan`, and `PortfolioState` pressure fields; the global-edge path publishes ranked `StrategyOpportunity` rows, held edges, and coordinator actions. `SignalAccumulator.dashboard_snapshot()` adds ranked conviction for the same payload. The API exposes `GET /dashboard/snapshot`; `GET /pnl` adds **calendar** week-to-date and month-to-date sums from `daily_pnl` (same `date` convention as `today`) plus lightweight `metrics` (win-rate on days with trades, max drawdown on stored portfolio value series when enough points exist). WebSocket `tick` frames include a small `dashboard` hint for change detection.
+**Reason:** The operator must see allocator intent, risk outcomes, and capital context on one screen without reading logs; period P&L answers “how am I doing this week/month” without ad-hoc spreadsheets.
+**Status:** Implemented.
+

@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 
 from api.server import app
 from api.server import _command_bus
+from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
+
+
 class _FakeBus:
     def __init__(self, row=None):
         self._row = row
@@ -89,3 +92,42 @@ def test_healthz_unauthenticated_with_dashboard_token(monkeypatch, client: TestC
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "secret-read")
     r = client.get("/healthz")
     assert r.status_code == 200
+
+
+class _FakeBusSnapshot:
+    async def get_state(self, key: str, default=None):
+        if key == DASHBOARD_SNAPSHOT_KEY:
+            return {"updated_at": "2026-04-12T00:00:00+00:00", "path": "d015", "fingerprint": "abc"}
+        return default
+
+
+def test_dashboard_snapshot_ok(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "tok")
+
+    def override_bus():
+        return _FakeBusSnapshot()
+
+    app.dependency_overrides[_command_bus] = override_bus
+    try:
+        r = client.get("/dashboard/snapshot", headers={"X-Dashboard-Token": "tok"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data.get("path") == "d015"
+        assert data.get("fingerprint") == "abc"
+    finally:
+        app.dependency_overrides.pop(_command_bus, None)
+
+
+def test_pnl_includes_week_month_metrics(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "tok")
+    r = client.get("/pnl", headers={"X-Dashboard-Token": "tok"})
+    if r.status_code == 503:
+        pytest.skip("database not available in test environment")
+    assert r.status_code == 200
+    data = r.json()
+    assert "week" in data
+    assert "month" in data
+    assert "period_start" in data["week"]
+    assert "metrics" in data
+    assert "win_rate_days" in data["metrics"]
+    assert "max_drawdown_pct" in data["metrics"]

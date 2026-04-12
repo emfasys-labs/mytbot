@@ -214,6 +214,51 @@ class SignalAccumulator:
             return None
         return self.compute_net_signal(state, now)
 
+    def dashboard_snapshot(self, *, top_n: int = 10, now: datetime | None = None) -> dict[str, Any]:
+        """
+        JSON-serializable conviction leaderboard for the dashboard.
+
+        Per-symbol net uses horizon scores (short/medium/long) as the decomposition shown in
+        ``components`` — not separate quant/news/macro ledgers (those are blended in ``update``).
+        """
+        now_utc = ensure_utc(now or utc_now())
+        n = max(1, min(50, int(top_n)))
+
+        def _entry(state: AssetSignalState, net: NetSignal) -> dict[str, Any]:
+            return {
+                "symbol": net.symbol,
+                "score": str(net.score),
+                "confidence": str(net.confidence),
+                "direction": net.direction,
+                "horizon_bias": net.horizon_bias,
+                "aligned_sources": list(net.aligned_sources),
+                "conflicting_sources": list(net.conflicting_sources),
+                "components": {k: str(v) for k, v in net.components.items()},
+                "source_types_seen": sorted(state.source_types_seen),
+                "updated_at": net.updated_at.isoformat(),
+            }
+
+        entries: list[dict[str, Any]] = []
+        for state in self._states.values():
+            net = self.compute_net_signal(state, now_utc)
+            entries.append(_entry(state, net))
+
+        entries.sort(key=lambda e: abs(Decimal(str(e["score"]))), reverse=True)
+        top_by_magnitude = entries[:n]
+
+        bullish = [e for e in entries if Decimal(str(e["score"])) > Decimal("0")]
+        bullish.sort(key=lambda e: Decimal(str(e["score"])), reverse=True)
+
+        bearish = [e for e in entries if Decimal(str(e["score"])) < Decimal("0")]
+        bearish.sort(key=lambda e: Decimal(str(e["score"])))
+
+        return {
+            "updated_at": now_utc.isoformat(),
+            "top_by_magnitude": top_by_magnitude,
+            "bullish_top": bullish[:n],
+            "bearish_top": bearish[:n],
+        }
+
     def feed_ai_pipeline_result(
         self,
         result: AIPipelineResult,

@@ -55,6 +55,7 @@ from system.d015_escalation import (
 )
 from system.d015_portfolio_bridge import portfolio_dict_to_runtime_state
 from system.d015_shadow import log_d015_shadow_for_signal
+from system.dashboard_publish import publish_dashboard_snapshot_d015, publish_dashboard_snapshot_global_edge
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
@@ -838,6 +839,20 @@ class TradingLoop:
                                     len(plan.instructions),
                                     plan.estimated_turnover,
                                 )
+                                try:
+                                    await publish_dashboard_snapshot_d015(
+                                        bus,
+                                        path="d015",
+                                        loop_iteration=self.iterations,
+                                        accumulator=self.sig_engine.accumulator if self.sig_engine else None,
+                                        regime=regime,
+                                        opportunities=opps,
+                                        decision=dec,
+                                        plan=plan,
+                                        portfolio_state=ps_rt,
+                                    )
+                                except Exception as pub_exc:  # noqa: BLE001
+                                    logger.warning("dashboard_publish | d015 | {}", pub_exc)
                                 for instr in plan.instructions:
                                     px = await _resolve_price_for_symbol(instr.symbol)
                                     ac = _asset_class_lookup(instr.symbol, batch_candidates)
@@ -1011,6 +1026,24 @@ class TradingLoop:
             replacement_context=repl_ctx,
         )
         log_arb_event("rank", ranked=len(actions), opportunities=len(new_opps), held=len(held))
+
+        try:
+            ps_ge = portfolio_dict_to_runtime_state(
+                portfolio_dict,
+                mode=mode_raw,
+                capital_pct=float(self.capital_pct),
+            )
+            await publish_dashboard_snapshot_global_edge(
+                bus,
+                loop_iteration=self.iterations,
+                accumulator=self.sig_engine.accumulator if self.sig_engine else None,
+                held=held,
+                strategy_opportunities=new_opps,
+                coordinator_actions=actions,
+                portfolio_state=ps_ge,
+            )
+        except Exception as pub_exc:  # noqa: BLE001
+            logger.warning("dashboard_publish | global_edge | {}", pub_exc)
 
         executed = 0
         planner_cfg = {

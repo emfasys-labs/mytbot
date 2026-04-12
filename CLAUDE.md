@@ -48,7 +48,9 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `execution/engine.py`      — order placement
 - `execution/router.py`      — smart order routing
 - `storage/models.py`        — database schema
-- `api/server.py`            — FastAPI: includes `/system/start`, `/system/stop`, `/system/status`
+- `api/server.py`            — FastAPI: `/system/start`, `/system/stop`, `/system/status`, `/dashboard/snapshot`, `/pnl` (week/month)
+- `api/pnl_periods.py`       — calendar week/month rollups over `daily_pnl` for `/pnl`
+- `system/dashboard_publish.py` — persists allocator snapshot (`dashboard.snapshot` in `ControlState`) for the UI
 - `config/risk_limits.yaml`  — all risk thresholds (editable without code change)
 - `config/m8_micro_live.yaml` — optional micro-live profile (symbol/strategy/notional caps when `APP_ENV=live`)
 - `config/fundamentals.yaml` — parameter defaults, absolute bounds, AI policy
@@ -88,7 +90,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: **D017 Stateful signal accumulation** — `signals/accumulator.py` (`SignalAccumulator`, half-life decay, alignment/conflict), `SignalEngine` optional integration + metadata (`accumulator_*`), `feed_ai_pipeline_result` after AI compute in `system/trading_loop.py`, `run_m3.py`, `run_m5.py`; `config/strategies.yaml` `signal_engine.use_signal_accumulator` (default on). Docs: `docs/ARCHITECTURE.md`, `docs/BUILD_PLAN.md` G5, `docs/DECISIONS.md` D017.
+- Last completed task: **D019 Dashboard V2 control tower** — `signals/accumulator.py` `dashboard_snapshot()`, `system/dashboard_publish.py` persists `dashboard.snapshot` to `ControlState` from D015 + global-edge ticks; `GET /dashboard/snapshot`, `GET /pnl` week/month + metrics, WebSocket `payload.dashboard` hint; React `ui/` layout (`LiveStrip`, `SignalBrain`, `AllocationCenter`, `RiskGate`, `PerformancePanel`) with top `NewsTicker` + bottom `OpportunityTicker` preserved. Docs: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` D019.
+- Prior: **D017 Stateful signal accumulation** — `signals/accumulator.py` (`SignalAccumulator`, half-life decay, alignment/conflict), `SignalEngine` optional integration + metadata (`accumulator_*`), `feed_ai_pipeline_result` after AI compute in `system/trading_loop.py`, `run_m3.py`, `run_m5.py`; `config/strategies.yaml` `signal_engine.use_signal_accumulator` (default on). Docs: `docs/ARCHITECTURE.md`, `docs/BUILD_PLAN.md` G5, `docs/DECISIONS.md` D017.
 - Prior: **D016 IBKR single-leg options** — `core/instruments.OptionContractSpec`, optional `instrument_metadata` on `Order`/`Position` in `brokers/base.py` (serialization only; defaults preserve existing adapters), `IBKRAdapter.get_option_chain` / `qualify_option_contract` / `get_option_market_data`, `ExecutionEngine` passes option payload into `Order`, `RiskEngine._check_options_trading_policy` + `config/risk_limits.yaml` `options_trading` + `risk/options_env.py`, portfolio `option_premium_exposure` in `run_m3._load_portfolio_state`, Alembic `c8f2a1d0e4aa`, smoke script `scripts/smoke_ibkr_options.py`. Default **options disabled** (`ENABLE_OPTIONS=false`).
 - Prior: D015 **primary** operational path (allocator batch → risk → execution); see DECISIONS D004 amendment.
 - Next task: Paper soak on primary path; IBKR options paper validation with `scripts/smoke_ibkr_options.py` when enabled.

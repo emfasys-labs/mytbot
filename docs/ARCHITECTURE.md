@@ -108,7 +108,8 @@ Reference docs:
 │           OBSERVABILITY & CONTROL                    │
 │  Audit log (every decision stored)                   │
 │  Dashboard (FastAPI + React in `ui/`)              │
-│  WebSocket ticks + `/system/status` (incl. `balance_ready`) │
+│  WebSocket ticks + `/system/status` + `/dashboard/snapshot` │
+│  (`balance_ready`, allocator snapshot, P&L periods)          │
 │  Alerts (e.g. Telegram on failures)                 │
 │  Kill switch (API + UI)                            │
 └─────────────────────────────────────────────────────┘
@@ -162,7 +163,7 @@ brokers/_template/adapter.py  ← copy this for any new exchange
       Tracks fill
 10. Portfolio tracker updates positions and P&L
 11. Everything written to audit log / DB
-12. Dashboard reflects state via REST + WebSocket (`/system/status` includes broker `balance_ready` for honest “connected” UI)
+12. Dashboard reflects state via REST + WebSocket: `/system/status` (broker `balance_ready`), `GET /dashboard/snapshot` (latest D015/global-edge decision snapshot from `ControlState` key `dashboard.snapshot`, written by `system/dashboard_publish.py` from the trading loop), `GET /pnl` (today + calendar week/month rollups), and WebSocket `tick` payloads that include a compact `dashboard` hint (`updated_at`, `fingerprint`, `path`) for cheap UI invalidation
 ```
 
 ---

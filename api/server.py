@@ -26,7 +26,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from api.dashboard_layer import gather_ws_events, log_cors_live_warning, merge_risk_parameters_for_api, verify_dashboard_token
+from api.pnl_periods import (
+    aggregate_daily_pnl_range,
+    equity_max_drawdown_pct,
+    month_to_date_range,
+    week_to_date_range,
+    win_rate_from_daily_rows,
+)
 from control.command_bus import CommandBus
+from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
@@ -730,7 +738,8 @@ def _configured_paper_nav() -> Decimal:
 
 @app.get("/pnl")
 async def get_pnl(session_factory=Depends(_session_factory)):
-    today = date.today().isoformat()
+    today_d = date.today()
+    today = today_d.isoformat()
     async with session_factory() as session:
         today_q = await session.execute(select(DailyPnL).where(DailyPnL.date == today).limit(1))
         today_row = today_q.scalars().first()
@@ -743,6 +752,21 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             )
         )
         agg = agg_q.one()
+        ws, we = week_to_date_range(today_d)
+        ms, me = month_to_date_range(today_d)
+        week_agg = await aggregate_daily_pnl_range(session, ws, we)
+        month_agg = await aggregate_daily_pnl_range(session, ms, me)
+        pv_q = await session.execute(select(DailyPnL.portfolio_value).order_by(DailyPnL.date.asc()).limit(400))
+        pv_vals: list[Decimal] = []
+        for x in pv_q.scalars().all():
+            if x is None:
+                continue
+            try:
+                pv_vals.append(Decimal(str(x)))
+            except Exception:  # noqa: BLE001
+                continue
+        max_dd = equity_max_drawdown_pct(pv_vals)
+        win_rate = await win_rate_from_daily_rows(session)
 
     mtm_unrealised = await _compute_live_unrealised_mtm(session_factory)
     db_today_unrealised = Decimal(str(today_row.unrealised_pnl if today_row else 0))
@@ -783,7 +807,22 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             "fees": _decimal_str(agg[2]),
             "trades": int(agg[3] or 0),
         },
+        "week": week_agg,
+        "month": month_agg,
+        "metrics": {
+            "win_rate_days": win_rate,
+            "max_drawdown_pct": max_dd,
+        },
     }
+
+
+@app.get("/dashboard/snapshot")
+async def get_dashboard_snapshot(bus: CommandBus = Depends(_command_bus)):
+    """Latest allocator + accumulator snapshot from ``ControlState`` (trading loop)."""
+    raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
+    if not isinstance(raw, dict):
+        return {}
+    return raw
 
 
 @app.get("/pnl/history")
@@ -1021,6 +1060,16 @@ async def ws_updates(ws: WebSocket):
             events = await gather_ws_events(bus, sf)
             orch = _get_orchestrator()
             sys_status = orch.status() if orch else {"state": "off"}
+            dash_hint = None
+            if bus is not None:
+                dash_raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
+                if isinstance(dash_raw, dict):
+                    dash_hint = {
+                        "updated_at": dash_raw.get("updated_at"),
+                        "fingerprint": dash_raw.get("fingerprint"),
+                        "path": dash_raw.get("path"),
+                        "loop_iteration": dash_raw.get("loop_iteration"),
+                    }
             await ws.send_json(
                 {
                     "type": "tick",
@@ -1028,6 +1077,7 @@ async def ws_updates(ws: WebSocket):
                         "status": status,
                         "system": sys_status,
                         "events": events,
+                        "dashboard": dash_hint,
                     },
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }

@@ -168,3 +168,46 @@ def test_feed_ai_pipeline_result_smoke():
     net = acc.compute_net_for_symbol("SPY", _ts())
     assert net is not None
     assert isinstance(net, NetSignal)
+
+
+def test_dashboard_snapshot_ranking_and_json_safe():
+    import json
+
+    acc = SignalAccumulator()
+    t0 = _ts()
+    acc.update(
+        InputSignal(
+            symbol="WEAK",
+            source_type="quant",
+            source_name="m",
+            direction=-1,
+            strength=Decimal("0.3"),
+            confidence=Decimal("0.5"),
+            horizon="short",
+            timestamp=t0,
+        ),
+        now=t0,
+    )
+    acc.update(
+        InputSignal(
+            symbol="STRONG",
+            source_type="quant",
+            source_name="m",
+            direction=1,
+            strength=Decimal("0.95"),
+            confidence=Decimal("0.95"),
+            horizon="short",
+            timestamp=t0,
+        ),
+        now=t0,
+    )
+    snap = acc.dashboard_snapshot(top_n=5, now=t0)
+    json.dumps(snap)  # JSON-safe
+    assert snap["updated_at"]
+    assert {e["symbol"] for e in snap["bullish_top"]} >= {"STRONG"}
+    assert {e["symbol"] for e in snap["bearish_top"]} >= {"WEAK"}
+    # STRONG should rank first by magnitude
+    assert snap["top_by_magnitude"][0]["symbol"] == "STRONG"
+    for e in snap["top_by_magnitude"]:
+        assert "components" in e
+        assert "source_types_seen" in e

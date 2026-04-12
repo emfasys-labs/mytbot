@@ -37,6 +37,15 @@ function getBase(): string {
   return _resolvedBase ?? (CONFIGURED_BASE || `http://${window.location.hostname || 'localhost'}:8000`);
 }
 
+export type PnlPeriodRollup = {
+  realised?: string;
+  unrealised?: string;
+  fees?: string;
+  trades?: number;
+  period_start?: string;
+  period_end?: string;
+};
+
 export type ApiPnlResponse = {
   today?: {
     realised?: string;
@@ -47,6 +56,12 @@ export type ApiPnlResponse = {
     /** Total equity × capital_allocation_pct — order sizing budget, not a second balance. */
     tradable_capital?: string;
     capital_allocation_pct?: number;
+  };
+  week?: PnlPeriodRollup;
+  month?: PnlPeriodRollup;
+  metrics?: {
+    win_rate_days?: number | null;
+    max_drawdown_pct?: number | null;
   };
 };
 
@@ -183,6 +198,36 @@ export type SystemModeResponse = {
 
 export type SystemState = 'off' | 'starting' | 'running' | 'stopping' | 'error';
 
+/** GET /dashboard/snapshot — persisted trading-loop decision state. */
+export type DashboardSnapshot = {
+  updated_at?: string;
+  fingerprint?: string;
+  path?: string;
+  loop_iteration?: number;
+  accumulator?: {
+    updated_at?: string;
+    bullish_top?: Array<Record<string, unknown>>;
+    bearish_top?: Array<Record<string, unknown>>;
+    top_by_magnitude?: Array<Record<string, unknown>>;
+  };
+  regime?: {
+    regime_label?: string;
+    market_state_score?: string;
+    components?: Record<string, string>;
+    timestamp?: string;
+  } | null;
+  opportunities?: Array<Record<string, unknown>>;
+  allocation?: Record<string, unknown> | null;
+  execution_plan?: {
+    instructions?: Array<Record<string, unknown>>;
+    estimated_turnover?: string;
+    rationale?: string;
+    timestamp?: string;
+  } | null;
+  portfolio?: Record<string, unknown>;
+  global_edge?: Record<string, unknown>;
+};
+
 export type SystemStatusResponse = {
   state: SystemState;
   state_changed_at?: string;
@@ -258,6 +303,7 @@ export const api = {
   getDiscoveryAnomalies: (limit = 8) => getJson<DiscoveryAnomaliesResponse>(`/discovery/anomalies?limit=${limit}`),
   getIntelligenceRegime: () => getJson<IntelligenceRegimeResponse>('/intelligence/regime'),
   getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
+  getDashboardSnapshot: () => getJson<DashboardSnapshot>('/dashboard/snapshot'),
 };
 
 export function toNumber(v: unknown, fallback = 0): number {
