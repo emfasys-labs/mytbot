@@ -48,6 +48,30 @@ _EXEMPT_READ_AUTH = frozenset(
 )
 
 
+def _pick_strongest_news_log_per_symbol(news_rows: list[Any]) -> dict[str, Any]:
+    """
+    For each symbol, keep the log row with the largest |score| in the fetched window.
+
+    The AI pipeline persists one row per symbol every cycle; the latest row is often 0.0 when
+    no headline matched. Without this merge, dashboard 'news movers' would hide prior non-zero
+    scores for the same symbol.
+    """
+    by_symbol: dict[str, Any] = {}
+    for r in news_rows:
+        s = (getattr(r, "symbol", None) or "").strip().upper()
+        if not s:
+            continue
+        try:
+            sc = float(r.score) if r.score is not None else 0.0
+        except (TypeError, ValueError):
+            sc = 0.0
+        prev = by_symbol.get(s)
+        psc = float(prev.score) if prev is not None and prev.score is not None else 0.0
+        if prev is None or abs(sc) > abs(psc):
+            by_symbol[s] = r
+    return by_symbol
+
+
 class _DashboardReadMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         if request.scope.get("type") == "websocket":
@@ -323,25 +347,32 @@ async def get_news(limit: int = Query(30, ge=1, le=100), session_factory=Depends
         )
         headlines = list(hq.scalars().all())
 
+        ai_limit = min(2000, max(300, limit * 40))
         aq = await session.execute(
             select(AIOutputLog)
-            .where(AIOutputLog.context_type == "news")
+            .where(AIOutputLog.context_type == "news", AIOutputLog.symbol.isnot(None))
             .order_by(AIOutputLog.timestamp.desc())
-            .limit(limit)
+            .limit(ai_limit)
         )
         ai_rows = list(aq.scalars().all())
 
-    ai_by_symbol: dict[str, dict[str, Any]] = {}
-    for r in ai_rows:
-        if r.symbol and r.symbol not in ai_by_symbol:
-            ai_by_symbol[r.symbol] = {
-                "symbol": r.symbol,
-                "score": _decimal_str(r.score) if r.score is not None else None,
-                "confidence": _decimal_str(r.confidence) if r.confidence is not None else None,
-                "event_type": r.event_type,
-                "rationale": r.rationale,
-                "scored_at": r.timestamp.isoformat() if r.timestamp else None,
-            }
+    best_per_sym = _pick_strongest_news_log_per_symbol(ai_rows)
+    ranked = sorted(
+        best_per_sym.values(),
+        key=lambda r: abs(float(r.score) if r.score is not None else 0.0),
+        reverse=True,
+    )[:limit]
+    ai_scores = [
+        {
+            "symbol": r.symbol,
+            "score": _decimal_str(r.score) if r.score is not None else None,
+            "confidence": _decimal_str(r.confidence) if r.confidence is not None else None,
+            "event_type": r.event_type,
+            "rationale": r.rationale,
+            "scored_at": r.timestamp.isoformat() if r.timestamp else None,
+        }
+        for r in ranked
+    ]
 
     return {
         "headlines": [
@@ -354,7 +385,7 @@ async def get_news(limit: int = Query(30, ge=1, le=100), session_factory=Depends
             }
             for h in headlines
         ],
-        "ai_scores": list(ai_by_symbol.values()),
+        "ai_scores": ai_scores,
     }
 
 
@@ -441,26 +472,24 @@ async def get_intelligence_regime(session_factory=Depends(_session_factory)):
             select(AIOutputLog)
             .where(AIOutputLog.context_type == "news", AIOutputLog.timestamp >= cutoff, AIOutputLog.symbol.isnot(None))
             .order_by(AIOutputLog.timestamp.desc())
-            .limit(200)
+            .limit(1200)
         )
         news_rows = list(news_q.scalars().all())
 
-    by_symbol: dict[str, dict] = {}
-    for r in news_rows:
-        s = (r.symbol or "").strip().upper()
-        if not s or s in by_symbol:
-            continue
-        by_symbol[s] = {
-            "symbol": s,
-            "score": float(r.score) if r.score is not None else 0.0,
-            "event_type": r.event_type or "other",
-            "rationale": (r.rationale or "")[:200],
-            "scored_at": r.timestamp.isoformat() if r.timestamp else None,
-        }
-
-    # Only show symbols with a real score; 0.0 means no relevant news was found.
+    best = _pick_strongest_news_log_per_symbol(news_rows)
+    # Only show symbols with a real score; 0.0 means no relevant news was found in the best row.
     top_movers = sorted(
-        [v for v in by_symbol.values() if v["score"] != 0.0],
+        [
+            {
+                "symbol": s,
+                "score": float(r.score) if r.score is not None else 0.0,
+                "event_type": r.event_type or "other",
+                "rationale": (r.rationale or "")[:200],
+                "scored_at": r.timestamp.isoformat() if r.timestamp else None,
+            }
+            for s, r in best.items()
+            if (float(r.score) if r.score is not None else 0.0) != 0.0
+        ],
         key=lambda x: abs(x["score"]),
         reverse=True,
     )[:8]

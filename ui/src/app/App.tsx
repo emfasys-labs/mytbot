@@ -97,20 +97,13 @@ function App() {
     }
   };
 
+  /** Clears live-trading UI slices only. Intelligence/discovery/equity stay on DB-backed refresh so the dashboard is not blank when the system is off. */
   const clearLiveData = useCallback(() => {
     setActiveBrokers([]);
     setNewsItems([]);
     setLivePositions([]);
-    setIntelligenceSignals(null);
-    setIntelligenceRegime(null);
-    setDiscoverySummary(null);
-    setDiscoveryAnomalies(null);
     setTradesToday(0);
     setLastTradeMinutes(0);
-    setDailyPnL(0);
-    setEquityHistory([]);
-    setTotalCapital(0);
-    setTradableCapital(null);
     lastTradeTs.current = 0;
     lastIntelRefresh.current = 0;
   }, []);
@@ -188,7 +181,6 @@ function App() {
         } else if (sysState === 'off' || sysState === 'error') {
           setControlState('flatten');
           clearLiveData();
-          return; // skip further data processing — system is off
         }
       }
 
@@ -222,17 +214,18 @@ function App() {
         setLivePositions(mappedPositions);
       }
 
-      const currentSysState = sysStatus?.state ?? systemState;
-      if (news && currentSysState === 'running') {
+      if (news) {
         const headlines = news.headlines ?? [];
         const aiMap = new Map<string, { score: number; sentiment: 'positive' | 'negative' | 'neutral' }>();
         for (const ai of news.ai_scores ?? []) {
           if (ai.symbol && ai.score != null) {
             const s = parseFloat(ai.score);
-            aiMap.set(ai.symbol.toUpperCase(), {
-              score: s,
-              sentiment: s > 0.2 ? 'positive' : s < -0.2 ? 'negative' : 'neutral',
-            });
+            if (Number.isFinite(s)) {
+              aiMap.set(ai.symbol.toUpperCase(), {
+                score: s,
+                sentiment: s > 0.2 ? 'positive' : s < -0.2 ? 'negative' : 'neutral',
+              });
+            }
           }
         }
         const tickerItems: TickerItem[] = headlines.slice(0, 20).map((h) => {
@@ -255,10 +248,9 @@ function App() {
         }
       }
 
-      // Refresh discovery/intelligence data every ~30s (only when running)
-      const currentSysStateForIntel = sysStatus?.state ?? systemState;
+      // Discovery + intelligence: DB-backed; refresh every poll so panels stay warm even when the runner is off.
       const now = Date.now();
-      if (currentSysStateForIntel === 'running' && now - lastIntelRefresh.current > 28_000) {
+      if (now - lastIntelRefresh.current > 12_000) {
         lastIntelRefresh.current = now;
         const [ds, da, ir, is_, modeRes] = await Promise.allSettled([
           api.getDiscoverySummary(),
@@ -333,6 +325,7 @@ function App() {
           } else if (sysPayload?.state === 'off' || sysPayload?.state === 'error') {
             setControlState('flatten');
             clearLiveData();
+            void refresh();
           }
 
           const events = msg.payload.events ?? [];

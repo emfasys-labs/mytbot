@@ -60,12 +60,15 @@ export function IntelligencePanel({ regime, signals }: IntelligencePanelProps) {
 
       {/* Top news movers — only show symbols with a real score */}
       {(() => {
-        const scored = movers.filter((m) => Math.abs(m.score) > 0.01);
+        const scored = movers.filter((m) => Number.isFinite(m.score) && Math.abs(m.score) > 0.001);
         return (
           <div className="space-y-1.5">
             <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-2">News movers</div>
             {scored.length === 0 ? (
-              <div className="text-[11px] text-gray-700 italic">No scored news yet</div>
+              <div className="text-[11px] text-gray-700 italic leading-relaxed">
+                No directional scores in the last 48h (or only neutral / no headline match). Run the trading loop or{' '}
+                <code className="text-gray-500">run_m3</code> so the AI pipeline persists scores to the database.
+              </div>
             ) : (
               scored.slice(0, 5).map((m) => {
                 const positive = m.score > 0;
@@ -91,11 +94,15 @@ export function IntelligencePanel({ regime, signals }: IntelligencePanelProps) {
         );
       })()}
 
-      {/* Signal queue */}
-      {signalList.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-2">Signal queue</div>
-          {signalList.slice(0, 6).map((s) => {
+      {/* Signal queue — always show heading; empty state explains missing rows */}
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-2">Signal queue</div>
+        {signalList.length === 0 ? (
+          <div className="text-[11px] text-gray-700 italic leading-relaxed">
+            No recent signals in the database (last 6h). Signals appear after the runner evaluates strategies and logs them.
+          </div>
+        ) : (
+          signalList.slice(0, 6).map((s) => {
             const approved = s.verdict === 'approved';
             const buyColor = s.side === 'buy' ? 'text-emerald-400' : 'text-rose-400';
             const age = s.timestamp
@@ -135,9 +142,9 @@ export function IntelligencePanel({ regime, signals }: IntelligencePanelProps) {
                 )}
               </div>
             );
-          })}
-        </div>
-      )}
+          })
+        )}
+      </div>
     </div>
   );
 }
