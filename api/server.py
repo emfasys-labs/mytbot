@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # POSTGRES_* and API_CONTROL_TOKEN are missing when starting `uvicorn api.server:app`.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -454,8 +454,12 @@ async def get_discovery_summary(session_factory=Depends(_session_factory)):
 
 
 @app.get("/intelligence/regime")
-async def get_intelligence_regime(session_factory=Depends(_session_factory)):
+async def get_intelligence_regime(
+    response: Response,
+    session_factory=Depends(_session_factory),
+):
     """Latest macro regime + top news-scored symbols."""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     from datetime import timedelta
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
@@ -507,21 +511,25 @@ async def get_intelligence_regime(session_factory=Depends(_session_factory)):
 
 @app.get("/intelligence/signals")
 async def get_intelligence_signals(
+    response: Response,
     limit: int = Query(10, ge=1, le=50),
     session_factory=Depends(_session_factory),
 ):
     """Recent signals annotated with their risk verdict.
-    Prefers signals from the last 2 hours; falls back to latest N if none exist recently.
+    Prefers signals from the last 6h; falls back to latest N if none exist recently.
+    Deduplicates by (symbol, strategy, side) so the dashboard shows the newest row per idea.
     """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     from datetime import timedelta
     recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+    fetch_cap = min(500, limit * 25)
     async with session_factory() as session:
         # Fetch recent signals; exclude legacy "max_trades_per_day" rejections
         sig_q = await session.execute(
             select(SignalLog)
             .where(SignalLog.timestamp >= recent_cutoff)
             .order_by(SignalLog.timestamp.desc())
-            .limit(limit * 3)  # over-fetch so we can filter below
+            .limit(fetch_cap)
         )
         sigs_raw = list(sig_q.scalars().all())
 
@@ -538,12 +546,12 @@ async def get_intelligence_signals(
                 if checks and all(c == legacy_check for c in checks):
                     legacy_signal_ids.add(rv.signal_id)
 
-        sigs = [s for s in sigs_raw if s.id not in legacy_signal_ids][:limit]
+        sigs = [s for s in sigs_raw if s.id not in legacy_signal_ids]
 
         # Absolute fallback: newest N signals from all time (still excluding legacy)
         if not sigs:
             sig_q = await session.execute(
-                select(SignalLog).order_by(SignalLog.timestamp.desc()).limit(limit * 3)
+                select(SignalLog).order_by(SignalLog.timestamp.desc()).limit(fetch_cap)
             )
             sigs_raw = list(sig_q.scalars().all())
             if sigs_raw:
@@ -555,7 +563,7 @@ async def get_intelligence_signals(
                     checks = rv.checks_failed or []
                     if checks and all(c == legacy_check for c in checks):
                         legacy_signal_ids.add(rv.signal_id)
-            sigs = [s for s in sigs_raw if s.id not in legacy_signal_ids][:limit]
+            sigs = [s for s in sigs_raw if s.id not in legacy_signal_ids]
 
         verdicts: dict[str, dict] = {}
         if sigs:
@@ -571,6 +579,23 @@ async def get_intelligence_signals(
                         "checks_failed": rv.checks_failed or [],
                     }
 
+    # Dashboard: one row per (symbol, strategy, side) — keep the newest only. The runner may log
+    # the same idea every few minutes; showing six identical lines is correct historically but noisy.
+    sigs_ordered = list(sigs)
+    seen_keys: set[tuple[str, str, str]] = set()
+    sigs_deduped: list[Any] = []
+    for s in sigs_ordered:
+        key = (
+            (s.symbol or "").strip().upper(),
+            (s.strategy or "").strip().lower(),
+            (s.side or "").strip().lower(),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        sigs_deduped.append(s)
+        if len(sigs_deduped) >= limit:
+            break
 
     return {
         "signals": [
@@ -589,7 +614,7 @@ async def get_intelligence_signals(
                 "risk_reason": verdicts.get(s.id, {}).get("reason", ""),
                 "checks_failed": verdicts.get(s.id, {}).get("checks_failed", []),
             }
-            for s in sigs
+            for s in sigs_deduped
         ]
     }
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { IntelligenceSignalsResponse, IntelligenceRegimeResponse } from '../lib/api';
+import { dedupeIntelligenceSignals } from '../lib/intelligenceSignals';
 
 interface TickerItem {
   key: string;
@@ -19,8 +20,9 @@ interface OpportunityTickerProps {
 }
 
 function buildItems(signals: IntelligenceSignalsResponse | null): TickerItem[] {
-  if (!signals?.signals?.length) return [];
-  return signals.signals.map((s) => ({
+  const rows = dedupeIntelligenceSignals(signals?.signals, 12);
+  if (!rows.length) return [];
+  return rows.map((s) => ({
     key: s.id,
     symbol: s.symbol,
     side: s.side as 'buy' | 'sell',

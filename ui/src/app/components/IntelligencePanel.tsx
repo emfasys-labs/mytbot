@@ -1,5 +1,6 @@
 import { motion } from 'motion/react';
 import type { IntelligenceRegimeResponse, IntelligenceSignalsResponse } from '../lib/api';
+import { dedupeIntelligenceSignals } from '../lib/intelligenceSignals';
 
 interface IntelligencePanelProps {
   regime: IntelligenceRegimeResponse | null;
@@ -28,7 +29,7 @@ function RegimeChip({ label, confidence }: { label: string; confidence: number }
 export function IntelligencePanel({ regime, signals }: IntelligencePanelProps) {
   const reg = regime?.regime;
   const movers = regime?.top_movers ?? [];
-  const signalList = signals?.signals ?? [];
+  const signalList = dedupeIntelligenceSignals(signals?.signals, 8);
 
   return (
     <div className="space-y-5">
