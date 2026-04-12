@@ -19,6 +19,8 @@
 | M7 | Dashboard + Control | Weeks 16–17 | ✅ Complete |
 | M8 | Micro-Live + Iteration | Weeks 18+ | ✅ Complete (code); ongoing ops: soak, scale capital slowly |
 
+**Post-M8 extension:** IBKR single-leg options (D016) — chain fetch, structured `OptionContractSpec`, risk gate `options_trading`, order/position `instrument_metadata` in storage; not a new milestone, does not replace M8 soak requirements.
+
 ---
 
 ## Research Integration (2026-04)

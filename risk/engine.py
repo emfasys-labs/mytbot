@@ -24,6 +24,8 @@ from typing import Optional
 import logging
 import os
 
+from core.instruments import option_premium_notional, parse_option_contract_from_metadata
+from risk.options_env import options_trading_config
 from risk.parameters import ParameterManager
 from risk.provider import ParameterProvider
 
@@ -97,6 +99,7 @@ class RiskEngine:
 
         checks = [
             self._check_kill_switch,
+            self._check_options_trading_policy,
             self._check_m8_symbol_whitelist,
             self._check_m8_strategy_whitelist,
             self._check_m8_max_notional,
@@ -230,6 +233,120 @@ class RiskEngine:
     def _check_kill_switch(self, signal, portfolio) -> tuple[bool, str]:
         return (not self._is_killed, "kill_switch")
 
+    @staticmethod
+    def _is_option_signal(signal: Signal) -> bool:
+        ac = (signal.asset_class or "").strip().lower()
+        if ac == "option":
+            return True
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        if meta.get("instrument_type") == "option":
+            return True
+        return isinstance(meta.get("option_contract"), dict)
+
+    def _check_options_trading_policy(self, signal: Signal, portfolio: dict) -> tuple[bool, str]:
+        """
+        Conservative IBKR single-leg options gate (config ``options_trading`` + env).
+        Does not run for non-option signals.
+        """
+        if not self._is_option_signal(signal):
+            return (True, "options_skipped")
+
+        cfg = options_trading_config(self.config)
+        ok_label = "options_trading_policy"
+
+        if not cfg["enabled"]:
+            logger.warning("RISK options_disabled | signal_id=%s", signal.signal_id)
+            return (False, "options_disabled")
+
+        if cfg["paper_only"]:
+            env_mode = (os.getenv("APP_ENV", "paper") or "paper").strip().lower()
+            if env_mode == "live":
+                logger.warning("RISK options_paper_only | signal_id=%s", signal.signal_id)
+                return (False, "options_paper_only")
+
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        spec = parse_option_contract_from_metadata(meta)
+        if spec is None:
+            logger.warning("RISK options_invalid_spec | signal_id=%s", signal.signal_id)
+            return (False, "options_invalid_spec")
+
+        allowed = {str(x).strip().upper() for x in cfg["allowed_underlyings"] if str(x).strip()}
+        und = spec.underlying_symbol.strip().upper()
+        if und not in allowed:
+            logger.warning(
+                "RISK options_underlying_denied | underlying=%s | signal_id=%s",
+                und,
+                signal.signal_id,
+            )
+            return (False, "options_underlying_denied")
+
+        qty_abs = abs(signal.suggested_quantity)
+        try:
+            max_contracts = int(cfg["max_contracts_per_trade"])
+        except Exception:  # noqa: BLE001
+            max_contracts = 1
+        if qty_abs > Decimal(max_contracts):
+            logger.warning(
+                "RISK options_max_contracts | qty=%s max=%s | signal_id=%s",
+                qty_abs,
+                max_contracts,
+                signal.signal_id,
+            )
+            return (False, "options_max_contracts")
+
+        px = self._resolve_signal_price(signal)
+        if px <= 0:
+            logger.warning("RISK options_missing_premium | signal_id=%s", signal.signal_id)
+            return (False, "options_missing_premium")
+
+        mult = int(spec.multiplier)
+        premium = option_premium_notional(qty_abs, px, mult)
+        if premium > cfg["max_premium_per_trade"]:
+            logger.warning(
+                "RISK options_max_premium_per_trade | premium=%s cap=%s | signal_id=%s",
+                premium,
+                cfg["max_premium_per_trade"],
+                signal.signal_id,
+            )
+            return (False, "options_max_premium_per_trade")
+
+        side = (signal.side or "").strip().lower()
+        pos_map = portfolio.get("positions") if isinstance(portfolio.get("positions"), dict) else {}
+        sym_key = spec.position_key()
+        row = pos_map.get(sym_key) if sym_key else None
+        prev_qty = Decimal("0")
+        if isinstance(row, dict):
+            try:
+                prev_qty = Decimal(str(row.get("quantity", "0")))
+            except Exception:  # noqa: BLE001
+                prev_qty = Decimal("0")
+
+        if side == "sell":
+            if not cfg["allow_sell_to_close"]:
+                logger.warning("RISK options_sell_disabled | signal_id=%s", signal.signal_id)
+                return (False, "options_sell_disabled")
+            if prev_qty <= 0:
+                logger.warning(
+                    "RISK options_short_opening_rejected | signal_id=%s",
+                    signal.signal_id,
+                )
+                return (False, "options_short_opening_rejected")
+
+        current_opt = self._decimal_from_portfolio(portfolio, "option_premium_exposure", Decimal("0"))
+        if side == "buy":
+            projected = current_opt + premium
+            max_tot = cfg["max_total_premium_exposure"]
+            if projected > max_tot:
+                logger.warning(
+                    "RISK options_max_total_premium_exposure | projected=%s cap=%s | signal_id=%s",
+                    projected,
+                    max_tot,
+                    signal.signal_id,
+                )
+                return (False, "options_max_total_premium_exposure")
+
+        return (True, ok_label)
+
     def _m8_guards_active(self) -> bool:
         m8 = self.config.get("m8_micro_live")
         if not isinstance(m8, dict) or not m8.get("enabled"):
@@ -237,6 +354,8 @@ class RiskEngine:
         return os.getenv("APP_ENV", "paper").strip().lower() == "live"
 
     def _check_m8_symbol_whitelist(self, signal, portfolio) -> tuple[bool, str]:
+        if self._is_option_signal(signal):
+            return (True, "m8_symbol_whitelist")
         if not self._m8_guards_active():
             return (True, "m8_symbol_whitelist")
         m8 = self.config["m8_micro_live"]
@@ -248,6 +367,8 @@ class RiskEngine:
         return (sym in allowed, "m8_symbol_whitelist")
 
     def _check_m8_strategy_whitelist(self, signal, portfolio) -> tuple[bool, str]:
+        if self._is_option_signal(signal):
+            return (True, "m8_strategy_whitelist")
         if not self._m8_guards_active():
             return (True, "m8_strategy_whitelist")
         m8 = self.config["m8_micro_live"]
@@ -259,6 +380,8 @@ class RiskEngine:
         return (st in allowed, "m8_strategy_whitelist")
 
     def _check_m8_max_notional(self, signal, portfolio) -> tuple[bool, str]:
+        if self._is_option_signal(signal):
+            return (True, "m8_max_notional")
         if not self._m8_guards_active():
             return (True, "m8_max_notional")
         m8 = self.config["m8_micro_live"]
@@ -291,6 +414,8 @@ class RiskEngine:
         Optional per-strategy order caps under M8 (separate sleeves / allocation).
         See config/m8_micro_live.yaml strategy_sleeve_caps.
         """
+        if self._is_option_signal(signal):
+            return (True, "m8_strategy_sleeve_cap")
         if not self._m8_guards_active():
             return (True, "m8_strategy_sleeve_cap")
         m8 = self.config["m8_micro_live"]
@@ -360,6 +485,8 @@ class RiskEngine:
         return (minimum < (sizing_base * threshold_pct), "asset_proportionality")
 
     def _check_minimum_order_size(self, signal, portfolio) -> tuple[bool, str]:
+        if self._is_option_signal(signal):
+            return (True, "minimum_order_size")
         notional = self._requested_notional(signal)
         minimum = self._minimum_order_size(signal.asset_class)
         if minimum <= 0:
@@ -411,8 +538,11 @@ class RiskEngine:
         max_concentration_pct = self._provider.get_decimal("max_concentration_pct", fallback=Decimal("0"))
         symbol_exposure_raw = portfolio.get("symbol_exposure", {})
         symbol_exposure = Decimal("0")
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        spec = parse_option_contract_from_metadata(meta)
+        sym_key = spec.position_key() if spec is not None else signal.symbol
         if isinstance(symbol_exposure_raw, dict):
-            symbol_exposure = Decimal(str(symbol_exposure_raw.get(signal.symbol, "0")))
+            symbol_exposure = Decimal(str(symbol_exposure_raw.get(sym_key, "0")))
         projected_symbol_exposure = symbol_exposure + self._requested_notional(signal)
         allowed_symbol_exposure = sizing_base * max_concentration_pct
         return (projected_symbol_exposure <= allowed_symbol_exposure, "concentration")
@@ -434,6 +564,7 @@ class RiskEngine:
             "bond": "max_bond_pct",
             # Portfolio-level cap for all equity exposure combined.
             "equity": "max_equity_pct",
+            "option": "max_option_pct",
         }
         config_key = key_by_class.get(asset_class)
         if config_key is None:
@@ -469,7 +600,9 @@ class RiskEngine:
         positions = portfolio.get("positions", {})
         if not positions:
             return (True, "theme_uniqueness")
-        sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        spec = parse_option_contract_from_metadata(meta)
+        sym = spec.position_key() if spec is not None else (getattr(signal, "symbol", "") or "").strip().upper()
         for pos_sym, pos in positions.items():
             if pos_sym.strip().upper() != sym:
                 continue
@@ -624,6 +757,15 @@ class RiskEngine:
                     return d
             except Exception:  # noqa: BLE001
                 pass
+        spec = parse_option_contract_from_metadata(meta)
+        if spec is not None:
+            px = self._resolve_signal_price(signal)
+            if px > 0:
+                return option_premium_notional(
+                    abs(signal.suggested_quantity),
+                    px,
+                    int(spec.multiplier),
+                )
         return abs(signal.suggested_quantity) * self._resolve_signal_price(signal)
 
     @staticmethod

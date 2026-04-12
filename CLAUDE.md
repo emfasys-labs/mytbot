@@ -32,8 +32,11 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `system/dependency_manager.py` — auto-start Postgres/Redis via Docker
 - `system/broker_manager.py` — auto-discover and connect available brokers
 - `system/trading_loop.py`   — controllable async trading loop (start/stop)
-- `brokers/base.py`          — the adapter interface (FROZEN, never change)
+- `brokers/base.py`          — the adapter interface (FROZEN: backward-compatible optional fields only)
 - `brokers/registry.py`      — add new brokers here (one line)
+- `brokers/ibkr/adapter.py`  — IBKR + single-leg options (chain / qualify / `Order.instrument_metadata`)
+- `core/instruments.py`      — `OptionContractSpec` (options as structured instruments)
+- `risk/options_env.py`      — `ENABLE_OPTIONS` / `OPTIONS_*` env merged into risk config
 - `brokers/bybit/adapter.py` — Bybit V5 (spot / USDT linear)
 - `brokers/_template/`       — copy this to add any new exchange
 - `risk/engine.py`           — risk checks, kill switch
@@ -82,13 +85,14 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: D015 **primary** operational path: `system/trading_loop.py` batches candidates → `compute_regime_state_async` → `build_opportunities_async` → `build_allocation_decision` (interval + churn) → `apply_allocation_smoothing` → `build_execution_plan` → `execution/d015_instruction_executor.py` → `RiskEngine` + `ExecutionEngine`. Volume escalation via `CommandBus` (`d015_volume_refresh`). Default `allocator_d015_primary` unless `ALLOCATOR_D015_LEGACY_FALLBACK=true`. Policy scalars in `config/allocation.yaml`. Paper summary script: `scripts/d015_paper_report.py`. DECISIONS D004 amendment + D015 status updated.
-- Next task: Paper soak on primary path; operator sign-off; optional further `risk_modes.yaml` trim for non-legacy UIs only.
+- Last completed task: **D016 IBKR single-leg options** — `core/instruments.OptionContractSpec`, optional `instrument_metadata` on `Order`/`Position` in `brokers/base.py` (serialization only; defaults preserve existing adapters), `IBKRAdapter.get_option_chain` / `qualify_option_contract` / `get_option_market_data`, `ExecutionEngine` passes option payload into `Order`, `RiskEngine._check_options_trading_policy` + `config/risk_limits.yaml` `options_trading` + `risk/options_env.py`, portfolio `option_premium_exposure` in `run_m3._load_portfolio_state`, Alembic `c8f2a1d0e4aa`, smoke script `scripts/smoke_ibkr_options.py`. Default **options disabled** (`ENABLE_OPTIONS=false`).
+- Prior: D015 **primary** operational path (allocator batch → risk → execution); see DECISIONS D004 amendment.
+- Next task: Paper soak on primary path; IBKR options paper validation with `scripts/smoke_ibkr_options.py` when enabled.
 - Blockers: GPU server for faster inference; IBKR stream/order need local IB Gateway/TWS
 - Notes: .env not committed — use .env.example; `python run.py` is the ONLY command needed; Claude API disabled by default in config/ai.yaml; Ollama running on localhost:11434 with qwen2.5:7b + llama3.1:8b
 
 ## RULES CLAUDE MUST FOLLOW IN THIS PROJECT
-1. Never change `brokers/base.py` interface — it is frozen
+1. Never break `brokers/base.py` — the `BrokerAdapter` ABC and existing fields are frozen; backward-compatible optional dataclass fields (e.g. `instrument_metadata`) are allowed when all adapters default them to `None`
 2. Never add a bypass to the risk engine
 3. Decimal for all prices and quantities, never float
 4. paper_mode=True is always the default

@@ -27,6 +27,7 @@ import httpx
 from brokers.registry import get_broker
 from control.runtime import get_risk_engine, set_execution_engine
 from brokers.base import Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
+from core.instruments import parse_option_contract_from_metadata
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
 from execution.arbitrage_executor import ArbitrageExecutor
@@ -330,13 +331,23 @@ class ExecutionEngine:
         return ok
 
     def _build_order(self, signal: Signal) -> Order:
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        inst_meta = None
+        if isinstance(meta.get("option_contract"), dict):
+            inst_meta = {
+                "instrument_type": "option",
+                "option_contract": dict(meta["option_contract"]),
+            }
+        spec = parse_option_contract_from_metadata(meta)
+        sym = spec.position_key() if spec is not None else signal.symbol
         return Order(
-            symbol=signal.symbol,
+            symbol=sym,
             side=OrderSide.BUY if signal.side == "buy" else OrderSide.SELL,
             order_type=OrderType.MARKET if signal.suggested_price is None else OrderType.LIMIT,
             quantity=signal.suggested_quantity,
             limit_price=signal.suggested_price,
             client_order_id=str(uuid.uuid4()),  # idempotency key
+            instrument_metadata=inst_meta,
         )
 
     async def _get_broker(self, name: str):
@@ -676,10 +687,11 @@ class ExecutionEngine:
                 snap_ts = datetime.now(timezone.utc)
                 async with sf() as session:
                     for broker_name, p in remote_snapshots:
+                        im = getattr(p, "instrument_metadata", None)
                         session.add(
                             PositionLog(
                                 timestamp=snap_ts,
-                                symbol=str(p.symbol).strip().upper()[:20],
+                                symbol=str(p.symbol).strip().upper()[:72],
                                 broker=str(broker_name).strip().lower()[:20],
                                 quantity=Decimal(str(p.quantity)),
                                 avg_entry_price=Decimal(str(p.avg_entry_price)),
@@ -688,6 +700,7 @@ class ExecutionEngine:
                                 asset_class=str(p.asset_class.value if hasattr(p.asset_class, "value") else p.asset_class)
                                 .strip()
                                 .lower()[:20],
+                                instrument_metadata=im if isinstance(im, dict) else None,
                             )
                         )
                     await session.commit()

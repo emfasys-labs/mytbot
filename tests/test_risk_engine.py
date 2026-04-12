@@ -42,20 +42,35 @@ def _signal(
     price: str = "100",
     confidence: float = 0.9,
     metadata: dict | None = None,
+    asset_class: str = "equity",
+    symbol: str = "SPY",
+    side: str = "buy",
 ) -> Signal:
     return Signal(
         signal_id="s-1",
-        symbol="SPY",
-        side="buy",
+        symbol=symbol,
+        side=side,
         strategy="momentum_breakout",
         confidence=confidence,
         suggested_quantity=Decimal(qty),
         suggested_price=Decimal(price),
         broker="ibkr",
-        asset_class="equity",
+        asset_class=asset_class,
         timestamp="2026-04-06T12:00:00+00:00",
         metadata=metadata or {},
     )
+
+
+def _spy_call_option_metadata() -> dict:
+    return {
+        "option_contract": {
+            "underlying_symbol": "SPY",
+            "expiry": "20260420",
+            "strike": "500",
+            "right": "C",
+            "multiplier": 100,
+        }
+    }
 
 
 def test_rejects_on_daily_loss_limit() -> None:
@@ -412,6 +427,90 @@ def test_rejects_on_max_loss_per_trade_pct() -> None:
     )
     assert decision.verdict == RiskVerdict.REJECTED
     assert decision.checks_failed == ["max_loss_per_trade_pct"]
+
+
+def test_options_rejected_when_disabled() -> None:
+    cfg = _risk_cfg()
+    cfg["options_trading"] = {"enabled": False}
+    engine = RiskEngine(cfg)
+    sig = _signal(metadata=_spy_call_option_metadata(), asset_class="option")
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+        "positions": {},
+        "option_premium_exposure": Decimal("0"),
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert "options_disabled" in decision.checks_failed
+
+
+def test_options_rejected_short_opening() -> None:
+    cfg = _risk_cfg()
+    cfg["options_trading"] = {
+        "enabled": True,
+        "paper_only": False,
+        "allowed_underlyings": ["SPY"],
+        "max_premium_per_trade": "2000",
+        "max_contracts_per_trade": 5,
+        "max_total_premium_exposure": "5000",
+        "allow_sell_to_close": True,
+    }
+    engine = RiskEngine(cfg)
+    sig = _signal(
+        side="sell",
+        price="2",
+        metadata=_spy_call_option_metadata(),
+        asset_class="option",
+        symbol="SPY|20260420|C|500",
+    )
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+        "positions": {},
+        "option_premium_exposure": Decimal("0"),
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert "options_short_opening_rejected" in decision.checks_failed
+
+
+def test_options_approved_long_call_within_limits() -> None:
+    cfg = _risk_cfg()
+    cfg["options_trading"] = {
+        "enabled": True,
+        "paper_only": False,
+        "allowed_underlyings": ["SPY"],
+        "max_premium_per_trade": "2000",
+        "max_contracts_per_trade": 5,
+        "max_total_premium_exposure": "5000",
+        "allow_sell_to_close": True,
+    }
+    engine = RiskEngine(cfg)
+    sig = _signal(
+        qty="1",
+        price="2",
+        metadata=_spy_call_option_metadata(),
+        asset_class="option",
+        symbol="SPY|20260420|C|500",
+    )
+    portfolio = {
+        "portfolio_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+        "positions": {},
+        "option_premium_exposure": Decimal("0"),
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.APPROVED
 
 
 def test_cooldown_expires_after_elapsed_time() -> None:

@@ -45,6 +45,19 @@ max_crypto_pct: 0.30            # Max 30% of portfolio in crypto
 max_equity_pct: 0.80            # Max 80% total in equities/ETFs combined
 max_single_stock_pct: 0.10      # Max 10% in any single stock
 max_bond_pct: 0.50              # Max 50% in bonds
+max_option_pct: 1.00            # Cap on option premium notional vs portfolio (1.0 = use options_trading caps only)
+
+# ── IBKR single-leg options (see also ENABLE_OPTIONS env to override) ──
+options_trading:
+  enabled: true
+  paper_only: true
+  allowed_underlyings:
+    - SPY
+  max_premium_per_trade: "200"
+  max_contracts_per_trade: 1
+  max_total_premium_exposure: "500"
+  allow_short: false
+  allow_sell_to_close: true
 
 # ── Execution limits ──────────────────────────────────────────────────────────
 max_slippage_pct: 0.005         # Reject if expected slippage > 0.5%
@@ -106,3 +119,8 @@ arbitrage:
   max_stale_quote_seconds: 5
   cross_spot:
     enabled: true
+
+# Env overrides (merged at runtime): ENABLE_OPTIONS, OPTIONS_ALLOWED_UNDERLYINGS,
+# OPTIONS_MAX_PREMIUM_PER_TRADE, OPTIONS_MAX_CONTRACTS_PER_TRADE,
+# OPTIONS_MAX_TOTAL_PREMIUM_EXPOSURE, OPTIONS_PAPER_ONLY, OPTIONS_ALLOW_SHORT,
+# OPTIONS_ALLOW_SELL_TO_CLOSE — see risk/options_env.py

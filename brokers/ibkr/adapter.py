@@ -31,6 +31,7 @@ from ib_insync import (
     Forex,
     LimitOrder,
     MarketOrder,
+    Option,
     Stock,
     StopLimitOrder,
     StopOrder,
@@ -40,6 +41,7 @@ from ib_insync import (
 )
 from loguru import logger
 
+from core.instruments import OptionContractSpec
 from brokers.base import (
     AssetClass,
     Balance,
@@ -100,6 +102,24 @@ def _is_bad_price(v: object) -> bool:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _contract_expiry_yyyymmdd(contract: Contract) -> str:
+    exp = getattr(contract, "lastTradeDateOrContractMonth", None)
+    if exp is None:
+        return ""
+    if hasattr(exp, "strftime"):
+        return exp.strftime("%Y%m%d")
+    s = str(exp).strip().replace("-", "")
+    return s[:8] if len(s) >= 8 else s
+
+
+def _option_contract_position_key(contract: Contract) -> str:
+    und = (contract.symbol or "").strip().upper()
+    e = _contract_expiry_yyyymmdd(contract)
+    r = (getattr(contract, "right", None) or "").strip().upper()[:1] or "?"
+    stk = _d(getattr(contract, "strike", 0) or 0)
+    return f"{und}|{e}|{r}|{stk}"
 
 
 class IBKRAdapter(BrokerAdapter):
@@ -172,9 +192,37 @@ class IBKRAdapter(BrokerAdapter):
             return Forex(s[:3] + s[3:])
         return Stock(s, "SMART", "USD")
 
+    def build_option_contract(self, spec: OptionContractSpec) -> Option:
+        """Build an unqualified ib_insync Option from a structured spec."""
+        exp = spec.expiry_yyyymmdd()
+        mult = str(int(spec.multiplier)) if spec.multiplier else "100"
+        return Option(
+            spec.underlying_symbol.strip().upper(),
+            exp,
+            float(spec.strike),
+            spec.right.value,
+            spec.exchange or "SMART",
+            currency=spec.currency or "USD",
+            multiplier=mult,
+        )
+
+    def _order_to_contract(self, order: Order) -> Contract:
+        meta = getattr(order, "instrument_metadata", None)
+        if isinstance(meta, dict) and meta.get("instrument_type") == "option":
+            raw = meta.get("option_contract")
+            if isinstance(raw, dict):
+                spec = OptionContractSpec.from_dict(raw)
+                return self.build_option_contract(spec)
+        return self._symbol_to_contract(order.symbol)
+
     def _contract_symbol_key(self, contract: Contract) -> str:
         """Produce a display symbol for ticks/positions."""
         st = (contract.secType or "").upper()
+        if st == "OPT":
+            ls = (getattr(contract, "localSymbol", None) or "").strip()
+            if ls:
+                return ls
+            return _option_contract_position_key(contract)
         if st == "CRYPTO":
             return f"{contract.symbol}/{contract.currency}"
         if st == "CASH":
@@ -183,6 +231,30 @@ class IBKRAdapter(BrokerAdapter):
                 return f"{cur[:3]}/{cur[3:]}"
             return cur
         return contract.symbol or ""
+
+    def _option_metadata_from_contract(self, contract: Contract) -> dict[str, Any]:
+        mult_raw = getattr(contract, "multiplier", None) or 100
+        try:
+            mult_i = int(float(mult_raw))
+        except Exception:  # noqa: BLE001
+            mult_i = 100
+        right_c = (getattr(contract, "right", None) or "").strip().upper()[:1] or "C"
+        try:
+            strike_d = _d(getattr(contract, "strike", 0) or 0)
+        except Exception:  # noqa: BLE001
+            strike_d = Decimal(0)
+        return {
+            "instrument_type": "option",
+            "underlying_symbol": (contract.symbol or "").strip().upper(),
+            "expiry": _contract_expiry_yyyymmdd(contract),
+            "strike": str(strike_d),
+            "right": right_c,
+            "multiplier": mult_i,
+            "exchange": (contract.exchange or "SMART").strip() or "SMART",
+            "currency": (contract.currency or "USD").strip() or "USD",
+            "sec_type": "OPT",
+            "local_symbol": (getattr(contract, "localSymbol", None) or "").strip() or None,
+        }
 
     def _asset_class_from_contract(self, contract: Contract) -> AssetClass:
         st = (contract.secType or "").upper()
@@ -831,6 +903,10 @@ class IBKRAdapter(BrokerAdapter):
                     mpx = _d(p.avgCost)
                     unreal = Decimal(0)
                     avg_px = _d(p.avgCost)
+                st = (p.contract.secType or "").upper()
+                inst_meta: Optional[dict[str, Any]] = None
+                if st == "OPT":
+                    inst_meta = self._option_metadata_from_contract(p.contract)
                 out.append(
                     Position(
                         symbol=sym,
@@ -840,12 +916,102 @@ class IBKRAdapter(BrokerAdapter):
                         current_price=mpx,
                         unrealised_pnl=unreal,
                         broker=self.broker_name,
+                        instrument_metadata=inst_meta,
                     )
                 )
             return out
         except Exception as exc:  # noqa: BLE001
             logger.exception("get_positions | IBKR | error={}", exc)
             return []
+
+    async def get_option_chain(self, underlying_symbol: str) -> list[dict[str, Any]]:
+        """
+        IBKR option parameter matrix for *underlying_symbol* (STK on SMART).
+
+        Returns one dict per exchange slice:
+        ``exchange``, ``underlying_con_id``, ``trading_class``, ``multiplier``,
+        ``expirations`` (YYYYMMDD strings), ``strikes`` (Decimal).
+        """
+        if self._ib is None or not self._ib.isConnected():
+            logger.warning("get_option_chain | IBKR | not connected")
+            return []
+        u = underlying_symbol.strip().upper()
+        stock = Stock(u, "SMART", "USD")
+        try:
+            qualified = await self._ib.qualifyContractsAsync(stock)
+            if not qualified:
+                logger.warning("get_option_chain | IBKR | could not qualify underlying | {}", u)
+                return []
+            und = qualified[0]
+            rows = await self._ib.reqSecDefOptParamsAsync(
+                und.symbol,
+                "",
+                und.secType,
+                und.conId,
+            )
+            out: list[dict[str, Any]] = []
+            for ch in rows:
+                expirations = [str(x).replace("-", "")[:8] for x in (ch.expirations or [])]
+                strikes = [_d(s) for s in (ch.strikes or [])]
+                mult = getattr(ch, "multiplier", None)
+                try:
+                    mult_i = int(float(mult)) if mult is not None else 100
+                except Exception:  # noqa: BLE001
+                    mult_i = 100
+                out.append(
+                    {
+                        "exchange": str(getattr(ch, "exchange", "") or ""),
+                        "underlying_con_id": int(getattr(ch, "underlyingConId", 0) or 0),
+                        "trading_class": str(getattr(ch, "tradingClass", "") or ""),
+                        "multiplier": mult_i,
+                        "expirations": expirations,
+                        "strikes": strikes,
+                    }
+                )
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("get_option_chain | IBKR | symbol={} | error={}", u, exc)
+            return []
+
+    async def qualify_option_contract(self, spec: OptionContractSpec) -> Option:
+        """Qualify a single-leg option; returns contract with ``conId`` / ``localSymbol`` set."""
+        if self._ib is None or not self._ib.isConnected():
+            raise ConnectionError("IBKR not connected")
+        c = self.build_option_contract(spec)
+        qualified = await self._ib.qualifyContractsAsync(c)
+        if not qualified:
+            raise ValueError(f"IBKR could not qualify option contract {spec!r}")
+        return qualified[0]
+
+    async def get_option_market_data(self, spec: OptionContractSpec) -> dict[str, Any]:
+        """Snapshot bid / ask / last for a single option (requires market data permissions)."""
+        if self._ib is None or not self._ib.isConnected():
+            return {"bid": None, "ask": None, "last": None, "error": "not_connected"}
+        c: Optional[Contract] = None
+        try:
+            c = await self.qualify_option_contract(spec)
+            self._ib.reqMktData(c, "", True, False)
+            await asyncio.sleep(1.2)
+            t = self._ib.ticker(c)
+            bid = getattr(t, "bid", None)
+            ask = getattr(t, "ask", None)
+            last = getattr(t, "last", None) or getattr(t, "close", None)
+            out = {
+                "bid": None if _is_bad_price(bid) else _d(bid),
+                "ask": None if _is_bad_price(ask) else _d(ask),
+                "last": None if _is_bad_price(last) else _d(last),
+                "local_symbol": (getattr(c, "localSymbol", None) or "").strip(),
+            }
+            self._ib.cancelMktData(c)
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("get_option_market_data | IBKR | error={}", exc)
+            if c is not None and self._ib is not None:
+                try:
+                    self._ib.cancelMktData(c)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"bid": None, "ask": None, "last": None, "error": str(exc)}
 
     async def get_last_price(self, symbol: str) -> Decimal:
         """Fetch last traded (or mid) price for a symbol via a snapshot request."""
@@ -1031,7 +1197,7 @@ class IBKRAdapter(BrokerAdapter):
                     )
                     return self._trade_to_order_result(existing)
 
-            contract = self._symbol_to_contract(order.symbol)
+            contract = self._order_to_contract(order)
             await self._ib.qualifyContractsAsync(contract)
             ib_ord = await self._build_ib_order_for_contract(order, contract)
             trade = self._ib.placeOrder(contract, ib_ord)

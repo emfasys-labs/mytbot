@@ -31,6 +31,7 @@ from execution.engine import ExecutionEngine
 from execution.router import SmartOrderRouter
 from risk.engine import RiskEngine, RiskVerdict
 from risk.m8_loader import merge_m8_into_risk_cfg
+from risk.options_env import merge_options_env_into_risk_cfg
 from data.scanner import UniverseScanner
 from data.universe import UniverseManager
 from graph.engine import DependencyGraphEngine
@@ -174,6 +175,7 @@ async def _run_loop(args: argparse.Namespace) -> int:
     pipeline_cfg = _load_yaml(args.pipeline_config)
     risk_cfg = _load_yaml(args.risk_config)
     merge_m8_into_risk_cfg(risk_cfg, args.m8_config)
+    merge_options_env_into_risk_cfg(risk_cfg)
     ai_cfg = _load_yaml(args.ai_config)
     discovery_cfg = _load_yaml(args.discovery_config)
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]

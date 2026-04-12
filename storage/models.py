@@ -32,7 +32,7 @@ class SignalLog(Base):
 
     id              = Column(String, primary_key=True)      # signal_id (UUID)
     timestamp       = Column(DateTime(timezone=True), nullable=False, index=True)
-    symbol          = Column(String(20), nullable=False, index=True)
+    symbol          = Column(String(72), nullable=False, index=True)
     side            = Column(String(4), nullable=False)     # "buy" | "sell"
     strategy        = Column(String(50), nullable=False)
     confidence      = Column(Numeric(5, 4), nullable=False)
@@ -64,7 +64,7 @@ class OrderLog(Base):
     broker_order_id     = Column(String, nullable=True, index=True)
     signal_id           = Column(String, nullable=False, index=True)
     timestamp           = Column(DateTime(timezone=True), nullable=False, index=True)
-    symbol              = Column(String(20), nullable=False)
+    symbol              = Column(String(72), nullable=False)
     side                = Column(String(4), nullable=False)
     order_type          = Column(String(20), nullable=False)
     quantity            = Column(Numeric(20, 8), nullable=False)
@@ -75,6 +75,7 @@ class OrderLog(Base):
     avg_fill_price      = Column(Numeric(20, 8), nullable=True)
     fee                 = Column(Numeric(20, 8), nullable=True)
     paper_mode          = Column(Boolean, default=True)
+    instrument_metadata = Column(JSON, nullable=True)
 
 
 class PositionLog(Base):
@@ -83,13 +84,14 @@ class PositionLog(Base):
 
     id              = Column(Integer, primary_key=True, autoincrement=True)
     timestamp       = Column(DateTime(timezone=True), nullable=False, index=True)
-    symbol          = Column(String(20), nullable=False, index=True)
+    symbol          = Column(String(72), nullable=False, index=True)
     broker          = Column(String(20), nullable=False)
     quantity        = Column(Numeric(20, 8), nullable=False)
     avg_entry_price = Column(Numeric(20, 8), nullable=False)
     current_price   = Column(Numeric(20, 8), nullable=False)
     unrealised_pnl  = Column(Numeric(20, 8), nullable=False)
     asset_class     = Column(String(20), nullable=False)
+    instrument_metadata = Column(JSON, nullable=True)
 
 
 class PriceHistory(Base):

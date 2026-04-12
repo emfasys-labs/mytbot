@@ -11,11 +11,13 @@ Adding a new broker = one new folder + one new file implementing these methods.
 Zero changes to anything else.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
@@ -70,6 +72,9 @@ class Position:
     current_price: Decimal
     unrealised_pnl: Decimal
     broker: str
+    # Optional structured fields (e.g. option legs). Brokers that do not use it
+    # leave this as None — keeps the frozen interface backward-compatible.
+    instrument_metadata: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -82,6 +87,9 @@ class Order:
     stop_price: Optional[Decimal] = None
     client_order_id: Optional[str] = None   # idempotency key
     time_in_force: str = "GTC"
+    # When set, adapters may build exchange-native contracts (e.g. IBKR OPT).
+    # Expected shape: {"instrument_type": "option", "option_contract": {...}}.
+    instrument_metadata: Optional[dict[str, Any]] = None
 
 
 @dataclass

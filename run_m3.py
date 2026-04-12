@@ -26,8 +26,10 @@ from control.command_bus import CommandBus
 from control.runner_control import apply_control_commands, hydrate_risk_parameters_from_bus, publish_runner_heartbeat
 from control.runtime import set_risk_engine
 from control.startup_validation import validate_startup_env
+from core.instruments import parse_option_contract_from_metadata
 from risk.engine import RiskEngine, RiskVerdict
 from risk.m8_loader import merge_m8_into_risk_cfg
+from risk.options_env import merge_options_env_into_risk_cfg
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
 from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, PositionLog, SignalLog
@@ -103,7 +105,7 @@ async def _persist_signal(session_factory, signal, *, paper_mode: bool, timefram
     row = SignalLog(
         id=signal.signal_id,
         timestamp=ts,
-        symbol=signal.symbol[:20],
+        symbol=signal.symbol[:72],
         side=signal.side[:4],
         strategy=signal.strategy[:50],
         confidence=Decimal(str(signal.confidence)),
@@ -151,6 +153,40 @@ async def _persist_signal_ai_audit(
         await session.commit()
 
 
+def _position_log_notional(
+    row: PositionLog,
+    signal_price_fallback: Decimal | None,
+) -> tuple[Decimal, bool]:
+    qty = abs(Decimal(str(row.quantity)))
+    px = Decimal(str(row.current_price or signal_price_fallback or "0"))
+    ac = (row.asset_class or "").strip().lower()
+    is_opt = ac == "option"
+    mult = Decimal(100)
+    meta = getattr(row, "instrument_metadata", None)
+    if is_opt and isinstance(meta, dict):
+        try:
+            mult = Decimal(str(meta.get("multiplier", 100)))
+        except Exception:  # noqa: BLE001
+            mult = Decimal(100)
+    if is_opt:
+        return qty * px * mult, True
+    return qty * px, False
+
+
+def _position_dict_notional(p: dict[str, Any]) -> Decimal:
+    qty = abs(Decimal(str(p.get("quantity", "0"))))
+    px = Decimal(str(p.get("current_price", "0")))
+    ac = str(p.get("asset_class", "")).strip().lower()
+    if ac == "option":
+        meta = p.get("instrument_metadata") if isinstance(p.get("instrument_metadata"), dict) else {}
+        try:
+            mult = Decimal(str(meta.get("multiplier", 100)))
+        except Exception:  # noqa: BLE001
+            mult = Decimal(100)
+        return qty * px * mult
+    return qty * px
+
+
 async def _load_portfolio_state(
     session_factory,
     *,
@@ -175,6 +211,7 @@ async def _load_portfolio_state(
     cooldown_until: str | None = None
     daily_loss_accumulated = Decimal("0")
     pv_from_db = Decimal("0")
+    option_premium_exposure = Decimal("0")
 
     async with session_factory() as session:
         latest_pnl_q = await session.execute(
@@ -211,18 +248,24 @@ async def _load_portfolio_state(
             for row in rows:
                 qty = Decimal(str(row.quantity))
                 px = Decimal(str(row.current_price or signal_price_fallback or "0"))
-                notional = abs(qty) * px
+                notional, is_option_row = _position_log_notional(row, signal_price_fallback)
                 current_gross_exposure += notional
+                if is_option_row:
+                    option_premium_exposure += notional
                 symbol = (row.symbol or "").strip()
                 if symbol:
                     symbol_exposure[symbol] = symbol_exposure.get(symbol, Decimal("0")) + notional
-                    positions[symbol] = {
+                    entry: dict[str, Any] = {
                         "quantity": qty,
                         "avg_entry_price": Decimal(str(row.avg_entry_price or px)),
                         "current_price": px,
                         "asset_class": (row.asset_class or "").strip().lower(),
                         "broker": (row.broker or "").strip()[:20],
                     }
+                    im = getattr(row, "instrument_metadata", None)
+                    if isinstance(im, dict):
+                        entry["instrument_metadata"] = im
+                    positions[symbol] = entry
                 asset = (row.asset_class or "").strip().lower()
                 if asset:
                     asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
@@ -274,6 +317,7 @@ async def _load_portfolio_state(
         "consecutive_losses": consecutive_losses,
         "cooldown_until": cooldown_until,
         "daily_loss_accumulated": daily_loss_accumulated,
+        "option_premium_exposure": option_premium_exposure,
     }
 
 
@@ -306,7 +350,9 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
     price = _resolve_price_from_signal(signal)
     if price <= 0:
         return
-    symbol = signal.symbol
+    meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+    spec = parse_option_contract_from_metadata(meta)
+    symbol = spec.position_key() if spec is not None else signal.symbol
     side_mult = Decimal("1") if signal.side == "buy" else Decimal("-1")
     qty_delta = Decimal(str(signal.suggested_quantity)) * side_mult
 
@@ -319,8 +365,14 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
             "asset_class": (signal.asset_class or "").strip().lower(),
             "broker": (signal.broker or "").strip()[:20],
         }
+        if spec is not None:
+            row["asset_class"] = "option"
+            row["instrument_metadata"] = spec.to_dict()
     prev_qty = Decimal(str(row["quantity"]))
     new_qty = prev_qty + qty_delta
+    if spec is not None:
+        row["instrument_metadata"] = spec.to_dict()
+        row["asset_class"] = "option"
     if new_qty == 0:
         positions.pop(symbol, None)
     else:
@@ -332,28 +384,47 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
             # Weighted average on add-to-position in same direction.
             old_notional = abs(prev_qty) * Decimal(str(row["avg_entry_price"]))
             add_notional = abs(qty_delta) * price
+            if str(row.get("asset_class", "")).strip().lower() == "option":
+                om = row.get("instrument_metadata") if isinstance(row.get("instrument_metadata"), dict) else {}
+                try:
+                    mult = Decimal(str(om.get("multiplier", 100)))
+                except Exception:  # noqa: BLE001
+                    mult = Decimal(100)
+                old_notional *= mult
+                add_notional *= mult
             denom = abs(new_qty)
             if denom > 0:
-                row["avg_entry_price"] = (old_notional + add_notional) / denom
+                avg = (old_notional + add_notional) / denom
+                if str(row.get("asset_class", "")).strip().lower() == "option":
+                    om = row.get("instrument_metadata") if isinstance(row.get("instrument_metadata"), dict) else {}
+                    try:
+                        mult = Decimal(str(om.get("multiplier", 100)))
+                    except Exception:  # noqa: BLE001
+                        mult = Decimal(100)
+                    if mult > 0:
+                        avg /= mult
+                row["avg_entry_price"] = avg
         positions[symbol] = row
 
     symbol_exposure: dict[str, Decimal] = {}
     asset_class_exposure: dict[str, Decimal] = {}
     current_gross_exposure = Decimal("0")
+    option_premium_exposure = Decimal("0")
     for sym, p in positions.items():
-        qty = abs(Decimal(str(p["quantity"])))
-        px = Decimal(str(p["current_price"]))
-        notional = qty * px
+        notional = _position_dict_notional(p)
         current_gross_exposure += notional
         symbol_exposure[sym] = symbol_exposure.get(sym, Decimal("0")) + notional
         asset = str(p.get("asset_class", "")).strip().lower()
         if asset:
             asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+        if asset == "option":
+            option_premium_exposure += notional
 
     portfolio_state["positions"] = positions
     portfolio_state["symbol_exposure"] = symbol_exposure
     portfolio_state["asset_class_exposure"] = asset_class_exposure
     portfolio_state["current_gross_exposure"] = current_gross_exposure
+    portfolio_state["option_premium_exposure"] = option_premium_exposure
     portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
 
 
@@ -364,15 +435,17 @@ async def _persist_position_snapshot(session_factory, portfolio_state: dict[str,
     ts = datetime.now(timezone.utc)
     async with session_factory() as session:
         for symbol, p in positions.items():
+            im = p.get("instrument_metadata") if isinstance(p.get("instrument_metadata"), dict) else None
             row = PositionLog(
                 timestamp=ts,
-                symbol=symbol[:20],
+                symbol=symbol[:72],
                 broker=str(p.get("broker", "ibkr"))[:20] or "ibkr",
                 quantity=Decimal(str(p.get("quantity", "0"))),
                 avg_entry_price=Decimal(str(p.get("avg_entry_price", "0"))),
                 current_price=Decimal(str(p.get("current_price", "0"))),
                 unrealised_pnl=Decimal("0"),
                 asset_class=str(p.get("asset_class", ""))[:20],
+                instrument_metadata=im,
             )
             session.add(row)
         await session.commit()
@@ -416,6 +489,7 @@ async def _run_once(args: argparse.Namespace) -> int:
     pipeline_cfg = _load_yaml(args.pipeline_config)
     risk_cfg = _load_yaml(args.risk_config)
     merge_m8_into_risk_cfg(risk_cfg, args.m8_config)
+    merge_options_env_into_risk_cfg(risk_cfg)
     ai_cfg = _load_yaml(args.ai_config)
 
     symbols = [s.strip() for s in (args.symbols.split(",") if args.symbols else pipeline_cfg.get("symbols", [])) if s.strip()]

@@ -61,6 +61,7 @@ from system.d015_portfolio_bridge import portfolio_dict_to_runtime_state
 from system.d015_shadow import log_d015_shadow_for_signal
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
+from risk.options_env import merge_options_env_into_risk_cfg
 from run_m3 import (
     _apply_signal_to_portfolio_state,
     _load_portfolio_state,
@@ -301,6 +302,7 @@ class TradingLoop:
             pipeline_cfg = _load_yaml("config/data_pipeline.yaml")
             risk_cfg = _load_yaml("config/risk_limits.yaml")
             merge_m8_into_risk_cfg(risk_cfg, "config/m8_micro_live.yaml")
+            merge_options_env_into_risk_cfg(risk_cfg)
             legacy_fb = _d015_legacy_fallback()
             if legacy_fb:
                 risk_cfg["allocator_d015_primary"] = False

@@ -10,7 +10,7 @@ It monitors markets 24/7, generates trading signals, validates them
 through a strict risk engine, and executes orders across multiple
 brokers — all without human intervention.
 
-**Assets traded:** US equities, UK equities, ETFs, bonds, forex, crypto
+**Assets traded:** US equities, UK equities, ETFs, bonds, forex, crypto; **IBKR single-leg options** (opt-in via `options_trading` / `ENABLE_OPTIONS`, same Signal → Risk → Execution path)
 **Primary broker:** Interactive Brokers Pro (IBKR)
 **Crypto brokers:** Kraken, Binance
 **Capital:** Personal funds only. Not a public product.

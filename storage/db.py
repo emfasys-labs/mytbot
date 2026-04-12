@@ -173,12 +173,13 @@ async def persist_order_log(
     if not oid:
         oid = f"m1-{uuid.uuid4()}"
     ts = tick_timestamp_to_datetime(result.timestamp)
+    im = getattr(order, "instrument_metadata", None)
     row = OrderLog(
         id=oid[:256],
         broker_order_id=(result.broker_order_id or None)[:64] if result.broker_order_id else None,
         signal_id=signal_id[:128],
         timestamp=ts,
-        symbol=order.symbol.strip()[:20],
+        symbol=order.symbol.strip()[:72],
         side=order.side.value[:4],
         order_type=order.order_type.value[:20],
         quantity=order.quantity,
@@ -189,6 +190,7 @@ async def persist_order_log(
         avg_fill_price=result.avg_fill_price,
         fee=result.fee,
         paper_mode=paper_mode,
+        instrument_metadata=im if isinstance(im, dict) else None,
     )
     async with session_factory() as session:
         session.add(row)
