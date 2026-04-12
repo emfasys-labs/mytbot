@@ -149,7 +149,9 @@ export function PerformancePanel({
         <div>
           <div className="text-[10px] text-zinc-600">Win days</div>
           <div className="text-zinc-300">
-            {winRate == null ? '—' : `${(winRate * 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 0 })}%`}
+            {winRate == null
+              ? '—'
+              : `${(winRate * 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}%`}
           </div>
         </div>
         <div>

@@ -153,7 +153,7 @@ export function AllocationCenter({
       : null;
 
   return (
-    <div className="flex flex-col gap-2 min-h-0">
+    <div className="flex min-h-0 w-full min-w-0 flex-col gap-2">
       {repl.length > 0 ? (
         <div className="rounded-xl border border-amber-500/25 bg-gradient-to-br from-amber-950/40 to-black/40 p-2.5 shadow-[0_0_24px_rgba(251,191,36,0.06)]">
           <div className="text-[10px] uppercase tracking-widest text-amber-200/90 mb-1.5">Replacement view</div>
@@ -174,7 +174,7 @@ export function AllocationCenter({
         </div>
       ) : null}
 
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
+      <div className="w-full min-w-0 rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Capital & targets</div>
         {dormant ? (
           <div className="text-xs text-zinc-600">Start the system to load allocator data.</div>
@@ -185,38 +185,38 @@ export function AllocationCenter({
         ) : !snapshot ? (
           <div className="text-xs text-zinc-600">Loading allocator snapshot…</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+          <div className="grid w-full grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-[11px] items-start">
             {isGlobalEdge && !allocRec ? (
-              <div className="md:col-span-2 text-[9px] text-zinc-500 leading-snug">
+              <div className="sm:col-span-2 text-[9px] text-zinc-500 leading-snug">
                 Book snapshot — global_edge path does not publish D015 allocator targets. Gross/net below reflect live
                 portfolio state.
               </div>
             ) : null}
-            <div>
+            <div className="min-w-0">
               <div className="text-zinc-500 mb-0.5 text-[10px]">
                 {allocRec ? 'Exposure targets' : 'Exposure (book)'}
               </div>
               <div className="text-zinc-300 font-mono text-[10px] space-y-0.5">
                 <div>
-                  gross <span className="text-white/90">{grossDisplay}</span>
+                  gross <span className="text-white/90 tabular-nums">{grossDisplay}</span>
                 </div>
                 <div>
-                  net <span className="text-white/90">{netDisplay}</span>
+                  net <span className="text-white/90 tabular-nums">{netDisplay}</span>
                 </div>
                 {navDisplay != null ? (
                   <div>
-                    nav <span className="text-white/90">{navDisplay}</span>
+                    nav <span className="text-white/90 tabular-nums">{navDisplay}</span>
                   </div>
                 ) : null}
               </div>
             </div>
-            <div>
+            <div className="min-w-0 sm:border-l sm:border-white/5 sm:pl-6">
               <div className="text-zinc-500 mb-0.5 text-[10px]">{weightsSub}</div>
               <div className="space-y-0.5 max-h-[88px] overflow-y-auto">
                 {weightRows.slice(0, 8).map((t, i) => (
-                  <div key={i} className="flex justify-between gap-2 font-mono text-[10px]">
+                  <div key={i} className="flex justify-between gap-3 font-mono text-[10px]">
                     <span className="truncate text-white/90">{String(t.symbol ?? '')}</span>
-                    <span className="text-emerald-300/80 tabular-nums">{fmtDashNum(t.target_weight)}</span>
+                    <span className="shrink-0 text-emerald-300/80 tabular-nums">{fmtDashNum(t.target_weight)}</span>
                   </div>
                 ))}
                 {weightRows.length === 0 ? <span className="text-zinc-600">—</span> : null}
@@ -226,8 +226,9 @@ export function AllocationCenter({
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-h-0">
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-[120px]">
+      <div className="grid min-h-0 w-full min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 lg:items-stretch">
+        <div className="flex min-h-0 min-w-0 flex-col gap-2 lg:min-w-0">
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 shrink-0">
           <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Top opportunities</div>
           {dormant ? (
             <div className="text-xs text-zinc-600">System off</div>
@@ -329,8 +330,44 @@ export function AllocationCenter({
           )}
         </div>
 
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-[120px]">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Hold pressure</div>
+      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
+        {dormant || instr.length === 0 ? (
+          <div className="text-xs text-zinc-500 space-y-1.5">
+            {dormant ? (
+              <p>System off — no instructions.</p>
+            ) : idleCopy ? (
+              <ul className="list-disc pl-4 space-y-1 font-mono text-[10px] text-zinc-400">
+                {idleCopy.map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-zinc-600">Waiting for allocator snapshot…</p>
+            )}
+          </div>
+        ) : (
+          <ScrollArea className="h-[100px] min-h-[100px] w-full">
+            <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300 pr-1">
+              {instr.slice(0, 14).map((x, i) => (
+                <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-white/5 pb-0.5">
+                  <span className="text-white/90 shrink-0">{formatCoordinatorKind(String(x.action ?? x.kind ?? ''))}</span>
+                  <span className="shrink-0">{String(x.symbol ?? '')}</span>
+                  {x.strategy_name != null && String(x.strategy_name).trim() ? (
+                    <span className="text-zinc-500 truncate max-w-[140px]">{String(x.strategy_name)}</span>
+                  ) : null}
+                  <span className="text-zinc-500 shrink-0">{String(x.side ?? '')}</span>
+                  <span className="text-emerald-300/80 tabular-nums shrink-0">{fmtDashNum(x.capital ?? x.target_notional)}</span>
+                </li>
+              ))}
+            </ul>
+          </ScrollArea>
+        )}
+      </div>
+        </div>
+
+        <div className="flex h-full min-h-[300px] min-w-0 flex-col rounded-xl border border-white/5 bg-white/[0.02] p-2.5 lg:min-h-0">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5 shrink-0">Hold pressure</div>
           {dormant ? (
             <div className="text-xs text-zinc-600">System off</div>
           ) : usingHoldFallback ? (
@@ -338,7 +375,7 @@ export function AllocationCenter({
               <div className="text-[10px] text-zinc-500 mb-1">
                 Allocator weak list empty — spread from book P&amp;L proxy (hold vs exit tension).
               </div>
-              <ScrollArea className="h-[150px]">
+              <ScrollArea className="min-h-0 w-full flex-1 lg:min-h-[200px]">
                 <table className="w-full text-[11px] font-mono">
                   <thead>
                     <tr className="text-left text-zinc-500 text-[10px]">
@@ -362,7 +399,7 @@ export function AllocationCenter({
           ) : weakest.length === 0 ? (
             <div className="text-xs text-zinc-600">No weak holdings flagged.</div>
           ) : (
-            <ScrollArea className="h-[150px]">
+            <ScrollArea className="min-h-0 w-full flex-1 lg:min-h-[200px]">
               <table className="w-full text-[11px] font-mono">
                 <thead>
                   <tr className="text-left text-zinc-500 text-[10px]">
@@ -384,41 +421,6 @@ export function AllocationCenter({
             </ScrollArea>
           )}
         </div>
-      </div>
-
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
-        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
-        {dormant || instr.length === 0 ? (
-          <div className="text-xs text-zinc-500 space-y-1.5">
-            {dormant ? (
-              <p>System off — no instructions.</p>
-            ) : idleCopy ? (
-              <ul className="list-disc pl-4 space-y-1 font-mono text-[10px] text-zinc-400">
-                {idleCopy.map((line, i) => (
-                  <li key={i}>{line}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-zinc-600">Waiting for allocator snapshot…</p>
-            )}
-          </div>
-        ) : (
-          <ScrollArea className="h-[100px]">
-            <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300">
-              {instr.slice(0, 14).map((x, i) => (
-                <li key={i} className="flex flex-wrap gap-x-2 border-b border-white/5 pb-0.5">
-                  <span className="text-white/90">{formatCoordinatorKind(String(x.action ?? x.kind ?? ''))}</span>
-                  <span>{String(x.symbol ?? '')}</span>
-                  {x.strategy_name != null && String(x.strategy_name).trim() ? (
-                    <span className="text-zinc-500 truncate max-w-[140px]">{String(x.strategy_name)}</span>
-                  ) : null}
-                  <span className="text-zinc-500">{String(x.side ?? '')}</span>
-                  <span className="text-emerald-300/80 tabular-nums">{fmtDashNum(x.capital ?? x.target_notional)}</span>
-                </li>
-              ))}
-            </ul>
-          </ScrollArea>
-        )}
       </div>
     </div>
   );

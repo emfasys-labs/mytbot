@@ -22,7 +22,7 @@ export function PositionChips({ positions, isFlattened = false, onHaptic }: Posi
   }
 
   return (
-    <div className="flex gap-3 justify-center flex-wrap">
+    <div className="flex w-full min-w-0 flex-wrap justify-start gap-2">
       {positions.map((position) => {
         const isPositive = position.change >= 0;
         const chipClass = isFlattened

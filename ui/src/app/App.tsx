@@ -534,8 +534,8 @@ function App() {
         />
 
         <div className="flex flex-1 min-h-0 flex-col">
-          <div className="flex flex-1 min-h-0 flex-col lg:flex-row gap-2 p-2 overflow-hidden">
-            <aside className="lg:w-80 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none z-0">
+          <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-hidden p-2 lg:flex-row lg:items-stretch">
+            <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-72">
               <SignalBrain
                 snapshot={dashboardSnapshot}
                 events={wsEvents}
@@ -545,7 +545,7 @@ function App() {
               />
             </aside>
 
-            <main className="relative flex-1 flex flex-col gap-2 min-w-0 min-h-0 overflow-y-auto isolate z-0 xl:pr-14">
+            <main className="relative z-0 isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-y-auto xl:pr-14">
               <div className="pointer-events-none hidden xl:block absolute right-0 top-0 z-10 h-96">
                 <div className="pointer-events-auto">
                   <CapitalSlider
@@ -563,7 +563,7 @@ function App() {
                 snapshotFetchFailed={snapshotFetchFailed}
                 positions={positions}
               />
-              <div className="flex flex-wrap items-center gap-4 px-1 shrink-0 relative z-[1]">
+              <div className="relative z-[1] flex w-full shrink-0 flex-wrap items-start gap-3">
                 <PositionChips
                   positions={positions}
                   isFlattened={isFlattened}
@@ -596,7 +596,7 @@ function App() {
               />
             </main>
 
-            <aside className="lg:w-72 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none">
+            <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-72">
               <RiskGate signals={intelligenceSignals} dormant={systemState !== 'running'} />
             </aside>
           </div>
