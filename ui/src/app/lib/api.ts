@@ -325,7 +325,13 @@ export type SystemStatusResponse = {
     { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
   >;
   infrastructure?: Record<string, { healthy: boolean; error?: string | null }>;
-  trading?: { running: boolean; iterations?: number; last_error?: string | null };
+  trading?: {
+    running: boolean;
+    iterations?: number;
+    last_iteration_at?: string | null;
+    loop_interval_sec?: number;
+    last_error?: string | null;
+  };
   errors?: string[];
   pipeline_running?: boolean;
   capital_pct?: number;

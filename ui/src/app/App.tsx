@@ -71,6 +71,8 @@ function App() {
   const [dashboardSnapshot, setDashboardSnapshot] = useState<DashboardSnapshot | null>(null);
   const [snapshotFetchFailed, setSnapshotFetchFailed] = useState(false);
   const [wsEvents, setWsEvents] = useState<WsTickEvent[]>([]);
+  /** Loop sleep drives snapshot cadence — stale threshold must be > ~2× this or we spuriously warn. */
+  const [loopIntervalSec, setLoopIntervalSec] = useState(120);
 
   const triggerHaptic = useHaptic();
 
@@ -123,6 +125,7 @@ function App() {
     setDashboardSnapshot(null);
     setSnapshotFetchFailed(false);
     setWsEvents([]);
+    setLoopIntervalSec(120);
     setEquityHistory([]);
     setEquityHistorySeries([]);
     setRecentOrders([]);
@@ -205,6 +208,14 @@ function App() {
       if (sysStatus) {
         const newState = sysStatus.state ?? 'off';
         setSystemState(newState);
+        const tr = sysStatus.trading;
+        if (tr && typeof tr === 'object') {
+          const li =
+            typeof tr.loop_interval_sec === 'number' && Number.isFinite(tr.loop_interval_sec) && tr.loop_interval_sec > 0
+              ? tr.loop_interval_sec
+              : 120;
+          setLoopIntervalSec(li);
+        }
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
         if (sysStatus.brokers)
           setAllBrokers(
@@ -486,10 +497,14 @@ function App() {
 
   const snapshotStale = useMemo(() => {
     if (systemState !== 'running' || !dashboardSnapshot?.updated_at) return false;
-    const t = Date.parse(dashboardSnapshot.updated_at);
-    if (!Number.isFinite(t)) return false;
-    return Date.now() - t > 120_000;
-  }, [systemState, dashboardSnapshot?.updated_at]);
+    const snapTs = Date.parse(dashboardSnapshot.updated_at);
+    if (!Number.isFinite(snapTs)) return false;
+    const loopMs = Math.max(10_000, loopIntervalSec * 1000);
+    // Snapshots publish once per iteration; the loop then sleeps ~loop_interval_sec (default 120s).
+    // A fixed 120s age threshold matched that sleep and always showed STALE between healthy ticks.
+    const minAgeForStale = Math.max(180_000, 2 * loopMs + 90_000);
+    return Date.now() - snapTs > minAgeForStale;
+  }, [systemState, dashboardSnapshot?.updated_at, loopIntervalSec]);
 
   const watchlistRanked = useMemo(
     () => buildWatchlistRanked(dashboardSnapshot, intelligenceSignals, positions),

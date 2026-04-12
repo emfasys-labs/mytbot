@@ -1170,6 +1170,7 @@ class TradingLoop:
             "running": self.is_running,
             "iterations": self.iterations,
             "last_iteration_at": self.last_iteration_at.isoformat() if self.last_iteration_at else None,
+            "loop_interval_sec": int(self.loop_interval_sec),
             "last_error": self.last_error,
             "paper_mode": self.paper_mode,
             "capital_pct": self.capital_pct,
