@@ -153,7 +153,7 @@ export function AllocationCenter({
       : null;
 
   return (
-    <div className="flex min-h-0 w-full min-w-0 flex-col gap-2">
+    <div className="relative z-0 isolate flex min-h-0 w-full min-w-0 flex-col gap-2 overflow-x-hidden">
       {repl.length > 0 ? (
         <div className="rounded-xl border border-amber-500/25 bg-gradient-to-br from-amber-950/40 to-black/40 p-2.5 shadow-[0_0_24px_rgba(251,191,36,0.06)]">
           <div className="text-[10px] uppercase tracking-widest text-amber-200/90 mb-1.5">Replacement view</div>
@@ -226,9 +226,9 @@ export function AllocationCenter({
         )}
       </div>
 
-      <div className="grid min-h-0 w-full min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 lg:items-stretch">
+      <div className="grid min-h-0 w-full min-w-0 grid-cols-1 gap-3 overflow-hidden lg:grid-cols-2 lg:items-stretch">
         <div className="flex min-h-0 min-w-0 flex-col gap-2 lg:min-w-0">
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 shrink-0">
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 shrink-0 overflow-hidden">
           <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Top opportunities</div>
           {dormant ? (
             <div className="text-xs text-zinc-600">System off</div>
@@ -330,7 +330,7 @@ export function AllocationCenter({
           )}
         </div>
 
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1">
+      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1 overflow-hidden">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
         {!dormant && instr.length > 0 ? (
           <div className="mb-1.5 text-[9px] leading-snug text-zinc-600">

@@ -586,7 +586,7 @@ function App() {
                 snapshotFetchFailed={snapshotFetchFailed}
                 positions={positions}
               />
-              <div className="relative z-[1] flex w-full shrink-0 flex-wrap items-start gap-3">
+              <div className="flex w-full shrink-0 flex-wrap items-start gap-3 border-t border-white/5 pt-3 mt-1">
                 <PositionChips
                   positions={positions}
                   isFlattened={isFlattened}
