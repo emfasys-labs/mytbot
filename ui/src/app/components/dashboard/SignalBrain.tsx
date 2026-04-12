@@ -16,6 +16,13 @@ function scoreCell(row: Record<string, unknown>): string {
   return '—';
 }
 
+function scoreClass(row: Record<string, unknown>): string {
+  const d = String(row.direction ?? '').toLowerCase();
+  if (d === 'bullish' || d === 'long') return 'text-emerald-300/90';
+  if (d === 'bearish' || d === 'short') return 'text-rose-300/90';
+  return 'text-zinc-300';
+}
+
 export function SignalBrain({ snapshot, events, dormant }: Props) {
   const acc = snapshot?.accumulator;
   const rows = (acc?.top_by_magnitude ?? []).slice(0, 8) as Array<Record<string, unknown>>;
@@ -40,7 +47,7 @@ export function SignalBrain({ snapshot, events, dormant }: Props) {
           rows.map((r, i) => (
             <div key={`${String(r.symbol)}-${i}`} className="flex justify-between gap-2">
               <span className="text-white/90 truncate">{String(r.symbol ?? '')}</span>
-              <span className="text-emerald-300/90 shrink-0 tabular-nums">{scoreCell(r)}</span>
+              <span className={`${scoreClass(r)} shrink-0 tabular-nums`}>{scoreCell(r)}</span>
             </div>
           ))
         )}
