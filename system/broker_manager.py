@@ -98,6 +98,12 @@ def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
     return True
 
 
+# Shown in dashboard even when optional deps are missing (see BROKER_REGISTRY try/import).
+_MISSING_ADAPTER_HINT: dict[str, str] = {
+    "bybit": "Install pybit (pip install pybit) to enable the Bybit adapter",
+}
+
+
 async def _tcp_probe(host: str, port: int, timeout: float = 3.0) -> bool:
     """Quick TCP connect to check if a service is listening."""
     try:
@@ -174,10 +180,27 @@ class BrokerManager:
         self.report = BrokerReport()
         all_tasks: list[asyncio.Task] = []
 
-        for name in BROKER_REGISTRY:
+        # Every venue in .env config gets a row in /system/status (dashboard badges).
+        # Optional adapters (e.g. Bybit) may be absent from BROKER_REGISTRY if pybit is not installed.
+        for name in sorted(self.configs.keys()):
             cfg = self.configs.get(name, {})
             status = BrokerStatus(name=name)
             self.report.brokers[name] = status
+
+            if name not in BROKER_REGISTRY:
+                if _is_configured(name, cfg):
+                    status.configured = True
+                    status.connected = False
+                    status.error = _MISSING_ADAPTER_HINT.get(
+                        name,
+                        f"No adapter registered for {name}",
+                    )
+                    logger.warning("broker | {} | {}", name, status.error)
+                else:
+                    status.configured = False
+                    status.error = "Missing API keys in .env"
+                    logger.info("broker | {} | skipped (not configured)", name)
+                continue
 
             if not _is_configured(name, cfg):
                 status.configured = False
@@ -360,7 +383,10 @@ class BrokerManager:
             await self._prune_disconnected_adapters()
             failed = [
                 name for name, s in list(self.report.brokers.items())
-                if s.configured and not s.connected and name not in self.adapters
+                if s.configured
+                and not s.connected
+                and name not in self.adapters
+                and name in BROKER_REGISTRY
             ]
             attempted: list[str] = []
             for name in failed:

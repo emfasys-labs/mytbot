@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import yaml
+from dotenv import load_dotenv
 from loguru import logger
 
 from brokers.registry import get_broker
@@ -31,6 +32,7 @@ from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
 
 
 async def _main() -> None:
+    load_dotenv(ROOT / ".env")
     strat_path = ROOT / "config" / "strategies.yaml"
     with strat_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -54,7 +56,6 @@ async def _main() -> None:
         kwargs = dict(bc.get(n, {}))
         if n == "bybit":
             kwargs.setdefault("category", "linear")
-            kwargs.setdefault("paper_mode", True)
         b = get_broker(n, paper_mode=True, **kwargs)
         try:
             if await b.connect():

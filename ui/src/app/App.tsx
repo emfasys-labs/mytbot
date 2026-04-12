@@ -409,19 +409,25 @@ function App() {
                 {systemState !== 'off' && Object.keys(allBrokers).length > 0 && (
                   <div className="flex gap-1 flex-wrap justify-end pt-2.5">
                     {Object.entries(allBrokers)
-                      .filter(([, v]) => v.configured)
-                      .map(([name, v]) => (
-                        <span
-                          key={name}
-                          className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${
-                            v.connected
-                              ? 'bg-emerald-400/10 text-emerald-300/70'
-                              : 'bg-gray-400/10 text-gray-500/50'
-                          }`}
-                        >
-                          {name}
-                        </span>
-                      ))}
+                      .sort(([a], [b]) => a.localeCompare(b))
+                      .map(([name, v]) => {
+                        const err = 'error' in v && v.error ? String(v.error) : '';
+                        const cls =
+                          v.configured && v.connected
+                            ? 'bg-emerald-400/10 text-emerald-300/70'
+                            : v.configured
+                              ? 'bg-amber-400/10 text-amber-200/60'
+                              : 'bg-zinc-800/40 text-zinc-600';
+                        return (
+                          <span
+                            key={name}
+                            title={err || (v.configured ? (v.connected ? 'Connected' : 'Configured, not connected') : 'Not configured')}
+                            className={`rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider transition-colors duration-500 ${cls}`}
+                          >
+                            {name}
+                          </span>
+                        );
+                      })}
                   </div>
                 )}
                 <MasterControl
