@@ -13,6 +13,8 @@ interface ModeSelectorProps {
   inactiveVisual?: boolean;
   /** When true, mode cannot be changed (system fully off). */
   disabled?: boolean;
+  /** Vertical (default) = sidebar stack; horizontal = single row for top strip. */
+  variant?: 'vertical' | 'horizontal';
 }
 
 const MODE_META: Record<Mode, { icon: typeof Shield; label: string; color: string }> = {
@@ -27,6 +29,7 @@ export function ModeSelector({
   onHaptic,
   inactiveVisual = false,
   disabled = false,
+  variant = 'vertical',
 }: ModeSelectorProps) {
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
 
@@ -48,10 +51,14 @@ export function ModeSelector({
 
   const modes = (['hunter', 'trader', 'defender'] as Mode[]);
 
+  const iconSize = variant === 'horizontal' ? 24 : 28;
+  const layoutCls =
+    variant === 'horizontal'
+      ? 'flex flex-row items-center gap-5'
+      : 'flex flex-col gap-8';
+
   return (
-    <div
-      className={`flex flex-col gap-8 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-    >
+    <div className={`${layoutCls} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
       {modes.map((id) => {
         const { icon: Icon, label, color } = MODE_META[id];
         const isSelected = selectedMode === id;
@@ -74,7 +81,7 @@ export function ModeSelector({
                 whileTap={disabled ? undefined : { scale: 0.95 }}
               >
                 <Icon
-                  size={28}
+                  size={iconSize}
                   strokeWidth={1.5}
                   className={`transition-colors ${
                     showActive

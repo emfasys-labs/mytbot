@@ -3,9 +3,16 @@ import type {
   DiscoverySummaryResponse,
   IntelligenceRegimeResponse,
   SystemState,
+  TradingMode,
 } from '../../lib/api';
+import { ModeSelector } from '../ModeSelector';
 
 type BrokerRow = { configured: boolean; connected: boolean; balance_ready?: boolean };
+
+const MACRO_TOOLTIP =
+  'AI macro stance for strategy filtering — not your risk mode (Hunter/Trader/Defender). ' +
+  'Typical labels: easing ≈ supportive liquidity / easier financial conditions; ' +
+  'tightening ≈ restrictive policy; neutral / risk_on / risk_off / swing = other AI bucket labels.';
 
 function fmtMoney(n: number, currency = '£'): string {
   const sign = n < 0 ? '−' : '';
@@ -18,7 +25,11 @@ type Props = {
   weekPnL: number;
   monthPnL: number;
   systemState: SystemState;
-  modeLabel: string;
+  mode: TradingMode;
+  onModeChange: (m: TradingMode) => void;
+  onModeHaptic?: () => void;
+  modeInactiveVisual: boolean;
+  modeDisabled: boolean;
   allBrokers: Record<string, BrokerRow>;
   intelligenceRegime: IntelligenceRegimeResponse | null;
   snapshot: DashboardSnapshot | null;
@@ -33,7 +44,11 @@ export function LiveStrip({
   weekPnL,
   monthPnL,
   systemState,
-  modeLabel,
+  mode,
+  onModeChange,
+  onModeHaptic,
+  modeInactiveVisual,
+  modeDisabled,
   allBrokers,
   intelligenceRegime,
   snapshot,
@@ -53,7 +68,8 @@ export function LiveStrip({
 
   return (
     <div className="shrink-0 border-b border-white/10 bg-black/40 px-3 py-2 md:px-4">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] md:text-xs text-zinc-300">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 text-[11px] md:text-xs text-zinc-300">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
         <div className="flex items-baseline gap-2">
           <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
           <span className="text-lg font-light text-white tabular-nums">
@@ -83,9 +99,6 @@ export function LiveStrip({
         </div>
         <div className="h-4 w-px bg-white/10 hidden md:block" />
         <div className="flex flex-wrap gap-2 items-center">
-          <span className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
-            {modeLabel}
-          </span>
           <span className="text-zinc-500">System</span>
           <span
             className={
@@ -105,16 +118,36 @@ export function LiveStrip({
             <span className="text-amber-400/90 text-[10px] uppercase">snapshot stale</span>
           ) : null}
         </div>
-        <div className="hidden lg:flex flex-wrap gap-2 items-center ml-auto">
-          <span className="text-zinc-500">Regime</span>
-          <span className="text-white/90">{regimeLabel}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 md:ml-auto">
+          <span className="hidden sm:inline text-[10px] uppercase tracking-wider text-zinc-600 pr-1">
+            Risk mode
+          </span>
+          <ModeSelector
+            variant="horizontal"
+            selectedMode={mode}
+            onModeChange={onModeChange}
+            onHaptic={onModeHaptic}
+            inactiveVisual={modeInactiveVisual}
+            disabled={modeDisabled}
+          />
+        </div>
+      </div>
+      {!isFlattened && (regimeLabel !== '—' || compEntries.length > 0) ? (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/5 pt-2 text-[10px] text-zinc-500">
+          <span title={MACRO_TOOLTIP} className="cursor-help">
+            <span className="text-zinc-600">AI macro </span>
+            <span className="text-zinc-200">{regimeLabel}</span>
+            <span className="text-zinc-600"> · </span>
+            <span className="text-zinc-500 hidden md:inline">(policy/liquidity label, not Hunter/Trader/Defender)</span>
+          </span>
           {compEntries.map(([k, v]) => (
             <span key={k} className="text-zinc-500">
               {k.replace(/_/g, ' ')} <span className="text-zinc-300 tabular-nums">{v}</span>
             </span>
           ))}
         </div>
-      </div>
+      ) : null}
       {d24 && !isFlattened ? (
         <div className="mt-1 text-[10px] text-zinc-600">
           24h discovery · signals {d24.signals_produced ?? '—'} · anomalies {d24.anomalies_detected ?? '—'}

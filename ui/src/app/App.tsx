@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NewsTicker, type TickerItem } from './components/NewsTicker';
-import { ModeSelector } from './components/ModeSelector';
 import { CapitalSlider } from './components/CapitalSlider';
 import { MasterControl } from './components/MasterControl';
 import { PositionChips } from './components/PositionChips';
@@ -460,8 +459,6 @@ function App() {
     return Date.now() - t > 120_000;
   }, [systemState, dashboardSnapshot?.updated_at]);
 
-  const modeLabel = mode.charAt(0).toUpperCase() + mode.slice(1);
-
   return (
     <div className="min-h-screen overflow-hidden bg-[#0a0a0a] text-white relative">
       <HapticFeedback />
@@ -469,14 +466,7 @@ function App() {
       <div className="w-full h-screen flex flex-col min-h-0">
         <NewsTicker items={newsItems} paused={isFlattened} />
 
-        <div className="flex shrink-0 items-start justify-between gap-2 border-b border-white/5 px-3 py-2 md:px-4">
-          <ModeSelector
-            selectedMode={mode}
-            onModeChange={setMode}
-            onHaptic={() => triggerHaptic('medium')}
-            inactiveVisual={isFlattened}
-            disabled={systemState === 'off'}
-          />
+        <div className="flex shrink-0 items-center justify-end gap-2 border-b border-white/5 px-3 py-2 md:px-4">
           <MasterControl
             currentState={controlState}
             systemState={systemState}
@@ -493,7 +483,11 @@ function App() {
           weekPnL={weekPnL}
           monthPnL={monthPnL}
           systemState={systemState}
-          modeLabel={modeLabel}
+          mode={mode}
+          onModeChange={setMode}
+          onModeHaptic={() => triggerHaptic('medium')}
+          modeInactiveVisual={isFlattened}
+          modeDisabled={systemState === 'off'}
           allBrokers={allBrokers}
           intelligenceRegime={intelligenceRegime}
           snapshot={dashboardSnapshot}
