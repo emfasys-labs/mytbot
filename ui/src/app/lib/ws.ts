@@ -29,12 +29,12 @@ export type WsTickMessage = {
 };
 
 function readDashboardToken(): string | null {
-  const env = import.meta.env.VITE_DASHBOARD_READ_TOKEN;
-  if (typeof env === 'string' && env.trim()) return env.trim();
   if (typeof localStorage !== 'undefined') {
     const ls = localStorage.getItem(DASHBOARD_TOKEN_KEY);
     if (ls?.trim()) return ls.trim();
   }
+  const env = import.meta.env.VITE_DASHBOARD_READ_TOKEN;
+  if (typeof env === 'string' && env.trim()) return env.trim();
   return null;
 }
 

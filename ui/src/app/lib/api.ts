@@ -4,16 +4,20 @@ const CANDIDATE_PORTS = [8000, 8001, 8002, 8003, 8004];
 /** Same token source as `ws.ts` — required when API sets `DASHBOARD_READ_TOKEN`. */
 const DASHBOARD_TOKEN_LS_KEY = 'dashboardReadToken';
 
+/** Prefer localStorage so the banner paste wins over a baked-in VITE_DASHBOARD_READ_TOKEN. */
+function readDashboardToken(): string | undefined {
+  if (typeof localStorage !== 'undefined') {
+    const ls = localStorage.getItem(DASHBOARD_TOKEN_LS_KEY);
+    if (ls?.trim()) return ls.trim();
+  }
+  const env = import.meta.env.VITE_DASHBOARD_READ_TOKEN;
+  if (typeof env === 'string' && env.trim()) return env.trim();
+  return undefined;
+}
+
 function dashboardReadHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  const env = import.meta.env.VITE_DASHBOARD_READ_TOKEN;
-  let tok: string | undefined;
-  if (typeof env === 'string' && env.trim()) {
-    tok = env.trim();
-  } else if (typeof localStorage !== 'undefined') {
-    const ls = localStorage.getItem(DASHBOARD_TOKEN_LS_KEY);
-    if (ls?.trim()) tok = ls.trim();
-  }
+  const tok = readDashboardToken();
   if (tok) headers['X-Dashboard-Token'] = tok;
   return headers;
 }

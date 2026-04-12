@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { setDashboardReadToken } from '../../lib/api';
+import { api, setDashboardReadToken } from '../../lib/api';
 
 type Props = {
   visible: boolean;
@@ -9,19 +9,38 @@ type Props = {
 export function DashboardAuthBanner({ visible, onTokenSaved }: Props) {
   const [value, setValue] = useState('');
   const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   if (!visible) return null;
 
-  const apply = () => {
+  const apply = async () => {
     const t = value.trim();
     if (!t) {
       setErr('Paste the same value as server DASHBOARD_READ_TOKEN');
+      setOk(null);
       return;
     }
     setErr(null);
-    setDashboardReadToken(t);
-    setValue('');
-    onTokenSaved();
+    setOk(null);
+    setBusy(true);
+    try {
+      setDashboardReadToken(t);
+      setValue('');
+      await api.init();
+      await api.getDashboardSnapshot();
+      setOk('Token accepted — loading dashboard…');
+      onTokenSaved();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr(
+        msg.includes('401')
+          ? 'Still 401: value must match DASHBOARD_READ_TOKEN exactly (no extra spaces). Restart the API after changing .env.'
+          : `Request failed: ${msg}`,
+      );
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -41,17 +60,22 @@ export function DashboardAuthBanner({ visible, onTokenSaved }: Props) {
           placeholder="Dashboard read token"
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void apply();
+          }}
           className="min-w-[200px] flex-1 max-w-md rounded-md border border-white/15 bg-black/40 px-2 py-1.5 font-mono text-xs text-white placeholder:text-zinc-600"
         />
         <button
           type="button"
-          onClick={apply}
-          className="rounded-md bg-amber-500/20 px-3 py-1.5 text-xs font-medium uppercase tracking-wide text-amber-100 hover:bg-amber-500/30"
+          disabled={busy}
+          onClick={() => void apply()}
+          className="rounded-md bg-amber-500/20 px-3 py-1.5 text-xs font-medium uppercase tracking-wide text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
         >
-          Save & retry
+          {busy ? 'Checking…' : 'Save & retry'}
         </button>
       </div>
       {err ? <div className="mt-1 text-rose-300/90">{err}</div> : null}
+      {ok ? <div className="mt-1 text-emerald-400/90">{ok}</div> : null}
     </div>
   );
 }
