@@ -108,8 +108,8 @@ Reference docs:
 │           OBSERVABILITY & CONTROL                    │
 │  Audit log (every decision stored)                   │
 │  Dashboard (FastAPI + React in `ui/`)              │
-│  WebSocket ticks + `/system/status` + `/dashboard/snapshot` │
-│  (`balance_ready`, allocator snapshot, P&L periods)          │
+│  WebSocket ticks + `/status` + `/system/status` + `/dashboard/snapshot` │
+│  (`balance_ready`, `runtime.heartbeat` incl. `ai`, allocator snapshot, P&L) │
 │  Alerts (e.g. Telegram on failures)                 │
 │  Kill switch (API + UI)                            │
 └─────────────────────────────────────────────────────┘
@@ -163,7 +163,7 @@ brokers/_template/adapter.py  ← copy this for any new exchange
       Tracks fill
 10. Portfolio tracker updates positions and P&L
 11. Everything written to audit log / DB
-12. Dashboard reflects state via REST + WebSocket: `/system/status` (broker `balance_ready`), `GET /dashboard/snapshot` (latest D015/global-edge decision snapshot from `ControlState` key `dashboard.snapshot`, written by `system/dashboard_publish.py` from the trading loop), `GET /pnl` (today + calendar week/month rollups), and WebSocket `tick` payloads that include a compact `dashboard` hint (`updated_at`, `fingerprint`, `path`) for cheap UI invalidation
+12. Dashboard reflects state via REST + WebSocket: **`GET /status`** (includes **`runtime`** from **`runtime.heartbeat`**: runner symbols, **`ai`** health when the loop publishes it), **`GET /system/status`** (orchestrator **`state`**, **`trading.orchestrator_starting`** during boot, **`trading.ai`** merged from heartbeat when present, **`trading.snapshot_published_at`** from **`dashboard.snapshot`**, broker **`balance_ready`**), **`GET /dashboard/snapshot`** (latest D015/global-edge decision snapshot from `ControlState` key `dashboard.snapshot`, written by `system/dashboard_publish.py` from the trading loop), **`GET /pnl`** (today + calendar week/month rollups), and WebSocket `tick` payloads that include a compact `dashboard` hint (`updated_at`, `fingerprint`, `path`) for cheap UI invalidation
 ```
 
 ---
@@ -239,3 +239,15 @@ Never import "upward". Risk engine does not import from strategies.
 | Server | VPS (Hetzner/DO) | Always-on deployment |
 | Logging | Loguru | Structured logs |
 | Async | asyncio + aiohttp | Concurrent broker streams |
+
+---
+
+## Orchestrator, dependencies, and operational contracts
+
+**Orchestrator** (`system/orchestrator.py`): single state machine (**off → starting → running → stopping → off**). On **start**, **`DependencyManager`** ensures Postgres (required) and Redis (best-effort): tries TCP first, then **`docker compose up`** for **`db`** / **`redis`** with **`_start_docker_service_with_retries`** (**`DOCKER_COMPOSE_UP_ATTEMPTS`**, backoff + jitter). **`BrokerManager`** discovers/connects adapters; **`TradingLoop`** receives **`broker_manager`** so execution matches router/reconcile adapters (including brokers that attach after startup — **D022**). Background **data pipeline** task (`_pipeline_runner`) wraps **`data.pipeline.run_once`** on an interval; idle wait uses **chunked sleep** so **`stop()`** cancellation drains within seconds, not only after a full **`PIPELINE_INTERVAL_SEC`** (**D023**).
+
+**Execution engine** (`execution/engine.py`): optional **`broker_manager`** injection for shared adapters; **`place_order`** retries use linear backoff plus extra **uniform jitter** for **`ibkr`** (**`IBKR_PLACE_ORDER_RETRY_JITTER_SEC`**) to reduce burstiness against TWS (**D023**).
+
+**FastAPI read auth** (`api/server.py`): When **`DASHBOARD_READ_TOKEN`** is set, **`_DashboardReadMiddleware`** protects read routes unless **`PYTEST_API_DISABLE_READ_MIDDLEWARE`** is truthy (pytest **`conftest`** defaults it **on** so CI/local tests work with an operator `.env`; tests that assert auth clear it — **D023**). Mutating routes may require **`API_CONTROL_TOKEN`** (**`X-Control-Token`**).
+
+**Decision references:** **D020–D023** in **`docs/DECISIONS.md`** for dashboard clock, shared DB bind, late venues + AI status, pytest/Docker/pipeline/jitter behaviour.

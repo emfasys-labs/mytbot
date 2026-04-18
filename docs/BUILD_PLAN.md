@@ -64,6 +64,15 @@ Stateful accumulation is **implemented** and on by default (`config/strategies.y
 - [x] Dual AI veto + legacy modifier behaviour covered by engine tests / logs (continue to monitor in soak).
 - [x] Metadata on `Signal` / logs for accumulator snapshot (extend dashboard fields only when product needs them).
 
+### G6 — Platform resilience + observability (2026-04 audit — shipped)
+
+Cross-cutting fixes from audit rounds **P0/P1**; canonical reasoning in **`docs/DECISIONS.md`** (**D020–D023**).
+
+- [x] **D021:** Shared DB pool bind (`storage.db.bind_app_database`) so FastAPI + trading loop share one async engine/session factory where possible; execution/risk registry lifecycle; Decimal hygiene in signal veto paths; orchestrator **`last_start_error`** on failed start.
+- [x] **D020:** Unconditional dashboard heartbeat when allocator/global-edge snapshot is skipped; **`GET /system/status`** merges **`trading.snapshot_published_at`** from **`dashboard.snapshot`** freshness.
+- [x] **D022:** **`ExecutionEngine(broker_manager=…)`** reuses adapters for venues that connect late; **`add_allowed_broker`** wired from **`TradingLoop._check_late_brokers`**; **`runtime_ai_status()`** on classifiers → runner heartbeat **`ai`** blob → **`GET /system/status`** merges **`trading.ai`** when **`runtime.heartbeat`** present.
+- [x] **D023:** **`PYTEST_API_DISABLE_READ_MIDDLEWARE`** (default in **`tests/conftest.py`**) so pytest does not collide with developer **`DASHBOARD_READ_TOKEN`**; **`DOCKER_COMPOSE_UP_ATTEMPTS`** retry + jitter for **`docker compose up`**; orchestrator pipeline **chunked sleep** (~2s) so cancel responds quickly; **`trading.orchestrator_starting`** while **`state == starting`**; **`IBKR_PLACE_ORDER_RETRY_JITTER_SEC`** on **`place_order`** retries for IBKR.
+
 ---
 
 ## M1 — Foundation
