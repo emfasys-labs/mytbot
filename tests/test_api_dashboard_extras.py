@@ -83,6 +83,7 @@ def test_get_control_command_404(monkeypatch, client: TestClient):
 
 
 def test_read_requires_dashboard_token_when_set(monkeypatch, client: TestClient):
+    monkeypatch.delenv("PYTEST_API_DISABLE_READ_MIDDLEWARE", raising=False)
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "secret-read")
     r = client.get("/status")
     assert r.status_code == 401

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import shutil
 from dataclasses import dataclass, field
 from typing import Any
@@ -87,6 +88,39 @@ async def _start_docker_service(service: str, compose_dir: str) -> tuple[bool, s
     return True, ""
 
 
+async def _start_docker_service_with_retries(
+    service: str,
+    compose_dir: str,
+    *,
+    attempts: int | None = None,
+) -> tuple[bool, str]:
+    """Transient compose/registry races — retry with exponential backoff + small jitter."""
+    last_err = ""
+    if attempts is None:
+        try:
+            attempts = max(1, int(os.getenv("DOCKER_COMPOSE_UP_ATTEMPTS", "3")))
+        except ValueError:
+            attempts = 3
+    n = max(1, int(attempts))
+    for attempt in range(n):
+        ok, err = await _start_docker_service(service, compose_dir)
+        if ok:
+            return True, ""
+        last_err = err or ""
+        if attempt + 1 < n:
+            delay = float(2**attempt) + random.uniform(0.15, 0.85)
+            logger.warning(
+                "deps | docker compose up | service={} | attempt {}/{} failed — retry in {:.1f}s | {}",
+                service,
+                attempt + 1,
+                n,
+                delay,
+                last_err[:500],
+            )
+            await asyncio.sleep(delay)
+    return False, last_err
+
+
 async def _check_postgres_direct() -> bool:
     """Try a TCP connect to the Postgres port to see if it's reachable."""
     host = os.getenv("POSTGRES_HOST", "localhost")
@@ -158,7 +192,7 @@ class DependencyManager:
             return
 
         logger.info("deps | postgres | starting via docker compose...")
-        ok, err = await _start_docker_service("db", self.compose_dir)
+        ok, err = await _start_docker_service_with_retries("db", self.compose_dir)
         if not ok:
             status.error = f"docker compose up failed: {err}"
             logger.error("deps | postgres | {}", status.error)
@@ -200,7 +234,7 @@ class DependencyManager:
             return
 
         logger.info("deps | redis | starting via docker compose...")
-        ok, err = await _start_docker_service("redis", self.compose_dir)
+        ok, err = await _start_docker_service_with_retries("redis", self.compose_dir)
         if not ok:
             status.error = f"docker compose up failed: {err}"
             logger.warning("deps | redis | {} — continuing without cache", status.error)

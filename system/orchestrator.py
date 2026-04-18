@@ -79,6 +79,16 @@ class Orchestrator:
         self.state_changed_at = datetime.now(timezone.utc)
         logger.info("orchestrator | {} → {}", prev.value, state.value)
 
+    @staticmethod
+    async def _sleep_cancellable(total_sec: float, *, chunk_sec: float = 2.0) -> None:
+        """Sleep in small slices so asyncio.Task.cancel() stops the pipeline within ~chunk_sec."""
+        remaining = max(0.0, float(total_sec))
+        ch = max(0.25, min(float(chunk_sec), 30.0))
+        while remaining > 0:
+            step = min(ch, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+
     async def start(self) -> dict[str, Any]:
         """
         Bring the entire system to RUNNING state.
@@ -230,9 +240,18 @@ class Orchestrator:
         active_brokers = self._broker_report.active_names if self._broker_report else []
         dep_status = self._dep_report.to_dict() if self._dep_report else {}
 
-        trading_status = self._trading_loop.status_dict() if self._trading_loop else {
-            "running": False, "iterations": 0, "last_iteration_at": None, "last_error": None, "paper_mode": paper_mode,
-        }
+        if self._trading_loop is not None:
+            trading_status = self._trading_loop.status_dict()
+        else:
+            trading_status = {
+                "running": False,
+                "iterations": 0,
+                "last_iteration_at": None,
+                "last_error": None,
+                "paper_mode": paper_mode,
+            }
+        if self.state == SystemState.STARTING:
+            trading_status = {**trading_status, "orchestrator_starting": True}
 
         out: dict[str, Any] = {
             "state": self.state.value,
@@ -364,6 +383,6 @@ class Orchestrator:
                     except Exception:
                         pass
             try:
-                await asyncio.sleep(interval)
+                await self._sleep_cancellable(float(interval))
             except asyncio.CancelledError:
                 return

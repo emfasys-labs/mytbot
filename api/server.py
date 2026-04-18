@@ -96,6 +96,11 @@ class _DashboardReadMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         if request.scope.get("type") == "websocket":
             return await call_next(request)
+        # TestClient runs with the developer's .env; read-token middleware would block
+        # most API tests. Opt-in bypass via conftest `PYTEST_API_DISABLE_READ_MIDDLEWARE`;
+        # tests that assert on read protection call `monkeypatch.delenv(...)` first.
+        if os.getenv("PYTEST_API_DISABLE_READ_MIDDLEWARE", "").strip().lower() in ("1", "true", "yes", "on"):
+            return await call_next(request)
         if request.method == "OPTIONS":
             return await call_next(request)
         path = request.url.path

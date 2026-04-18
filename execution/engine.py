@@ -18,6 +18,7 @@ Key properties:
 import uuid
 import logging
 import os
+import random
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -150,8 +151,19 @@ class ExecutionEngine:
                 )
                 if attempt < self.place_order_retries:
                     await self._reconnect_broker(signal.broker)
+                    delay = 0.0
                     if self.place_order_retry_backoff_sec > 0:
-                        await asyncio.sleep(self.place_order_retry_backoff_sec * (attempt + 1))
+                        delay = self.place_order_retry_backoff_sec * (attempt + 1)
+                    bname = str(signal.broker or "").strip().lower()
+                    if bname == "ibkr":
+                        try:
+                            jmax = float(os.getenv("IBKR_PLACE_ORDER_RETRY_JITTER_SEC", "0.5"))
+                        except ValueError:
+                            jmax = 0.5
+                        if jmax > 0:
+                            delay += random.uniform(0.0, jmax)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     continue
                 if self.paper_mode:
                     logger.info("PAPER FILL (broker error) | %s %s", signal.symbol, signal.side)
