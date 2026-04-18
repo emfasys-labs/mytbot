@@ -113,3 +113,16 @@ def test_trend_label():
     assert AIPipeline._trend_label([Decimal("5.5"), Decimal("5.0")]) == "up"
     assert AIPipeline._trend_label([Decimal("4.8"), Decimal("5.0")]) == "down"
     assert AIPipeline._trend_label([Decimal("5.01"), Decimal("5.0")]) == "flat"
+
+
+def test_airouter_runtime_ai_status_degraded_when_no_providers():
+    from ai.router import AIRouter
+
+    r = AIRouter({})
+    assert r.runtime_ai_status()["kind"] == "local_first"
+    assert r.runtime_ai_status()["ai_degraded"] is False
+
+    r._startup_validated = True
+    for k in list(r._providers_enabled.keys()):
+        r._providers_enabled[k] = False
+    assert r.runtime_ai_status()["ai_degraded"] is True

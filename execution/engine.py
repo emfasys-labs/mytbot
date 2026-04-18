@@ -44,6 +44,7 @@ class ExecutionEngine:
         paper_mode: bool = True,
         *,
         allowed_brokers: list[str] | None = None,
+        broker_manager: Any | None = None,
         place_order_retries: int = 2,
         place_order_retry_backoff_sec: float = 1.0,
         fill_poll_timeout_sec: float = 10.0,
@@ -53,6 +54,7 @@ class ExecutionEngine:
         self.paper_mode = paper_mode
         self.broker_configs = broker_configs
         self.allowed_brokers = [b.strip().lower() for b in (allowed_brokers or []) if str(b).strip()]
+        self._broker_manager = broker_manager
         self._brokers = {}          # lazy-loaded broker adapters
         self._open_orders = {}      # client_order_id → OrderResult
         self.place_order_retries = max(0, int(place_order_retries))
@@ -61,6 +63,13 @@ class ExecutionEngine:
         self.fill_poll_interval_sec = float(fill_poll_interval_sec)
         self.cancel_partial_on_timeout = bool(cancel_partial_on_timeout)
         set_execution_engine(self)
+
+    def add_allowed_broker(self, name: str) -> None:
+        """Register a venue that became available after engine construction (e.g. late IBKR connect)."""
+        n = (name or "").strip().lower()
+        if not n or n in self.allowed_brokers:
+            return
+        self.allowed_brokers.append(n)
 
     async def execute(
         self,
@@ -456,28 +465,51 @@ class ExecutionEngine:
 
     async def _get_broker(self, name: str):
         """Lazy-load broker adapter."""
-        if name not in self._brokers:
-            config = self.broker_configs.get(name, {})
+        key = (name or "").strip().lower()
+        if not key:
+            return None
+        if key not in self._brokers:
+            bm = getattr(self, "_broker_manager", None)
+            adapters = getattr(bm, "adapters", None) if bm is not None else None
+            if isinstance(adapters, dict) and key in adapters:
+                broker = adapters[key]
+                try:
+                    connected = await broker.is_connected()
+                except Exception:  # noqa: BLE001
+                    connected = False
+                if not connected:
+                    try:
+                        connected = bool(await broker.connect())
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Broker connect raised | broker=%s | %s", key, exc)
+                        return None
+                    if not connected:
+                        logger.error("Broker connect failed | broker=%s", key)
+                        return None
+                self._brokers[key] = broker
+                return broker
+            config = self.broker_configs.get(key, self.broker_configs.get(name, {}))
             broker = get_broker(
-                name,
+                key,
                 paper_mode=self.paper_mode,
                 **config
             )
             try:
                 connected = await broker.connect()
             except Exception as exc:  # noqa: BLE001
-                logger.error("Broker connect raised | broker=%s | %s", name, exc)
+                logger.error("Broker connect raised | broker=%s | %s", key, exc)
                 return None
             if not connected:
-                logger.error("Broker connect failed | broker=%s", name)
+                logger.error("Broker connect failed | broker=%s", key)
                 return None
-            self._brokers[name] = broker
-        return self._brokers[name]
+            self._brokers[key] = broker
+        return self._brokers[key]
 
     async def _reconnect_broker(self, name: str) -> bool:
-        broker = self._brokers.get(name)
+        key = (name or "").strip().lower()
+        broker = self._brokers.get(key)
         if broker is None:
-            broker = await self._get_broker(name)
+            broker = await self._get_broker(key)
             return broker is not None
         try:
             connected = await broker.is_connected()

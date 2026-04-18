@@ -64,6 +64,9 @@ class _FakeBroker:
     async def connect(self) -> bool:
         return self.connect_ok
 
+    async def is_connected(self) -> bool:
+        return self.connect_ok
+
     async def place_order(self, order):
         self.place_calls += 1
         if self.fail_place:
@@ -525,4 +528,40 @@ async def test_cancel_all_invokes_cancel_for_each_open_order() -> None:
     await engine.cancel_all()
     assert ibkr.cancel_calls == 1
     assert kraken.cancel_calls == 1
+
+
+def test_add_allowed_broker_appends_once() -> None:
+    from control.runtime import set_execution_engine
+
+    try:
+        eng = ExecutionEngine(broker_configs={}, paper_mode=True, allowed_brokers=["kraken"])
+        eng.add_allowed_broker("ibkr")
+        eng.add_allowed_broker("ibkr")
+        assert eng.allowed_brokers == ["kraken", "ibkr"]
+    finally:
+        set_execution_engine(None)
+
+
+@pytest.mark.asyncio
+async def test_get_broker_uses_broker_manager_adapter(monkeypatch) -> None:
+    from control.runtime import set_execution_engine
+
+    def _boom(*_a, **_k):
+        raise AssertionError("get_broker should not run when broker_manager supplies adapter")
+
+    monkeypatch.setattr("execution.engine.get_broker", _boom)
+    fake = _FakeBroker(connect_ok=True)
+    bm = SimpleNamespace(adapters={"ibkr": fake})
+    eng = ExecutionEngine(
+        broker_configs={"ibkr": {}},
+        paper_mode=True,
+        allowed_brokers=["ibkr"],
+        broker_manager=bm,
+    )
+    try:
+        b = await eng._get_broker("IBKR")
+        assert b is fake
+        assert eng._brokers["ibkr"] is fake
+    finally:
+        set_execution_engine(None)
 

@@ -287,3 +287,10 @@ The system must continuously compare (1) current positions using capital and (2)
 **Reason:** Audit P0-1/P0-2/P0-5/P0-6/P0-7/P1-9/P1-10; reduce silent double pools, fix `/status` execution visibility, and avoid float drift in veto math.
 **Status:** Implemented.
 
+---
+
+## D022 — Late venues on execution engine + AI health on status
+**Date:** 2026-04-18
+**Decision:** (1) `ExecutionEngine` accepts optional `broker_manager`; `_get_broker` prefers an already-connected adapter from `broker_manager.adapters` before calling `get_broker`, so late connects (e.g. IBKR) reuse the same instance as routing/reconciliation instead of a duplicate client. `TradingLoop._check_late_brokers` calls `execution_engine.add_allowed_broker(name)` so reconciliation preload includes the venue. (2) `AIRouter` / `NewsClassifier` expose `runtime_ai_status()`; `publish_runner_heartbeat` adds an `ai` object (kind, `providers_enabled`, `ai_degraded`); `GET /system/status` merges that `ai` blob into `trading` when `runtime.heartbeat` is present.
+**Reason:** Audit P1-1 (late broker vs execution) and P1-8 (observable AI degradation without log diving).
+**Status:** Implemented.

@@ -178,6 +178,8 @@ class TradingLoop:
                 self.available_brokers.append(name)
                 if self.router is not None:
                     self.router.add_broker(name)
+                if self.execution_engine is not None:
+                    self.execution_engine.add_allowed_broker(name)
                 logger.info("trading_loop | late broker joined: {}", name)
 
     async def start(self) -> None:
@@ -286,8 +288,8 @@ class TradingLoop:
                 broker_configs=self.broker_configs,
                 paper_mode=self.paper_mode,
                 allowed_brokers=list(self.available_brokers),
+                broker_manager=self._broker_manager,
             )
-            set_execution_engine(self.execution_engine)
             _se_cfg = strategies_cfg.get("signal_engine", {}) or {}
             _acc = (
                 SignalAccumulator()
@@ -963,10 +965,17 @@ class TradingLoop:
                         await self.execution_engine.reconcile_positions(session_factory=session_factory)
                         next_reconcile_at = now_ts + self.reconcile_interval_sec
 
+                    hb_extra: dict[str, Any] = {"paper_mode": self.paper_mode}
+                    if ai_pipeline is not None and getattr(ai_pipeline, "classifier", None) is not None:
+                        _cls = ai_pipeline.classifier
+                        hb_extra["ai"] = _cls.runtime_ai_status()
+                    else:
+                        hb_extra["ai"] = {"kind": "off", "ai_degraded": False}
+
                     await publish_runner_heartbeat(
                         bus, runner_name="orchestrator",
                         symbols=symbols, generated=generated, executed=executed,
-                        extra={"paper_mode": self.paper_mode},
+                        extra=hb_extra,
                     )
                     self.last_iteration_at = datetime.now(timezone.utc)
                     self.iterations += 1

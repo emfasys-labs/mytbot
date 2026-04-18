@@ -139,6 +139,15 @@ Rules:
             logger.warning("news_classifier | startup validation failed | model={} err={}", self.model, exc)
             return False
 
+    def runtime_ai_status(self) -> dict[str, Any]:
+        """Snapshot for status APIs when using legacy Claude news classifier."""
+        has_key = bool(self.api_key and str(self.api_key).strip())
+        return {
+            "kind": "legacy_api",
+            "providers_enabled": {"claude_api": has_key},
+            "ai_degraded": not has_key,
+        }
+
     def get_symbol_score(
         self,
         symbol: str,

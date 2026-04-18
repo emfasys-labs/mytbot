@@ -92,6 +92,16 @@ class AIRouter:
             "total_scored": 0,
         }
 
+    def runtime_ai_status(self) -> dict[str, Any]:
+        """Snapshot for status APIs (heartbeat / dashboard) after or before startup validation."""
+        prov = dict(self._providers_enabled)
+        active_any = any(prov.values())
+        return {
+            "kind": "local_first",
+            "providers_enabled": prov,
+            "ai_degraded": bool(self._startup_validated and not active_any),
+        }
+
     async def validate_startup(self) -> bool:
         """Run startup checks on all enabled providers."""
         if self._startup_validated:

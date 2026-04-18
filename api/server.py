@@ -1036,6 +1036,13 @@ async def system_status(bus: CommandBus = Depends(_command_bus)):
                 tr = out.get("trading")
                 if isinstance(tr, dict):
                     out["trading"] = {**tr, "snapshot_published_at": ua.strip()}
+        rt_hb = await bus.get_state("runtime.heartbeat", None)
+        if isinstance(rt_hb, dict):
+            ai_st = rt_hb.get("ai")
+            if isinstance(ai_st, dict):
+                tr2 = out.get("trading")
+                if isinstance(tr2, dict):
+                    out["trading"] = {**tr2, "ai": ai_st}
     except Exception:  # noqa: BLE001
         pass
     return out
