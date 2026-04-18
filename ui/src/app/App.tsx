@@ -73,6 +73,8 @@ function App() {
   const [wsEvents, setWsEvents] = useState<WsTickEvent[]>([]);
   /** Loop sleep drives snapshot cadence — stale threshold must be > ~2× this or we spuriously warn. */
   const [loopIntervalSec, setLoopIntervalSec] = useState(120);
+  /** From GET /system/status trading.snapshot_published_at (same clock as dashboard.snapshot.updated_at when synced). */
+  const [snapshotPublishedAt, setSnapshotPublishedAt] = useState<string | null>(null);
 
   const triggerHaptic = useHaptic();
 
@@ -126,6 +128,7 @@ function App() {
     setSnapshotFetchFailed(false);
     setWsEvents([]);
     setLoopIntervalSec(120);
+    setSnapshotPublishedAt(null);
     setEquityHistory([]);
     setEquityHistorySeries([]);
     setRecentOrders([]);
@@ -215,6 +218,11 @@ function App() {
               ? tr.loop_interval_sec
               : 120;
           setLoopIntervalSec(li);
+          const spa =
+            typeof tr.snapshot_published_at === 'string' && tr.snapshot_published_at.trim()
+              ? tr.snapshot_published_at.trim()
+              : null;
+          setSnapshotPublishedAt(spa);
         }
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
         if (sysStatus.brokers)
@@ -496,15 +504,20 @@ function App() {
     : 0;
 
   const snapshotStale = useMemo(() => {
-    if (systemState !== 'running' || !dashboardSnapshot?.updated_at) return false;
-    const snapTs = Date.parse(dashboardSnapshot.updated_at);
-    if (!Number.isFinite(snapTs)) return false;
+    if (systemState !== 'running') return false;
+    const fromSnap = dashboardSnapshot?.updated_at ? Date.parse(dashboardSnapshot.updated_at) : NaN;
+    const fromStatus = snapshotPublishedAt ? Date.parse(snapshotPublishedAt) : NaN;
+    const snapTs = Math.max(
+      Number.isFinite(fromSnap) ? fromSnap : 0,
+      Number.isFinite(fromStatus) ? fromStatus : 0,
+    );
+    if (!(snapTs > 0)) return false;
     const loopMs = Math.max(10_000, loopIntervalSec * 1000);
     // Snapshots publish once per iteration; the loop then sleeps ~loop_interval_sec (default 120s).
     // A fixed 120s age threshold matched that sleep and always showed STALE between healthy ticks.
     const minAgeForStale = Math.max(180_000, 2 * loopMs + 90_000);
     return Date.now() - snapTs > minAgeForStale;
-  }, [systemState, dashboardSnapshot?.updated_at, loopIntervalSec]);
+  }, [systemState, dashboardSnapshot?.updated_at, snapshotPublishedAt, loopIntervalSec]);
 
   const watchlistRanked = useMemo(
     () => buildWatchlistRanked(dashboardSnapshot, intelligenceSignals, positions),

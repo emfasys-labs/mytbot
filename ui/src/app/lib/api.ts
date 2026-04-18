@@ -341,6 +341,8 @@ export type SystemStatusResponse = {
     last_iteration_at?: string | null;
     loop_interval_sec?: number;
     last_error?: string | null;
+    /** ISO time of last `dashboard.snapshot` write (full or heartbeat); mirrors snapshot.updated_at when in sync. */
+    snapshot_published_at?: string | null;
   };
   errors?: string[];
   pipeline_running?: boolean;

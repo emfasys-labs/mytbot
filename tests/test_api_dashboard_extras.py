@@ -110,6 +110,48 @@ class _FakeBusSnapshot:
         return default
 
 
+def test_system_status_includes_snapshot_published_at(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
+    iso = "2026-04-12T12:34:56+00:00"
+
+    class _Orch:
+        state = SimpleNamespace(value="running")
+
+        def status(self):
+            return {
+                "state": "running",
+                "paper_mode": True,
+                "state_changed_at": datetime.now(timezone.utc).isoformat(),
+                "active_brokers": [],
+                "brokers": {},
+                "infrastructure": {},
+                "trading": {"running": True, "iterations": 3, "loop_interval_sec": 120},
+                "errors": [],
+                "pipeline_running": False,
+                "capital_pct": 1.0,
+            }
+
+    monkeypatch.setattr("api.server._get_orchestrator", lambda: _Orch())
+
+    def override_bus():
+        class B:
+            async def get_state(self, key: str, default=None):
+                if key == DASHBOARD_SNAPSHOT_KEY:
+                    return {"updated_at": iso, "path": "d015"}
+                return default
+
+        return B()
+
+    app.dependency_overrides[_command_bus] = override_bus
+    try:
+        r = client.get("/system/status")
+        assert r.status_code == 200
+        j = r.json()
+        assert j["trading"]["snapshot_published_at"] == iso
+    finally:
+        app.dependency_overrides.pop(_command_bus, None)
+
+
 def test_dashboard_snapshot_ok(monkeypatch, client: TestClient):
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "tok")
 

@@ -1011,7 +1011,7 @@ async def toggle_strategy(
 
 
 @app.get("/system/status")
-async def system_status():
+async def system_status(bus: CommandBus = Depends(_command_bus)):
     """Full system status including state, brokers, infrastructure."""
     orch = _get_orchestrator()
     if orch is None:
@@ -1025,7 +1025,18 @@ async def system_status():
             "errors": ["Orchestrator not initialized"],
             "pipeline_running": False,
         }
-    return orch.status()
+    out = orch.status()
+    try:
+        dash_raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
+        if isinstance(dash_raw, dict):
+            ua = dash_raw.get("updated_at")
+            if isinstance(ua, str) and ua.strip():
+                tr = out.get("trading")
+                if isinstance(tr, dict):
+                    out["trading"] = {**tr, "snapshot_published_at": ua.strip()}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 @app.post("/system/start")
