@@ -271,3 +271,11 @@ The system must continuously compare (1) current positions using capital and (2)
 **Reason:** The operator must see allocator intent, risk outcomes, and capital context on one screen without reading logs; period P&L answers “how am I doing this week/month” without ad-hoc spreadsheets.
 **Status:** Implemented.
 
+---
+
+## D020 — Unconditional dashboard heartbeat when allocator snapshot is skipped
+**Date:** 2026-04-12
+**Decision:** When a loop iteration does **not** run the full D015 or global-edge dashboard publish (e.g. `batch_candidates` empty, legacy per-symbol path, or publish failure), the loop still writes `dashboard.snapshot` via `publish_dashboard_snapshot_heartbeat()` in `system/dashboard_publish.py`. Payload includes `heartbeat_only`, `dashboard_feed` (`reason`, `message`, symbol/feature counts, batch size), empty `opportunities` / `allocation`, and current `portfolio` serialization so `GET /dashboard/snapshot` reflects each tick. The UI shows a short banner in `SignalBrain` when `heartbeat_only` is true.
+**Reason:** Conditional publish made an empty feature store or mis-scoped universe **indistinguishable** from a genuinely quiet market; the API could return `{}` or a stale snapshot with no diagnostic.
+**Status:** Implemented (`system/trading_loop/loop.py`; `_run_global_edge_tick` returns `(executed, dashboard_snapshot_written)` so heartbeat runs if global-edge publish fails).
+

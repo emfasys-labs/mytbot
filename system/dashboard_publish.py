@@ -31,6 +31,59 @@ DASHBOARD_SNAPSHOT_KEY = "dashboard.snapshot"
 PathKind = Literal["d015", "global_edge"]
 
 
+async def publish_dashboard_snapshot_heartbeat(
+    bus: CommandBus,
+    *,
+    path: PathKind,
+    loop_iteration: int,
+    portfolio_state: PortfolioState,
+    accumulator: SignalAccumulator | None,
+    batch_candidate_count: int,
+    universe_symbol_count: int,
+    symbols_with_features: int,
+    symbols_feature_empty: int,
+    reason: str,
+    message: str,
+) -> None:
+    """Publish a minimal snapshot when the full allocator path did not run (no batch candidates, or legacy path).
+
+    Lets GET /dashboard/snapshot and the UI distinguish a healthy quiet tick from a stale/missing bus state.
+    """
+    acc_blob: dict[str, Any] | None = None
+    if accumulator is not None:
+        acc_blob = accumulator.dashboard_snapshot(top_n=10)
+
+    payload: dict[str, Any] = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "path": path,
+        "loop_iteration": int(loop_iteration),
+        "heartbeat_only": True,
+        "dashboard_feed": {
+            "reason": reason[:120],
+            "message": message[:500],
+            "batch_candidate_count": int(batch_candidate_count),
+            "universe_symbol_count": int(universe_symbol_count),
+            "symbols_with_features": int(symbols_with_features),
+            "symbols_feature_empty": int(symbols_feature_empty),
+        },
+        "accumulator": acc_blob,
+        "regime": None,
+        "opportunities": [],
+        "allocation": None,
+        "execution_plan": {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": str(portfolio_state.mode),
+            "instructions": [],
+            "estimated_turnover": "0",
+            "estimated_cost_bps": "0",
+            "rationale": f"heartbeat:{reason[:80]}",
+        },
+        "portfolio": serialize_held_positions(portfolio_state),
+    }
+    payload["fingerprint"] = snapshot_fingerprint(payload)
+    await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)
+
+
 def _d(x: Decimal | None) -> str:
     if x is None:
         return "0"

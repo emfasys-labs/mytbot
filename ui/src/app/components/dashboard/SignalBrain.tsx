@@ -81,6 +81,19 @@ export function SignalBrain({
           Snapshot unavailable — fix read token (banner above) to load conviction.
         </div>
       ) : null}
+      {!dormant && snapshot?.heartbeat_only && snapshot.dashboard_feed ? (
+        <div className="text-[10px] text-sky-300/95 mb-2 leading-snug rounded-md border border-sky-500/25 bg-sky-950/35 px-2 py-1.5">
+          <div className="font-semibold uppercase tracking-wide text-sky-200/90 mb-0.5">
+            Loop tick · allocator quiet
+          </div>
+          <div className="text-zinc-400 font-mono text-[9px]">
+            {String(snapshot.dashboard_feed.message ?? '')}
+            {snapshot.dashboard_feed.reason ? (
+              <span className="text-zinc-600"> · {String(snapshot.dashboard_feed.reason)}</span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <div className="text-[10px] uppercase tracking-wider text-emerald-600/90 mb-1">Top conviction</div>
       <div className="space-y-0.5 mb-2 font-mono text-[11px] border-b border-white/5 pb-2 min-h-[4.5rem]">

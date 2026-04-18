@@ -6,8 +6,24 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
+from core.models_runtime import PortfolioState
 from portfolio.strategy_opportunity import StrategyOpportunity
-from system.dashboard_publish import serialize_coordinator_actions, serialize_strategy_opportunity
+from system.dashboard_publish import (
+    DASHBOARD_SNAPSHOT_KEY,
+    publish_dashboard_snapshot_heartbeat,
+    serialize_coordinator_actions,
+    serialize_strategy_opportunity,
+)
+
+
+class _FakeBus:
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def set_state(self, key: str, value: object) -> None:
+        self.state[key] = value
 
 
 def test_strategy_opportunity_includes_opportunity_score_alias():
@@ -49,6 +65,48 @@ def test_strategy_opportunity_blank_name_uses_global_edge_tag():
     )
     d = serialize_strategy_opportunity(o)
     assert d["tags"] == ["global_edge"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_snapshot_writes_bus_and_shape():
+    bus = _FakeBus()
+    now = datetime.now(timezone.utc)
+    ps = PortfolioState(
+        timestamp=now,
+        mode="trader",
+        nav=Decimal("100000"),
+        cash=Decimal("100000"),
+        available_buying_power=Decimal("100000"),
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+        leverage_ratio=Decimal("0"),
+    )
+    await publish_dashboard_snapshot_heartbeat(
+        bus,  # type: ignore[arg-type]
+        path="d015",
+        loop_iteration=7,
+        portfolio_state=ps,
+        accumulator=None,
+        batch_candidate_count=0,
+        universe_symbol_count=12,
+        symbols_with_features=0,
+        symbols_feature_empty=12,
+        reason="no_features",
+        message="No rows in feature_snapshots for scanned symbols.",
+    )
+    raw = bus.state[DASHBOARD_SNAPSHOT_KEY]
+    assert isinstance(raw, dict)
+    assert raw.get("heartbeat_only") is True
+    assert raw.get("path") == "d015"
+    assert raw.get("loop_iteration") == 7
+    feed = raw.get("dashboard_feed")
+    assert isinstance(feed, dict)
+    assert feed.get("reason") == "no_features"
+    assert feed.get("universe_symbol_count") == 12
+    assert raw.get("opportunities") == []
+    assert isinstance(raw.get("execution_plan"), dict)
+    assert raw["execution_plan"].get("instructions") == []
+    assert isinstance(raw.get("fingerprint"), str) and len(raw["fingerprint"]) >= 8
 
 
 def test_coordinator_action_includes_action_alias():

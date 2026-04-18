@@ -55,7 +55,11 @@ from system.d015_escalation import (
 )
 from system.d015_portfolio_bridge import portfolio_dict_to_runtime_state
 from system.d015_shadow import log_d015_shadow_for_signal
-from system.dashboard_publish import publish_dashboard_snapshot_d015, publish_dashboard_snapshot_global_edge
+from system.dashboard_publish import (
+    publish_dashboard_snapshot_d015,
+    publish_dashboard_snapshot_global_edge,
+    publish_dashboard_snapshot_heartbeat,
+)
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
@@ -484,6 +488,9 @@ class TradingLoop:
                 try:
                     generated = 0
                     executed = 0
+                    dashboard_snapshot_published = False
+                    symbols_with_features = 0
+                    symbols_feature_empty = 0
 
                     ai_result = None
                     if ai_pipeline is not None:
@@ -550,6 +557,7 @@ class TradingLoop:
                         return "equity"
 
                     use_legacy = legacy_fb
+                    batch_candidates: list[Any] = []
 
                     if use_legacy:
                         for symbol in symbols:
@@ -664,7 +672,7 @@ class TradingLoop:
                                         thesis=thesis,
                                     )
                     else:
-                        batch_candidates: list = []
+                        batch_candidates.clear()
                         for symbol in symbols:
                             if self._stop_event.is_set():
                                 break
@@ -676,7 +684,9 @@ class TradingLoop:
                                 lookback_bars=self.lookback_bars,
                             )
                             if df.empty:
+                                symbols_feature_empty += 1
                                 continue
+                            symbols_with_features += 1
 
                             raw_candidates = []
                             m_sig = momentum.generate_signal(symbol, df)
@@ -762,7 +772,7 @@ class TradingLoop:
                             )
                             tradable_nav = total_equity * Decimal(str(self.capital_pct))
                             if self._use_global_edge and not use_legacy:
-                                executed = await self._run_global_edge_tick(
+                                executed, ge_dash_ok = await self._run_global_edge_tick(
                                     batch_candidates=batch_candidates,
                                     portfolio_dict=portfolio_dict,
                                     tradable=tradable_nav,
@@ -775,6 +785,8 @@ class TradingLoop:
                                     resolve_price=_resolve_price_for_symbol,
                                     strat_cfg=strat_cfg,
                                 )
+                                if ge_dash_ok:
+                                    dashboard_snapshot_published = True
                             else:
                                 async with session_factory() as session:
                                     feat_extra = await drain_volume_refresh_features(
@@ -851,6 +863,7 @@ class TradingLoop:
                                         plan=plan,
                                         portfolio_state=ps_rt,
                                     )
+                                    dashboard_snapshot_published = True
                                 except Exception as pub_exc:  # noqa: BLE001
                                     logger.warning("dashboard_publish | d015 | {}", pub_exc)
                                 for instr in plan.instructions:
@@ -869,6 +882,71 @@ class TradingLoop:
                                     ok = await _process_signal(rs, symbol_hint=instr.symbol)
                                     if ok:
                                         executed += 1
+
+                    if not dashboard_snapshot_published:
+                        try:
+                            pd_h = await _load_portfolio_state(
+                                session_factory,
+                                fallback_portfolio_value=total_equity,
+                                signal_price_fallback=None,
+                                capital_pct=Decimal(str(self.capital_pct)),
+                            )
+                            ps_h = portfolio_dict_to_runtime_state(
+                                pd_h,
+                                mode=mode_raw,
+                                capital_pct=float(self.capital_pct),
+                            )
+                            path_h = "global_edge" if (self._use_global_edge and not use_legacy) else "d015"
+                            if use_legacy:
+                                reason = "legacy_signal_path"
+                                msg = (
+                                    "Legacy per-symbol loop — batch allocator snapshot is not emitted. "
+                                    "Portfolio row below still refreshes each tick."
+                                )
+                            elif len(symbols) == 0:
+                                reason = "empty_universe"
+                                msg = "Universe is empty — check data_pipeline / scanner / DB tier picks."
+                            elif symbols_with_features == 0:
+                                reason = "no_features"
+                                msg = (
+                                    "No recent features for scanned symbols — run run_pipeline so "
+                                    "feature_snapshots has bars for this timeframe."
+                                )
+                            elif len(batch_candidates) == 0:
+                                reason = "no_batch_candidates"
+                                msg = (
+                                    "Features exist for at least one symbol but no batch candidates "
+                                    "formed (momentum/mean-rev + discovery) under current filters."
+                                )
+                            else:
+                                reason = "publish_failed_or_skipped"
+                                msg = (
+                                    "Allocator tick ran but the full dashboard snapshot was not written "
+                                    "(publish error or coordinator-only path)."
+                                )
+
+                            await publish_dashboard_snapshot_heartbeat(
+                                bus,
+                                path=path_h,
+                                loop_iteration=self.iterations,
+                                portfolio_state=ps_h,
+                                accumulator=self.sig_engine.accumulator if self.sig_engine else None,
+                                batch_candidate_count=len(batch_candidates),
+                                universe_symbol_count=len(symbols),
+                                symbols_with_features=symbols_with_features,
+                                symbols_feature_empty=symbols_feature_empty,
+                                reason=reason,
+                                message=msg,
+                            )
+                            logger.info(
+                                "dashboard_publish | heartbeat | {} | batch_candidates={} symbols_feats={}/{}",
+                                reason,
+                                len(batch_candidates),
+                                symbols_with_features,
+                                len(symbols),
+                            )
+                        except Exception as hb_exc:  # noqa: BLE001
+                            logger.warning("dashboard_publish | heartbeat_failed | {}", hb_exc)
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     if now_ts >= next_reconcile_at:
@@ -964,8 +1042,11 @@ class TradingLoop:
         total_equity: Decimal,
         resolve_price,
         strat_cfg: dict[str, Any],
-    ) -> int:
-        """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution."""
+    ) -> tuple[int, bool]:
+        """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution.
+
+        Returns ``(executed_count, dashboard_snapshot_written)``.
+        """
         self._ensure_arb_stack(strategies_cfg)
         assert self._treasury is not None
         assert self.sig_engine is not None
@@ -1027,6 +1108,7 @@ class TradingLoop:
         )
         log_arb_event("rank", ranked=len(actions), opportunities=len(new_opps), held=len(held))
 
+        dashboard_snapshot_written = False
         try:
             ps_ge = portfolio_dict_to_runtime_state(
                 portfolio_dict,
@@ -1042,6 +1124,7 @@ class TradingLoop:
                 coordinator_actions=actions,
                 portfolio_state=ps_ge,
             )
+            dashboard_snapshot_written = True
         except Exception as pub_exc:  # noqa: BLE001
             logger.warning("dashboard_publish | global_edge | {}", pub_exc)
 
@@ -1090,7 +1173,7 @@ class TradingLoop:
             if ok:
                 executed += 1
                 log_arb_event("execute", symbol=sig.symbol, strategy=sig.strategy, side=sig.side)
-        return executed
+        return executed, dashboard_snapshot_written
 
     async def _process_signal_global(
         self,

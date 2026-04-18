@@ -291,6 +291,16 @@ export type DashboardSnapshot = {
   fingerprint?: string;
   path?: string;
   loop_iteration?: number;
+  /** True when the loop wrote a minimal tick (no full allocator publish). */
+  heartbeat_only?: boolean;
+  dashboard_feed?: {
+    reason?: string;
+    message?: string;
+    batch_candidate_count?: number;
+    universe_symbol_count?: number;
+    symbols_with_features?: number;
+    symbols_feature_empty?: number;
+  };
   accumulator?: {
     updated_at?: string;
     bullish_top?: Array<Record<string, unknown>>;
