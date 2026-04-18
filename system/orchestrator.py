@@ -65,6 +65,7 @@ class Orchestrator:
         self._pipeline_scan_idx: int = 0
 
         self._lock = asyncio.Lock()
+        self._last_start_error: str | None = None
 
     @classmethod
     def get_instance(cls) -> Orchestrator:
@@ -89,6 +90,7 @@ class Orchestrator:
 
             self._set_state(SystemState.STARTING)
             self.errors.clear()
+            self._last_start_error = None
 
             try:
                 # 1. Infrastructure
@@ -98,6 +100,7 @@ class Orchestrator:
                 if not self._dep_report.postgres.healthy:
                     err = f"Postgres unavailable: {self._dep_report.postgres.error or 'unknown'}"
                     self.errors.append(err)
+                    self._last_start_error = err[:2000]
                     logger.error("orchestrator | {}", err)
                     self._set_state(SystemState.ERROR)
                     return self.status()
@@ -146,6 +149,7 @@ class Orchestrator:
                     logger.info("orchestrator | cleared stale kill switch on fresh start")
 
                 self._set_state(SystemState.RUNNING)
+                self._last_start_error = None
                 logger.info(
                     "orchestrator | RUNNING | brokers={} paper={}",
                     active_brokers or "none (observation)",
@@ -155,6 +159,7 @@ class Orchestrator:
             except Exception as exc:
                 err = f"Startup failed: {exc}"
                 self.errors.append(err)
+                self._last_start_error = err[:2000]
                 logger.exception("orchestrator | {}", err)
                 self._set_state(SystemState.ERROR)
 
@@ -229,7 +234,7 @@ class Orchestrator:
             "running": False, "iterations": 0, "last_iteration_at": None, "last_error": None, "paper_mode": paper_mode,
         }
 
-        return {
+        out: dict[str, Any] = {
             "state": self.state.value,
             "state_changed_at": self.state_changed_at.isoformat(),
             "paper_mode": paper_mode,
@@ -241,6 +246,9 @@ class Orchestrator:
             "pipeline_running": self._pipeline_task is not None and not self._pipeline_task.done(),
             "capital_pct": self.capital_pct,
         }
+        if self._last_start_error:
+            out["last_start_error"] = self._last_start_error
+        return out
 
     def set_capital_pct(self, pct: float) -> None:
         """Set the fraction of total capital available for trading (0.0 – 1.0)."""

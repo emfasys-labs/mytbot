@@ -31,7 +31,7 @@ from data.universe import UniverseManager
 from data.universe_tiers import load_universe_tiers
 from config.loaders import load_allocation, load_profile_modes
 from core.models_runtime import AssetClass
-from control.runtime import set_risk_engine
+from control.runtime import set_execution_engine, set_risk_engine
 from execution.d015_instruction_executor import risk_signal_from_execution_instruction
 from execution.engine import ExecutionEngine
 from execution.planner import build_execution_plan
@@ -74,7 +74,7 @@ from run_m3 import (
 )
 from signals.accumulator import SignalAccumulator
 from signals.engine import SignalEngine
-from storage.db import dispose_engine, init_async_database
+from storage.db import dispose_engine, get_app_database, init_async_database
 from storage.discovery import persist_anomaly_log, persist_thesis_log
 from storage.models import AIOutputLog, FeatureSnapshot
 from strategies.mean_reversion import MeanReversionStrategy
@@ -237,6 +237,7 @@ class TradingLoop:
     async def _run(self) -> None:
         self._running = True
         engine = None
+        owns_engine = False
         try:
             strategies_cfg = load_yaml("config/strategies.yaml")
             pipeline_cfg = load_yaml("config/data_pipeline.yaml")
@@ -265,7 +266,15 @@ class TradingLoop:
                 self._running = False
                 return
 
-            engine, session_factory = await init_async_database()
+            bound_engine, bound_sf = get_app_database()
+            if bound_sf is not None:
+                engine = bound_engine
+                session_factory = bound_sf
+                owns_engine = False
+                logger.info("trading_loop | using shared app database pool (no second engine)")
+            else:
+                engine, session_factory = await init_async_database()
+                owns_engine = engine is not None
             if session_factory is None:
                 logger.error("trading_loop | database unavailable — cannot run")
                 self.last_error = "Database unavailable"
@@ -278,10 +287,11 @@ class TradingLoop:
                 paper_mode=self.paper_mode,
                 allowed_brokers=list(self.available_brokers),
             )
+            set_execution_engine(self.execution_engine)
             _se_cfg = strategies_cfg.get("signal_engine", {}) or {}
             _acc = (
                 SignalAccumulator()
-                if bool(_se_cfg.get("use_signal_accumulator", False))
+                if bool(_se_cfg.get("use_signal_accumulator", True))
                 else None
             )
             self.sig_engine = SignalEngine(_se_cfg, accumulator=_acc)
@@ -967,16 +977,24 @@ class TradingLoop:
                     self.last_error = str(exc)[:300]
                     logger.exception("trading_loop | iteration failed: {}", exc)
 
-                    try:
-                        await dispose_engine(engine)
-                    except Exception:
-                        pass
-                    engine, session_factory = await init_async_database()
-                    if session_factory is None:
-                        logger.error("trading_loop | DB reconnect failed — will retry next iteration")
+                    if owns_engine:
+                        try:
+                            await dispose_engine(engine)
+                        except Exception:
+                            pass
+                        engine, session_factory = await init_async_database()
+                        owns_engine = engine is not None
+                        if session_factory is None:
+                            logger.error("trading_loop | DB reconnect failed — will retry next iteration")
+                        else:
+                            bus = CommandBus(session_factory)
+                            self._control_bus = bus
                     else:
                         bus = CommandBus(session_factory)
                         self._control_bus = bus
+                        logger.warning(
+                            "trading_loop | iteration DB error — rebound CommandBus (shared engine; not disposed)",
+                        )
 
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.loop_interval_sec)
@@ -991,7 +1009,8 @@ class TradingLoop:
             logger.exception("trading_loop | fatal: {}", exc)
         finally:
             self._running = False
-            if engine is not None:
+            set_execution_engine(None)
+            if owns_engine and engine is not None:
                 try:
                     await dispose_engine(engine)
                 except Exception:

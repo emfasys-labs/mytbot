@@ -39,7 +39,7 @@ from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
-from storage.db import dispose_engine, init_async_database
+from storage.db import bind_app_database, clear_app_database_bind, dispose_engine, init_async_database
 from storage.models import AIOutputLog, AnomalyLog, DailyPnL, FeatureSnapshot, NewsHeadline, OrderLog, PositionLog, RiskLog, SignalLog, ThesisLog
 
 APP_ENV = os.getenv("APP_ENV", "paper")
@@ -152,10 +152,12 @@ async def _startup() -> None:
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.command_bus = CommandBus(session_factory) if session_factory is not None else None
+    bind_app_database(engine, session_factory)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    clear_app_database_bind()
     await dispose_engine(getattr(app.state, "db_engine", None))
 
 

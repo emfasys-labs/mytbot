@@ -205,7 +205,7 @@ class IBKRAdapter(BrokerAdapter):
         return Option(
             spec.underlying_symbol.strip().upper(),
             exp,
-            float(spec.strike),
+            float(str(spec.strike)),
             spec.right.value,
             spec.exchange or "SMART",
             currency=spec.currency or "USD",

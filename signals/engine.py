@@ -14,7 +14,7 @@ Flow:
 
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 import uuid
 from datetime import datetime, timezone
 import logging
@@ -76,12 +76,12 @@ class SignalEngine:
         *,
         news_score: Optional[float],
         now: datetime,
-    ) -> tuple[Optional[NetSignal], Optional[float]]:
+    ) -> tuple[Optional[NetSignal], Union[Decimal, float, None]]:
         """
         Push quant raw signal into accumulator and return (net_signal, overlay_for_legacy_fields).
 
-        ``overlay_for_legacy_fields`` is the score used for veto/confidence when accumulator
-        is enabled (else None, caller uses point-in-time ``news_score``).
+        ``overlay_for_legacy_fields`` is ``Decimal`` from the accumulator net when present,
+        else point-in-time ``news_score`` (float) for veto/confidence; ``None`` if neither applies.
         """
         if self.accumulator is None:
             return None, None
@@ -90,9 +90,9 @@ class SignalEngine:
             net = self.accumulator.compute_net_for_symbol(raw.symbol, now)
             if net is None:
                 return None, news_score
-            return net, float(net.score)
+            return net, net.score
         net = self.accumulator.update(inp, now)
-        return net, float(net.score)
+        return net, net.score
 
     @staticmethod
     def _enrich_metadata_with_net(md: dict, net: Optional[NetSignal], ai_news_score: Optional[float]) -> None:
@@ -100,8 +100,8 @@ class SignalEngine:
             md["ai_news_score"] = ai_news_score
         if net is None:
             return
-        md["accumulator_score"] = float(net.score)
-        md["accumulator_confidence"] = float(net.confidence)
+        md["accumulator_score"] = str(net.score)
+        md["accumulator_confidence"] = str(net.confidence)
         md["accumulator_direction"] = net.direction
         md["accumulator_horizon_bias"] = net.horizon_bias
         md["accumulator_aligned_sources"] = list(net.aligned_sources)
@@ -119,44 +119,54 @@ class SignalEngine:
         if not apply_news_overlay:
             return False, float(raw.confidence)
 
-        veto_threshold = float(self.config.get("news_veto_threshold", -0.7))
-        w = float(self.config.get("news_confidence_weight", 0.15))
+        veto_threshold = Decimal(str(self.config.get("news_veto_threshold", -0.7)))
+        w = Decimal(str(self.config.get("news_confidence_weight", 0.15)))
         dual_ai = bool(self.config.get("accumulator_dual_ai_veto", True))
 
+        overlay_dec: Decimal | None = None
         if self.accumulator is not None and net is not None:
-            overlay = float(net.score)
+            overlay_dec = net.score
         elif news_score is not None:
-            overlay = float(news_score)
-        else:
-            overlay = None
+            overlay_dec = Decimal(str(news_score))
 
         news_veto = False
-        if overlay is not None and overlay < veto_threshold:
+        if overlay_dec is not None and overlay_dec < veto_threshold:
             logger.info(
-                "Signal vetoed by overlay score %.2f (threshold %.2f) | %s",
-                overlay,
+                "Signal vetoed by overlay score {} (threshold {}) | {}",
+                overlay_dec,
                 veto_threshold,
                 raw.symbol,
             )
             news_veto = True
 
+        # When accumulator produced a net signal, overlay already encodes rolled-up AI/news;
+        # do not stack a second veto from stale point-in-time news_score (P1 dual veto).
         if (
             dual_ai
             and self.accumulator is not None
+            and net is None
             and news_score is not None
-            and news_score < veto_threshold
+            and Decimal(str(news_score)) < veto_threshold
         ):
             logger.info(
-                "Signal vetoed by point AI news score %.2f (threshold %.2f) | %s",
+                "Signal vetoed by point AI news score {} (threshold {}) | {}",
                 news_score,
                 veto_threshold,
                 raw.symbol,
             )
             news_veto = True
 
-        adjusted_confidence = float(raw.confidence)
-        if overlay is not None:
-            adjusted_confidence = max(0.0, min(1.0, adjusted_confidence + overlay * w))
+        base_conf = Decimal(str(raw.confidence))
+        if overlay_dec is not None:
+            adj = base_conf + overlay_dec * w
+            lo, hi = Decimal("0"), Decimal("1")
+            if adj < lo:
+                adj = lo
+            elif adj > hi:
+                adj = hi
+            adjusted_confidence = float(adj)
+        else:
+            adjusted_confidence = float(base_conf)
 
         return news_veto, adjusted_confidence
 

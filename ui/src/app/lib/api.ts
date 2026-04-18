@@ -328,6 +328,8 @@ export type DashboardSnapshot = {
 export type SystemStatusResponse = {
   state: SystemState;
   state_changed_at?: string;
+  /** Last orchestrator start() exception message (survives errors.clear on retry). */
+  last_start_error?: string | null;
   paper_mode?: boolean;
   active_brokers?: string[];
   brokers?: Record<

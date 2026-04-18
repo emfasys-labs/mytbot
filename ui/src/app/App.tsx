@@ -75,6 +75,8 @@ function App() {
   const [loopIntervalSec, setLoopIntervalSec] = useState(120);
   /** From GET /system/status trading.snapshot_published_at (same clock as dashboard.snapshot.updated_at when synced). */
   const [snapshotPublishedAt, setSnapshotPublishedAt] = useState<string | null>(null);
+  const [tradingIterations, setTradingIterations] = useState(0);
+  const [lastStartError, setLastStartError] = useState<string | null>(null);
 
   const triggerHaptic = useHaptic();
 
@@ -129,6 +131,8 @@ function App() {
     setWsEvents([]);
     setLoopIntervalSec(120);
     setSnapshotPublishedAt(null);
+    setTradingIterations(0);
+    setLastStartError(null);
     setEquityHistory([]);
     setEquityHistorySeries([]);
     setRecentOrders([]);
@@ -211,6 +215,11 @@ function App() {
       if (sysStatus) {
         const newState = sysStatus.state ?? 'off';
         setSystemState(newState);
+        const lse =
+          typeof sysStatus.last_start_error === 'string' && sysStatus.last_start_error.trim()
+            ? sysStatus.last_start_error.trim()
+            : null;
+        setLastStartError(lse);
         const tr = sysStatus.trading;
         if (tr && typeof tr === 'object') {
           const li =
@@ -223,6 +232,11 @@ function App() {
               ? tr.snapshot_published_at.trim()
               : null;
           setSnapshotPublishedAt(spa);
+          const it = tr.iterations;
+          setTradingIterations(typeof it === 'number' && Number.isFinite(it) && it >= 0 ? Math.trunc(it) : 0);
+        } else {
+          setTradingIterations(0);
+          setSnapshotPublishedAt(null);
         }
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
         if (sysStatus.brokers)
@@ -241,6 +255,10 @@ function App() {
 
       const sysState = (sysStatus?.state as SystemState | undefined) ?? systemStateRef.current;
       const feedsLive = sysState === 'running';
+
+      if (!feedsLive) {
+        setSnapshotFetchFailed(false);
+      }
 
       if (results[7].status === 'fulfilled') {
         setSnapshotFetchFailed(false);
@@ -567,6 +585,9 @@ function App() {
           discoverySummary={discoverySummary}
           snapshotStale={snapshotStale}
           isFlattened={isFlattened}
+          tradingIterations={tradingIterations}
+          loopIntervalSec={loopIntervalSec}
+          lastStartError={lastStartError}
         />
 
         <div className="flex flex-1 min-h-0 flex-col">

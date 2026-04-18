@@ -26,6 +26,33 @@ from sqlalchemy.ext.asyncio import (
 from brokers.base import Order, OrderResult, Tick
 from storage.models import Base, OrderLog, PriceHistory
 
+# FastAPI lifespan binds the primary engine/factory; the trading loop reuses them
+# instead of opening a second connection pool to the same database.
+_bound_engine: AsyncEngine | None = None
+_bound_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def bind_app_database(
+    engine: AsyncEngine | None,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+) -> None:
+    """Register the API-owned engine/session factory for reuse by the trading loop."""
+    global _bound_engine, _bound_session_factory
+    _bound_engine = engine
+    _bound_session_factory = session_factory
+
+
+def clear_app_database_bind() -> None:
+    """Clear bind before disposing the API engine (shutdown)."""
+    global _bound_engine, _bound_session_factory
+    _bound_engine = None
+    _bound_session_factory = None
+
+
+def get_app_database() -> tuple[AsyncEngine | None, async_sessionmaker[AsyncSession] | None]:
+    """Return (engine, session_factory) if API startup registered them, else (None, None)."""
+    return _bound_engine, _bound_session_factory
+
 
 def database_async_url_from_env() -> str | None:
     host = os.getenv("POSTGRES_HOST", "localhost")

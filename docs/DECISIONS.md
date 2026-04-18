@@ -279,3 +279,11 @@ The system must continuously compare (1) current positions using capital and (2)
 **Reason:** Conditional publish made an empty feature store or mis-scoped universe **indistinguishable** from a genuinely quiet market; the API could return `{}` or a stale snapshot with no diagnostic.
 **Status:** Implemented (`system/trading_loop/loop.py`; `_run_global_edge_tick` returns `(executed, dashboard_snapshot_written)` so heartbeat runs if global-edge publish fails). **`GET /system/status`** merges `trading.snapshot_published_at` from the same `dashboard.snapshot` `updated_at` so the UI can treat staleness against the loop clock without relying only on the last HTTP snapshot fetch.
 
+---
+
+## D021 — Shared DB pool, execution engine registry, signal veto Decimal hygiene
+**Date:** 2026-04-18
+**Decision:** (1) FastAPI startup calls `storage.db.bind_app_database(engine, session_factory)`; the trading loop prefers `get_app_database()` and **does not** open a second async engine when the API already bound one (still creates its own `CommandBus` wrapper over the shared factory). On loop-only entry points without a prior bind, behaviour is unchanged (`init_async_database`). The loop **only** disposes an engine it created (`owns_engine`); shared engines are never disposed from the loop. (2) After constructing `ExecutionEngine`, the loop calls `control.runtime.set_execution_engine(...)` and clears it in `_run` `finally`. (3) `SignalEngine` news veto / confidence blending uses `Decimal` for thresholds and overlay scores; accumulator metadata stores string decimals; `accumulator_dual_ai_veto` no longer stacks a point-in-time news veto when an accumulator `NetSignal` exists. (4) IBKR option build uses `float(str(spec.strike))` from `Decimal` strike. (5) Orchestrator persists `last_start_error` across `errors.clear()` on retry start; status exposes it. (6) UI: first-cycle wait copy on `LiveStrip`, `last_start_error` on `error`, clear `snapshotFetchFailed` when not running.
+**Reason:** Audit P0-1/P0-2/P0-5/P0-6/P0-7/P1-9/P1-10; reduce silent double pools, fix `/status` execution visibility, and avoid float drift in veto math.
+**Status:** Implemented.
+

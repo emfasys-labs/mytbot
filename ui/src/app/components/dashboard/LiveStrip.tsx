@@ -30,6 +30,10 @@ type Props = {
   discoverySummary: DiscoverySummaryResponse | null;
   snapshotStale: boolean;
   isFlattened: boolean;
+  /** Completed loop iterations from /system/status trading.iterations */
+  tradingIterations?: number;
+  loopIntervalSec?: number;
+  lastStartError?: string | null;
 };
 
 export function LiveStrip({
@@ -54,11 +58,20 @@ export function LiveStrip({
   discoverySummary,
   snapshotStale,
   isFlattened,
+  tradingIterations = 0,
+  loopIntervalSec = 120,
+  lastStartError = null,
 }: Props) {
   const path = snapshot?.path ?? '—';
   const loopIt = snapshot?.loop_iteration;
 
   const d24 = discoverySummary?.last_24h;
+  const showFirstCycleWait =
+    systemState === 'running' &&
+    !isFlattened &&
+    typeof tradingIterations === 'number' &&
+    tradingIterations === 0;
+
   const navMismatch =
     bookNav != null &&
     Number.isFinite(bookNav) &&
@@ -180,6 +193,17 @@ export function LiveStrip({
                 </span>
               );
             })}
+        </div>
+      ) : null}
+      {systemState === 'error' && lastStartError ? (
+        <div className="mt-1.5 text-[10px] text-rose-300/90 max-w-2xl leading-snug font-mono">
+          Last start: {lastStartError}
+        </div>
+      ) : null}
+      {showFirstCycleWait ? (
+        <div className="mt-1.5 text-[10px] text-amber-200/85 max-w-2xl leading-snug">
+          First loop cycle in progress (interval ≈ {loopIntervalSec}s). Allocator strip fills after iteration 1; heartbeat
+          may show before full D015/global-edge publish.
         </div>
       ) : null}
     </div>
