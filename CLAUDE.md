@@ -82,6 +82,7 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 - `ai/pipeline.py`           — M6 orchestration: symbol news score + macro regime
 - `docs/DECISIONS.md`        — architectural decision log
 - `docs/BUILD_PLAN.md`       — milestones M1–M10 + task history
+- `docs/NEW_MACHINE_SETUP.md` — new PC / full reinstall (Python, Docker, Ollama, UI, `.env`)
 - `docs/M8_MICRO_LIVE.md`    — micro-live guardrails (`APP_ENV=live`, YAML profile)
 - `alembic/`                 — DB migrations (URL from POSTGRES_* in env.py)
 - `tests/`                   — pytest smoke tests
@@ -90,7 +91,8 @@ AI is local-first (rules → FinBERT → local LLM → optional paid fallback) �
 ## CURRENT STATE
 <!-- Update this section after each work session -->
 - Milestone: M10 — Local-First AI Architecture ✅
-- Last completed task: **Docs sync (audit D020–D023)** — `docs/BUILD_PLAN.md` **G6** checklist; `docs/ARCHITECTURE.md` orchestrator/contracts section + observability/data-flow refresh. Prior implementation: DECISIONS D023 (pytest read bypass, Docker retries, pipeline chunked sleep, `trading.orchestrator_starting`, IBKR jitter).
+- Last completed task: **`docs/NEW_MACHINE_SETUP.md`** + `scripts/setup_new_machine.{ps1,sh}` — full new-PC migration (requirements, Docker, Ollama models per `config/ai.yaml`, FinBERT, UI, `.env`); README + `CLAUDE` key files + `.env.example` pointer.
+- Prior: **Docs sync (audit D020–D023)** — `docs/BUILD_PLAN.md` **G6**; `docs/ARCHITECTURE.md` orchestrator/contracts. Prior implementation: DECISIONS D023.
 - Prior: **D023 Operational hardening** — pytest `PYTEST_API_DISABLE_READ_MIDDLEWARE` + conftest default; Docker compose up retries (`DOCKER_COMPOSE_UP_ATTEMPTS`); orchestrator pipeline chunked sleep + `trading.orchestrator_starting`; IBKR `place_order` retry jitter (`IBKR_PLACE_ORDER_RETRY_JITTER_SEC`). Docs: `docs/DECISIONS.md` D023.
 - Prior: **D022 Late brokers + AI status** — `ExecutionEngine(broker_manager=...)`, `_get_broker` prefers `broker_manager.adapters`, `add_allowed_broker` from `TradingLoop._check_late_brokers`; heartbeat `ai` via `runtime_ai_status()` (`AIRouter` / `NewsClassifier`); `GET /system/status` merges `trading.ai` from `runtime.heartbeat`. Docs: `docs/DECISIONS.md` D022.
 - Prior: **D021 Audit hardening** — shared `bind_app_database` / trading loop reuses API pool (no second engine); `ExecutionEngine.__init__` registers `set_execution_engine`; `SignalEngine` Decimal veto + dual-AI gate; IBKR `str(strike)`; orchestrator `last_start_error`; LiveStrip first-cycle + error copy; `snapshotFetchFailed` clears when not running. Docs: `docs/DECISIONS.md` D021.
