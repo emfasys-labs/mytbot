@@ -25,7 +25,13 @@ export interface Position {
   avg: number;
   last: number;
   pnl: number;
+  /** Fractional portfolio weight in [0,1], ``notional / nav``. */
   w: number;
+  /** Current notional exposure in account currency (``|qty × last|``).
+   *  Displayed alongside qty so the operator can see size at a glance. */
+  notional: number;
+  /** Originating broker (``ibkr``, ``alpaca``, ``binance``, …). */
+  broker?: string;
 }
 
 export type EventKind = 'fill' | 'signal' | 'tick';

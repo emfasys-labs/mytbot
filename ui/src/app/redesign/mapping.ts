@@ -156,19 +156,29 @@ export function mapPositions(
     const avg = toNumber(p.avg_entry_price, 0);
     const last = toNumber(p.current_price, avg);
     const unreal = toNumber(p.unrealised_pnl, 0);
-    // qty is not exposed on the raw positions endpoint we use, so derive it.
-    const priceDelta = last - avg;
-    const qtyGuess =
-      Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
-    const notional = Math.abs(qtyGuess * last);
+    // Prefer the authoritative quantity from the backend. The legacy
+    // ``unreal / priceDelta`` heuristic silently collapses to zero when the
+    // price hasn't moved since entry (freshly opened positions) and mis-signs
+    // shorts — using PositionLog.quantity removes both failure modes.
+    const qtyRaw = toNumber(p.quantity, NaN);
+    let qty: number;
+    if (Number.isFinite(qtyRaw) && qtyRaw !== 0) {
+      qty = qtyRaw;
+    } else {
+      const priceDelta = last - avg;
+      qty = Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
+    }
+    const notional = Math.abs(qty * last);
     const weight = totalNav > 0 ? notional / totalNav : 0;
     return {
       sym: (p.symbol ?? '').toUpperCase(),
-      qty: Number.isFinite(qtyGuess) ? Math.round(qtyGuess * 100) / 100 : 0,
+      qty: Number.isFinite(qty) ? Math.round(qty * 100) / 100 : 0,
       avg: Number.isFinite(avg) ? avg : 0,
       last: Number.isFinite(last) ? last : 0,
       pnl: Number.isFinite(unreal) ? unreal : 0,
       w: Math.max(0, Math.min(1, weight)),
+      notional: Number.isFinite(notional) ? notional : 0,
+      broker: typeof p.broker === 'string' && p.broker.trim() ? p.broker.trim() : undefined,
     };
   });
 }
@@ -272,19 +282,32 @@ export function mapExposure(
   snapshot: DashboardSnapshot | null,
 ): { gross: number; net: number; cash: number } {
   const portfolio = (snapshot?.portfolio ?? {}) as Record<string, unknown>;
-  const gross = parsePct(portfolio.gross_exposure);
-  const net = parsePct(portfolio.net_exposure);
+  const nav = toNumber(portfolio.nav, 0);
+  const gross = normalizeExposure(portfolio.gross_exposure, nav);
+  // Net can legitimately be negative (short bias); clamp to [0,1] for display
+  // by taking absolute value — the sign is conveyed via P&L + position sides.
+  const net = normalizeExposure(portfolio.net_exposure, nav);
   const cash = Math.max(0, 1 - gross);
   return { gross, net, cash };
 }
 
-function parsePct(raw: unknown): number {
+/** Exposure figures from the backend arrive in three shapes depending on the
+ *  snapshot writer:
+ *   1. Ratio in [0,1]  (e.g. ``0.54``)
+ *   2. Percent 0–100   (e.g. ``54``)
+ *   3. Absolute £ notional when ``PortfolioState`` serializes market value
+ *      directly (e.g. ``57919.88`` with ``nav=1055095.72``).
+ *  Auto-detect by magnitude so the Exposure / Capital-at-work panels never
+ *  collapse to ``100%`` just because the writer shipped absolutes. */
+function normalizeExposure(raw: unknown, nav: number): number {
   if (raw == null || raw === '') return 0;
   const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
-  if (!Number.isFinite(n) || n < 0) return 0;
-  // Backend exposure is typically a ratio [0,1]; accept percent values too.
-  const v = n > 1 ? n / 100 : n;
-  return Math.max(0, Math.min(1, v));
+  if (!Number.isFinite(n)) return 0;
+  const a = Math.abs(n);
+  if (a <= 1) return Math.max(0, Math.min(1, a));
+  if (a <= 100) return Math.max(0, Math.min(1, a / 100));
+  if (nav > 0) return Math.max(0, Math.min(1, a / nav));
+  return 0;
 }
 
 export function mapExecutionRejections(orders: ApiOrderRow[]): ExecutionRejection[] {

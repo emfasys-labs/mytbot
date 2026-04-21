@@ -162,9 +162,15 @@ export type ApiOrdersResponse = {
 export type ApiPositionsResponse = {
   positions?: Array<{
     symbol: string;
+    /** Signed position size (negative for short). Backend always populates
+     *  this from PositionLog.quantity — the legacy "derive from pnl/delta"
+     *  heuristic is a fallback for responses missing the field. */
+    quantity?: string;
     unrealised_pnl?: string;
     avg_entry_price?: string;
     current_price?: string;
+    broker?: string;
+    asset_class?: string;
   }>;
 };
 

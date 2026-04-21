@@ -104,7 +104,10 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
   const accentColor = ACCENTS[accent].main;
   const totalPnl = live.positions.reduce((s, p) => s + p.pnl, 0);
   const nav = live.nav > 0 ? live.nav : 0;
-  const deployedCapital = nav * Math.max(0, Math.min(1, live.exposure.gross));
+  // Sum the actual position notionals instead of deriving from ``nav *
+  // exposure.gross`` — the latter was unreliable when the backend shipped
+  // exposure as an absolute £ figure rather than a ratio (see D026).
+  const deployedCapital = live.positions.reduce((sum, p) => sum + (p.notional || 0), 0);
   const pendingCapital = live.orders
     .filter((o) => isPendingOrder(o.status))
     .reduce((sum, o) => {
@@ -130,28 +133,53 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
             </div>
           ) : (
             <div style={{ display: 'grid', gap: 2 }}>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '110px 110px 80px 80px 95px 1fr 80px',
+                gap: 12, padding: '0 0 6px 0',
+                fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
+                textTransform: 'uppercase', letterSpacing: '0.06em',
+                borderBottom: `1px solid ${TOKENS.line}`,
+              }}>
+                <span>Symbol</span>
+                <span>Size</span>
+                <span>Avg</span>
+                <span>Last</span>
+                <span>P&amp;L</span>
+                <span>Weight</span>
+                <span style={{ textAlign: 'right' }}>Trend</span>
+              </div>
               {live.positions.map((p) => (
                 <div key={p.sym} style={{
-                  display: 'grid', gridTemplateColumns: '100px 70px 90px 90px 1fr 90px',
+                  display: 'grid',
+                  gridTemplateColumns: '110px 110px 80px 80px 95px 1fr 80px',
                   gap: 12, alignItems: 'center', padding: '10px 0',
                   borderBottom: `1px solid ${TOKENS.line}`,
                 }}>
                   <div>
                     <div style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{p.sym}</div>
-                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>qty {p.qty}</div>
+                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                      qty {p.qty}{p.broker ? ` · ${p.broker}` : ''}
+                    </div>
                   </div>
-                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>avg {fmtPrice(p.avg)}</span>
-                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1 }}>last {fmtPrice(p.last)}</span>
+                  <div>
+                    <div style={{ fontFamily: TOKENS.mono, fontSize: 13, color: TOKENS.ink0 }}>
+                      {fmtNotional(p.notional)}
+                    </div>
+                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>notional</div>
+                  </div>
+                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>{fmtPrice(p.avg)}</span>
+                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1 }}>{fmtPrice(p.last)}</span>
                   <Signed value={p.pnl} size={12} />
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ flex: 1, height: 3, background: 'rgba(255,255,255,0.04)', borderRadius: 2, overflow: 'hidden' }}>
                       <div style={{ width: `${Math.min(100, p.w * 100 * 4)}%`, height: '100%', background: accentColor }} />
                     </div>
                     <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, width: 36, textAlign: 'right' }}>
-                      {(p.w * 100).toFixed(0)}%
+                      {(p.w * 100).toFixed(1)}%
                     </span>
                   </div>
-                  <Spark values={[p.avg * 0.99 || 0, p.avg || 0, p.avg * 1.01 || 0, p.last || p.avg || 0]} width={80} height={24} accent={accentColor} />
+                  <Spark values={[p.avg * 0.99 || 0, p.avg || 0, p.avg * 1.01 || 0, p.last || p.avg || 0]} width={72} height={24} accent={accentColor} />
                 </div>
               ))}
             </div>
@@ -254,14 +282,27 @@ function fmtPrice(v: number): string {
   return v >= 100 ? v.toFixed(2) : v.toFixed(4);
 }
 
+/** Compact account-currency formatter for position notionals. Uses ``k`` /
+ *  ``M`` suffixes above £1k / £1M so the Book row stays one line on narrow
+ *  cards while still exposing exact pence for small positions. */
+function fmtNotional(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (v >= 1_000_000) return `£${(v / 1_000_000).toFixed(2)}M`;
+  if (v >= 10_000) return `£${(v / 1_000).toFixed(1)}k`;
+  if (v >= 1_000) return `£${(v / 1_000).toFixed(2)}k`;
+  return `£${v.toFixed(2)}`;
+}
+
 export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const { approved, rejected, executionRejections } = live;
 
   const gauges = useMemo(() => {
     const portfolio = (live.snapshot?.portfolio ?? {}) as Record<string, unknown>;
-    const gross = numFromPortfolio(portfolio.gross_exposure);
-    const net = Math.abs(numFromPortfolio(portfolio.net_exposure));
+    const nav = typeof portfolio.nav === 'string' || typeof portfolio.nav === 'number'
+      ? Number(portfolio.nav) || 0 : 0;
+    const gross = numFromPortfolio(portfolio.gross_exposure, nav);
+    const net = Math.abs(numFromPortfolio(portfolio.net_exposure, nav));
     const maxPosCount = live.positions.length;
     const positionHeat = Math.min(1, maxPosCount / 20);
     const drawdown = numFromPortfolio(live.pnl?.metrics?.max_drawdown_pct);
@@ -428,13 +469,15 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
   );
 }
 
-function numFromPortfolio(raw: unknown): number {
+function numFromPortfolio(raw: unknown, nav = 0): number {
   if (raw == null || raw === '') return 0;
   const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
   if (!Number.isFinite(n)) return 0;
-  // Accept both ratio (0–1) and percent (0–100) inputs.
-  const v = n > 1 ? n / 100 : n;
-  return Math.max(0, Math.min(1, v));
+  const a = Math.abs(n);
+  if (a <= 1) return Math.max(0, Math.min(1, a));
+  if (a <= 100) return Math.max(0, Math.min(1, a / 100));
+  if (nav > 0) return Math.max(0, Math.min(1, a / nav));
+  return 0;
 }
 
 function formatRelativeTime(ms: number): string {

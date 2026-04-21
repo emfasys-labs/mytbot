@@ -21,7 +21,7 @@ import os
 import random
 from dataclasses import replace
 from decimal import Decimal, ROUND_DOWN
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import asyncio
 
@@ -64,6 +64,16 @@ class ExecutionEngine:
         self.fill_poll_timeout_sec = float(fill_poll_timeout_sec)
         self.fill_poll_interval_sec = float(fill_poll_interval_sec)
         self.cancel_partial_on_timeout = bool(cancel_partial_on_timeout)
+        # In-flight dedup — when the allocator re-ranks the same opportunity
+        # on consecutive loops, we must not flood the broker with duplicate
+        # limit orders that stack up unfilled. A non-terminal order for the
+        # same (symbol, side, broker) placed within this window blocks new
+        # submissions. Tunable via EXECUTION_DEDUP_WINDOW_SEC (default 900s).
+        try:
+            self.dedup_window_sec = float(os.getenv("EXECUTION_DEDUP_WINDOW_SEC", "900") or 0)
+        except (TypeError, ValueError):
+            self.dedup_window_sec = 900.0
+        self.dedup_skipped = 0  # observability counter
         set_execution_engine(self)
 
     def add_allowed_broker(self, name: str) -> None:
@@ -93,6 +103,27 @@ class ExecutionEngine:
 
         if (signal.side or "").strip().upper().startswith("ARBITRAGE_"):
             return await self._execute_arbitrage(signal, session_factory=session_factory)
+
+        # Dedup: if a non-terminal order for (symbol, side, broker) already
+        # exists within ``dedup_window_sec``, skip emitting a duplicate. This
+        # prevents the allocator from re-submitting the same opportunity each
+        # loop iteration when a prior limit order is still sitting unfilled.
+        if self.dedup_window_sec > 0:
+            existing = await self._find_in_flight_order(session_factory, signal)
+            if existing is not None:
+                self.dedup_skipped += 1
+                logger.info(
+                    "DEDUP SKIP | %s %s broker=%s (existing order %s status=%s qty=%s age=%ss)",
+                    signal.symbol,
+                    signal.side,
+                    signal.broker,
+                    existing.id,
+                    existing.status,
+                    existing.quantity,
+                    int((datetime.now(timezone.utc) - existing.timestamp).total_seconds())
+                    if existing.timestamp else -1,
+                )
+                return None
 
         order = self._build_order(signal)
 
@@ -466,6 +497,53 @@ class ExecutionEngine:
             self._maybe_auto_kill_reconciliation("reconciliation exception", broker=None)
             return False
         return ok
+
+    async def _find_in_flight_order(
+        self,
+        session_factory,
+        signal: Signal,
+    ) -> Optional["OrderLog"]:  # type: ignore[name-defined]
+        """Return an existing non-terminal order for this (symbol, side, broker).
+
+        Uses the ``orders`` table because a fresh process restart has an
+        empty in-memory ``_open_orders`` dict — we must not re-emit orders
+        that the previous runner already parked in the broker book.
+
+        Matches on status in {``pending``, ``open``, ``partially_filled``}
+        and timestamp within ``dedup_window_sec`` of ``now``.
+        """
+        if session_factory is None:
+            return None
+        sym = (signal.symbol or "").strip().upper()
+        side = (signal.side or "").strip().lower()
+        broker = (signal.broker or "").strip().lower()
+        if not sym or not broker or side not in ("buy", "sell"):
+            return None
+        try:
+            from sqlalchemy import select  # local import to keep module import light
+            from storage.models import OrderLog
+
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.dedup_window_sec)
+            async with session_factory() as session:
+                stmt = (
+                    select(OrderLog)
+                    .where(
+                        OrderLog.symbol == sym,
+                        OrderLog.broker == broker,
+                        OrderLog.side == side,
+                        OrderLog.status.in_(("pending", "open", "partially_filled")),
+                        OrderLog.timestamp >= cutoff,
+                    )
+                    .order_by(OrderLog.timestamp.desc())
+                    .limit(1)
+                )
+                q = await session.execute(stmt)
+                return q.scalars().first()
+        except Exception as exc:  # noqa: BLE001
+            # Dedup is best-effort — on DB failure we fall through and let
+            # the order place. Safer than blocking trading on a DB hiccup.
+            logger.warning("Order dedup lookup failed (%s); allowing order", exc)
+            return None
 
     def _build_order(self, signal: Signal) -> Order:
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
