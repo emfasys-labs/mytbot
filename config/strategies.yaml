@@ -32,7 +32,11 @@ strategies:
   momentum_breakout:
     enabled: true
     preferred_broker: ibkr
-    asset_class: equity
+    # Asset classes the strategy is allowed to scan. Router picks the
+    # broker per-symbol — equity → ibkr/alpaca, crypto → binance/kraken,
+    # forex → ibkr. Futures are data-only until an IBKR futures contract
+    # resolver ships (see loop.py execution gating).
+    asset_classes: [equity, crypto, forex, future]
     lookback_periods: 20
     volume_multiplier: 1.2
     atr_min: 0.004
@@ -42,7 +46,7 @@ strategies:
   mean_reversion:
     enabled: true
     preferred_broker: ibkr
-    asset_class: equity
+    asset_classes: [equity, crypto, forex, future]
     lookback_periods: 30
     # Slightly wider trigger zone so live 1h data produces actionable flow.
     rsi_buy_threshold: 42

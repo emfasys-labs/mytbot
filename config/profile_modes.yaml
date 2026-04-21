@@ -190,6 +190,14 @@ modes:
           rolling_drawdown_weight: 0.20
           loss_streak_weight: 0.15
 
+# Per-mode trading-loop cadence. The feature pipeline still refreshes hourly;
+# this just controls how often the allocator re-evaluates signals, refreshes
+# NAV, and lets the hunter actually *hunt*.
+loop_cadence_sec:
+  defender: 900   # 15 min — slow, conservative, let setups mature
+  trader: 300     # 5 min  — balanced rotation
+  hunter: 120     # 2 min  — aggressive rotation / fast book refresh
+
 safety_bounds:
   absolute_max_gross_exposure:
     defender: 1.25

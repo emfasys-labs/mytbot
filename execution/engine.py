@@ -74,6 +74,18 @@ class ExecutionEngine:
         except (TypeError, ValueError):
             self.dedup_window_sec = 900.0
         self.dedup_skipped = 0  # observability counter
+        # Marketable-limit slippage buffer. Every LIMIT order's price is
+        # rewritten just before placement so BUYs sit at or above the current
+        # ask (and SELLs at or below the current bid), making them likely to
+        # fill the top of book immediately. This prevents the 1h-old bar
+        # close from becoming an unmarketable, stuck-in-the-queue bid.
+        # Tunable via EXECUTION_MARKETABLE_SLIP_BPS (default 10 bps).
+        # Set to 0 to disable and keep legacy "limit at last close" behaviour.
+        try:
+            self.marketable_slip_bps = float(os.getenv("EXECUTION_MARKETABLE_SLIP_BPS", "10") or 0)
+        except (TypeError, ValueError):
+            self.marketable_slip_bps = 10.0
+        self.marketable_adjusted = 0  # observability counter
         set_execution_engine(self)
 
     def add_allowed_broker(self, name: str) -> None:
@@ -143,6 +155,7 @@ class ExecutionEngine:
             )
             return None
 
+        order = await self._apply_marketable_limit(order, signal, broker)
         order = self._normalize_order_for_broker(order, signal)
         if order.quantity <= 0:
             logger.warning(
@@ -564,6 +577,105 @@ class ExecutionEngine:
             client_order_id=str(uuid.uuid4()),  # idempotency key
             instrument_metadata=inst_meta,
         )
+
+    async def _apply_marketable_limit(
+        self,
+        order: Order,
+        signal: Signal,
+        broker: Any,
+    ) -> Order:
+        """Rewrite the limit price into a *marketable* one using live top-of-book.
+
+        The allocator emits ``suggested_price = last 1h-bar close`` which, after
+        even a tiny upward drift, becomes an unmarketable bid that sits in the
+        broker queue forever. By fetching live bid/ask at placement time and
+        pricing BUYs at ``ask × (1 + slip)`` / SELLs at ``bid × (1 - slip)``
+        we produce orders that cross the spread and fill immediately.
+
+        Fallback chain when quotes are unavailable:
+          1. Order book top-of-book (primary)
+          2. ``broker.get_last_price`` ± slip (secondary)
+          3. Keep the original ``suggested_price`` (legacy behaviour)
+
+        Skipped entirely when ``self.marketable_slip_bps <= 0``.
+        """
+        if self.marketable_slip_bps <= 0:
+            return order
+        if order.order_type != OrderType.LIMIT:
+            return order
+        if broker is None:
+            return order
+
+        slip_factor = Decimal(str(self.marketable_slip_bps)) / Decimal("10000")
+        side_is_buy = order.side == OrderSide.BUY
+
+        bid: Decimal | None = None
+        ask: Decimal | None = None
+        try:
+            ob: OrderBook = await broker.get_order_book(order.symbol, depth=1)
+            if ob is not None:
+                if ob.bids:
+                    b0 = ob.bids[0][0]
+                    if b0 is not None and b0 > 0:
+                        bid = Decimal(str(b0))
+                if ob.asks:
+                    a0 = ob.asks[0][0]
+                    if a0 is not None and a0 > 0:
+                        ask = Decimal(str(a0))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Marketable limit: order book fetch failed | symbol=%s | %s",
+                order.symbol,
+                exc,
+            )
+
+        reference: Decimal | None = None
+        source = "book"
+        if side_is_buy and ask is not None and ask > 0:
+            reference = ask
+        elif (not side_is_buy) and bid is not None and bid > 0:
+            reference = bid
+
+        if reference is None:
+            # Fall back to last traded price when the book is empty or one-sided.
+            try:
+                last_px = await broker.get_last_price(order.symbol)
+                if last_px is not None and last_px > 0:
+                    reference = Decimal(str(last_px))
+                    source = "last"
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Marketable limit: get_last_price failed | symbol=%s | %s",
+                    order.symbol,
+                    exc,
+                )
+
+        if reference is None or reference <= 0:
+            return order  # keep original — no fresh reference available
+
+        if side_is_buy:
+            new_px = reference * (Decimal("1") + slip_factor)
+        else:
+            new_px = reference * (Decimal("1") - slip_factor)
+
+        # Venue-specific tick rounding is handled inside each adapter's
+        # ``place_order`` (e.g. Alpaca quantizes sub-penny prices). We pass the
+        # raw Decimal so every adapter can apply its own rules consistently.
+        if new_px <= 0:
+            return order
+
+        self.marketable_adjusted += 1
+        logger.info(
+            "MARKETABLE LIMIT | %s %s reference=%s (%s) slip_bps=%s old=%s new=%s",
+            signal.symbol,
+            signal.side,
+            reference,
+            source,
+            self.marketable_slip_bps,
+            order.limit_price,
+            new_px,
+        )
+        return replace(order, limit_price=new_px)
 
     def _normalize_order_for_broker(self, order: Order, signal: Signal) -> Order:
         """

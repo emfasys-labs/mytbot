@@ -1255,6 +1255,80 @@ async def ws_updates(ws: WebSocket):
         return
 
 
+@app.post("/admin/cancel_pending_orders")
+async def admin_cancel_pending_orders(
+    broker: str | None = Query(None, description="Optional broker filter (e.g. ibkr, alpaca)"),
+    session_factory=Depends(_session_factory),
+    _: None = Depends(_require_mutation_token),
+):
+    """Cancel every non-terminal order across connected brokers.
+
+    Use this after shipping execution changes (e.g. marketable-limit pricing)
+    to clear the pre-change backlog of stuck limit orders. Safe to run at any
+    time — only affects orders with status ``pending`` / ``open`` /
+    ``partially_filled``. Returns a per-broker cancellation summary.
+    """
+    execution_engine = get_execution_engine()
+    brokers_map: dict[str, Any] = (
+        dict(getattr(execution_engine, "_brokers", {})) if execution_engine is not None else {}
+    )
+    if broker:
+        b = broker.strip().lower()
+        brokers_map = {k: v for k, v in brokers_map.items() if k.lower() == b}
+
+    summary: dict[str, dict[str, int]] = {}
+    for bname, badapter in brokers_map.items():
+        cancelled = 0
+        failed = 0
+        try:
+            open_orders = await badapter.get_open_orders()
+        except Exception as exc:
+            summary[bname] = {"cancelled": 0, "failed": 0, "error": str(exc)[:200]}  # type: ignore[dict-item]
+            continue
+        for o in open_orders:
+            boid = getattr(o, "broker_order_id", None)
+            if not boid:
+                continue
+            try:
+                ok = await badapter.cancel_order(boid)
+                if ok:
+                    cancelled += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        summary[bname] = {"cancelled": cancelled, "failed": failed}
+
+    # Reconcile the DB so the next iteration's dedup-lookup sees a clean
+    # slate. Any straggler we couldn't cancel at the broker will be picked up
+    # by the usual order-tracking code on the next sync.
+    from sqlalchemy import update
+    db_updated = 0
+    try:
+        async with session_factory() as session:
+            stmt = (
+                update(OrderLog)
+                .where(OrderLog.status.in_(("pending", "open", "partially_filled")))
+            )
+            if broker:
+                stmt = stmt.where(OrderLog.broker == broker.strip().lower())
+            stmt = stmt.values(status="cancelled")
+            result = await session.execute(stmt)
+            await session.commit()
+            db_updated = int(result.rowcount or 0)
+    except Exception as exc:
+        return {
+            "cancelled_by_broker": summary,
+            "db_updated": 0,
+            "db_error": str(exc)[:200],
+        }
+
+    return {
+        "cancelled_by_broker": summary,
+        "db_updated": db_updated,
+    }
+
+
 _VALID_MODES = frozenset({"defender", "trader", "hunter"})
 _MODE_RUNTIME_FILE = Path("data/runtime/active_mode.json")
 

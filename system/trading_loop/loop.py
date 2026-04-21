@@ -102,10 +102,13 @@ from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
 
 from system.trading_loop.helpers import (
     apply_saved_mode_to_risk_cfg,
+    asset_class_for_symbol,
+    broker_symbol_for,
     d015_legacy_fallback,
     enrich_candidate_volume_z,
     enrich_signal_volume_z,
     is_crypto_symbol,
+    is_futures_symbol,
     load_yaml,
 )
 
@@ -348,6 +351,11 @@ class TradingLoop:
             bus = CommandBus(session_factory)
             alloc_cfg = load_allocation()
             profile_modes_cfg = load_profile_modes()
+            # Mode-aware iteration cadence. YAML key is ``loop_cadence_sec``
+            # under ``config/profile_modes.yaml``. Missing/invalid entries fall
+            # back to ``self.loop_interval_sec`` so operators can disable this
+            # feature simply by deleting the YAML block.
+            mode_cadence_map = self._load_mode_cadence_map()
             for name, strategy in strategies.items():
                 state_v = await bus.get_state(f"strategy.enabled.{name}", None)
                 if state_v is not None:
@@ -403,11 +411,44 @@ class TradingLoop:
                     ordered = ordered[:max_symbols_per_iteration]
                 return ordered if ordered else None
 
+            # Futures execution is gated until a futures-contract resolver
+            # ships for IBKR (``ES=F`` → ``Future("ES", "202506", "CME")``).
+            # Until then we still generate + rank + log futures signals for
+            # visibility, but short-circuit order placement so we don't send
+            # nonsense Stock contracts to the broker.
+            futures_execution_enabled = os.getenv(
+                "FUTURES_EXECUTION_ENABLED", "0"
+            ).strip().lower() in ("1", "true", "yes", "on")
+
             async def _process_signal(signal, *, symbol_hint: str | None = None) -> bool:
                 routed = self.router.route(signal.asset_class, signal.symbol)
                 if routed is None:
                     return False
                 signal.broker = routed
+                # Futures data-only gate. Signal still logs; order never lands.
+                if is_futures_symbol(signal.symbol) and not futures_execution_enabled:
+                    if not isinstance(getattr(signal, "metadata", None), dict):
+                        signal.metadata = {}
+                    signal.metadata["execution_gated"] = "futures_disabled"
+                    logger.info(
+                        "FUTURES DATA-ONLY | skipping execution for %s (set FUTURES_EXECUTION_ENABLED=1 once the contract resolver ships)",
+                        signal.symbol,
+                    )
+                    await _persist_signal(
+                        session_factory, signal,
+                        paper_mode=self.paper_mode,
+                        timeframe=self.timeframe,
+                        feature_ts=datetime.now(timezone.utc),
+                    )
+                    return False
+                # Rewrite the pipeline ticker to the broker's native form
+                # before the order builder sees it (e.g. ``EURUSD=X`` → ``EURUSD``).
+                native = broker_symbol_for(signal.symbol, routed)
+                if native and native != signal.symbol:
+                    if not isinstance(getattr(signal, "metadata", None), dict):
+                        signal.metadata = {}
+                    signal.metadata.setdefault("pipeline_symbol", signal.symbol)
+                    signal.symbol = native
                 portfolio_state = await _load_portfolio_state(
                     session_factory,
                     fallback_portfolio_value=total_equity,
@@ -585,13 +626,16 @@ class TradingLoop:
                             if df.empty:
                                 continue
 
+                            sym_ac = asset_class_for_symbol(symbol)
                             raw_candidates = []
-                            m_sig = momentum.generate_signal(symbol, df)
-                            if m_sig is not None:
-                                raw_candidates.append(m_sig)
-                            r_sig = mean_rev.generate_signal(symbol, df)
-                            if r_sig is not None:
-                                raw_candidates.append(r_sig)
+                            if momentum.supports_asset_class(sym_ac):
+                                m_sig = momentum.generate_signal(symbol, df)
+                                if m_sig is not None:
+                                    raw_candidates.append(m_sig)
+                            if mean_rev.supports_asset_class(sym_ac):
+                                r_sig = mean_rev.generate_signal(symbol, df)
+                                if r_sig is not None:
+                                    raw_candidates.append(r_sig)
 
                             if ai_result is not None and ai_pipeline is not None:
                                 allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
@@ -610,8 +654,14 @@ class TradingLoop:
                             if signal is None:
                                 continue
 
-                            if is_crypto_symbol(symbol) and signal.asset_class != "crypto":
-                                signal.asset_class = "crypto"
+                            # Relabel the signal with the true asset class for
+                            # this ticker so SmartOrderRouter picks the right
+                            # venue (equity → ibkr/alpaca, crypto → binance/
+                            # kraken, forex → ibkr). Strategies no longer need
+                            # to hard-code the class themselves.
+                            resolved_ac = asset_class_for_symbol(symbol)
+                            if resolved_ac and signal.asset_class != resolved_ac:
+                                signal.asset_class = resolved_ac
 
                             if ai_result is not None:
                                 signal.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -700,13 +750,16 @@ class TradingLoop:
                                 continue
                             symbols_with_features += 1
 
+                            sym_ac = asset_class_for_symbol(symbol)
                             raw_candidates = []
-                            m_sig = momentum.generate_signal(symbol, df)
-                            if m_sig is not None:
-                                raw_candidates.append(m_sig)
-                            r_sig = mean_rev.generate_signal(symbol, df)
-                            if r_sig is not None:
-                                raw_candidates.append(r_sig)
+                            if momentum.supports_asset_class(sym_ac):
+                                m_sig = momentum.generate_signal(symbol, df)
+                                if m_sig is not None:
+                                    raw_candidates.append(m_sig)
+                            if mean_rev.supports_asset_class(sym_ac):
+                                r_sig = mean_rev.generate_signal(symbol, df)
+                                if r_sig is not None:
+                                    raw_candidates.append(r_sig)
 
                             if ai_result is not None and ai_pipeline is not None:
                                 allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
@@ -723,8 +776,9 @@ class TradingLoop:
                             if cand is None:
                                 continue
 
-                            if is_crypto_symbol(symbol) and str(cand.asset_class) != "crypto":
-                                cand.asset_class = cast(AssetClass, "crypto")
+                            resolved_ac = asset_class_for_symbol(symbol)
+                            if resolved_ac and str(cand.asset_class) != resolved_ac:
+                                cand.asset_class = cast(AssetClass, resolved_ac)
 
                             if ai_result is not None:
                                 cand.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -1005,8 +1059,12 @@ class TradingLoop:
                             "trading_loop | iteration DB error — rebound CommandBus (shared engine; not disposed)",
                         )
 
+                # Pick the iteration cadence for the *current* profile mode so
+                # a hunter → defender switch takes effect on the very next sleep.
+                current_mode = self._read_active_mode()
+                iter_interval = mode_cadence_map.get(current_mode, self.loop_interval_sec)
                 try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.loop_interval_sec)
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=iter_interval)
                     break
                 except asyncio.TimeoutError:
                     pass
@@ -1218,6 +1276,31 @@ class TradingLoop:
         if routed is None:
             return False
         signal.broker = routed
+        # Futures execution gate — same as legacy path. See _process_signal().
+        if is_futures_symbol(signal.symbol) and os.getenv(
+            "FUTURES_EXECUTION_ENABLED", "0"
+        ).strip().lower() not in ("1", "true", "yes", "on"):
+            if not isinstance(getattr(signal, "metadata", None), dict):
+                signal.metadata = {}
+            signal.metadata["execution_gated"] = "futures_disabled"
+            logger.info(
+                "FUTURES DATA-ONLY | skipping execution for %s (set FUTURES_EXECUTION_ENABLED=1)",
+                signal.symbol,
+            )
+            await _persist_signal(
+                session_factory,
+                signal,
+                paper_mode=self.paper_mode,
+                timeframe=self.timeframe,
+                feature_ts=datetime.now(timezone.utc),
+            )
+            return False
+        native = broker_symbol_for(signal.symbol, routed)
+        if native and native != signal.symbol:
+            if not isinstance(getattr(signal, "metadata", None), dict):
+                signal.metadata = {}
+            signal.metadata.setdefault("pipeline_symbol", signal.symbol)
+            signal.symbol = native
         self.risk_engine.update_high_watermark(
             Decimal(str(portfolio_dict.get("high_watermark_value", total_equity)))
         )
@@ -1275,6 +1358,46 @@ class TradingLoop:
         await _persist_position_snapshot(session_factory, post_trade_state)
         await _upsert_daily_pnl(session_factory, post_trade_state)
         return True
+
+    def _load_mode_cadence_map(self) -> dict[str, int]:
+        """Load ``loop_cadence_sec`` from ``config/profile_modes.yaml``.
+
+        The YAML key is optional; when missing/invalid we return an empty
+        map and every mode falls back to ``self.loop_interval_sec``.
+        """
+        try:
+            raw = load_yaml("config/profile_modes.yaml")
+            mapping = raw.get("loop_cadence_sec") if isinstance(raw, dict) else None
+            if not isinstance(mapping, dict):
+                return {}
+            out: dict[str, int] = {}
+            for k, v in mapping.items():
+                try:
+                    sec = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if sec <= 0:
+                    continue
+                # Respect the same lower-bound guard as __init__ (10s).
+                out[str(k).strip().lower()] = max(10, sec)
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trading_loop | loop_cadence_sec load failed: {}", exc)
+            return {}
+
+    @staticmethod
+    def _read_active_mode() -> str:
+        """Read the operator-selected profile mode. Matches api/server.py semantics."""
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            p = _Path("data/runtime/active_mode.json")
+            if p.is_file():
+                return str(_json.loads(p.read_text(encoding="utf-8")).get("mode", "trader")).strip().lower()
+        except Exception:  # noqa: BLE001
+            pass
+        return "trader"
 
     def status_dict(self) -> dict[str, Any]:
         loaded: list[dict[str, Any]] = []

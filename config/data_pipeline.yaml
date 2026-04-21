@@ -20,11 +20,30 @@ dynamic_universe:
     scan_strategy_every_n: 3
 
 symbols:
+  # Equity anchors
   - SPY
   - QQQ
   - IWM
+  # Crypto anchors (routed to binance/kraken via router)
   - BTC-USD
   - ETH-USD
+  - SOL-USD
+  - XRP-USD
+  # Forex majors (routed to IBKR; ``=X`` suffix stripped at order build time)
+  - EURUSD=X
+  - GBPUSD=X
+  - USDJPY=X
+  - AUDUSD=X
+  - USDCHF=X
+  - USDCAD=X
+  # Futures (data-only until contract-month resolver ships —
+  # see FUTURES_EXECUTION_ENABLED in system/trading_loop/loop.py)
+  - ES=F
+  - NQ=F
+  - YM=F
+  - CL=F
+  - GC=F
+  - SI=F
 
 backfill:
   interval: "1d"

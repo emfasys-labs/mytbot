@@ -22,6 +22,60 @@ def is_crypto_symbol(symbol: str) -> bool:
     return False
 
 
+def is_forex_symbol(symbol: str) -> bool:
+    """Recognise yfinance forex tickers like ``EURUSD=X``.
+
+    We intentionally stay strict: must end ``=X`` and have a 6-letter base.
+    That keeps false positives (crypto pairs, tickers with stray ``=``) out.
+    """
+    s = symbol.strip().upper()
+    if not s.endswith("=X"):
+        return False
+    base = s[:-2]
+    return len(base) == 6 and base.isalpha()
+
+
+def is_futures_symbol(symbol: str) -> bool:
+    """Recognise yfinance continuous-futures tickers like ``ES=F`` / ``CL=F``."""
+    s = symbol.strip().upper()
+    if not s.endswith("=F"):
+        return False
+    base = s[:-2]
+    return 1 <= len(base) <= 4 and base.isalnum()
+
+
+def asset_class_for_symbol(symbol: str) -> str:
+    """Single source of truth for mapping a ticker to its asset class.
+
+    Priority: crypto → forex → future → equity. Used by the trading loop to
+    relabel every signal so the Smart Order Router can pick the right broker.
+    """
+    if is_crypto_symbol(symbol):
+        return "crypto"
+    if is_forex_symbol(symbol):
+        return "forex"
+    if is_futures_symbol(symbol):
+        return "future"
+    return "equity"
+
+
+def broker_symbol_for(symbol: str, broker: str) -> str:
+    """Translate a pipeline ticker (yfinance convention) to a broker-native one.
+
+    Currently: strip the ``=X`` (forex) / ``=F`` (futures) suffix for any
+    non-yfinance broker. IBKR's ``_symbol_to_contract`` expects ``EURUSD``
+    (6-char pair) for forex, not ``EURUSD=X``. Futures still need a contract
+    month which we don't yet ship, so futures routing is gated elsewhere.
+    """
+    s = (symbol or "").strip().upper()
+    b = (broker or "").strip().lower()
+    if not s or not b:
+        return s
+    if s.endswith("=X") or s.endswith("=F"):
+        return s[:-2]
+    return s
+
+
 def load_yaml(path: str | Path) -> dict[str, Any]:
     p = Path(path)
     if not p.exists():

@@ -86,6 +86,9 @@ class ProfileModesConfig(StrictBaseModel):
     defaults: ProfileDefaultsConfig
     modes: dict[str, ProfileModeConfig]
     safety_bounds: ProfileSafetyBoundsConfig
+    # Per-mode trading-loop cadence (seconds). Consumed by TradingLoop to
+    # speed up/slow down iteration tempo based on the active profile mode.
+    loop_cadence_sec: dict[str, int] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
