@@ -21,7 +21,7 @@ import asyncio
 import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, AsyncIterator, Optional, Set
 
 from ib_insync import (
@@ -450,6 +450,23 @@ class IBKRAdapter(BrokerAdapter):
         """Build ib_insync order; PAXOS crypto uses cashQty with totalQuantity 0."""
         if self._is_paxos_crypto(contract):
             return await self._build_paxos_crypto_ib_order(order, contract)
+        # IBKR forex (IDEALPRO) rejects fractional quantities with
+        # error 10318: "This order doesn't support fractional quantity
+        # trading". Sizing gives us e.g. ``75409.42964522`` units for a
+        # GBP-denominated cash stake; IBKR requires whole base-currency
+        # units. Round DOWN so we never exceed the sized notional.
+        if isinstance(contract, Forex):
+            qty_dec = Decimal(str(order.quantity))
+            whole = qty_dec.to_integral_value(rounding=ROUND_DOWN)
+            if whole != qty_dec and whole > 0:
+                logger.info(
+                    "place_order | IBKR | forex qty rounded to whole units | "
+                    "symbol={} original={} rounded={}",
+                    order.symbol,
+                    qty_dec,
+                    whole,
+                )
+                order.quantity = whole
         return self._build_ib_order(order)
 
     async def _build_paxos_crypto_ib_order(
