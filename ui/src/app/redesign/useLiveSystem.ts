@@ -415,7 +415,22 @@ export function useLiveSystem(): LiveData {
     return v >= 0 ? v : null;
   }, [pnl]);
 
-  const uiState = mapSystemState(backendState, killSwitch);
+  const baseUiState = mapSystemState(backendState, killSwitch);
+  // Keep the UI in "warming up" until the orchestrator has published data the
+  // user can actually see on the dashboard. Backend reports `running` as soon
+  // as the loop starts, but the first iteration may still be in flight — in
+  // that window NAV, conviction and the live feed are empty. We flip to
+  // `running` as soon as any of the visible surfaces has real content OR the
+  // first full allocator publish has landed (non-heartbeat snapshot).
+  const hasVisibleData =
+    conviction.length > 0
+    || strategies.length > 0
+    || positions.length > 0
+    || events.length > 0
+    || (snapshot != null && snapshot.heartbeat_only === false)
+    || loopIteration > 0;
+  const uiState: DesignSystemState =
+    baseUiState === 'running' && !hasVisibleData ? 'starting' : baseUiState;
 
   return {
     backendState,

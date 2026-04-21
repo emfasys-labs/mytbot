@@ -108,7 +108,7 @@ export function Sidebar({
 
 export function TopBar({
   state, accent, onArm, onPower, armed, currentTitle, onOpenCmd, onOpenTweaks,
-  loopIteration, path, wsConnected,
+  loopIteration, path, wsConnected, mode, onSetMode,
 }: {
   state: SystemState;
   accent: string;
@@ -121,6 +121,8 @@ export function TopBar({
   loopIteration: number;
   path: string;
   wsConnected: boolean;
+  mode: TradingMode;
+  onSetMode: (m: TradingMode) => void;
 }) {
   return (
     <div style={{
@@ -135,8 +137,24 @@ export function TopBar({
         {currentTitle}
       </div>
       <div style={{ marginLeft: 18, display: 'flex', alignItems: 'center', gap: 8, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
-        <Glyph state={state} accent={accent} size={10} />
-        <span style={{ color: state === 'running' ? accent : state === 'error' ? TOKENS.danger : TOKENS.ink3 }}>{state}</span>
+        {(() => {
+          const displayState: SystemState = armed ? 'paused' : state;
+          const label =
+            displayState === 'starting' ? 'warming up' :
+            displayState;
+          const color =
+            displayState === 'running'  ? accent :
+            displayState === 'error'    ? TOKENS.danger :
+            displayState === 'starting' ? TOKENS.caution :
+            displayState === 'paused'   ? TOKENS.caution :
+            TOKENS.ink3;
+          return (
+            <>
+              <Glyph state={displayState} accent={accent} size={10} />
+              <span style={{ color }}>{label}</span>
+            </>
+          );
+        })()}
         <span style={{ color: TOKENS.ink4 }}>·</span>
         <span>loop #{loopIteration || 0}</span>
         <span style={{ color: TOKENS.ink4 }}>·</span>
@@ -150,6 +168,35 @@ export function TopBar({
         </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 4, padding: 2,
+          borderRadius: 8, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1,
+        }}>
+          {(['defender', 'trader', 'hunter'] as const).map((m) => {
+            const active = mode === m;
+            return (
+              <button
+                key={m}
+                onClick={() => onSetMode(m)}
+                style={{
+                  padding: '4px 8px',
+                  borderRadius: 6,
+                  border: `1px solid ${active ? `${accent}55` : TOKENS.line}`,
+                  background: active ? `${accent}18` : 'transparent',
+                  color: active ? accent : TOKENS.ink3,
+                  fontFamily: TOKENS.mono,
+                  fontSize: 10,
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase',
+                  cursor: 'pointer',
+                }}
+                title={`Set mode: ${m}`}
+              >
+                {m}
+              </button>
+            );
+          })}
+        </div>
         <button
           onClick={onOpenCmd}
           style={{
@@ -195,12 +242,28 @@ export function MasterButton({
   const [progress, setProgress] = useState(0);
   const rafRef = useRef<number | null>(null);
   const startRef = useRef(0);
+  const pressingRef = useRef(false);
+  const progressRef = useRef(0);
   const holdMs = 900;
 
   const running = state === 'running';
   const off = state === 'off';
-  const danger = armed;
-  const c = danger ? TOKENS.danger : running ? accent : off ? TOKENS.ink3 : TOKENS.caution;
+  const starting = state === 'starting';
+  const holding = pressing;
+  const c = holding
+    ? TOKENS.danger
+    : armed
+      ? TOKENS.caution
+      : running
+        ? accent
+        : starting
+          ? TOKENS.caution
+          : off
+            ? TOKENS.ink3
+            : TOKENS.caution;
+  const borderColor = off ? TOKENS.line : `${c}44`;
+  const bgColor = off ? 'transparent' : `${c}10`;
+  const textColor = off ? TOKENS.ink2 : c;
 
   const cancelRaf = () => {
     if (rafRef.current != null) {
@@ -211,16 +274,22 @@ export function MasterButton({
 
   const down = () => {
     if (off) { onPower(); return; }
+    pressingRef.current = true;
+    progressRef.current = 0;
     setPressing(true);
     startRef.current = performance.now();
     const tick = () => {
       const p = Math.min(1, (performance.now() - startRef.current) / holdMs);
+      progressRef.current = p;
       setProgress(p);
       if (p < 1) {
         rafRef.current = requestAnimationFrame(tick);
       } else {
-        onArm(true);
+        pressingRef.current = false;
+        onArm(false);
+        onPower();
         setPressing(false);
+        setProgress(0);
       }
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -228,15 +297,20 @@ export function MasterButton({
 
   const up = () => {
     cancelRaf();
-    if (pressing) {
-      if (progress < 1) onPower();
-      setProgress(0);
-      setPressing(false);
-    }
+    const wasPressing = pressingRef.current;
+    const p = progressRef.current;
+    pressingRef.current = false;
+    progressRef.current = 0;
+    if (!wasPressing) return;
+    if (p < 1) onArm(!armed);
+    setProgress(0);
+    setPressing(false);
   };
 
   const cancel = () => {
     cancelRaf();
+    pressingRef.current = false;
+    progressRef.current = 0;
     setPressing(false);
     setProgress(0);
   };
@@ -247,9 +321,9 @@ export function MasterButton({
         onMouseDown={down} onMouseUp={up} onMouseLeave={cancel}
         onTouchStart={down} onTouchEnd={up}
         style={{
-          position: 'relative', width: 80, height: 32, borderRadius: 8,
-          border: `1px solid ${c}44`, background: `${c}10`,
-          color: c, fontFamily: TOKENS.sans, fontSize: 11, fontWeight: 500,
+          position: 'relative', width: 110, height: 32, borderRadius: 8,
+          border: `1px solid ${borderColor}`, background: bgColor,
+          color: textColor, fontFamily: TOKENS.sans, fontSize: 11, fontWeight: 500,
           letterSpacing: '0.04em', textTransform: 'uppercase',
           cursor: 'pointer', overflow: 'hidden',
           transition: `border-color ${TOKENS.fast}ms ${TOKENS.ease}`,
@@ -261,17 +335,17 @@ export function MasterButton({
         }} />
         <span style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
           <I.power />
-          {armed ? 'stop?' : running ? 'live' : off ? 'start' : 'paused'}
+          {armed
+            ? 'paused'
+            : running
+              ? 'live'
+              : starting
+                ? 'warming up'
+                : off
+                  ? 'start'
+                  : 'error'}
         </span>
       </button>
-      {pressing && !armed && (
-        <div style={{
-          position: 'absolute', bottom: -14, left: 0, right: 0,
-          fontFamily: TOKENS.mono, fontSize: 9, color: TOKENS.ink3, textAlign: 'center',
-        }}>
-          hold to arm
-        </div>
-      )}
     </div>
   );
 }

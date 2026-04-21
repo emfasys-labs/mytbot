@@ -35,8 +35,8 @@ export function mapSystemState(
   if (killSwitch) return 'paused';
   switch (backend) {
     case 'running':  return 'running';
-    case 'starting': return 'paused';
-    case 'stopping': return 'paused';
+    case 'starting': return 'starting';
+    case 'stopping': return 'starting';
     case 'error':    return 'error';
     case 'off':
     default:         return 'off';

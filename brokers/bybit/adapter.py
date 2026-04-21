@@ -164,16 +164,31 @@ class BybitAdapter(BrokerAdapter):
         self._private_ok = False
         self._client: HTTP | None = None
         self._order_symbol: dict[str, str] = {}
-        self._wallet_account_type: str = "UNIFIED"
+        self._wallet_account_type: str | None = None
+        self._wallet_unavailable: bool = False
 
     def _candidate_wallet_account_types(self) -> list[str]:
-        # Support classic and unified account modes.
+        # Probe order biased by adapter category: linear perps → CONTRACT/UNIFIED first,
+        # spot → SPOT/UNIFIED first. FUND is rarely the right answer so it goes last.
+        if self.category == "spot":
+            return ["UNIFIED", "SPOT", "CONTRACT", "FUND"]
         return ["UNIFIED", "CONTRACT", "SPOT", "FUND"]
 
-    async def _detect_wallet_account_type(self) -> str:
+    @staticmethod
+    def _is_account_type_error(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "errcode: 400" in s and "accounttype" in s
+
+    async def _detect_wallet_account_type(self) -> str | None:
+        """
+        Probe wallet account types with a single attempt each (no SDK retry storm).
+
+        Returns the first working type, or ``None`` if every probe rejects the key
+        (which usually means the key lacks wallet-read permission). In that case the
+        caller should mark ``_wallet_unavailable=True`` so we stop retrying.
+        """
         if self._client is None:
-            return "UNIFIED"
-        last_err: Exception | None = None
+            return None
         for account_type in self._candidate_wallet_account_types():
             try:
                 await self._run_sync(
@@ -181,25 +196,13 @@ class BybitAdapter(BrokerAdapter):
                 )
                 return account_type
             except Exception as exc:  # noqa: BLE001
-                last_err = exc
                 logger.debug(
-                    "connect | Bybit | wallet probe failed | accountType={} | {}",
+                    "Bybit | wallet probe failed | accountType={} | {}",
                     account_type,
                     exc,
                 )
-        if last_err is not None:
-            # Some Bybit account setups reject all wallet accountType probes (ErrCode 400)
-            # even when API credentials are otherwise valid. Keep the adapter online and let
-            # subsequent balance/order endpoints drive readiness and behavior.
-            err_s = str(last_err).lower()
-            if "errcode: 400" in err_s and "accounttype" in err_s:
-                logger.warning(
-                    "connect | Bybit | wallet accountType autodetect failed for all probes; "
-                    "defaulting to UNIFIED and continuing"
-                )
-                return "UNIFIED"
-            raise last_err
-        return "UNIFIED"
+                continue
+        return None
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
@@ -212,20 +215,43 @@ class BybitAdapter(BrokerAdapter):
 
     async def connect(self) -> bool:
         try:
+            # Keep the pybit retry window short so a transient 4xx/5xx cannot
+            # stall us past the broker-manager startup timeout.
             self._client = HTTP(
                 testnet=self.testnet,
                 api_key=self.api_key or None,
                 api_secret=self.api_secret or None,
+                timeout=10,
+                max_retries=1,
+                retry_delay=1,
             )
+            # Public — always available.
             await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
+
             if self.api_key and self.api_secret:
-                self._wallet_account_type = await self._detect_wallet_account_type()
-                self._private_ok = True
+                # Validate credentials with a cheap authenticated endpoint that works on
+                # both Classic and UTA accounts. This avoids the slow wallet-balance
+                # probe storm that used to blow past the 15s startup window.
+                try:
+                    await self._run_sync(
+                        lambda: self._client.get_api_key_information()  # type: ignore[union-attr]
+                    )
+                    self._private_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "connect | Bybit | API key validation failed | error={}", exc,
+                    )
+                    self._private_ok = False
+                    if not self.paper_mode:
+                        self._connected = False
+                        self._client = None
+                        return False
+
                 logger.info(
-                    "connect | Bybit | private API | ok | testnet={} category={} wallet_account_type={}",
+                    "connect | Bybit | private API | private_ok={} | testnet={} | category={}",
+                    self._private_ok,
                     self.testnet,
                     self.category,
-                    self._wallet_account_type,
                 )
             else:
                 self._private_ok = False
@@ -266,6 +292,24 @@ class BybitAdapter(BrokerAdapter):
     async def get_balance(self) -> list[Balance]:
         if not self._private_ok or self._client is None:
             return []
+        if self._wallet_unavailable:
+            return []
+
+        if self._wallet_account_type is None:
+            detected = await self._detect_wallet_account_type()
+            if detected is None:
+                self._wallet_unavailable = True
+                logger.warning(
+                    "get_balance | Bybit | wallet balance endpoint rejected every accountType "
+                    "(likely API key lacks wallet-read permission or account is restricted) — "
+                    "treating wallet as unavailable; adapter stays connected for price/order data.",
+                )
+                return []
+            self._wallet_account_type = detected
+            logger.info(
+                "Bybit | wallet accountType resolved | accountType={}",
+                self._wallet_account_type,
+            )
 
         def _fetch() -> dict[str, Any]:
             assert self._client is not None
@@ -274,6 +318,10 @@ class BybitAdapter(BrokerAdapter):
         try:
             raw = await self._run_sync(_fetch)
         except Exception as exc:  # noqa: BLE001
+            # If this was an accountType 400, reset the cached type so the next call retries
+            # the probe. If probing fails again get_balance will latch into _wallet_unavailable.
+            if self._is_account_type_error(exc):
+                self._wallet_account_type = None
             logger.warning("get_balance | Bybit | error={}", exc)
             return []
 

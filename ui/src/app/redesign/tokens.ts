@@ -49,7 +49,7 @@ export const ACCENTS: Record<AccentName, Accent> = {
   white:   { main: '#ffffff', dim: 'rgba(255,255,255,0.12)', glow: 'rgba(255,255,255,0.22)' },
 };
 
-export type SystemState = 'running' | 'paused' | 'off' | 'error';
+export type SystemState = 'running' | 'starting' | 'paused' | 'off' | 'error';
 export type Density = 'comfort' | 'compact';
 export type Theme = 'dark' | 'light';
 export type Viewport = 'desktop' | 'tablet' | 'mobile';

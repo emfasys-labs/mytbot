@@ -76,53 +76,83 @@ export function DashboardScreen({
             opacity: 0.8, pointerEvents: 'none', animation: 'ds-fade-out-slow 2s ease',
           }} />
         )}
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
-          <div>
-            <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
-            <NavNumber value={navValue} accent={accentColor} size={density === 'compact' ? 54 : 68} />
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginTop: 10 }}>
-              <span style={{
-                fontFamily: TOKENS.mono, fontSize: 13,
-                color: dayChange >= 0 ? TOKENS.profit : TOKENS.loss,
-                fontVariantNumeric: 'tabular-nums',
+        {state === 'off' ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 18, minHeight: 128 }}>
+            <div>
+              <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
+              <div style={{
+                fontFamily: TOKENS.sans,
+                fontSize: density === 'compact' ? 44 : 56,
+                fontWeight: 300,
+                color: TOKENS.ink3,
+                letterSpacing: '-0.02em',
+                lineHeight: 1,
               }}>
-                {dayChange >= 0 ? '+' : '−'}£{Math.abs(dayChange).toFixed(2)}
-              </span>
-              <span style={{
-                fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3,
-                fontVariantNumeric: 'tabular-nums',
+                —
+              </div>
+              <div style={{
+                marginTop: 10, fontFamily: TOKENS.mono, fontSize: 11,
+                color: TOKENS.ink3, letterSpacing: '0.04em', textTransform: 'uppercase',
               }}>
-                {dayPct >= 0 ? '+' : ''}{dayPct.toFixed(2)}% today
-              </span>
+                system off · press start to begin
+              </div>
             </div>
           </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
+              <div>
+                <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
+                <NavNumber value={navValue} accent={accentColor} size={density === 'compact' ? 54 : 68} />
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginTop: 10 }}>
+                  <span style={{
+                    fontFamily: TOKENS.mono, fontSize: 13,
+                    color: dayChange >= 0 ? TOKENS.profit : TOKENS.loss,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {dayChange >= 0 ? '+' : '−'}£{Math.abs(dayChange).toFixed(2)}
+                  </span>
+                  <span style={{
+                    fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {dayPct >= 0 ? '+' : ''}{dayPct.toFixed(2)}% today
+                  </span>
+                </div>
+              </div>
 
-          <div style={{ flex: 1 }} />
+              <div style={{ flex: 1 }} />
 
-          <div style={{ display: 'flex', gap: 28 }}>
-            <MiniStat label="Week"  value={live.pnlRollups.w} />
-            <MiniStat label="Month" value={live.pnlRollups.m} />
-            <MiniStat label="YTD"   value={live.pnlRollups.y} />
-          </div>
+              <div style={{ display: 'flex', gap: 28 }}>
+                <MiniStat label="Week"  value={live.pnlRollups.w} />
+                <MiniStat label="Month" value={live.pnlRollups.m} />
+                <MiniStat label="YTD"   value={live.pnlRollups.y} />
+              </div>
 
-          <div style={{ width: 1, height: 48, background: TOKENS.line }} />
+              <div style={{ width: 1, height: 48, background: TOKENS.line }} />
 
-          <ExposureRing gross={live.exposure.gross} net={live.exposure.net} accent={accentColor} />
-        </div>
+              <ExposureRing gross={live.exposure.gross} net={live.exposure.net} accent={accentColor} />
+            </div>
 
-        <div style={{ marginTop: 18 }}>
-          <EquityCurve values={live.equity.length ? live.equity : [navValue, navValue]} accent={accentColor} width={900} height={48} />
-        </div>
+            <div style={{ marginTop: 18 }}>
+              <EquityCurve values={live.equity.length ? live.equity : [navValue, navValue]} accent={accentColor} width={900} height={48} />
+            </div>
 
-        {tradable != null && (
-          <div style={{
-            marginTop: 10, display: 'flex', gap: 12, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
-          }}>
-            <span>Tradable £{Math.round(tradable).toLocaleString()}</span>
-            <span>·</span>
-            <span>Allocation {Math.round(live.capitalPct * 100)}%</span>
-            {state !== 'running' && <span style={{ color: TOKENS.caution }}>· system {state}</span>}
-          </div>
+            {tradable != null && (
+              <div style={{
+                marginTop: 10, display: 'flex', gap: 12, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
+              }}>
+                <span>Tradable £{Math.round(tradable).toLocaleString()}</span>
+                <span>·</span>
+                <span>Allocation {Math.round(live.capitalPct * 100)}%</span>
+                {state !== 'running' && (
+                  <span style={{ color: TOKENS.caution }}>
+                    · system {state === 'starting' ? 'warming up' : state}
+                  </span>
+                )}
+              </div>
+            )}
+          </>
         )}
       </Card>
 

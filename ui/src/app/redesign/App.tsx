@@ -107,17 +107,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', h);
   }, []);
 
-  // Long-press → confirm stop after 1.8s (real api.systemStop).
-  useEffect(() => {
-    if (!armed) return;
-    const t = setTimeout(() => {
-      setArmed(false);
-      void live.stop();
-    }, 1800);
-    return () => clearTimeout(t);
-  }, [armed, live]);
-
-  // Master button tap → start if off, stop if running.
+  // Power action from button/cmd: start if off, stop if running.
   const togglePower = useCallback(() => {
     if (live.backendState === 'running' || live.backendState === 'starting') {
       void live.stop();
@@ -125,6 +115,13 @@ export default function App() {
       void live.start();
     }
   }, [live]);
+
+  // Clear armed (paused visual) whenever the backend is no longer live.
+  useEffect(() => {
+    if (live.backendState !== 'running' && live.backendState !== 'starting' && armed) {
+      setArmed(false);
+    }
+  }, [live.backendState, armed]);
 
   const state = live.uiState;
 
@@ -195,6 +192,8 @@ export default function App() {
           loopIteration={live.loopIteration}
           path={live.path}
           wsConnected={live.wsConnected}
+          mode={live.mode}
+          onSetMode={(m) => void live.setMode(m)}
         />
         <div style={{ flex: 1, minHeight: 0, background: TOKENS.bg0, position: 'relative' }}>
           {route === 'dash' && (
@@ -259,17 +258,16 @@ function ArmOverlay() {
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 50 }}>
       <div style={{
         position: 'absolute', inset: 0,
-        border: `2px solid ${TOKENS.danger}`,
-        animation: 'ds-pulse 0.9s ease-in-out infinite',
+        border: `1px solid ${TOKENS.caution}66`,
       }} />
       <div style={{
         position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
-        padding: '8px 14px', background: TOKENS.bg2, border: `1px solid ${TOKENS.danger}`,
-        borderRadius: 8, color: TOKENS.danger,
+        padding: '8px 14px', background: TOKENS.bg2, border: `1px solid ${TOKENS.caution}`,
+        borderRadius: 8, color: TOKENS.caution,
         fontFamily: TOKENS.sans, fontSize: 12, fontWeight: 500,
         letterSpacing: '0.04em', textTransform: 'uppercase',
       }}>
-        stopping · flattening book
+        paused · hold power to stop
       </div>
     </div>
   );

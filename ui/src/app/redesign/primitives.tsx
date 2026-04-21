@@ -23,6 +23,7 @@ export function Glyph({
   const off = TOKENS.ink3;
   const color =
     state === 'running' ? accent :
+    state === 'starting' ? TOKENS.caution :
     state === 'paused' ? TOKENS.caution :
     state === 'error' ? danger : off;
   const glow = state === 'running' || state === 'error' ? color : 'transparent';
@@ -40,7 +41,18 @@ export function Glyph({
         background: glow, filter: `blur(${Math.round(size * 0.6)}px)`, opacity: 0.5,
         animation: pulse,
       }} />
-      {state === 'paused' ? (
+      {state === 'starting' ? (
+        <svg
+          width={size} height={size} viewBox="0 0 10 10"
+          style={{ position: 'relative', animation: 'ds-spin 1.2s linear infinite' }}
+        >
+          <circle cx="5" cy="5" r="4" fill="none" stroke={`${color}33`} strokeWidth="1.2" />
+          <path
+            d="M5 1 A4 4 0 0 1 9 5"
+            fill="none" stroke={color} strokeWidth="1.2" strokeLinecap="round"
+          />
+        </svg>
+      ) : state === 'paused' ? (
         <svg width={size} height={size} viewBox="0 0 10 10" style={{ position: 'relative' }}>
           <circle cx="5" cy="5" r="4" fill="none" stroke={color} strokeWidth="1" />
           <path d="M5 1 A4 4 0 0 1 5 9 Z" fill={color} />

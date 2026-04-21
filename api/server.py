@@ -766,13 +766,13 @@ async def get_pnl(session_factory=Depends(_session_factory)):
         today_row = today_q.scalars().first()
         agg_q = await session.execute(
             select(
-                func.coalesce(func.sum(DailyPnL.realised_pnl), 0),
-                func.coalesce(func.sum(DailyPnL.unrealised_pnl), 0),
-                func.coalesce(func.sum(DailyPnL.total_fees), 0),
-                func.coalesce(func.sum(DailyPnL.trade_count), 0),
+                func.coalesce(func.sum(DailyPnL.realised_pnl), 0).label("realised"),
+                func.coalesce(func.sum(DailyPnL.unrealised_pnl), 0).label("unrealised"),
+                func.coalesce(func.sum(DailyPnL.total_fees), 0).label("fees"),
+                func.coalesce(func.sum(DailyPnL.trade_count), 0).label("trades"),
             )
         )
-        agg = agg_q.one()
+        agg = tuple(agg_q.one())
         ws, we = week_to_date_range(today_d)
         ms, me = month_to_date_range(today_d)
         week_agg = await aggregate_daily_pnl_range(session, ws, we)
@@ -814,9 +814,9 @@ async def get_pnl(session_factory=Depends(_session_factory)):
 
     if today_row is not None:
         db_today_u = Decimal(str(today_row.unrealised_pnl or 0))
-        for agg in (week_agg, month_agg):
-            u = Decimal(str(agg["unrealised"]))
-            agg["unrealised"] = str(
+        for period_agg in (week_agg, month_agg):
+            u = Decimal(str(period_agg["unrealised"]))
+            period_agg["unrealised"] = str(
                 merge_live_today_unrealised_into_period(
                     u,
                     db_today_unrealised=db_today_u,
