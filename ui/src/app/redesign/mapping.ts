@@ -18,6 +18,7 @@ import {
   Approved,
   BrokerStatus,
   Conviction,
+  ExecutionRejection,
   LiveEvent,
   NewsRow,
   Position,
@@ -284,6 +285,29 @@ function parsePct(raw: unknown): number {
   // Backend exposure is typically a ratio [0,1]; accept percent values too.
   const v = n > 1 ? n / 100 : n;
   return Math.max(0, Math.min(1, v));
+}
+
+export function mapExecutionRejections(orders: ApiOrderRow[]): ExecutionRejection[] {
+  if (!Array.isArray(orders)) return [];
+  const out: ExecutionRejection[] = [];
+  for (const o of orders) {
+    const status = (o.status ?? '').toLowerCase();
+    if (status !== 'rejected' && status !== 'cancelled') continue;
+    if (!o.symbol) continue;
+    const reasonRaw =
+      (o as { reason?: unknown }).reason ??
+      (o as { error_message?: unknown }).error_message;
+    const reason = typeof reasonRaw === 'string' && reasonRaw.trim() ? reasonRaw.trim() : null;
+    out.push({
+      sym: o.symbol.toUpperCase(),
+      side: normalizeSide(o.side),
+      status: status as 'rejected' | 'cancelled',
+      broker: (o.broker ?? '').toLowerCase(),
+      t: o.timestamp ? Date.parse(String(o.timestamp)) : Date.now(),
+      reason,
+    });
+  }
+  return out;
 }
 
 export function mapOrderEvent(o: ApiOrderRow): LiveEvent | null {

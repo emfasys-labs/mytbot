@@ -28,6 +28,7 @@ import {
   mapApprovedRejected,
   mapBrokers,
   mapConviction,
+  mapExecutionRejections,
   mapExposure,
   mapNews,
   mapOrderEvent,
@@ -37,7 +38,7 @@ import {
   mergeStrategiesWithSignals,
   mapSystemState,
 } from './mapping';
-import type { Approved, BrokerStatus, Conviction, LiveEvent, NewsRow, Position, Rejected, Strategy } from './data';
+import type { Approved, BrokerStatus, Conviction, ExecutionRejection, LiveEvent, NewsRow, Position, Rejected, Strategy } from './data';
 import type { SystemState as DesignSystemState } from './tokens';
 
 const REFRESH_INTERVAL_MS = 10_000;
@@ -71,6 +72,7 @@ export interface LiveData {
   positions: Position[];
   approved: Approved[];
   rejected: Rejected[];
+  executionRejections: ExecutionRejection[];
   strategies: Strategy[];
   events: LiveEvent[];
   eventLines: string[];
@@ -365,6 +367,7 @@ export function useLiveSystem(): LiveData {
   const positions = useMemo(() => mapPositions(positionsRaw, nav), [positionsRaw, nav]);
   const conviction = useMemo(() => mapConviction(snapshot, positionChanges), [snapshot, positionChanges]);
   const { approved, rejected } = useMemo(() => mapApprovedRejected(intelligence), [intelligence]);
+  const executionRejections = useMemo(() => mapExecutionRejections(orders), [orders]);
   const strategies = useMemo(
     () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence),
     [snapshot, intelligence],
@@ -460,6 +463,7 @@ export function useLiveSystem(): LiveData {
     positions,
     approved,
     rejected,
+    executionRejections,
     strategies,
     events,
     eventLines,

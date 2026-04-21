@@ -256,7 +256,7 @@ function fmtPrice(v: number): string {
 
 export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
-  const { approved, rejected } = live;
+  const { approved, rejected, executionRejections } = live;
 
   const gauges = useMemo(() => {
     const portfolio = (live.snapshot?.portfolio ?? {}) as Record<string, unknown>;
@@ -315,8 +315,11 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
           <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>last batch</span>
         </div>
         {rejected.length === 0 ? (
-          <div style={{ padding: 20, color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+          <div style={{ padding: 20, color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11, lineHeight: 1.5 }}>
             No rejections
+            <div style={{ marginTop: 4, color: TOKENS.ink4, fontSize: 10 }}>
+              risk engine approved every recent signal
+            </div>
           </div>
         ) : rejected.map((r, i) => (
           <div key={`${r.sym}-${i}`} style={{ padding: '10px 0', borderBottom: `1px solid ${TOKENS.line}` }}>
@@ -331,6 +334,68 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
             <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.loss }}>{r.reason}</div>
           </div>
         ))}
+      </Card>
+      <Card style={{ gridColumn: '1 / -1' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <Label style={{ color: TOKENS.caution }}>
+            Execution rejections · {executionRejections.length}
+          </Label>
+          <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            broker-side · post risk-gate
+          </span>
+        </div>
+        {executionRejections.length === 0 ? (
+          <div style={{ padding: 12, color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+            No execution rejections — every approved order made it to the broker
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {executionRejections.map((x) => (
+              <div
+                key={`${x.broker}-${x.sym}-${x.t}`}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '140px 80px 90px 1fr 140px',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: '8px 10px',
+                  background: 'rgba(255,255,255,0.02)',
+                  border: `1px solid ${TOKENS.line}`,
+                  borderRadius: 6,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0 }}>
+                    {x.sym}
+                  </span>
+                  <Pill size="sm" tone={x.side === 'long' ? 'profit' : 'loss'}>{x.side}</Pill>
+                </div>
+                <Pill size="sm" tone={x.status === 'rejected' ? 'danger' : 'caution'}>
+                  {x.status}
+                </Pill>
+                <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>
+                  {x.broker || '—'}
+                </span>
+                <span
+                  style={{
+                    fontFamily: TOKENS.mono,
+                    fontSize: 11,
+                    color: x.reason ? TOKENS.caution : TOKENS.ink3,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={x.reason ?? ''}
+                >
+                  {x.reason ?? '(no reason recorded — see backend log)'}
+                </span>
+                <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, textAlign: 'right' }}>
+                  {formatRelativeTime(x.t)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
       <Card style={{ gridColumn: '1 / -1' }}>
         <Label style={{ marginBottom: 12 }}>Risk gauges</Label>
@@ -370,6 +435,20 @@ function numFromPortfolio(raw: unknown): number {
   // Accept both ratio (0–1) and percent (0–100) inputs.
   const v = n > 1 ? n / 100 : n;
   return Math.max(0, Math.min(1, v));
+}
+
+function formatRelativeTime(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  const delta = Date.now() - ms;
+  if (delta < 0) return 'just now';
+  const s = Math.floor(delta / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
 
 export function StrategiesScreen({ accent, live }: { accent: AccentName; live: LiveData }) {

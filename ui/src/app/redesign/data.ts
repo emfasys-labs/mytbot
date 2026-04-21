@@ -51,6 +51,15 @@ export interface Rejected {
   explain: string;
 }
 
+export interface ExecutionRejection {
+  sym: string;
+  side: Side;
+  status: 'rejected' | 'cancelled';
+  broker: string;
+  t: number;
+  reason: string | null;
+}
+
 export interface NewsRow {
   text: string;
   src: string;

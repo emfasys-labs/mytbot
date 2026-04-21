@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, AsyncIterator, Callable, TypeVar
 
 from alpaca.common.exceptions import APIError
@@ -196,6 +196,86 @@ def _is_crypto_symbol(symbol: str) -> bool:
     return "/" in symbol.strip()
 
 
+def _format_alpaca_error(exc: BaseException) -> str:
+    """Extract a concise human-readable reason from an Alpaca SDK error."""
+    import json as _json
+
+    msg = str(exc).strip()
+    # Alpaca wraps its JSON payload in the exception message — peel it out.
+    brace = msg.find("{")
+    if brace >= 0:
+        tail = msg[brace:]
+        try:
+            data = _json.loads(tail)
+            if isinstance(data, dict):
+                reason = data.get("message") or data.get("error") or ""
+                if isinstance(reason, str) and reason.strip():
+                    code = data.get("code")
+                    return f"{reason.strip()}" + (f" [code={code}]" if code else "")
+        except Exception:  # noqa: BLE001
+            pass
+    # Fallback: collapse HTTPError boilerplate.
+    if " for url:" in msg:
+        msg = msg.split(" for url:", 1)[0]
+    return msg[:240]
+
+
+# ─── Alpaca US-equity tick size rules ──────────────────────────────────────
+# Per NMS Rule 612: stocks priced >= $1.00 quote in $0.01 increments; stocks
+# priced < $1.00 may quote in $0.0001 increments. Alpaca enforces this server-
+# side and returns a 422 "sub-penny increment" error if we submit anything
+# finer. Any model output like 28.53499985 must be rounded before submission.
+_ALPACA_EQUITY_PENNY = Decimal("0.01")
+_ALPACA_EQUITY_SUBPENNY = Decimal("0.0001")
+_ALPACA_EQUITY_SUBPENNY_CUTOFF = Decimal("1.00")
+# Alpaca crypto allows up to 8 decimals — keep model precision but still clamp
+# to something sane so we never submit 15+ digit floats.
+_ALPACA_CRYPTO_TICK = Decimal("0.00000001")
+
+
+def _alpaca_price_tick(symbol: str, price: Decimal) -> Decimal:
+    """Return the minimum price increment Alpaca will accept for ``symbol``."""
+    if _is_crypto_symbol(symbol):
+        return _ALPACA_CRYPTO_TICK
+    if price < _ALPACA_EQUITY_SUBPENNY_CUTOFF:
+        return _ALPACA_EQUITY_SUBPENNY
+    return _ALPACA_EQUITY_PENNY
+
+
+def _round_price_to_tick(
+    symbol: str,
+    price: Decimal,
+    *,
+    side: AlpOrderSide,
+    is_stop: bool = False,
+) -> Decimal:
+    """Quantize a price to the nearest valid Alpaca tick, biased defensively.
+
+    We intentionally do **not** round to the mathematically-nearest tick because
+    that can flip the order across a penny and make fills slightly more
+    aggressive than the model intended. Instead we bias each direction so the
+    resulting order is always at least as passive as the raw model price:
+
+    * ``LIMIT BUY``  → round DOWN (won't pay more than model requested)
+    * ``LIMIT SELL`` → round UP   (won't sell cheaper than model requested)
+    * ``STOP BUY``   → round UP   (breakout trigger needs more momentum)
+    * ``STOP SELL``  → round DOWN (protective stop gives position more room)
+    """
+    if price <= 0:
+        return price
+    tick = _alpaca_price_tick(symbol, price)
+    if side == AlpOrderSide.BUY:
+        rounding = ROUND_UP if is_stop else ROUND_DOWN
+    else:
+        rounding = ROUND_DOWN if is_stop else ROUND_UP
+    q = (price / tick).quantize(Decimal("1"), rounding=rounding) * tick
+    # Re-evaluate tick in case the rounded price crossed the $1 boundary.
+    new_tick = _alpaca_price_tick(symbol, q)
+    if new_tick != tick:
+        q = (price / new_tick).quantize(Decimal("1"), rounding=rounding) * new_tick
+    return q.quantize(new_tick)
+
+
 def _bars_timeframe(timeframe: str) -> TimeFrame:
     m: dict[str, TimeFrame] = {
         "1m": TimeFrame(1, TimeFrameUnit.Minute),
@@ -362,18 +442,22 @@ class AlpacaAdapter(BrokerAdapter):
         if order.order_type == OrderType.LIMIT:
             if order.limit_price is None:
                 raise ValueError("limit_price required for LIMIT orders")
-            return LimitOrderRequest(**common, limit_price=float(order.limit_price))
+            limit_px = _round_price_to_tick(sym, _d(order.limit_price), side=side, is_stop=False)
+            return LimitOrderRequest(**common, limit_price=float(limit_px))
         if order.order_type == OrderType.STOP:
             if order.stop_price is None:
                 raise ValueError("stop_price required for STOP orders")
-            return StopOrderRequest(**common, stop_price=float(order.stop_price))
+            stop_px = _round_price_to_tick(sym, _d(order.stop_price), side=side, is_stop=True)
+            return StopOrderRequest(**common, stop_price=float(stop_px))
         if order.order_type == OrderType.STOP_LIMIT:
             if order.limit_price is None or order.stop_price is None:
                 raise ValueError("limit_price and stop_price required for STOP_LIMIT orders")
+            limit_px = _round_price_to_tick(sym, _d(order.limit_price), side=side, is_stop=False)
+            stop_px = _round_price_to_tick(sym, _d(order.stop_price), side=side, is_stop=True)
             return StopLimitOrderRequest(
                 **common,
-                stop_price=float(order.stop_price),
-                limit_price=float(order.limit_price),
+                stop_price=float(stop_px),
+                limit_price=float(limit_px),
             )
         raise ValueError(f"Unsupported order type: {order.order_type}")
 
@@ -508,7 +592,20 @@ class AlpacaAdapter(BrokerAdapter):
             alp_o = await self._run_sync(_submit)
             return _alp_order_to_result(alp_o)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("place_order | Alpaca | error={}", exc)
+            err = _format_alpaca_error(exc)
+            logger.warning(
+                "place_order | Alpaca | rejected | symbol={} | side={} | error={}",
+                order.symbol.strip(),
+                order.side.value,
+                err,
+            )
+            # Stash the broker's reason on the order so ``persist_order_log``
+            # captures it into ``OrderLog.instrument_metadata`` and the Risk UI
+            # can display *why* the broker refused this order.
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", err)
+            meta.setdefault("rejected_by", "alpaca")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,

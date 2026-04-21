@@ -330,33 +330,67 @@ async def get_positions(limit: int = Query(50, ge=1, le=500), session_factory=De
     }
 
 
+def _order_log_to_dict(r: OrderLog) -> dict[str, Any]:
+    meta = r.instrument_metadata if isinstance(r.instrument_metadata, dict) else None
+    reason: str | None = None
+    if meta:
+        for k in ("error_message", "reject_reason", "reason"):
+            v = meta.get(k)
+            if isinstance(v, str) and v.strip():
+                reason = v.strip()
+                break
+    return {
+        "id": r.id,
+        "signal_id": r.signal_id,
+        "broker_order_id": r.broker_order_id,
+        "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        "symbol": r.symbol,
+        "side": r.side,
+        "order_type": r.order_type,
+        "quantity": _decimal_str(r.quantity),
+        "limit_price": _decimal_str(r.limit_price) if r.limit_price is not None else None,
+        "broker": r.broker,
+        "status": r.status,
+        "filled_quantity": _decimal_str(r.filled_quantity) if r.filled_quantity is not None else None,
+        "avg_fill_price": _decimal_str(r.avg_fill_price) if r.avg_fill_price is not None else None,
+        "fee": _decimal_str(r.fee) if r.fee is not None else None,
+        "paper_mode": bool(r.paper_mode),
+        "metadata": meta,
+        "reason": reason,
+    }
+
+
 @app.get("/orders")
 async def get_orders(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
     async with session_factory() as session:
         q = await session.execute(select(OrderLog).order_by(OrderLog.timestamp.desc()).limit(limit))
         rows = list(q.scalars().all())
-    return {
-        "orders": [
-            {
-                "id": r.id,
-                "signal_id": r.signal_id,
-                "broker_order_id": r.broker_order_id,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-                "symbol": r.symbol,
-                "side": r.side,
-                "order_type": r.order_type,
-                "quantity": _decimal_str(r.quantity),
-                "limit_price": _decimal_str(r.limit_price) if r.limit_price is not None else None,
-                "broker": r.broker,
-                "status": r.status,
-                "filled_quantity": _decimal_str(r.filled_quantity) if r.filled_quantity is not None else None,
-                "avg_fill_price": _decimal_str(r.avg_fill_price) if r.avg_fill_price is not None else None,
-                "fee": _decimal_str(r.fee) if r.fee is not None else None,
-                "paper_mode": bool(r.paper_mode),
-            }
-            for r in rows
-        ]
-    }
+    return {"orders": [_order_log_to_dict(r) for r in rows]}
+
+
+@app.get("/orders/rejections")
+async def get_order_rejections(
+    response: Response,
+    limit: int = Query(30, ge=1, le=200),
+    session_factory=Depends(_session_factory),
+):
+    """Recent broker-side order rejections + cancellations.
+
+    This is *execution*-side — i.e. orders the risk engine approved but the
+    broker refused (sub-penny price, insufficient BP, closed market,
+    unsupported instrument, …) or which were cancelled before filling.
+    Complements `/intelligence/signals` (risk-engine rejections).
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    async with session_factory() as session:
+        q = await session.execute(
+            select(OrderLog)
+            .where(OrderLog.status.in_(("rejected", "cancelled")))
+            .order_by(OrderLog.timestamp.desc())
+            .limit(limit)
+        )
+        rows = list(q.scalars().all())
+    return {"rejections": [_order_log_to_dict(r) for r in rows]}
 
 
 @app.get("/signals")
