@@ -49,7 +49,7 @@ export function PerformancePanel({
   const maxDd = pnl?.metrics?.max_drawdown_pct;
 
   const chartValues = useMemo(() => {
-    const h = [...equityHistory].filter((v) => v > 0);
+    const h = [...equityHistory].filter((v) => Number.isFinite(v));
     if (h.length <= 1) return h;
     if (horizon === 'all') return h.slice(-120);
     if (horizon === 'month') return h.slice(-31);
@@ -58,7 +58,7 @@ export function PerformancePanel({
   }, [equityHistory, horizon]);
 
   const chartSeries = useMemo(() => {
-    const s = [...equitySeries].filter((x) => x.value > 0);
+    const s = [...equitySeries].filter((x) => Number.isFinite(x.value));
     if (s.length <= 1) return s;
     if (horizon === 'all') return s.slice(-120);
     if (horizon === 'month') return s.slice(-31);
@@ -111,7 +111,7 @@ export function PerformancePanel({
           state={trendState}
           isActive={isActive}
           isFlattened={isFlattened}
-          historyValues={chartValues.length > 1 ? chartValues : undefined}
+          historyValues={chartValues.length >= 1 ? chartValues : undefined}
           tradeMarkers={tradeMarkers}
         />
       </div>

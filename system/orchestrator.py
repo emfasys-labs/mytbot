@@ -20,6 +20,7 @@ import asyncio
 import enum
 import os
 from datetime import datetime, timezone
+from collections.abc import Awaitable
 from typing import Any
 
 from dotenv import load_dotenv
@@ -36,6 +37,31 @@ class SystemState(str, enum.Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     ERROR = "error"
+
+
+def _shutdown_step_timeout_sec(env_name: str, default: float) -> float:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+async def _await_shutdown_step(label: str, coro: Awaitable[Any], timeout_sec: float) -> None:
+    """Bounded wait so broker I/O cannot strand the system in STOPPING indefinitely."""
+    if timeout_sec <= 0:
+        await coro
+        return
+    try:
+        await asyncio.wait_for(coro, timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "orchestrator | shutdown step '{}' timed out after {:.1f}s — continuing OFF transition",
+            label,
+            timeout_sec,
+        )
 
 
 class Orchestrator:
@@ -189,10 +215,15 @@ class Orchestrator:
             tl = self._trading_loop
             execution_engine = getattr(tl, "execution_engine", None) if tl is not None else None
 
+            t_loop = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_TRADING_LOOP_SEC", 120.0)
+            t_cancel = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_CANCEL_ALL_SEC", 45.0)
+            t_pipe = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_PIPELINE_SEC", 45.0)
+            t_disc = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_DISCONNECT_SEC", 60.0)
+
             # 1. Stop trading loop (no new signals / iterations)
             if tl is not None:
                 try:
-                    await tl.stop()
+                    await _await_shutdown_step("trading_loop.stop", tl.stop(), t_loop)
                 except Exception as exc:
                     logger.warning("orchestrator | trading loop stop error: {}", exc)
                 self._trading_loop = None
@@ -200,7 +231,11 @@ class Orchestrator:
             # 2. Cancel open orders while broker adapters are still connected
             if execution_engine is not None:
                 try:
-                    await execution_engine.cancel_all()
+                    await _await_shutdown_step(
+                        "execution_engine.cancel_all",
+                        execution_engine.cancel_all(),
+                        t_cancel,
+                    )
                 except Exception as exc:
                     logger.warning("orchestrator | cancel_all error: {}", exc)
 
@@ -208,14 +243,22 @@ class Orchestrator:
             if self._pipeline_task is not None and not self._pipeline_task.done():
                 self._pipeline_task.cancel()
                 try:
-                    await self._pipeline_task
+                    await _await_shutdown_step(
+                        "pipeline_task",
+                        self._pipeline_task,
+                        t_pipe,
+                    )
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._pipeline_task = None
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
-                await self._broker_manager.disconnect_all()
+                await _await_shutdown_step(
+                    "broker_manager.disconnect_all",
+                    self._broker_manager.disconnect_all(),
+                    t_disc,
+                )
             except Exception as exc:
                 logger.warning("orchestrator | broker disconnect error: {}", exc)
 

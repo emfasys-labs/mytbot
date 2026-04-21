@@ -15,8 +15,11 @@ interface PositionChipsProps {
 export function PositionChips({ positions, isFlattened = false, onHaptic }: PositionChipsProps) {
   if (positions.length === 0) {
     return (
-      <div className="text-center text-xs font-light text-gray-600">
-        No open positions
+      <div className="flex min-w-0 flex-1 flex-col gap-1 rounded-lg border border-dashed border-white/10 bg-white/[0.03] px-3 py-2 sm:flex-row sm:items-center sm:gap-3">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Open positions</span>
+        <span className={`text-[12px] font-light ${isFlattened ? 'text-zinc-600' : 'text-zinc-400'}`}>
+          None — book is flat
+        </span>
       </div>
     );
   }

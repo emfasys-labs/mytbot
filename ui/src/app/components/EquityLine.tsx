@@ -29,22 +29,29 @@ export function EquityLine({
   const [dataPoints, setDataPoints] = useState<number[]>([]);
 
   useEffect(() => {
-    if (historyValues && historyValues.length > 1) {
-      setDataPoints(historyValues.slice(-80));
+    if (historyValues && historyValues.length >= 1) {
+      const tail = historyValues.slice(-80);
+      // Need ≥2 x-coordinates for a path; duplicate a single sample so scale logic runs.
+      if (tail.length === 1) {
+        setDataPoints([tail[0]!, tail[0]!]);
+        return;
+      }
+      setDataPoints(tail);
       return;
     }
 
     const points: number[] = [];
     const baseValue = balance - dailyPnL;
     const steps = 50;
-    
+    const wiggle = Math.max(Math.abs(dailyPnL) * 0.1, Math.abs(baseValue) * 0.002, 1);
+
     for (let i = 0; i < steps; i++) {
       const progress = i / steps;
-      const variation = Math.sin(progress * Math.PI * 3) * (dailyPnL * 0.1);
-      const value = baseValue + (dailyPnL * progress) + variation;
+      const variation = Math.sin(progress * Math.PI * 3) * wiggle;
+      const value = baseValue + dailyPnL * progress + variation;
       points.push(value);
     }
-    
+
     setDataPoints(points);
   }, [balance, dailyPnL, historyValues]);
 
@@ -92,11 +99,18 @@ export function EquityLine({
 
   const minValue = Math.min(...dataPoints);
   const maxValue = Math.max(...dataPoints);
-  const range = maxValue - minValue || 1;
+  const rawRange = maxValue - minValue;
+  const range =
+    rawRange > 1e-9
+      ? rawRange
+      : Math.max(Math.abs(maxValue) * 0.02, Math.abs(minValue) * 0.02, 1);
+  const plotMin = rawRange > 1e-9 ? minValue : (minValue + maxValue) / 2 - range / 2;
+  const plotMax = rawRange > 1e-9 ? maxValue : (minValue + maxValue) / 2 + range / 2;
+  const plotSpan = Math.max(plotMax - plotMin, 1e-9);
 
   const pointPairs = dataPoints.map((value, index) => {
     const x = padding + (index / (dataPoints.length - 1)) * (width - padding * 2);
-    const y = height - padding - ((value - minValue) / range) * (height - padding * 2);
+    const y = height - padding - ((value - plotMin) / plotSpan) * (height - padding * 2);
     return { x, y };
   });
 

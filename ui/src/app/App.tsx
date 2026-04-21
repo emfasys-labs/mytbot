@@ -307,9 +307,9 @@ function App() {
       if (feedsLive && hist) {
         const series = (hist.history || [])
           .map((x) => ({ date: String(x.date ?? ''), value: toNumber(x.portfolio_value, 0) }))
-          .filter((x) => x.value > 0);
-        setEquityHistory(series.length > 1 ? series.map((x) => x.value) : []);
-        setEquityHistorySeries(series.length > 1 ? series : []);
+          .filter((x) => x.date && Number.isFinite(x.value));
+        setEquityHistory(series.length >= 1 ? series.map((x) => x.value) : []);
+        setEquityHistorySeries(series.length >= 1 ? series : []);
       }
 
       if (feedsLive && pos) {
@@ -620,6 +620,19 @@ function App() {
                 snapshotFetchFailed={snapshotFetchFailed}
                 positions={positions}
               />
+              <PerformancePanel
+                totalCapital={totalCapital}
+                dailyPnL={dailyPnL}
+                pnl={pnlSnapshot}
+                equityHistory={equityHistory}
+                equitySeries={equityHistorySeries}
+                recentOrders={recentOrders}
+                tradesToday={tradesToday}
+                lastTradeMinutes={lastTradeMinutes}
+                trendState={getTrendState()}
+                isActive={isActive}
+                isFlattened={isFlattened}
+              />
               <div className="flex w-full shrink-0 flex-wrap items-start gap-3 border-t border-white/5 pt-3 mt-1">
                 <PositionChips
                   positions={positions}
@@ -638,19 +651,6 @@ function App() {
                   </span>
                 ) : null}
               </div>
-              <PerformancePanel
-                totalCapital={totalCapital}
-                dailyPnL={dailyPnL}
-                pnl={pnlSnapshot}
-                equityHistory={equityHistory}
-                equitySeries={equityHistorySeries}
-                recentOrders={recentOrders}
-                tradesToday={tradesToday}
-                lastTradeMinutes={lastTradeMinutes}
-                trendState={getTrendState()}
-                isActive={isActive}
-                isFlattened={isFlattened}
-              />
             </main>
 
             <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-72">
