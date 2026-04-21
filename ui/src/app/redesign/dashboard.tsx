@@ -1,69 +1,65 @@
 /**
  * Dashboard screen — the main cockpit.
- * Ported from mytbot-design-system/project/prototypes/redesign/dashboard.jsx.
+ * Wired to live system via `LiveData` from useLiveSystem().
  */
 
-import { useEffect, useState } from 'react';
-import { Conviction, DATA, LiveEvent, Position } from './data';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Conviction, LiveEvent, Position } from './data';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, Density, SystemState, TOKENS } from './tokens';
+import type { LiveData } from './useLiveSystem';
 
 export function DashboardScreen({
-  state, accent, density,
+  state, accent, density, live,
 }: {
   state: SystemState;
   accent: AccentName;
   density: Density;
   onArm?: (v: boolean) => void;
   armed?: boolean;
+  live: LiveData;
 }) {
-  const [navVal, setNavVal] = useState(DATA.nav);
-  const [milestoneFlash, setMilestoneFlash] = useState(false);
   const [newSignal, setNewSignal] = useState<{ sym: string; score: number; t: number } | null>(null);
-  const [events, setEvents] = useState<LiveEvent[]>(DATA.events);
-  const running = state === 'running';
+  const [milestoneFlash, setMilestoneFlash] = useState(false);
   const accentColor = ACCENTS[accent].main;
   const accentGlow = ACCENTS[accent].glow;
 
+  // Flash on a fresh incoming signal event from the live feed.
+  const lastEventRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!running) return;
-    const tick = setInterval(() => {
-      setNavVal((v) => v + (Math.random() - 0.45) * 35);
-    }, 2200);
-    const signalTimer = setInterval(() => {
-      const syms = ['NVDA', 'AAPL', 'MSFT', 'BTC', 'AMZN', 'SPY'];
-      const sym = syms[Math.floor(Math.random() * syms.length)];
-      const score = 0.55 + Math.random() * 0.35;
-      setNewSignal({ sym, score, t: Date.now() });
-      setEvents((e) => {
-        const next: LiveEvent = {
-          kind: 'signal',
-          text: `${sym} long ${score.toFixed(2)} · approved`,
-          ok: true,
-          t: 0,
-        };
-        return [next, ...e].slice(0, 12);
-      });
-      setTimeout(() => setNewSignal(null), 2400);
-    }, 7000);
-    return () => {
-      clearInterval(tick);
-      clearInterval(signalTimer);
-    };
-  }, [running]);
+    const latest = live.events[0];
+    if (!latest || latest.kind !== 'signal') return;
+    const key = `${latest.t}:${latest.text}`;
+    if (key === lastEventRef.current) return;
+    lastEventRef.current = key;
+    const match = latest.text.match(/^([A-Z0-9.\-]+)\s+(long|short)\s+([0-9.]+)/i);
+    if (!match) return;
+    const sym = match[1].toUpperCase();
+    const score = parseFloat(match[3]);
+    if (!Number.isFinite(score)) return;
+    setNewSignal({ sym, score, t: Date.now() });
+    const timeout = setTimeout(() => setNewSignal(null), 2400);
+    return () => clearTimeout(timeout);
+  }, [live.events]);
 
+  // Milestone glow when NAV breaks peak.
+  const navValue = live.nav;
+  const navPeak = live.navPeak;
   useEffect(() => {
-    if (navVal > DATA.navPeak) {
+    if (navValue > navPeak && navValue > 0) {
       setMilestoneFlash(true);
       const t = setTimeout(() => setMilestoneFlash(false), 2000);
       return () => clearTimeout(t);
     }
-  }, [navVal]);
+  }, [navValue, navPeak]);
 
   const pad = density === 'compact' ? 12 : 20;
   const gap = density === 'compact' ? 10 : 14;
-  const dayChange = navVal - DATA.navOpen;
-  const dayPct = (dayChange / DATA.navOpen) * 100;
+  const dayChange = navValue - live.navOpen;
+  const dayPct = live.navOpen > 0 ? (dayChange / live.navOpen) * 100 : 0;
+
+  const topConviction = live.conviction[0];
+  const tradable = live.tradableCapital;
 
   return (
     <div style={{
@@ -83,7 +79,7 @@ export function DashboardScreen({
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
           <div>
             <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
-            <NavNumber value={navVal} accent={accentColor} size={density === 'compact' ? 54 : 68} />
+            <NavNumber value={navValue} accent={accentColor} size={density === 'compact' ? 54 : 68} />
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginTop: 10 }}>
               <span style={{
                 fontFamily: TOKENS.mono, fontSize: 13,
@@ -104,29 +100,40 @@ export function DashboardScreen({
           <div style={{ flex: 1 }} />
 
           <div style={{ display: 'flex', gap: 28 }}>
-            <MiniStat label="Week"  value={DATA.pnl.w} />
-            <MiniStat label="Month" value={DATA.pnl.m} />
-            <MiniStat label="YTD"   value={DATA.pnl.y} />
+            <MiniStat label="Week"  value={live.pnlRollups.w} />
+            <MiniStat label="Month" value={live.pnlRollups.m} />
+            <MiniStat label="YTD"   value={live.pnlRollups.y} />
           </div>
 
           <div style={{ width: 1, height: 48, background: TOKENS.line }} />
 
-          <ExposureRing gross={DATA.exposure.gross} net={DATA.exposure.net} accent={accentColor} />
+          <ExposureRing gross={live.exposure.gross} net={live.exposure.net} accent={accentColor} />
         </div>
 
         <div style={{ marginTop: 18 }}>
-          <EquityCurve values={DATA.equity} accent={accentColor} width={900} height={48} />
+          <EquityCurve values={live.equity.length ? live.equity : [navValue, navValue]} accent={accentColor} width={900} height={48} />
         </div>
+
+        {tradable != null && (
+          <div style={{
+            marginTop: 10, display: 'flex', gap: 12, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
+          }}>
+            <span>Tradable £{Math.round(tradable).toLocaleString()}</span>
+            <span>·</span>
+            <span>Allocation {Math.round(live.capitalPct * 100)}%</span>
+            {state !== 'running' && <span style={{ color: TOKENS.caution }}>· system {state}</span>}
+          </div>
+        )}
       </Card>
 
       <Card style={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <Label>Conviction river</Label>
           <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-            9 tracked · top {DATA.conviction[0].sym}
+            {live.conviction.length} tracked{topConviction ? ` · top ${topConviction.sym}` : ''}
           </span>
         </div>
-        <ConvictionRiver conviction={DATA.conviction} accent={accentColor} newSignal={newSignal} />
+        <ConvictionRiver conviction={live.conviction} accent={accentColor} newSignal={newSignal} />
       </Card>
 
       <Card style={{ minHeight: 0, display: 'flex', flexDirection: 'column', padding: 0 }}>
@@ -135,26 +142,45 @@ export function DashboardScreen({
             <Label>Live feed</Label>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
               <Glyph state={state} accent={accentColor} size={8} />
-              {running ? 'streaming' : 'idle'}
+              {live.wsConnected ? 'streaming' : state === 'running' ? 'polling' : 'idle'}
             </span>
           </div>
         </div>
-        <LiveFeed events={events} accent={accentColor} />
+        <LiveFeed events={live.events} accent={accentColor} />
       </Card>
 
       <Card style={{ gridColumn: '1 / -1', padding: '14px 18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, overflowX: 'auto' }}>
           <Label style={{ flexShrink: 0 }}>Book</Label>
-          {DATA.positions.map((p) => (
+          {live.positions.length === 0 ? (
+            <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+              No open positions
+            </span>
+          ) : live.positions.map((p) => (
             <PositionChip key={p.sym} pos={p} accent={accentColor} />
           ))}
           <div style={{ flex: 1 }} />
-          <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3, flexShrink: 0 }}>
-            {DATA.positions.length} positions · tradable £68,900
-          </span>
+          <BookFooter live={live} />
         </div>
       </Card>
     </div>
+  );
+}
+
+function BookFooter({ live }: { live: LiveData }) {
+  const totalPnl = useMemo(() => live.positions.reduce((s, p) => s + p.pnl, 0), [live.positions]);
+  return (
+    <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3, flexShrink: 0 }}>
+      {live.positions.length} positions
+      {live.positions.length > 0 && (
+        <>
+          {' · '}
+          <span style={{ color: totalPnl >= 0 ? TOKENS.profit : TOKENS.loss }}>
+            {totalPnl >= 0 ? '+' : '−'}£{Math.abs(totalPnl).toFixed(0)}
+          </span>
+        </>
+      )}
+    </span>
   );
 }
 
@@ -207,11 +233,12 @@ function ExposureRing({ gross, net, accent }: { gross: number; net: number; acce
 export function EquityCurve({
   values, accent, width = 900, height = 48,
 }: { values: number[]; accent: string; width?: number; height?: number }) {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const safeValues = values.length >= 2 ? values : values.length === 1 ? [values[0], values[0]] : [0, 0];
+  const min = Math.min(...safeValues);
+  const max = Math.max(...safeValues);
   const rng = max - min || 1;
-  const pts = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * width;
+  const pts = safeValues.map((v, i) => {
+    const x = (i / (safeValues.length - 1)) * width;
     const y = height - ((v - min) / rng) * (height - 6) - 3;
     return [x, y] as const;
   });
@@ -251,6 +278,17 @@ function ConvictionRiver({
       return () => clearTimeout(t);
     }
   }, [newSignal]);
+
+  if (conviction.length === 0) {
+    return (
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11,
+      }}>
+        awaiting first loop publish
+      </div>
+    );
+  }
 
   const sorted = [...conviction].sort((a, b) => b.score - a.score);
   return (
@@ -295,7 +333,12 @@ function ConvictionRiver({
               }} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: 140, flexShrink: 0, justifyContent: 'flex-end' }}>
-              <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{c.strat}</span>
+              <span style={{
+                fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
+                maxWidth: 92, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {c.strat}
+              </span>
               <span style={{
                 fontFamily: TOKENS.mono, fontSize: 13,
                 color: c.side === 'short' ? TOKENS.loss : accent,
@@ -312,6 +355,16 @@ function ConvictionRiver({
 }
 
 export function LiveFeed({ events, accent }: { events: LiveEvent[]; accent: string }) {
+  if (events.length === 0) {
+    return (
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11, padding: '14px 16px',
+      }}>
+        no events yet
+      </div>
+    );
+  }
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '8px 16px' }}>
       {events.map((e, i) => (
@@ -364,7 +417,7 @@ function PositionChip({ pos, accent }: { pos: Position; accent: string }) {
           fontVariantNumeric: 'tabular-nums',
         }}>{pos.qty}</span>
       </div>
-      <Spark values={[pos.avg, pos.avg * 1.01, pos.avg * 0.995, pos.last]} width={32} height={18} accent={accent} />
+      <Spark values={[pos.avg, pos.avg * 1.01, pos.avg * 0.995, pos.last || pos.avg]} width={32} height={18} accent={accent} />
       <Signed value={pos.pnl} size={12} />
     </div>
   );

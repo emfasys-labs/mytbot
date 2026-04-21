@@ -1,6 +1,5 @@
 /**
  * App shell: Sidebar, TopBar, MasterButton, CmdPalette, TweaksPanel.
- * Ported from mytbot-design-system/project/prototypes/redesign/shell.jsx.
  */
 
 import {
@@ -11,7 +10,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { DATA } from './data';
 import { Glyph, I, Label, Wordmark } from './primitives';
 import {
   ACCENTS,
@@ -23,6 +21,7 @@ import {
   Tweaks,
   Viewport,
 } from './tokens';
+import type { TradingMode } from '../lib/api';
 
 interface NavItem {
   id: Route;
@@ -40,13 +39,15 @@ const NAV: NavItem[] = [
 ];
 
 export function Sidebar({
-  current, onNav, accent, state, collapsed,
+  current, onNav, accent, state, collapsed, loopIteration, path,
 }: {
   current: Route;
   onNav: (r: Route) => void;
   accent: string;
   state: SystemState;
   collapsed: boolean;
+  loopIteration: number;
+  path: string;
 }) {
   const w = collapsed ? 56 : 200;
   return (
@@ -97,7 +98,7 @@ export function Sidebar({
             <span>command</span>
           </div>
           <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>
-            path {DATA.path} · #{DATA.loop}
+            path {path || '—'} · #{loopIteration || 0}
           </div>
         </div>
       )}
@@ -107,6 +108,7 @@ export function Sidebar({
 
 export function TopBar({
   state, accent, onArm, onPower, armed, currentTitle, onOpenCmd, onOpenTweaks,
+  loopIteration, path, wsConnected,
 }: {
   state: SystemState;
   accent: string;
@@ -116,6 +118,9 @@ export function TopBar({
   currentTitle: string;
   onOpenCmd: () => void;
   onOpenTweaks: () => void;
+  loopIteration: number;
+  path: string;
+  wsConnected: boolean;
 }) {
   return (
     <div style={{
@@ -133,9 +138,16 @@ export function TopBar({
         <Glyph state={state} accent={accent} size={10} />
         <span style={{ color: state === 'running' ? accent : state === 'error' ? TOKENS.danger : TOKENS.ink3 }}>{state}</span>
         <span style={{ color: TOKENS.ink4 }}>·</span>
-        <span>loop #{DATA.loop}</span>
+        <span>loop #{loopIteration || 0}</span>
         <span style={{ color: TOKENS.ink4 }}>·</span>
-        <span>{DATA.path}</span>
+        <span>{path || '—'}</span>
+        <span style={{ color: TOKENS.ink4 }}>·</span>
+        <span
+          title={wsConnected ? 'WebSocket live' : 'WebSocket disconnected'}
+          style={{ color: wsConnected ? accent : TOKENS.ink4 }}
+        >
+          {wsConnected ? 'ws' : 'ws·off'}
+        </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
         <button
@@ -268,26 +280,36 @@ interface CmdItem {
   id: string;
   label: string;
   hint: string;
-  kind: 'nav' | 'action' | 'sym';
+  kind: 'nav' | 'action' | 'mode';
   route?: Route;
+  action?: 'start' | 'stop';
+  mode?: TradingMode;
 }
 
 const CMD_ITEMS: CmdItem[] = [
-  { id: 'dash',        label: 'Go to Dashboard',  hint: 'overview',        kind: 'nav',    route: 'dash' },
-  { id: 'signals',     label: 'Go to Signals',    hint: 'conviction',      kind: 'nav',    route: 'signals' },
-  { id: 'book',        label: 'Go to Book',       hint: 'positions',       kind: 'nav',    route: 'book' },
-  { id: 'risk',        label: 'Go to Risk',       hint: 'approvals',       kind: 'nav',    route: 'risk' },
-  { id: 'strat',       label: 'Go to Strategies', hint: 'performance',     kind: 'nav',    route: 'strat' },
-  { id: 'log',         label: 'Go to Trade log',  hint: 'events',          kind: 'nav',    route: 'log' },
-  { id: 'pause',       label: 'Pause system',     hint: 'soft stop',       kind: 'action' },
-  { id: 'flatten',     label: 'Flatten book',     hint: 'close all',       kind: 'action' },
-  { id: 'query-nvda',  label: 'NVDA',             hint: 'conviction 0.84', kind: 'sym' },
-  { id: 'query-aapl',  label: 'AAPL',             hint: 'conviction 0.71', kind: 'sym' },
+  { id: 'dash',        label: 'Go to Dashboard',  hint: 'overview',       kind: 'nav',    route: 'dash' },
+  { id: 'signals',     label: 'Go to Signals',    hint: 'conviction',     kind: 'nav',    route: 'signals' },
+  { id: 'book',        label: 'Go to Book',       hint: 'positions',      kind: 'nav',    route: 'book' },
+  { id: 'risk',        label: 'Go to Risk',       hint: 'approvals',      kind: 'nav',    route: 'risk' },
+  { id: 'strat',       label: 'Go to Strategies', hint: 'performance',    kind: 'nav',    route: 'strat' },
+  { id: 'log',         label: 'Go to Trade log',  hint: 'events',         kind: 'nav',    route: 'log' },
+  { id: 'start',       label: 'Start system',     hint: 'api /system/start', kind: 'action', action: 'start' },
+  { id: 'stop',        label: 'Stop system',      hint: 'api /system/stop',  kind: 'action', action: 'stop' },
+  { id: 'mode-trader',   label: 'Mode · trader',   hint: 'normal trading', kind: 'mode', mode: 'trader' },
+  { id: 'mode-defender', label: 'Mode · defender', hint: 'defensive',      kind: 'mode', mode: 'defender' },
+  { id: 'mode-hunter',   label: 'Mode · hunter',   hint: 'aggressive',     kind: 'mode', mode: 'hunter' },
 ];
 
 export function CmdPalette({
-  open, onClose, onNav,
-}: { open: boolean; onClose: () => void; onNav: (r: Route) => void }) {
+  open, onClose, onNav, onStart, onStop, onSetMode,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onNav: (r: Route) => void;
+  onStart: () => void;
+  onStop: () => void;
+  onSetMode: (m: TradingMode) => void;
+}) {
   const [q, setQ] = useState('');
   useEffect(() => { if (!open) setQ(''); }, [open]);
   if (!open) return null;
@@ -298,6 +320,14 @@ export function CmdPalette({
         i.hint.toLowerCase().includes(q.toLowerCase()),
       )
     : CMD_ITEMS;
+
+  const execute = (it: CmdItem) => {
+    if (it.kind === 'nav' && it.route) onNav(it.route);
+    if (it.kind === 'action' && it.action === 'start') onStart();
+    if (it.kind === 'action' && it.action === 'stop') onStop();
+    if (it.kind === 'mode' && it.mode) onSetMode(it.mode);
+    onClose();
+  };
 
   return (
     <div
@@ -320,6 +350,9 @@ export function CmdPalette({
         <input
           autoFocus value={q} onChange={(e) => setQ(e.target.value)}
           placeholder="Search, jump, run commands…"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && filtered[0]) { execute(filtered[0]); }
+          }}
           style={{
             padding: 16, background: 'transparent', border: 'none', outline: 'none',
             color: TOKENS.ink0, fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 400,
@@ -332,7 +365,7 @@ export function CmdPalette({
           ) : filtered.map((it) => (
             <button
               key={it.id}
-              onClick={() => { if (it.kind === 'nav' && it.route) onNav(it.route); onClose(); }}
+              onClick={() => execute(it)}
               style={{
                 display: 'flex', alignItems: 'center', width: '100%', padding: '10px 12px',
                 background: 'transparent', border: 'none', borderRadius: 8, cursor: 'pointer',
@@ -411,9 +444,12 @@ export function TweaksPanel({
       </div>
 
       {renderChoiceRow<Density>('Density', ['comfort', 'compact'], tweaks.density, (v) => setK('density', v), row, lbl)}
-      {renderChoiceRow<SystemState>('System state', ['running', 'paused', 'off', 'error'], tweaks.state, (v) => setK('state', v), row, lbl)}
       {renderChoiceRow<Theme>('Theme', ['dark', 'light'], tweaks.theme, (v) => setK('theme', v), row, lbl)}
       {renderChoiceRow<Viewport>('View', ['desktop', 'tablet', 'mobile'], tweaks.viewport, (v) => setK('viewport', v), { ...row, borderBottom: 'none' }, lbl)}
+
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${TOKENS.line}`, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>
+        system state is controlled by the backend · use the master button or ⌘K
+      </div>
     </div>
   );
 }

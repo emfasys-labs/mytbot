@@ -1,29 +1,29 @@
 /**
- * Mobile companion — thumb-reachable layout.
- * Ported from mytbot-design-system/project/prototypes/redesign/mobile.jsx.
+ * Mobile companion — thumb-reachable layout, wired to live system data.
  */
 
 import { useState } from 'react';
-import { DATA } from './data';
 import { EquityCurve, LiveFeed } from './dashboard';
 import { Card, I, Label, NavNumber, Signed, Wordmark } from './primitives';
 import { MasterButton } from './shell';
 import { ACCENTS, AccentName, SystemState, TOKENS } from './tokens';
+import type { LiveData } from './useLiveSystem';
 
 type MobileTab = 'home' | 'book' | 'feed';
 
 export function MobileApp({
-  state, accent, armed, onArm, onPower,
+  state, accent, armed, onArm, onPower, live,
 }: {
   state: SystemState;
   accent: AccentName;
   armed: boolean;
   onArm: (v: boolean) => void;
   onPower: () => void;
+  live: LiveData;
 }) {
   const accentColor = ACCENTS[accent].main;
   const [tab, setTab] = useState<MobileTab>('home');
-  const dayChange = DATA.nav - DATA.navOpen;
+  const dayChange = live.nav - live.navOpen;
 
   return (
     <div style={{
@@ -36,8 +36,8 @@ export function MobileApp({
         padding: '14px 22px 8px', display: 'flex', justifyContent: 'space-between',
         fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2,
       }}>
-        <span>9:41</span>
-        <span>●●● 5G ▮</span>
+        <span>{new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+        <span>{live.wsConnected ? '● live' : '○ polling'}</span>
       </div>
       <div style={{
         padding: '8px 22px 16px', display: 'flex', alignItems: 'center',
@@ -45,7 +45,7 @@ export function MobileApp({
       }}>
         <Wordmark state={state} accent={accentColor} size={17} />
         <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-          #{DATA.loop} · {DATA.path}
+          #{live.loopIteration || 0} · {live.path || '—'}
         </span>
       </div>
 
@@ -53,7 +53,7 @@ export function MobileApp({
         {tab === 'home' && (
           <>
             <Label>NAV</Label>
-            <NavNumber value={DATA.nav} accent={accentColor} size={46} />
+            <NavNumber value={live.nav} accent={accentColor} size={46} />
             <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
               <span style={{
                 fontFamily: TOKENS.mono, fontSize: 12,
@@ -64,7 +64,7 @@ export function MobileApp({
             </div>
 
             <div style={{ marginTop: 18 }}>
-              <EquityCurve values={DATA.equity} accent={accentColor} width={340} height={60} />
+              <EquityCurve values={live.equity.length ? live.equity : [live.nav, live.nav]} accent={accentColor} width={340} height={60} />
             </div>
 
             <div style={{ marginTop: 22, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -74,20 +74,24 @@ export function MobileApp({
                   fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300,
                   color: TOKENS.ink0, marginTop: 4, letterSpacing: '-0.02em',
                 }}>
-                  {(DATA.exposure.gross * 100).toFixed(0)}
+                  {(live.exposure.gross * 100).toFixed(0)}
                   <span style={{ fontSize: 13, color: TOKENS.ink3 }}>%</span>
                 </div>
               </Card>
               <Card style={{ padding: 14 }}>
                 <Label>Positions</Label>
                 <div style={{ fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300, color: TOKENS.ink0, marginTop: 4 }}>
-                  {DATA.positions.length}
+                  {live.positions.length}
                 </div>
               </Card>
             </div>
 
             <Label style={{ marginTop: 22, marginBottom: 10 }}>Top conviction</Label>
-            {DATA.conviction.slice(0, 4).map((c) => (
+            {live.conviction.length === 0 ? (
+              <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+                awaiting pipeline publish
+              </div>
+            ) : live.conviction.slice(0, 4).map((c) => (
               <div key={c.sym} style={{
                 display: 'flex', alignItems: 'center', gap: 12,
                 padding: '10px 0', borderBottom: `1px solid ${TOKENS.line}`,
@@ -115,14 +119,18 @@ export function MobileApp({
         {tab === 'book' && (
           <>
             <Label style={{ marginBottom: 10 }}>Book</Label>
-            {DATA.positions.map((p) => (
+            {live.positions.length === 0 ? (
+              <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+                No open positions
+              </div>
+            ) : live.positions.map((p) => (
               <div key={p.sym} style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '12px 0', borderBottom: `1px solid ${TOKENS.line}`,
               }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{p.sym}</div>
-                  <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{p.qty} · {p.last}</div>
+                  <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{p.qty} · {p.last || p.avg}</div>
                 </div>
                 <Signed value={p.pnl} size={12} />
               </div>
@@ -132,7 +140,7 @@ export function MobileApp({
         {tab === 'feed' && (
           <>
             <Label style={{ marginBottom: 10 }}>Live feed</Label>
-            <LiveFeed events={DATA.events} accent={accentColor} />
+            <LiveFeed events={live.events} accent={accentColor} />
           </>
         )}
       </div>

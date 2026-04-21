@@ -1,12 +1,12 @@
 /**
  * "Living instrument" App root.
- * Ported from mytbot-design-system/project/prototypes/redesign/app.jsx.
  *
- * This is the design-handoff redesign the user landed on — a full app shell with
- * sidebar, command palette, 6 screens, mobile/tablet viewports, and a tweakable
- * accent/state/theme/density. The prototype runs on fake demo data; real-API
- * wiring lives in ui/src/app/App.tsx (legacy shell) and can be integrated per
- * panel as the redesign is validated.
+ * Wires the redesign shell to the live trading backend via `useLiveSystem`:
+ *   - backend state drives the visual SystemState (off / paused / running / error)
+ *   - MasterButton tap/hold calls api.systemStart() / api.systemStop()
+ *   - all six screens read real HTTP + WebSocket data
+ *
+ * Pass ?legacy=1 in the URL to load the previous production shell.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -28,6 +28,7 @@ import {
   TOKENS,
   Tweaks,
 } from './tokens';
+import { useLiveSystem } from './useLiveSystem';
 
 const TITLES: Record<Route, string> = {
   dash:    'Dashboard',
@@ -42,10 +43,18 @@ const TWEAKS_KEY = 'mytbot-redesign-tweaks';
 const ROUTE_KEY = 'mytbot-redesign-route';
 
 export default function App() {
+  const live = useLiveSystem();
+
   const [tweaks, setTweaks] = useState<Tweaks>(() => {
     try {
       const raw = localStorage.getItem(TWEAKS_KEY);
-      if (raw) return { ...DEFAULT_TWEAKS, ...(JSON.parse(raw) as Partial<Tweaks>) };
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<Tweaks>;
+        // System state is always owned by the backend; never restore it from storage.
+        const { state: _discard, ...rest } = parsed as Partial<Tweaks> & { state?: unknown };
+        void _discard;
+        return { ...DEFAULT_TWEAKS, ...rest };
+      }
     } catch {
       /* ignore */
     }
@@ -53,8 +62,17 @@ export default function App() {
   });
 
   useEffect(() => {
-    try { localStorage.setItem(TWEAKS_KEY, JSON.stringify(tweaks)); } catch { /* ignore */ }
+    try {
+      const { state: _discard, ...persisted } = tweaks as Tweaks & { state?: unknown };
+      void _discard;
+      localStorage.setItem(TWEAKS_KEY, JSON.stringify(persisted));
+    } catch { /* ignore */ }
   }, [tweaks]);
+
+  // Backend is the source of truth for system state.
+  useEffect(() => {
+    setTweaks((v) => (v.state === live.uiState ? v : { ...v, state: live.uiState }));
+  }, [live.uiState]);
 
   const [route, setRoute] = useState<Route>(() => {
     try {
@@ -74,7 +92,6 @@ export default function App() {
 
   const accentMain = useMemo(() => ACCENTS[tweaks.accent].main, [tweaks.accent]);
 
-  // ⌘K shortcut and Escape to close
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -90,19 +107,26 @@ export default function App() {
     return () => window.removeEventListener('keydown', h);
   }, []);
 
-  // After long-press arm → kill in 1.8s.
+  // Long-press → confirm stop after 1.8s (real api.systemStop).
   useEffect(() => {
     if (!armed) return;
     const t = setTimeout(() => {
       setArmed(false);
-      setTweaks((v) => ({ ...v, state: 'off' }));
+      void live.stop();
     }, 1800);
     return () => clearTimeout(t);
-  }, [armed]);
+  }, [armed, live]);
 
+  // Master button tap → start if off, stop if running.
   const togglePower = useCallback(() => {
-    setTweaks((v) => ({ ...v, state: v.state === 'running' ? 'paused' : 'running' }));
-  }, []);
+    if (live.backendState === 'running' || live.backendState === 'starting') {
+      void live.stop();
+    } else {
+      void live.start();
+    }
+  }, [live]);
+
+  const state = live.uiState;
 
   const isLight = tweaks.theme === 'light';
   const bg = isLight ? '#f7f7f5' : TOKENS.bg0;
@@ -118,11 +142,12 @@ export default function App() {
         }}
       >
         <MobileApp
-          state={tweaks.state}
+          state={state}
           accent={tweaks.accent}
           armed={armed}
           onArm={setArmed}
           onPower={togglePower}
+          live={live}
         />
         <TweaksPanel
           open={tweaksOpen}
@@ -152,12 +177,14 @@ export default function App() {
         current={route}
         onNav={setRoute}
         accent={accentMain}
-        state={tweaks.state}
+        state={state}
         collapsed={tweaks.density === 'compact'}
+        loopIteration={live.loopIteration}
+        path={live.path}
       />
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar
-          state={tweaks.state}
+          state={state}
           accent={accentMain}
           onArm={setArmed}
           armed={armed}
@@ -165,19 +192,48 @@ export default function App() {
           currentTitle={TITLES[route]}
           onOpenCmd={() => setCmdOpen(true)}
           onOpenTweaks={() => setTweaksOpen((o) => !o)}
+          loopIteration={live.loopIteration}
+          path={live.path}
+          wsConnected={live.wsConnected}
         />
         <div style={{ flex: 1, minHeight: 0, background: TOKENS.bg0, position: 'relative' }}>
-          {route === 'dash'    && <DashboardScreen  state={tweaks.state} accent={tweaks.accent} density={tweaks.density} onArm={setArmed} armed={armed} />}
-          {route === 'signals' && <SignalsScreen    accent={tweaks.accent} />}
-          {route === 'book'    && <BookScreen       accent={tweaks.accent} />}
-          {route === 'risk'    && <RiskScreen       accent={tweaks.accent} />}
-          {route === 'strat'   && <StrategiesScreen accent={tweaks.accent} />}
-          {route === 'log'     && <TradeLogScreen />}
-          {tweaks.state === 'error' && <ErrorOverlay />}
+          {route === 'dash' && (
+            <DashboardScreen
+              state={state}
+              accent={tweaks.accent}
+              density={tweaks.density}
+              onArm={setArmed}
+              armed={armed}
+              live={live}
+            />
+          )}
+          {route === 'signals' && (
+            <SignalsScreen accent={tweaks.accent} live={live} />
+          )}
+          {route === 'book' && (
+            <BookScreen accent={tweaks.accent} live={live} />
+          )}
+          {route === 'risk' && (
+            <RiskScreen accent={tweaks.accent} live={live} />
+          )}
+          {route === 'strat' && (
+            <StrategiesScreen accent={tweaks.accent} live={live} />
+          )}
+          {route === 'log' && (
+            <TradeLogScreen live={live} />
+          )}
+          {state === 'error' && <ErrorOverlay message={live.lastStartError ?? undefined} />}
           {armed && <ArmOverlay />}
         </div>
       </main>
-      <CmdPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onNav={setRoute} />
+      <CmdPalette
+        open={cmdOpen}
+        onClose={() => setCmdOpen(false)}
+        onNav={setRoute}
+        onStart={() => void live.start()}
+        onStop={() => void live.stop()}
+        onSetMode={(m) => void live.setMode(m)}
+      />
       <TweaksPanel open={tweaksOpen} onClose={() => setTweaksOpen(false)} tweaks={tweaks} setTweaks={setTweaks} />
     </div>
   );
@@ -219,19 +275,19 @@ function ArmOverlay() {
   );
 }
 
-function ErrorOverlay() {
+function ErrorOverlay({ message }: { message?: string }) {
   return (
     <div style={{
       position: 'absolute', top: 18, right: 18, zIndex: 40,
       padding: 14, background: TOKENS.bg2, border: `1px solid ${TOKENS.danger}`,
-      borderRadius: 10, boxShadow: '0 20px 40px rgba(0,0,0,0.4)', maxWidth: 320,
+      borderRadius: 10, boxShadow: '0 20px 40px rgba(0,0,0,0.4)', maxWidth: 360,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <Glyph state="error" size={12} />
-        <Label style={{ color: TOKENS.danger }}>Broker disconnected</Label>
+        <Label style={{ color: TOKENS.danger }}>System in error state</Label>
       </div>
       <div style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink1, lineHeight: 1.4 }}>
-        ibkr-gateway unreachable for 45s. Trading halted. Positions preserved. Retrying in 12s.
+        {message || 'Trading halted. See server logs for details.'}
       </div>
     </div>
   );
