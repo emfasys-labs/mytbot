@@ -76,7 +76,7 @@ from signals.accumulator import SignalAccumulator
 from signals.engine import SignalEngine
 from storage.db import dispose_engine, get_app_database, init_async_database
 from storage.discovery import persist_anomaly_log, persist_thesis_log
-from storage.models import AIOutputLog, FeatureSnapshot
+from storage.models import AIOutputLog, FeatureSnapshot, OrderLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -111,6 +111,38 @@ from system.trading_loop.helpers import (
     is_futures_symbol,
     load_yaml,
 )
+
+
+_DIRECTIONAL_SIDES = {"long", "short", "buy", "sell"}
+_SIDE_TO_ORDER_SIDE = {"long": "buy", "short": "sell", "buy": "buy", "sell": "sell"}
+
+
+async def _load_working_order_keys(session_factory: Any) -> set[tuple[str, str]]:
+    """Return {(SYMBOL, order_side)} for every order still working at a broker.
+
+    Used to short-circuit the global edge coordinator so it doesn't spend its
+    per-tick action budget re-proposing opportunities whose prior limit orders
+    are still sitting on the book — the execution engine would dedup them
+    anyway, producing ``executed=0`` for an otherwise-healthy iteration.
+    """
+    if session_factory is None:
+        return set()
+    try:
+        async with session_factory() as session:
+            stmt = select(OrderLog.symbol, OrderLog.side).where(
+                OrderLog.status.in_(("pending", "open", "partially_filled"))
+            )
+            rows = (await session.execute(stmt)).all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("trading_loop | working-order key lookup failed | {}", exc)
+        return set()
+    out: set[tuple[str, str]] = set()
+    for sym, side in rows:
+        s = (sym or "").strip().upper()
+        sd = (side or "").strip().lower()
+        if s and sd:
+            out.add((s, sd))
+    return out
 
 
 class TradingLoop:
@@ -1183,6 +1215,27 @@ class TradingLoop:
                     if isinstance(d, dict):
                         new_opps.append(cross_exchange_dict_to_strategy_opportunity(d, capital=notional, edge_boost=boost_x))
                         log_arb_event("detect", strategy="cross_exchange_arbitrage", symbol=sym)
+
+        working_keys = await _load_working_order_keys(session_factory)
+        if working_keys:
+            filtered_opps: list[Any] = []
+            skipped_symbols: list[str] = []
+            for opp in new_opps:
+                side_raw = (getattr(opp, "side", "") or "").strip().lower()
+                if side_raw in _DIRECTIONAL_SIDES:
+                    sym_key = str(getattr(opp, "symbol", "")).strip().upper()
+                    order_side = _SIDE_TO_ORDER_SIDE.get(side_raw, side_raw)
+                    if sym_key and (sym_key, order_side) in working_keys:
+                        skipped_symbols.append(sym_key)
+                        continue
+                filtered_opps.append(opp)
+            if skipped_symbols:
+                logger.info(
+                    "trading_loop | coord | skipped {} opportunities with live working orders | sample={}",
+                    len(skipped_symbols),
+                    skipped_symbols[:8],
+                )
+            new_opps = filtered_opps
 
         coord = GlobalEdgeCoordinator(self._global_edge_cfg, logger=logger)
         repl_ctx = await load_replacement_context_from_bus(bus)
