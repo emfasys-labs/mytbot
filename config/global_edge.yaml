@@ -12,7 +12,14 @@ edge_advantage:
   defender: "0.12"
 
 # Max coordinator-emitted actions per tick (incremental only).
-max_actions_per_tick: 3
+#   * ``hunter`` → broad book, many concurrent opens per cycle
+#   * ``trader`` → balanced default (matches legacy single scalar)
+#   * ``defender`` → defensive, at most one new opening per cycle
+# A scalar value is still honoured (back-compat) and used for every mode.
+max_actions_per_tick:
+  hunter: 10
+  trader: 3
+  defender: 1
 
 # Optional capital cap per action as fraction of tradable capital.
 max_notional_fraction_per_action: "0.15"

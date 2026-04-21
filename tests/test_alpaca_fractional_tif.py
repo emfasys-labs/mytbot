@@ -1,10 +1,16 @@
-"""Alpaca adapter — fractional-order TIF forcing.
+"""Alpaca adapter — asset-class-aware TIF forcing.
 
-Alpaca rejects orders whose quantity is not a whole number unless TIF is
-``DAY`` (error 42210000: "fractional orders must be DAY orders"). The
-adapter transparently coerces the upstream TIF so sizing / execution code
-doesn't have to know about that broker quirk. These tests lock in the
-behaviour so a future TIF refactor can't silently re-introduce the loop.
+Alpaca has *two* incompatible TIF rules we reconcile in the adapter:
+
+1. Fractional equity / ETF orders must use ``DAY``
+   (error 42210000: "fractional orders must be DAY orders").
+2. Crypto orders must NOT use ``DAY`` — only ``GTC`` / ``IOC`` / ``FOK``
+   are accepted (error 42210000: "invalid crypto time_in_force").
+
+Alpaca crypto symbols always use the slash separator (``BTC/USD``) which
+lets us split the rules without plumbing asset_class into Order objects.
+These tests lock in both behaviours so a future refactor can't
+re-introduce either rejection loop.
 """
 
 from __future__ import annotations
@@ -112,8 +118,8 @@ class TestAlpacaFractionalTif:
         req = adapter._build_order_request(order)
         assert req.time_in_force == AlpTIF.GTC
 
-    def test_sub_unit_crypto_quantity_forces_day(self) -> None:
-        """Crypto fractional sizes also hit the same rule — lock it down."""
+    def test_sub_unit_crypto_quantity_stays_gtc(self) -> None:
+        """Crypto on Alpaca forbids DAY — fractional crypto must keep GTC."""
         adapter = _make_adapter()
         order = Order(
             symbol="BTC/USD",
@@ -123,4 +129,42 @@ class TestAlpacaFractionalTif:
             time_in_force="GTC",
         )
         req = adapter._build_order_request(order)
-        assert req.time_in_force == AlpTIF.DAY
+        assert req.time_in_force == AlpTIF.GTC
+
+    def test_crypto_day_is_remapped_to_gtc(self) -> None:
+        """If upstream ever sends DAY for crypto the adapter rewrites it."""
+        adapter = _make_adapter()
+        order = Order(
+            symbol="ETH/USD",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.5"),
+            time_in_force="DAY",
+        )
+        req = adapter._build_order_request(order)
+        assert req.time_in_force == AlpTIF.GTC
+
+    def test_crypto_ioc_stays_ioc(self) -> None:
+        """IOC is a valid crypto TIF on Alpaca — do not touch it."""
+        adapter = _make_adapter()
+        order = Order(
+            symbol="SOL/USD",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("1.5"),
+            time_in_force="IOC",
+        )
+        req = adapter._build_order_request(order)
+        assert req.time_in_force == AlpTIF.IOC
+
+    def test_whole_crypto_quantity_keeps_gtc(self) -> None:
+        adapter = _make_adapter()
+        order = Order(
+            symbol="BTC/USD",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("1"),
+            time_in_force="GTC",
+        )
+        req = adapter._build_order_request(order)
+        assert req.time_in_force == AlpTIF.GTC

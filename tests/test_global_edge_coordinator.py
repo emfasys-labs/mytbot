@@ -138,3 +138,73 @@ def test_no_close_all_action_kind() -> None:
     new_opps = [_opp("C", "0.5"), _opp("D", "0.4")]
     actions = coord.propose_actions(held, new_opps, active_mode="trader")
     assert all(x.kind == "open_strategy" for x in actions)
+
+
+def test_max_actions_per_tick_scalar_is_mode_blind_backcompat() -> None:
+    """Legacy scalar config: same cap for every mode (v1 behaviour)."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01", "trader": "0.01", "defender": "0.01"},
+        "max_actions_per_tick": 2,
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(10)]
+    for mode in ("hunter", "trader", "defender"):
+        actions = coord.propose_actions([], list(new_opps), active_mode=mode)
+        assert len(actions) == 2, f"mode={mode} broke legacy scalar cap"
+
+
+def test_max_actions_per_tick_mode_aware_hunter_opens_many() -> None:
+    """Hunter must emit many actions per cycle; defender at most one."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01", "trader": "0.02", "defender": "0.12"},
+        "max_actions_per_tick": {"hunter": 8, "trader": 3, "defender": 1},
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(12)]
+
+    hunter_actions = coord.propose_actions([], list(new_opps), active_mode="hunter")
+    trader_actions = coord.propose_actions([], list(new_opps), active_mode="trader")
+    defender_actions = coord.propose_actions([], list(new_opps), active_mode="defender")
+
+    assert len(hunter_actions) == 8, f"hunter got {len(hunter_actions)} actions"
+    assert len(trader_actions) == 3, f"trader got {len(trader_actions)} actions"
+    assert len(defender_actions) == 1, f"defender got {len(defender_actions)} actions"
+
+
+def test_max_actions_per_tick_unknown_mode_falls_back_to_trader() -> None:
+    cfg = {
+        "edge_advantage": {"trader": "0.01"},
+        "max_actions_per_tick": {"hunter": 8, "trader": 3, "defender": 1},
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(10)]
+    actions = coord.propose_actions([], list(new_opps), active_mode="surge")  # unknown
+    assert len(actions) == 3
+
+
+def test_max_actions_per_tick_invalid_value_defaults_to_3() -> None:
+    cfg = {
+        "edge_advantage": {"trader": "0.01"},
+        "max_actions_per_tick": {"hunter": "banana", "trader": "3"},
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(10)]
+    actions = coord.propose_actions([], list(new_opps), active_mode="hunter")
+    assert len(actions) == 3  # malformed hunter value → default 3
+
+
+def test_max_actions_per_tick_explicit_kwarg_overrides_config() -> None:
+    """``max_actions=`` kwarg must still override the config (public API)."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01"},
+        "max_actions_per_tick": {"hunter": 8},
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(10)]
+    actions = coord.propose_actions([], list(new_opps), active_mode="hunter", max_actions=2)
+    assert len(actions) == 2

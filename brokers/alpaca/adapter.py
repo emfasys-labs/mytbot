@@ -434,14 +434,28 @@ class AlpacaAdapter(BrokerAdapter):
         qty = float(qty_dec)
         cid = order.client_order_id
 
-        # Alpaca rejects fractional equity/ETF orders with any TIF other than
-        # DAY ("fractional orders must be DAY orders [code=42210000]"). When
-        # the quantity isn't whole, force DAY regardless of the upstream TIF
-        # so the sizing logic doesn't have to know about broker quirks.
+        # Alpaca has two mutually-incompatible TIF rules we must reconcile:
+        #
+        #   1. Fractional equity / ETF orders ("fractional orders must be DAY
+        #      orders [code=42210000]") → force DAY.
+        #   2. Crypto orders ("invalid crypto time_in_force [code=42210000]")
+        #      → DAY is NOT allowed; only GTC / IOC / FOK.
+        #
+        # Alpaca crypto symbols use the slash separator (``BTC/USD``) whereas
+        # equities never do. That single character lets us split the rules
+        # cleanly without plumbing asset_class through the order object.
+        is_crypto_symbol = "/" in sym
         is_fractional = qty_dec != qty_dec.to_integral_value()
-        if is_fractional and tif != AlpTIF.DAY:
+        if is_crypto_symbol:
+            if tif == AlpTIF.DAY:
+                logger.debug(
+                    "Alpaca | mapping TIF=DAY → GTC for crypto | symbol=%s",
+                    sym,
+                )
+                tif = AlpTIF.GTC
+        elif is_fractional and tif != AlpTIF.DAY:
             logger.debug(
-                "Alpaca | forcing TIF=DAY for fractional order | symbol=%s qty=%s original_tif=%s",
+                "Alpaca | forcing TIF=DAY for fractional equity order | symbol=%s qty=%s original_tif=%s",
                 sym,
                 qty_dec,
                 tif,
@@ -597,17 +611,48 @@ class AlpacaAdapter(BrokerAdapter):
                     return None
                 raise
 
-        def _submit() -> AlpOrder:
+        def _submit(req_obj: Any) -> AlpOrder:
             ex = _existing_by_client_id()
             if ex is not None:
                 return ex
-            return tc.submit_order(req)
+            return tc.submit_order(req_obj)
 
         try:
-            alp_o = await self._run_sync(_submit)
+            alp_o = await self._run_sync(lambda: _submit(req))
             return _alp_order_to_result(alp_o)
         except Exception as exc:  # noqa: BLE001
             err = _format_alpaca_error(exc)
+            # Some tickers on Alpaca are flagged ``fractionable=false`` (CORO,
+            # certain new listings, low-liquidity ETFs). The sizing layer has
+            # no way to know this up-front, so we retry once with the floor
+            # of the requested quantity when the broker explicitly complains.
+            # This turns a hard rejection into a (smaller) fill instead of a
+            # dead signal.
+            if "not fractionable" in err.lower():
+                qty_dec = _d(order.quantity)
+                whole = qty_dec.to_integral_value(rounding=ROUND_DOWN)
+                if whole >= 1 and whole != qty_dec:
+                    logger.info(
+                        "Alpaca | retry non-fractionable symbol with whole qty | "
+                        "symbol={} original={} rounded_down={}",
+                        order.symbol.strip(),
+                        qty_dec,
+                        whole,
+                    )
+                    # Rebuild the request with the floored qty, keeping every
+                    # other field identical (side, TIF, client_order_id…).
+                    order.quantity = whole
+                    retry_req = self._build_order_request(order)
+                    try:
+                        alp_o = await self._run_sync(lambda: _submit(retry_req))
+                        return _alp_order_to_result(alp_o)
+                    except Exception as exc2:  # noqa: BLE001
+                        err = _format_alpaca_error(exc2)
+                        logger.warning(
+                            "place_order | Alpaca | retry rejected too | symbol={} | error={}",
+                            order.symbol.strip(),
+                            err,
+                        )
             logger.warning(
                 "place_order | Alpaca | rejected | symbol={} | side={} | error={}",
                 order.symbol.strip(),

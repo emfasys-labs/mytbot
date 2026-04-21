@@ -215,6 +215,38 @@ class GlobalEdgeCoordinator:
             key = DEFAULT_MODE
         return Decimal(str(ea.get(key, ea.get("trader", "0.05"))))
 
+    def _max_actions_for_mode(self, mode: str) -> int:
+        """Per-mode cap on coordinator actions emitted per tick.
+
+        Accepts either a scalar (``max_actions_per_tick: 3``) — applied
+        uniformly to every mode, preserving v1 behaviour — or a dict
+        keyed by mode name. Unknown / malformed values fall back to 3.
+        """
+        raw = self._cfg.get("max_actions_per_tick", 3)
+        key = (mode or DEFAULT_MODE).strip().lower()
+        if key not in ("hunter", "trader", "defender"):
+            key = DEFAULT_MODE
+        # Scalar: legacy behaviour — one number for all modes.
+        if isinstance(raw, (int, float)):
+            try:
+                return max(1, int(raw))
+            except (TypeError, ValueError):
+                return 3
+        if isinstance(raw, str):
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                return 3
+        if isinstance(raw, dict):
+            v = raw.get(key)
+            if v is None:
+                v = raw.get("trader", 3)
+            try:
+                return max(1, int(v))
+            except (TypeError, ValueError):
+                return 3
+        return 3
+
     def propose_actions(
         self,
         held: list[HeldPositionEdge],
@@ -229,7 +261,11 @@ class GlobalEdgeCoordinator:
         Trim actions are not emitted in v1 (incremental unwind handled by D015 replacement separately).
         """
         thresh = self._threshold(active_mode)
-        cap_n = max_actions if max_actions is not None else int(self._cfg.get("max_actions_per_tick", 3))
+        cap_n = (
+            max_actions
+            if max_actions is not None
+            else self._max_actions_for_mode(active_mode)
+        )
 
         weakest_edge = Decimal("0")
         if held:
