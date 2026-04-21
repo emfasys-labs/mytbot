@@ -63,6 +63,15 @@ def signal_candidate_to_strategy_opportunity(
     reg = Decimal("0.8")
     risk = Decimal("0.05")
     ps = compute_priority_score(edge, conf, reg, exe, risk)
+    # Carry the candidate's asset_class into metadata so it survives the
+    # SignalCandidate → StrategyOpportunity → CoordinatorAction → RawSignal
+    # round-trip. Without this, ``coordinator_action_to_raw_signal`` defaults
+    # to "equity" and mislabels crypto / forex / futures signals on the way
+    # back to the execution engine (which then routes to the wrong broker).
+    cand_meta = dict(getattr(cand, "metadata", {}) or {})
+    cand_ac = getattr(cand, "asset_class", None)
+    if cand_ac and "asset_class" not in cand_meta:
+        cand_meta["asset_class"] = str(cand_ac)
     return StrategyOpportunity(
         strategy_name=str(getattr(cand, "strategy_name", "unknown")),
         symbol=str(getattr(cand, "symbol", "")),
@@ -77,7 +86,7 @@ def signal_candidate_to_strategy_opportunity(
         regime_fit_score=reg,
         risk_cost_score=risk,
         priority_score=ps,
-        metadata=dict(getattr(cand, "metadata", {}) or {}),
+        metadata=cand_meta,
     )
 
 

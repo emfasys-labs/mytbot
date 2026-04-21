@@ -431,7 +431,7 @@ class TradingLoop:
                         signal.metadata = {}
                     signal.metadata["execution_gated"] = "futures_disabled"
                     logger.info(
-                        "FUTURES DATA-ONLY | skipping execution for %s (set FUTURES_EXECUTION_ENABLED=1 once the contract resolver ships)",
+                        "FUTURES DATA-ONLY | skipping execution for {} (set FUTURES_EXECUTION_ENABLED=1 once the contract resolver ships)",
                         signal.symbol,
                     )
                     await _persist_signal(
@@ -1284,7 +1284,7 @@ class TradingLoop:
                 signal.metadata = {}
             signal.metadata["execution_gated"] = "futures_disabled"
             logger.info(
-                "FUTURES DATA-ONLY | skipping execution for %s (set FUTURES_EXECUTION_ENABLED=1)",
+                "FUTURES DATA-ONLY | skipping execution for {} (set FUTURES_EXECUTION_ENABLED=1)",
                 signal.symbol,
             )
             await _persist_signal(
