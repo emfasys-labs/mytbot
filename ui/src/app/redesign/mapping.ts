@@ -27,19 +27,10 @@ import {
   Urgency,
 } from './data';
 import type { SystemState as BackendSystemState } from '../lib/api';
+import { prettySymbol } from '../lib/symbol';
 import type { SystemState as DesignSystemState } from './tokens';
 
-/**
- * Strip pipeline-only suffixes from a ticker so the UI shows what an operator
- * would type on a broker terminal (``EURUSD=X`` → ``EURUSD``, ``ES=F`` → ``ES``).
- * Internal state still keys on the raw symbol; this is display-only.
- */
-export function prettySymbol(raw: string | null | undefined): string {
-  if (!raw) return '';
-  const s = String(raw).trim().toUpperCase();
-  if (s.endsWith('=X') || s.endsWith('=F')) return s.slice(0, -2);
-  return s;
-}
+export { prettySymbol };
 
 export function mapSystemState(
   backend: BackendSystemState,

@@ -79,6 +79,30 @@ def test_broker_symbol_passthrough_for_equity_and_crypto():
     assert broker_symbol_for("BTC-USD", "binance") == "BTC-USD"
 
 
+def test_broker_symbol_alpaca_crypto_uses_slash():
+    """Alpaca rejects BTC-USD with 'asset not found' — it expects BTC/USD."""
+    assert broker_symbol_for("BTC-USD", "alpaca") == "BTC/USD"
+    assert broker_symbol_for("ETH-USD", "alpaca") == "ETH/USD"
+    assert broker_symbol_for("SOL-USD", "alpaca") == "SOL/USD"
+    assert broker_symbol_for("XRP-USDT", "alpaca") == "XRP/USDT"
+    assert broker_symbol_for("DOGE-USDC", "alpaca") == "DOGE/USDC"
+
+
+def test_broker_symbol_alpaca_leaves_equity_with_hyphen_alone():
+    """Alpaca tickers like BRK-B must keep their hyphen — those are equities,
+    not crypto pairs. The translation only applies to -USD/-USDT/-USDC.
+    """
+    assert broker_symbol_for("BRK-B", "alpaca") == "BRK-B"
+    assert broker_symbol_for("BF-B", "alpaca") == "BF-B"
+
+
+def test_broker_symbol_alpaca_strips_forex_suffix_and_leaves_forex():
+    """Forex stays a 6-char pair for any broker (including Alpaca, though
+    Alpaca doesn't trade forex today — we still want a deterministic
+    translation)."""
+    assert broker_symbol_for("EURUSD=X", "alpaca") == "EURUSD"
+
+
 def test_momentum_strategy_declares_multi_class():
     s = MomentumBreakoutStrategy({
         "asset_classes": ["equity", "crypto", "forex"],

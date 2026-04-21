@@ -62,17 +62,36 @@ def asset_class_for_symbol(symbol: str) -> str:
 def broker_symbol_for(symbol: str, broker: str) -> str:
     """Translate a pipeline ticker (yfinance convention) to a broker-native one.
 
-    Currently: strip the ``=X`` (forex) / ``=F`` (futures) suffix for any
-    non-yfinance broker. IBKR's ``_symbol_to_contract`` expects ``EURUSD``
-    (6-char pair) for forex, not ``EURUSD=X``. Futures still need a contract
-    month which we don't yet ship, so futures routing is gated elsewhere.
+    Pipeline conventions:
+      * ``EURUSD=X`` for forex (yfinance)
+      * ``ES=F`` for futures (yfinance) — still execution-gated elsewhere
+      * ``BTC-USD`` for crypto (yfinance)
+
+    Broker-native conventions we translate *to*:
+      * IBKR: ``EURUSD`` (6-char forex pair), ``BTC-USD`` kept as-is (IBKR
+        accepts dashed crypto).
+      * Alpaca crypto: ``BTC/USD`` (slash separator) — NOT ``BTC-USD``.
+        Submitting the dashed form triggers ``asset "BTC-USD" not found``.
+      * Bybit / Binance / Kraken: adapters already normalise crypto
+        internally, so we leave them alone here.
     """
     s = (symbol or "").strip().upper()
     b = (broker or "").strip().lower()
     if not s or not b:
         return s
+
     if s.endswith("=X") or s.endswith("=F"):
-        return s[:-2]
+        s = s[:-2]
+
+    # Alpaca crypto uses ``BASE/QUOTE`` slashes, not dashes.
+    # Only rewrite when the symbol clearly looks like a crypto pair
+    # (``*-USD`` / ``*-USDT`` / ``*-USDC``) so equities like ``BRK-B`` are
+    # not affected.
+    if b == "alpaca" and "-" in s:
+        base, _, quote = s.rpartition("-")
+        if base and quote in {"USD", "USDT", "USDC"}:
+            return f"{base}/{quote}"
+
     return s
 
 

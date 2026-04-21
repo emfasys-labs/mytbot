@@ -206,10 +206,27 @@ def compute_feature_columns(df: pd.DataFrame, pipeline_cfg: dict[str, Any] | Non
     if bb is not None and not bb.empty:
         for c in bb.columns:
             x[c] = bb[c]
+    # ``vol_ratio`` = current bar volume / rolling 20-bar mean volume.
+    # Edge cases:
+    #   1. ``vol_sma_20`` NaN — not enough bars yet → NaN (early warm-up).
+    #   2. ``vol_sma_20 == 0`` and current ``vol == 0`` — the feed
+    #      structurally has no volume (yfinance forex pairs report
+    #      0 volume on every bar). Treat as the neutral value 1.0 so
+    #      downstream strategies don't refuse to fire on volumeless
+    #      instruments. Without this, forex pairs had 0.0% feature
+    #      completeness and produced zero signals despite having
+    #      perfectly good OHLC history.
+    #   3. ``vol_sma_20 == 0`` and current ``vol > 0`` — unusual,
+    #      keep NaN so we don't divide by zero or fabricate a spike.
+    vol_sma = x["vol_sma_20"]
     x["vol_ratio"] = np.where(
-        (x["vol_sma_20"].isna()) | (x["vol_sma_20"] == 0),
+        vol_sma.isna(),
         np.nan,
-        vol / x["vol_sma_20"],
+        np.where(
+            vol_sma == 0,
+            np.where(vol == 0, 1.0, np.nan),
+            vol / vol_sma.replace(0, np.nan),
+        ),
     )
     # VPIN proxy before volume_flow (fake_spike_penalty); recomputed in _compute_research_columns for consistency.
     direction = np.sign(close.diff().fillna(0.0))

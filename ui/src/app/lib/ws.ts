@@ -1,4 +1,5 @@
 import { api } from './api';
+import { prettySymbol } from './symbol';
 
 const DASHBOARD_TOKEN_KEY = 'dashboardReadToken';
 
@@ -50,16 +51,18 @@ export async function getWsUrl(): Promise<string> {
 export function formatWsEventLine(ev: WsTickEvent): string | null {
   const p = ev.payload ?? {};
   if (ev.type === 'signal_generated') {
-    const sym = String(p.symbol ?? '');
-    const side = String(p.side ?? '').toUpperCase();
+    const rawSym = String(p.symbol ?? '');
+    if (!rawSym) return null;
+    const sym = prettySymbol(rawSym);
+    const side = String(p.side ?? '').toLowerCase();
     const strat = String(p.strategy ?? '');
-    if (!sym) return null;
     return `${sym} ${side} · ${strat || 'signal'}`;
   }
   if (ev.type === 'order_filled') {
-    const sym = String(p.symbol ?? '');
+    const rawSym = String(p.symbol ?? '');
+    if (!rawSym) return null;
+    const sym = prettySymbol(rawSym);
     const st = String(p.status ?? '');
-    if (!sym) return null;
     return `${sym} filled · ${st || 'filled'}`;
   }
   if (ev.type === 'kill_activated') {
