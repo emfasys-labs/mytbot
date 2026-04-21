@@ -66,13 +66,17 @@ class ExecutionEngine:
         self.cancel_partial_on_timeout = bool(cancel_partial_on_timeout)
         # In-flight dedup — when the allocator re-ranks the same opportunity
         # on consecutive loops, we must not flood the broker with duplicate
-        # limit orders that stack up unfilled. A non-terminal order for the
-        # same (symbol, side, broker) placed within this window blocks new
-        # submissions. Tunable via EXECUTION_DEDUP_WINDOW_SEC (default 900s).
+        # limit orders that stack up unfilled. The dedup query already filters
+        # on status in {pending, open, partially_filled}, which are inherently
+        # "working at the broker"; the time window is only a backstop for stale
+        # DB rows a reconciliation bug might otherwise orphan. A 7-day window
+        # covers weekend-held orders and broker re-connect lag without ever
+        # allowing a second copy of a still-live order to be submitted.
+        # Tunable via EXECUTION_DEDUP_WINDOW_SEC (default 604800s = 7 days).
         try:
-            self.dedup_window_sec = float(os.getenv("EXECUTION_DEDUP_WINDOW_SEC", "900") or 0)
+            self.dedup_window_sec = float(os.getenv("EXECUTION_DEDUP_WINDOW_SEC", "604800") or 0)
         except (TypeError, ValueError):
-            self.dedup_window_sec = 900.0
+            self.dedup_window_sec = 604800.0
         self.dedup_skipped = 0  # observability counter
         # Marketable-limit slippage buffer. Every LIMIT order's price is
         # rewritten just before placement so BUYs sit at or above the current

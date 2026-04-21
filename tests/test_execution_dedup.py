@@ -217,3 +217,41 @@ async def test_dedup_requires_session_factory(monkeypatch):
 
     assert engine.dedup_skipped == 0
     assert result is not None
+
+
+def test_dedup_default_window_is_at_least_one_day(monkeypatch):
+    """Regression guard: pending broker-side limits can sit for hours past
+    the loop cadence. The default dedup window must cover at least a full
+    trading day so that re-ranked opportunities never spawn a duplicate
+    order while the first copy is still working at the broker."""
+    monkeypatch.delenv("EXECUTION_DEDUP_WINDOW_SEC", raising=False)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    assert engine.dedup_window_sec >= 86400.0
+
+
+@pytest.mark.asyncio
+async def test_dedup_skips_when_pending_order_is_hours_old(monkeypatch):
+    """The live failure mode: a limit order sits pending at the broker for
+    20+ minutes (longer than the old 15-minute window), the allocator
+    re-ranks the same opportunity on the next tick, and ``_find_in_flight_order``
+    must still return the existing order so no duplicate is submitted."""
+    set_risk_engine(_FakeRiskEngine({"auto_kill_on_api_failure": False}))
+    monkeypatch.setattr("execution.engine.get_broker", lambda *a, **kw: None)
+    monkeypatch.delenv("EXECUTION_DEDUP_WINDOW_SEC", raising=False)
+
+    existing = _StoredOrder(
+        id="existing-ibkr-old",
+        symbol="FUTY",
+        broker="ibkr",
+        side="buy",
+        status="pending",
+        quantity=Decimal("1519"),
+        timestamp=datetime.now(timezone.utc) - timedelta(hours=3),
+    )
+    sf = _session_factory([existing])
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    result = await engine.execute(_signal(), _approved(), session_factory=sf)
+
+    assert result is None, "dedup must block the duplicate when prior pending order is still live"
+    assert engine.dedup_skipped == 1
