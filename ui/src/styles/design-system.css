@@ -1,0 +1,106 @@
+/**
+ * mytbot "Living Instrument" redesign — tokens.
+ * Ported from mytbot-design-system/project/prototypes/redesign/tokens_data.jsx.
+ * Consumed by components under ui/src/app/redesign/.
+ */
+
+:root {
+  /* Near-black neutrals */
+  --ds-bg-0: #050505;
+  --ds-bg-1: #0a0a0b;
+  --ds-bg-2: #111113;
+  --ds-bg-3: #17171a;
+
+  --ds-line: rgba(255, 255, 255, 0.06);
+  --ds-line-strong: rgba(255, 255, 255, 0.12);
+
+  --ds-ink-0: #ffffff;
+  --ds-ink-1: rgba(255, 255, 255, 0.92);
+  --ds-ink-2: rgba(255, 255, 255, 0.62);
+  --ds-ink-3: rgba(255, 255, 255, 0.42);
+  --ds-ink-4: rgba(255, 255, 255, 0.22);
+
+  /* Semantic */
+  --ds-profit: #5eead4;
+  --ds-loss: #fda4af;
+  --ds-caution: #fcd34d;
+  --ds-danger: #f87171;
+  --ds-info: #93c5fd;
+
+  /* Font stacks */
+  --ds-sans: 'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --ds-mono: 'Geist Mono', ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Motion */
+  --ds-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ds-ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --ds-dur-fast: 160ms;
+  --ds-dur-med: 300ms;
+  --ds-dur-slow: 600ms;
+}
+
+/* Ensure body + root match the design when the redesign is active. */
+html.ds-root,
+html.ds-root body,
+html.ds-root #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--ds-bg-0);
+  color: var(--ds-ink-1);
+  font-family: var(--ds-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html.ds-root ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+html.ds-root ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+}
+html.ds-root ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+html.ds-root ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html.ds-root input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* ─── Keyframes used by the redesign ──────────────────────────── */
+
+@keyframes ds-glyph-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%      { transform: scale(1.4); opacity: 0.85; }
+}
+@keyframes ds-glyph-err {
+  0%, 100% { transform: scale(1); opacity: 0.4; }
+  50%      { transform: scale(1.6); opacity: 1; }
+}
+@keyframes ds-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes ds-fade-out-slow {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes ds-slide-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes ds-flash-bar {
+  0%   { opacity: 0; }
+  20%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes ds-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0.9; }
+}
