@@ -1,0 +1,170 @@
+"""Unit tests for `_live_broker_prices` — the live-price resolver that feeds
+`_compute_live_unrealised_mtm` in the /pnl endpoint.
+
+These tests pin down the fallback behaviour that makes the dashboard equity
+curve actually move: whichever connected broker is fastest to return a
+positive `get_last_price` wins, slow or zero-returning adapters are ignored,
+and a complete failure returns an empty map (so the caller falls back to
+FeatureSnapshot / PositionLog).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+import pytest
+
+
+class _FakePosition:
+    def __init__(self, symbol: str, broker: str = "ibkr") -> None:
+        self.symbol = symbol
+        self.broker = broker
+
+
+class _FakeAdapter:
+    def __init__(self, price: Decimal | int | float | None, delay: float = 0.0, raise_exc: bool = False) -> None:
+        self._price = price
+        self._delay = delay
+        self._raise = raise_exc
+
+    async def get_last_price(self, symbol: str) -> Decimal:
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._raise:
+            raise RuntimeError("adapter down")
+        return Decimal(str(self._price)) if self._price is not None else Decimal(0)
+
+
+class _FakeBM:
+    def __init__(self, adapters: dict[str, _FakeAdapter]) -> None:
+        self.adapters = adapters
+
+
+class _FakeOrch:
+    def __init__(self, bm: _FakeBM | None) -> None:
+        self._broker_manager = bm
+
+
+def _install_orch(monkeypatch: pytest.MonkeyPatch, bm: _FakeBM | None) -> None:
+    import api.server as server
+
+    monkeypatch.setattr(server, "_get_orchestrator", lambda: _FakeOrch(bm))
+
+
+def test_no_orchestrator_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.server as server
+
+    monkeypatch.setattr(server, "_get_orchestrator", lambda: None)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
+    assert out == {}
+
+
+def test_no_broker_manager_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.server as server
+
+    _install_orch(monkeypatch, None)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
+    assert out == {}
+
+
+def test_first_non_zero_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fast adapter with positive price beats slower adapters."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "alpaca": _FakeAdapter(Decimal("100.25"), delay=0.0),
+            "ibkr": _FakeAdapter(Decimal("100.10"), delay=0.5),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL", broker="ibkr")]))
+    assert out == {"AAPL": Decimal("100.25")}
+
+
+def test_zero_adapter_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An adapter that returns 0 (e.g. symbol not supported) is ignored and a
+    later adapter with a real price wins."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "binance": _FakeAdapter(Decimal(0), delay=0.0),       # fastest but no price
+            "bybit": _FakeAdapter(Decimal(0), delay=0.01),         # also no price
+            "alpaca": _FakeAdapter(Decimal("42.13"), delay=0.05),  # real price
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
+    assert out == {"AAPL": Decimal("42.13")}
+
+
+def test_exception_adapter_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raising adapter is swallowed — the surviving adapter's price wins."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "kraken": _FakeAdapter(None, raise_exc=True),
+            "alpaca": _FakeAdapter(Decimal("77.77"), delay=0.01),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("COHR")]))
+    assert out == {"COHR": Decimal("77.77")}
+
+
+def test_all_adapters_zero_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If every adapter returns 0 the caller must see no price (so it falls
+    back to FeatureSnapshot / PositionLog)."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "binance": _FakeAdapter(Decimal(0)),
+            "bybit": _FakeAdapter(Decimal(0)),
+            "kraken": _FakeAdapter(Decimal(0)),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
+    assert out == {}
+
+
+def test_multiple_positions_each_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-symbol resolution is independent; each position gets its own price."""
+    import api.server as server
+
+    class _PerSymAdapter:
+        def __init__(self, table: dict[str, Decimal]) -> None:
+            self._table = table
+
+        async def get_last_price(self, symbol: str) -> Decimal:
+            return self._table.get(symbol, Decimal(0))
+
+    bm = _FakeBM(
+        {
+            "alpaca": _PerSymAdapter({"AAPL": Decimal("190.10"), "MSFT": Decimal("410.25")}),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(
+        server._live_broker_prices([_FakePosition("AAPL"), _FakePosition("MSFT"), _FakePosition("NVDA")])
+    )
+    assert out == {"AAPL": Decimal("190.10"), "MSFT": Decimal("410.25")}
+
+
+def test_timeout_does_not_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hanging adapter must time out and not prevent a fast adapter from winning."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "slow": _FakeAdapter(Decimal("1.0"), delay=5.0),
+            "fast": _FakeAdapter(Decimal("2.0"), delay=0.02),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(server._live_broker_prices([_FakePosition("X")]))
+    assert out == {"X": Decimal("2.0")}

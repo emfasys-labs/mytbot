@@ -43,6 +43,9 @@ import type { SystemState as DesignSystemState } from './tokens';
 
 const REFRESH_INTERVAL_MS = 10_000;
 const INTEL_THROTTLE_MS = 12_000;
+// ~1h of intraday NAV samples at 10s cadence. Keeps the hero equity line
+// responsive while the system is running without blowing up memory.
+const MAX_LIVE_NAV_SAMPLES = 360;
 
 export interface LiveData {
   backendState: BackendSystemState;
@@ -128,8 +131,15 @@ export function useLiveSystem(): LiveData {
   const [news, setNews] = useState<ApiNewsResponse | null>(null);
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
+  const [loadedStrategies, setLoadedStrategies] = useState<
+    Array<{ name: string; enabled: boolean; kind?: string }>
+  >([]);
   const [wsEvents, setWsEvents] = useState<WsTickEvent[]>([]);
   const [orderEvents, setOrderEvents] = useState<LiveEvent[]>([]);
+  // Rolling intraday NAV buffer. Pushed on every refresh while the system is
+  // live so the hero equity curve moves in real time instead of showing a
+  // single-point flat line from DailyPnL.
+  const [liveNavSamples, setLiveNavSamples] = useState<Array<{ t: number; value: number }>>([]);
 
   // ────── refs ──────
   const refreshLock = useRef(false);
@@ -152,6 +162,7 @@ export function useLiveSystem(): LiveData {
     setActiveBrokers([]);
     setSnapshotFetchFailed(false);
     setKillSwitch(false);
+    setLiveNavSamples([]);
   }, []);
 
   // ────── dashboard_token=… bootstrap (one-time) ──────
@@ -198,6 +209,13 @@ export function useLiveSystem(): LiveData {
         );
         if (Array.isArray(sysRes.active_brokers)) setActiveBrokers(sysRes.active_brokers);
         if (sysRes.brokers) setBrokersRaw(sysRes.brokers as Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean }>);
+        if (Array.isArray(sysRes.loaded_strategies)) {
+          setLoadedStrategies(
+            sysRes.loaded_strategies
+              .filter((x) => x && typeof x.name === 'string' && x.name.trim())
+              .map((x) => ({ name: x.name.trim(), enabled: !!x.enabled, kind: x.kind })),
+          );
+        }
         if (typeof sysRes.capital_pct === 'number' && Number.isFinite(sysRes.capital_pct)) {
           const c = Math.max(0, Math.min(1, sysRes.capital_pct));
           setCapitalPctState(c);
@@ -209,7 +227,31 @@ export function useLiveSystem(): LiveData {
       if (statusRes) setKillSwitch(!!statusRes.kill_switch);
 
       if (feedsLive) {
-        if (pnlRes) setPnl(pnlRes);
+        if (pnlRes) {
+          setPnl(pnlRes);
+          // Sample live NAV into the intraday rolling buffer so the hero
+          // equity curve actually moves while the system is running. Backend
+          // only persists one DailyPnL row per day — without this sample
+          // stream the chart would be a flat line for the first 24h.
+          const liveNav = toNumber(pnlRes.today?.portfolio_value, -1);
+          if (liveNav > 0) {
+            const now = Date.now();
+            setLiveNavSamples((prev) => {
+              // Always append on a fresh refresh — even if the value didn't
+              // change we still want a sample so the curve renders as a
+              // genuine time-series. Only suppress rapid duplicate pushes
+              // (e.g. WS + poll overlap) within ~1s.
+              const last = prev[prev.length - 1];
+              if (last && last.value === liveNav && now - last.t < 1_000) {
+                return prev;
+              }
+              const next = [...prev, { t: now, value: liveNav }];
+              return next.length > MAX_LIVE_NAV_SAMPLES
+                ? next.slice(next.length - MAX_LIVE_NAV_SAMPLES)
+                : next;
+            });
+          }
+        }
         if (histRes) {
           const series = (histRes.history || [])
             .map((x) => ({ date: String(x.date ?? ''), value: toNumber(x.portfolio_value, 0) }))
@@ -241,8 +283,12 @@ export function useLiveSystem(): LiveData {
       // Throttled intelligence / mode fetch.
       if (feedsLive && Date.now() - lastIntelRefresh.current > INTEL_THROTTLE_MS) {
         lastIntelRefresh.current = Date.now();
+        // Fetch the endpoint's full window (max 50) so secondary strategies
+        // whose signals are older than the newest 16 (e.g. momentum_breakout
+        // during a mean-reversion-dominant regime) still appear in the
+        // Strategy Mix card.
         const [sig, modeRes] = await Promise.allSettled([
-          api.getIntelligenceSignals(16),
+          api.getIntelligenceSignals(50),
           api.getSystemMode(),
         ]);
         if (sig.status === 'fulfilled') setIntelligence(sig.value);
@@ -360,7 +406,25 @@ export function useLiveSystem(): LiveData {
     return Math.max(0, v);
   }, [pnl]);
 
-  const equityValues = useMemo(() => equitySeries.map((x) => x.value).filter(Number.isFinite), [equitySeries]);
+  // Long-term daily equity history (one point per calendar day).
+  const dailyEquityValues = useMemo(
+    () => equitySeries.map((x) => x.value).filter(Number.isFinite),
+    [equitySeries],
+  );
+  // What the hero chart renders: blend the long-term daily history (one
+  // point per day) with the intraday rolling buffer (one sample per poll).
+  // As soon as a single live sample arrives the tail of the curve starts
+  // moving — the backend NAV updates on every /pnl call thanks to live
+  // broker prices feeding _compute_live_unrealised_mtm.
+  const equityValues = useMemo(() => {
+    const live = liveNavSamples.map((s) => s.value).filter(Number.isFinite);
+    if (live.length === 0) return dailyEquityValues;
+    if (dailyEquityValues.length <= 1) return live;
+    // Drop the persisted "today" row so we don't double-plot the first
+    // live sample on top of it.
+    const historyTrunc = dailyEquityValues.slice(0, -1);
+    return [...historyTrunc, ...live];
+  }, [liveNavSamples, dailyEquityValues]);
   const navPeak = useMemo(() => equityPeak(equityValues, nav), [equityValues, nav]);
   const navOpen = useMemo(() => estimateNavOpen(nav, pnl), [nav, pnl]);
 
@@ -369,8 +433,8 @@ export function useLiveSystem(): LiveData {
   const { approved, rejected } = useMemo(() => mapApprovedRejected(intelligence), [intelligence]);
   const executionRejections = useMemo(() => mapExecutionRejections(orders), [orders]);
   const strategies = useMemo(
-    () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence),
-    [snapshot, intelligence],
+    () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence, loadedStrategies),
+    [snapshot, intelligence, loadedStrategies],
   );
   const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
   const newsRows = useMemo(() => mapNews(news), [news]);

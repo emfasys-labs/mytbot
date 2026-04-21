@@ -393,43 +393,69 @@ export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
 export function mergeStrategiesWithSignals(
   snapshotStrategies: Strategy[],
   sigs: IntelligenceSignalsResponse | null,
+  loadedStrategies: Array<{ name: string; enabled: boolean; kind?: string }> = [],
 ): Strategy[] {
   const out = new Map<string, Strategy>();
   for (const s of snapshotStrategies) out.set(s.name, s);
 
   const rows = sigs?.signals ?? [];
-  if (!rows.length) return snapshotStrategies;
-
-  const sigAgg = new Map<string, { count: number; confSum: number }>();
-  let total = 0;
-  for (const r of rows) {
-    const nameRaw = String(r.strategy ?? '').trim();
-    if (!nameRaw) continue;
-    const name = nameRaw;
-    const conf = typeof r.confidence === 'number' && Number.isFinite(r.confidence)
-      ? Math.max(0, Math.min(1, r.confidence))
-      : 0;
-    const e = sigAgg.get(name) ?? { count: 0, confSum: 0 };
-    e.count += 1;
-    e.confSum += conf;
-    sigAgg.set(name, e);
-    total += 1;
+  if (rows.length) {
+    const sigAgg = new Map<string, { count: number; confSum: number }>();
+    let total = 0;
+    for (const r of rows) {
+      const nameRaw = String(r.strategy ?? '').trim();
+      if (!nameRaw) continue;
+      const conf = typeof r.confidence === 'number' && Number.isFinite(r.confidence)
+        ? Math.max(0, Math.min(1, r.confidence))
+        : 0;
+      const e = sigAgg.get(nameRaw) ?? { count: 0, confSum: 0 };
+      e.count += 1;
+      e.confSum += conf;
+      sigAgg.set(nameRaw, e);
+      total += 1;
+    }
+    if (total > 0) {
+      for (const [name, v] of sigAgg.entries()) {
+        if (out.has(name)) continue;
+        const avgConf = v.count > 0 ? v.confSum / v.count : 0;
+        out.set(name, {
+          name,
+          weight: v.count / total,
+          sharpe: avgConf,
+          winRate: avgConf,
+          trades: v.count,
+        });
+      }
+    }
   }
-  if (!total) return snapshotStrategies;
 
-  for (const [name, v] of sigAgg.entries()) {
-    if (out.has(name)) continue;
-    const avgConf = v.count > 0 ? v.confSum / v.count : 0;
+  // Seed every strategy the backend has registered — even if it produced zero
+  // opportunities and zero signals in the window — so the operator can see
+  // the full strategy roster. Without this the Strategy Mix card would
+  // collapse to a single entry whenever the regime favours one strategy.
+  for (const ls of loadedStrategies) {
+    const name = (ls?.name ?? '').trim();
+    if (!name) continue;
+    if (out.has(name)) {
+      const prev = out.get(name)!;
+      out.set(name, { ...prev, kind: ls.kind ?? prev.kind, enabled: ls.enabled });
+      continue;
+    }
     out.set(name, {
       name,
-      weight: v.count / total,
-      sharpe: avgConf,
-      winRate: avgConf,
-      trades: v.count,
+      weight: 0,
+      sharpe: 0,
+      winRate: 0,
+      trades: 0,
+      kind: ls.kind,
+      enabled: ls.enabled,
+      idle: true,
     });
   }
 
-  return [...out.values()].sort((a, b) => b.weight - a.weight).slice(0, 8);
+  return [...out.values()]
+    .sort((a, b) => b.weight - a.weight || (a.idle === b.idle ? 0 : a.idle ? 1 : -1))
+    .slice(0, 12);
 }
 
 export function estimateNavOpen(

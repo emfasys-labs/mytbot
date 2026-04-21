@@ -73,6 +73,15 @@ export interface Strategy {
   sharpe: number;
   winRate: number;
   trades: number;
+  /** Strategy family reported by the backend registry. Drives the "Arbitrage"
+   *  vs "Signal" pill in the Strategy Mix cards and helps the operator
+   *  understand that idle signal strategies are still loaded. */
+  kind?: 'signal' | 'arbitrage' | string;
+  /** True when the strategy is registered but hasn't produced opportunities
+   *  in the current snapshot / recent signal window. */
+  idle?: boolean;
+  /** Whether the strategy is enabled in the trading loop registry. */
+  enabled?: boolean;
 }
 
 export interface BrokerStatus {

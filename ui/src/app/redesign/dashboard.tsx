@@ -267,13 +267,23 @@ export function EquityCurve({
   const min = Math.min(...safeValues);
   const max = Math.max(...safeValues);
   const rng = max - min || 1;
+  // Inset the plot area so the pulsing endpoint dot (r grows to 7) and the
+  // stroke itself never clip against the SVG edge. preserveAspectRatio="none"
+  // means viewBox pixels are stretched to container width, so padding must be
+  // applied inside viewBox coordinates.
+  const padX = 10;
+  const padY = 6;
+  const plotW = Math.max(1, width - padX * 2);
+  const plotH = Math.max(1, height - padY * 2);
   const pts = safeValues.map((v, i) => {
-    const x = (i / (safeValues.length - 1)) * width;
-    const y = height - ((v - min) / rng) * (height - 6) - 3;
+    const x = padX + (i / (safeValues.length - 1)) * plotW;
+    const y = padY + plotH - ((v - min) / rng) * plotH;
     return [x, y] as const;
   });
   const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0]},${p[1]}`).join(' ');
-  const area = `${line} L${width},${height} L0,${height} Z`;
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  const area = `${line} L${last[0]},${height} L${first[0]},${height} Z`;
   return (
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
       <defs>
@@ -283,12 +293,12 @@ export function EquityCurve({
         </linearGradient>
       </defs>
       <path d={area} fill="url(#ds-eq-area)" />
-      <path d={line} stroke={accent} strokeWidth="1.2" fill="none" opacity="0.85" />
-      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="3" fill={accent}>
+      <path d={line} stroke={accent} strokeWidth="1.4" fill="none" opacity="0.9" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={last[0]} cy={last[1]} r="3" fill={accent}>
         <animate attributeName="r" from="3" to="7" dur="1.8s" repeatCount="indefinite" />
         <animate attributeName="opacity" from="1" to="0" dur="1.8s" repeatCount="indefinite" />
       </circle>
-      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="2.5" fill={accent} />
+      <circle cx={last[0]} cy={last[1]} r="2.5" fill={accent} />
     </svg>
   );
 }

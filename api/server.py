@@ -218,8 +218,84 @@ async def _latest_feature_prices(session, symbols: list[str]) -> dict[str, Decim
     return out
 
 
+async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
+    """Best-effort live last-price lookup via broker adapters.
+
+    Hourly FeatureSnapshot bars are far too stale to drive a live equity
+    curve — brokers expose a real-time `get_last_price(symbol)` which is the
+    freshest source we have. We race *all* connected adapters per symbol in
+    parallel and take the first one that returns a positive price. This
+    avoids being pinned to a stale position's original broker (e.g. an IBKR
+    paper position whose delayed feed returns a 15-minute-old print while
+    Alpaca's IEX feed is live). A tight per-adapter timeout guarantees one
+    slow adapter can't block /pnl.
+    """
+    orch = _get_orchestrator()
+    if orch is None:
+        return {}
+    bm = getattr(orch, "_broker_manager", None)
+    if bm is None or not rows:
+        return {}
+
+    adapters = list(bm.adapters.items())
+    if not adapters:
+        return {}
+
+    async def _probe(adapter, sym: str) -> Decimal:
+        try:
+            px = await asyncio.wait_for(adapter.get_last_price(sym), timeout=1.5)
+        except Exception:  # noqa: BLE001
+            return Decimal(0)
+        if px is None:
+            return Decimal(0)
+        try:
+            d = Decimal(str(px))
+        except Exception:  # noqa: BLE001
+            return Decimal(0)
+        return d if d > 0 else Decimal(0)
+
+    async def _one(sym: str) -> tuple[str, Decimal]:
+        # Race every adapter; take the first non-zero result and cancel the
+        # rest. This lets the fastest real-time feed (typically Alpaca for
+        # US equities, Binance/Bybit/Kraken for crypto) win over slower or
+        # delayed feeds regardless of which broker the position was opened
+        # through.
+        tasks = {asyncio.create_task(_probe(a, sym)): name for name, a in adapters}
+        try:
+            while tasks:
+                done, _pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    tasks.pop(t, None)
+                    px = t.result()
+                    if px > 0:
+                        for other in tasks:
+                            other.cancel()
+                        return sym, px
+        finally:
+            for t in tasks:
+                t.cancel()
+        return sym, Decimal(0)
+
+    results = await asyncio.gather(*(_one(r.symbol) for r in rows if r.symbol), return_exceptions=True)
+    out: dict[str, Decimal] = {}
+    for res in results:
+        if isinstance(res, Exception):
+            continue
+        sym, px = res
+        if sym and px > 0:
+            out[sym] = px
+    return out
+
+
 async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
-    """Mark latest position snapshot to latest feature prices."""
+    """Mark latest position snapshot to the freshest price available.
+
+    Price priority (highest freshness first):
+      1. Broker live `get_last_price` (real-time tick / snapshot)
+      2. FeatureSnapshot latest close (hourly bar — minutes to an hour stale)
+      3. PositionLog.current_price (last persisted snapshot)
+      4. Average entry price (no movement — effectively zero unrealised)
+    """
     async with session_factory() as session:
         latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_ts = latest_ts_q.scalar_one_or_none()
@@ -229,16 +305,23 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         rows = list(q.scalars().all())
         if not rows:
             return Decimal(0)
-        prices = await _latest_feature_prices(session, [r.symbol for r in rows])
-        total = Decimal(0)
-        for r in rows:
-            qty = Decimal(str(r.quantity or 0))
-            avg = Decimal(str(r.avg_entry_price or 0))
-            if avg <= 0 or qty == 0:
-                continue
-            current = prices.get(r.symbol, Decimal(str(r.current_price or avg)))
-            total += (current - avg) * qty
-        return total
+        feature_prices = await _latest_feature_prices(session, [r.symbol for r in rows])
+    # Broker lookups happen outside the DB session so we don't hold a
+    # connection while waiting on network round-trips.
+    live_prices = await _live_broker_prices(rows)
+    total = Decimal(0)
+    for r in rows:
+        qty = Decimal(str(r.quantity or 0))
+        avg = Decimal(str(r.avg_entry_price or 0))
+        if avg <= 0 or qty == 0:
+            continue
+        px = live_prices.get(r.symbol)
+        if px is None or px <= 0:
+            px = feature_prices.get(r.symbol)
+        if px is None or px <= 0:
+            px = Decimal(str(r.current_price or avg))
+        total += (px - avg) * qty
+    return total
 
 
 def _get_orchestrator():

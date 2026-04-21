@@ -1277,6 +1277,30 @@ class TradingLoop:
         return True
 
     def status_dict(self) -> dict[str, Any]:
+        loaded: list[dict[str, Any]] = []
+        for name, strat in (self._strategies or {}).items():
+            loaded.append({
+                "name": name,
+                "enabled": bool(getattr(strat, "enabled", True)),
+                "kind": "signal",
+            })
+        arb = self._arb_stack or {}
+        # Arbitrage strategy classes don't expose a ``.name`` attribute, so we
+        # use stable, human-readable identifiers that mirror the config keys in
+        # ``strategies.yaml`` (funding_rate_arbitrage / cross_exchange_arbitrage).
+        arb_display = (
+            ("funding", "funding_rate_arbitrage"),
+            ("cross", "cross_exchange_arbitrage"),
+        )
+        for key, display in arb_display:
+            strat = arb.get(key)
+            if strat is None:
+                continue
+            loaded.append({
+                "name": getattr(strat, "name", None) or display,
+                "enabled": bool(getattr(strat, "enabled", True)),
+                "kind": "arbitrage",
+            })
         return {
             "running": self.is_running,
             "iterations": self.iterations,
@@ -1285,4 +1309,5 @@ class TradingLoop:
             "last_error": self.last_error,
             "paper_mode": self.paper_mode,
             "capital_pct": self.capital_pct,
+            "loaded_strategies": loaded,
         }

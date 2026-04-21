@@ -349,6 +349,14 @@ export type SystemStatusResponse = {
   errors?: string[];
   pipeline_running?: boolean;
   capital_pct?: number;
+  /** Every strategy currently registered in the trading loop — signal & arbitrage.
+   *  Used by the dashboard to show a complete roster (including idle strategies
+   *  that have produced no recent opportunities). */
+  loaded_strategies?: Array<{
+    name: string;
+    enabled: boolean;
+    kind: 'signal' | 'arbitrage' | string;
+  }>;
 };
 
 async function getJson<T>(path: string): Promise<T> {

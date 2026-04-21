@@ -296,6 +296,14 @@ class Orchestrator:
         if self.state == SystemState.STARTING:
             trading_status = {**trading_status, "orchestrator_starting": True}
 
+        # Surface the loop's strategy registry at the top level so the
+        # dashboard can render a full strategy roster (including currently
+        # idle ones) instead of only those producing signals *right now*.
+        loaded_strategies: list[dict[str, Any]] = []
+        ts_ls = trading_status.get("loaded_strategies") if isinstance(trading_status, dict) else None
+        if isinstance(ts_ls, list):
+            loaded_strategies = ts_ls
+
         out: dict[str, Any] = {
             "state": self.state.value,
             "state_changed_at": self.state_changed_at.isoformat(),
@@ -307,6 +315,7 @@ class Orchestrator:
             "errors": list(self.errors),
             "pipeline_running": self._pipeline_task is not None and not self._pipeline_task.done(),
             "capital_pct": self.capital_pct,
+            "loaded_strategies": loaded_strategies,
         }
         if self._last_start_error:
             out["last_start_error"] = self._last_start_error

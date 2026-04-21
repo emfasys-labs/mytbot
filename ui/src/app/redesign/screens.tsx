@@ -464,29 +464,53 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
         </Card>
       ) : (
         <div style={{ display: 'grid', gap: 14, gridTemplateColumns: 'repeat(2, 1fr)' }}>
-          {live.strategies.map((s) => (
-            <Card key={s.name}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                <span style={{
-                  fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 500,
-                  color: TOKENS.ink0, letterSpacing: '-0.02em',
-                }}>{s.name}</span>
-                <Pill tone="neutral">weight {(s.weight * 100).toFixed(0)}%</Pill>
-              </div>
-              <Spark
-                values={Array.from({ length: 12 }, (_, i) => 1 + Math.sin(i * 0.7 + s.weight * 10) * 0.2 + i * 0.05 * s.weight)}
-                width={260} height={56} accent={accentColor}
-              />
-              <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12,
-                marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`,
-              }}>
-                <StratStat label="Avg conf" value={s.sharpe ? s.sharpe.toFixed(2) : '—'} />
-                <StratStat label="Opp score" value={s.winRate ? `${(s.winRate * 100).toFixed(0)}%` : '—'} />
-                <StratStat label="Opps"   value={String(s.trades)} />
-              </div>
-            </Card>
-          ))}
+          {live.strategies.map((s) => {
+            const isIdle = !!s.idle || (s.weight === 0 && s.trades === 0);
+            const isArb = s.kind === 'arbitrage';
+            return (
+              <Card key={s.name} style={isIdle ? { opacity: 0.72 } : undefined}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 8 }}>
+                  <span style={{
+                    fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 500,
+                    color: TOKENS.ink0, letterSpacing: '-0.02em',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{s.name}</span>
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                    {isArb && <Pill tone="neutral">arbitrage</Pill>}
+                    {s.enabled === false && <Pill tone="loss">disabled</Pill>}
+                    {isIdle
+                      ? <Pill tone="neutral">idle</Pill>
+                      : <Pill tone="neutral">weight {(s.weight * 100).toFixed(0)}%</Pill>
+                    }
+                  </div>
+                </div>
+                {isIdle ? (
+                  <div style={{
+                    height: 56, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11,
+                    borderRadius: 6, background: 'rgba(255,255,255,0.02)',
+                  }}>
+                    {isArb
+                      ? 'awaiting arbitrage opportunity'
+                      : 'registered · no opportunities in current regime'}
+                  </div>
+                ) : (
+                  <Spark
+                    values={Array.from({ length: 12 }, (_, i) => 1 + Math.sin(i * 0.7 + s.weight * 10) * 0.2 + i * 0.05 * s.weight)}
+                    width={260} height={56} accent={accentColor}
+                  />
+                )}
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12,
+                  marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`,
+                }}>
+                  <StratStat label="Avg conf" value={s.sharpe ? s.sharpe.toFixed(2) : '—'} />
+                  <StratStat label="Opp score" value={s.winRate ? `${(s.winRate * 100).toFixed(0)}%` : '—'} />
+                  <StratStat label="Opps"   value={String(s.trades)} />
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
     </div>
