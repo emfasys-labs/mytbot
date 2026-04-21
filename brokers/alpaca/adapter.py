@@ -430,8 +430,23 @@ class AlpacaAdapter(BrokerAdapter):
         sym = order.symbol.strip()
         side = AlpOrderSide.BUY if order.side == OrderSide.BUY else AlpOrderSide.SELL
         tif = _map_tif(order.time_in_force)
-        qty = float(order.quantity)
+        qty_dec = _d(order.quantity)
+        qty = float(qty_dec)
         cid = order.client_order_id
+
+        # Alpaca rejects fractional equity/ETF orders with any TIF other than
+        # DAY ("fractional orders must be DAY orders [code=42210000]"). When
+        # the quantity isn't whole, force DAY regardless of the upstream TIF
+        # so the sizing logic doesn't have to know about broker quirks.
+        is_fractional = qty_dec != qty_dec.to_integral_value()
+        if is_fractional and tif != AlpTIF.DAY:
+            logger.debug(
+                "Alpaca | forcing TIF=DAY for fractional order | symbol=%s qty=%s original_tif=%s",
+                sym,
+                qty_dec,
+                tif,
+            )
+            tif = AlpTIF.DAY
 
         common: dict = {"symbol": sym, "side": side, "time_in_force": tif, "qty": qty}
         if cid:

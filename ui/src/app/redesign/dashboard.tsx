@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Conviction, LiveEvent, Position } from './data';
+import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, Density, SystemState, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
@@ -160,7 +161,7 @@ export function DashboardScreen({
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <Label>Conviction river</Label>
           <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-            {live.conviction.length} tracked{topConviction ? ` · top ${topConviction.sym}` : ''}
+            {live.conviction.length} tracked{topConviction ? ` · top ${prettySymbol(topConviction.sym)}` : ''}
           </span>
         </div>
         <ConvictionRiver conviction={live.conviction} accent={accentColor} newSignal={newSignal} />
@@ -350,11 +351,15 @@ function ConvictionRiver({
               }} />
             )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: 130, flexShrink: 0 }}>
-              <span style={{
-                fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500,
-                color: TOKENS.ink0, letterSpacing: '-0.02em', width: 48,
-              }}>
-                {c.sym}
+              <span
+                title={c.sym}
+                style={{
+                  fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500,
+                  color: TOKENS.ink0, letterSpacing: '-0.02em',
+                  width: 64,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                {prettySymbol(c.sym)}
               </span>
               <Pill size="sm" tone={c.side === 'short' ? 'loss' : 'neutral'}>
                 {c.side}
@@ -448,10 +453,12 @@ function PositionChip({ pos, accent }: { pos: Position; accent: string }) {
       background: TOKENS.bg2, border: `1px solid ${TOKENS.line}`,
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-        <span style={{
-          fontFamily: TOKENS.sans, fontSize: 12, fontWeight: 500,
-          color: TOKENS.ink0, letterSpacing: '-0.02em',
-        }}>{pos.sym}</span>
+        <span
+          title={pos.sym}
+          style={{
+            fontFamily: TOKENS.sans, fontSize: 12, fontWeight: 500,
+            color: TOKENS.ink0, letterSpacing: '-0.02em',
+          }}>{prettySymbol(pos.sym)}</span>
         <span style={{
           fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
           fontVariantNumeric: 'tabular-nums',

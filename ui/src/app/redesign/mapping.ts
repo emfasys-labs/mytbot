@@ -29,6 +29,18 @@ import {
 import type { SystemState as BackendSystemState } from '../lib/api';
 import type { SystemState as DesignSystemState } from './tokens';
 
+/**
+ * Strip pipeline-only suffixes from a ticker so the UI shows what an operator
+ * would type on a broker terminal (``EURUSD=X`` → ``EURUSD``, ``ES=F`` → ``ES``).
+ * Internal state still keys on the raw symbol; this is display-only.
+ */
+export function prettySymbol(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const s = String(raw).trim().toUpperCase();
+  if (s.endsWith('=X') || s.endsWith('=F')) return s.slice(0, -2);
+  return s;
+}
+
 export function mapSystemState(
   backend: BackendSystemState,
   killSwitch: boolean,
@@ -340,9 +352,10 @@ export function mapOrderEvent(o: ApiOrderRow): LiveEvent | null {
   const kind: LiveEvent['kind'] = isFill ? 'fill' : 'signal';
   const qty = o.filled_quantity ?? '';
   const px = o.avg_fill_price ?? '';
+  const sym = prettySymbol(o.symbol);
   const txt = isFill
-    ? `${o.symbol} ${String(o.side ?? '').toLowerCase()} · ${qty} @ ${px}${o.broker ? ` (${o.broker})` : ''}`
-    : `${o.symbol} ${String(o.side ?? '').toLowerCase()} · ${st || 'queued'}`;
+    ? `${sym} ${String(o.side ?? '').toLowerCase()} · ${qty} @ ${px}${o.broker ? ` (${o.broker})` : ''}`
+    : `${sym} ${String(o.side ?? '').toLowerCase()} · ${st || 'queued'}`;
   return {
     t: o.timestamp ? Date.parse(String(o.timestamp)) : Date.now(),
     kind,

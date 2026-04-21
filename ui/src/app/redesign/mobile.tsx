@@ -4,6 +4,7 @@
 
 import { useState } from 'react';
 import { EquityCurve, LiveFeed } from './dashboard';
+import { prettySymbol } from './mapping';
 import { Card, I, Label, NavNumber, Signed, Wordmark } from './primitives';
 import { MasterButton } from './shell';
 import { ACCENTS, AccentName, SystemState, TOKENS } from './tokens';
@@ -96,8 +97,8 @@ export function MobileApp({
                 display: 'flex', alignItems: 'center', gap: 12,
                 padding: '10px 0', borderBottom: `1px solid ${TOKENS.line}`,
               }}>
-                <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0, width: 50 }}>
-                  {c.sym}
+                <span title={c.sym} style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0, width: 50, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {prettySymbol(c.sym)}
                 </span>
                 <div style={{ flex: 1, height: 4, background: 'rgba(255,255,255,0.04)', borderRadius: 2, overflow: 'hidden' }}>
                   <div style={{
@@ -129,7 +130,7 @@ export function MobileApp({
                 padding: '12px 0', borderBottom: `1px solid ${TOKENS.line}`,
               }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{p.sym}</div>
+                  <div title={p.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(p.sym)}</div>
                   <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{p.qty} · {p.last || p.avg}</div>
                 </div>
                 <Signed value={p.pnl} size={12} />

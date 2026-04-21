@@ -7,7 +7,7 @@ import { useMemo } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
-import { mapOrdersToTradeLog, normalizeSide } from './mapping';
+import { mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
@@ -58,7 +58,11 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
             padding: '12px 18px', borderBottom: `1px solid ${TOKENS.line}`,
             display: 'grid', gridTemplateColumns: cols, gap: 16, alignItems: 'center',
           }}>
-            <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0 }}>{r.sym || '—'}</span>
+            <span
+              title={r.sym}
+              style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0 }}>
+              {prettySymbol(r.sym) || '—'}
+            </span>
             <span style={{
               fontFamily: TOKENS.mono, fontSize: 11,
               color: r.side === 'short' ? TOKENS.loss : TOKENS.ink2,
@@ -157,7 +161,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                   borderBottom: `1px solid ${TOKENS.line}`,
                 }}>
                   <div>
-                    <div style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{p.sym}</div>
+                    <div title={p.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(p.sym)}</div>
                     <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
                       qty {p.qty}{p.broker ? ` · ${p.broker}` : ''}
                     </div>
@@ -335,7 +339,7 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
           <div key={`${a.sym}-${i}`} style={{ padding: '10px 0', borderBottom: `1px solid ${TOKENS.line}` }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{a.sym || '—'}</span>
+                <span title={a.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(a.sym) || '—'}</span>
                 <Pill size="sm" tone="neutral">{a.side}</Pill>
               </div>
               <Pill size="sm" tone="profit">approved</Pill>
@@ -366,7 +370,7 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
           <div key={`${r.sym}-${i}`} style={{ padding: '10px 0', borderBottom: `1px solid ${TOKENS.line}` }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{r.sym || '—'}</span>
+                <span title={r.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(r.sym) || '—'}</span>
                 <Pill size="sm" tone="loss">{r.side}</Pill>
               </div>
               <Pill size="sm" tone="danger">blocked</Pill>
@@ -406,8 +410,8 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0 }}>
-                    {x.sym}
+                  <span title={x.sym} style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, color: TOKENS.ink0 }}>
+                    {prettySymbol(x.sym)}
                   </span>
                   <Pill size="sm" tone={x.side === 'long' ? 'profit' : 'loss'}>{x.side}</Pill>
                 </div>
@@ -590,7 +594,7 @@ export function TradeLogScreen({ live }: { live: LiveData }) {
           }}>
             <span style={{ color: TOKENS.ink3, width: 130 }}>{r.t}</span>
             <Pill size="sm" tone={r.ok === true ? 'profit' : r.ok === false ? 'danger' : 'neutral'}>{r.kind}</Pill>
-            {r.sym && <span style={{ color: TOKENS.ink0, fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, width: 60 }}>{r.sym}</span>}
+            {r.sym && <span title={r.sym} style={{ color: TOKENS.ink0, fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500, width: 60 }}>{prettySymbol(r.sym)}</span>}
             {r.side && <span style={{ color: TOKENS.ink2, width: 44 }}>{r.side}</span>}
             {r.qty !== undefined && Number.isFinite(r.qty) && (
               <span style={{ color: TOKENS.ink1 }}>
