@@ -40,6 +40,20 @@ def _balance_rows_mean_ready(balances: list[Any]) -> bool:
     return False
 
 
+def _balance_poll_mean_ready(name: str, balances: list[Any]) -> bool:
+    """
+    Venue-specific readiness from a successful get_balance() poll.
+
+    IBKR can return transient empty rows while account summary warms up, so
+    keep the strict non-empty check there. Other venues should be considered
+    ready once the authenticated balance call succeeds, even when the wallet
+    currently has zero funded assets.
+    """
+    if name == "ibkr":
+        return _balance_rows_mean_ready(balances)
+    return True
+
+
 @dataclass
 class BrokerStatus:
     """Per-broker row for status; balance_ready after first non-empty get_balance snapshot."""
@@ -309,7 +323,7 @@ class BrokerManager:
         timeout = 60.0 if name == "ibkr" else 35.0
         try:
             balances = await asyncio.wait_for(adapter.get_balance(), timeout=timeout)
-            if balances is not None and _balance_rows_mean_ready(list(balances)):
+            if balances is not None and _balance_poll_mean_ready(name, list(balances)):
                 status.balance_ready = True
                 logger.info("broker | {} | balance snapshot ready ({} rows)", name, len(balances))
             else:
@@ -381,7 +395,11 @@ class BrokerManager:
                 await self._mark_balance_ready(name, adapter, status)
             else:
                 self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
-                status.error = "connect() returned False"
+                status.error = (
+                    "Startup connect deferred (transient exchange throttle/retry)"
+                    if name == "kraken"
+                    else "connect() returned False"
+                )
                 logger.warning("broker | {} | connect failed (attempt {})", name, self._broker_fail_count[name])
         except asyncio.TimeoutError:
             self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
@@ -412,6 +430,10 @@ class BrokerManager:
     def _broker_backoff(self, name: str) -> float:
         """Exponential backoff for any broker: 60 -> 120 -> 240 -> 300 (capped)."""
         fails = self._broker_fail_count.get(name, 0)
+        if name == "kraken":
+            # Kraken may throttle private auth bursts at startup; retry sooner.
+            base = min(10 * (2 ** fails), 120)
+            return base + random.uniform(0, min(3.0, base * 0.2))
         base = min(self._RECONNECT_BASE * (2 ** fails), self._RECONNECT_MAX)
         return base + random.uniform(0, min(5.0, base * 0.2))
 

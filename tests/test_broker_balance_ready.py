@@ -3,7 +3,11 @@
 from decimal import Decimal
 
 from brokers.base import Balance
-from system.broker_manager import _balance_rows_mean_ready
+from system.broker_manager import (
+    BrokerManager,
+    _balance_poll_mean_ready,
+    _balance_rows_mean_ready,
+)
 
 
 def test_balance_rows_mean_ready_empty_not_ready() -> None:
@@ -28,3 +32,19 @@ def test_balance_rows_mean_ready_no_currency_ignored() -> None:
         reserved=Decimal("0"),
     )
     assert _balance_rows_mean_ready([row]) is False
+
+
+def test_balance_poll_mean_ready_ibkr_still_requires_rows() -> None:
+    assert _balance_poll_mean_ready("ibkr", []) is False
+
+
+def test_balance_poll_mean_ready_non_ibkr_allows_empty_wallet() -> None:
+    assert _balance_poll_mean_ready("bybit", []) is True
+    assert _balance_poll_mean_ready("kraken", []) is True
+
+
+def test_kraken_backoff_is_shorter_than_default() -> None:
+    mgr = BrokerManager(paper_mode=True)
+    mgr._broker_fail_count["kraken"] = 1
+    mgr._broker_fail_count["binance"] = 1
+    assert mgr._broker_backoff("kraken") < mgr._broker_backoff("binance")

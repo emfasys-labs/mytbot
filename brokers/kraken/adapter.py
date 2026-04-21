@@ -73,6 +73,11 @@ def _d(v: object) -> Decimal:
     return Decimal(str(v))
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "rate limit" in s or "eapi:rate limit" in s
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -194,8 +199,7 @@ class KrakenAdapter(BrokerAdapter):
             try:
                 return await self._try_connect()
             except Exception as exc:  # noqa: BLE001
-                err_str = str(exc).lower()
-                is_rate_limit = "rate limit" in err_str or "eapi:rate limit" in err_str
+                is_rate_limit = _is_rate_limit_error(exc)
                 if is_rate_limit:
                     logger.warning(
                         "connect | Kraken | rate limited — will retry via reconnect loop",
@@ -222,7 +226,25 @@ class KrakenAdapter(BrokerAdapter):
         if self.api_key and self.api_secret:
             self._user = User(key=self.api_key, secret=self.api_secret)
             self._trade = Trade(key=self.api_key, secret=self.api_secret)
-            await self._run_sync(lambda: self._user.get_account_balance())  # type: ignore[union-attr]
+            auth_ok = False
+            for auth_attempt in range(3):
+                try:
+                    await self._run_sync(lambda: self._user.get_account_balance())  # type: ignore[union-attr]
+                    auth_ok = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_rate_limit_error(exc) or auth_attempt == 2:
+                        raise
+                    sleep_s = 2 + auth_attempt * 3
+                    logger.warning(
+                        "connect | Kraken | private auth rate-limited (attempt {}/{}) — retry in {}s",
+                        auth_attempt + 1,
+                        3,
+                        sleep_s,
+                    )
+                    await asyncio.sleep(sleep_s)
+            if not auth_ok:
+                return False
             self._private_ok = True
             logger.info("connect | Kraken | private API | ok")
         else:
