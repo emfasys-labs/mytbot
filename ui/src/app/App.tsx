@@ -6,7 +6,6 @@ import { SystemHeartbeat } from './components/SystemHeartbeat';
 import { HapticFeedback, useHaptic } from './components/HapticFeedback';
 import { OpportunityTicker } from './components/OpportunityTicker';
 import { LiveStrip } from './components/dashboard/LiveStrip';
-import { SignalBrain } from './components/dashboard/SignalBrain';
 import { AllocationCenter } from './components/dashboard/AllocationCenter';
 import { RiskGate } from './components/dashboard/RiskGate';
 import { PerformancePanel } from './components/dashboard/PerformancePanel';
@@ -70,7 +69,7 @@ function App() {
   const [pnlSnapshot, setPnlSnapshot] = useState<ApiPnlResponse | null>(null);
   const [dashboardSnapshot, setDashboardSnapshot] = useState<DashboardSnapshot | null>(null);
   const [snapshotFetchFailed, setSnapshotFetchFailed] = useState(false);
-  const [wsEvents, setWsEvents] = useState<WsTickEvent[]>([]);
+  const [, setWsEvents] = useState<WsTickEvent[]>([]);
   /** Loop sleep drives snapshot cadence — stale threshold must be > ~2× this or we spuriously warn. */
   const [loopIntervalSec, setLoopIntervalSec] = useState(120);
   /** From GET /system/status trading.snapshot_published_at (same clock as dashboard.snapshot.updated_at when synced). */
@@ -592,16 +591,6 @@ function App() {
 
         <div className="flex flex-1 min-h-0 flex-col">
           <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-hidden p-2 lg:flex-row lg:items-stretch">
-            <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-72">
-              <SignalBrain
-                snapshot={dashboardSnapshot}
-                events={wsEvents}
-                dormant={systemState !== 'running'}
-                snapshotFetchFailed={snapshotFetchFailed}
-                positions={positions}
-              />
-            </aside>
-
             <main className="relative z-0 isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-y-auto xl:pr-14">
               <div className="pointer-events-none hidden xl:block absolute right-0 top-0 z-10 h-96">
                 <div className="pointer-events-auto">
@@ -653,7 +642,7 @@ function App() {
               </div>
             </main>
 
-            <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-72">
+            <aside className="z-0 flex max-h-[42vh] min-h-0 shrink-0 flex-col lg:max-h-none lg:w-80">
               <RiskGate signals={intelligenceSignals} dormant={systemState !== 'running'} />
             </aside>
           </div>

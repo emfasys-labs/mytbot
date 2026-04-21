@@ -76,6 +76,13 @@ function urgencyLabel(d: number): string {
   return 'LOW';
 }
 
+function instructionStatus(v: string): 'pending' | 'waiting risk' | 'executing' {
+  const s = v.toLowerCase();
+  if (s.includes('approve') || s.includes('risk')) return 'waiting risk';
+  if (s.includes('open') || s.includes('buy') || s.includes('sell') || s.includes('close')) return 'executing';
+  return 'pending';
+}
+
 export function AllocationCenter({
   snapshot,
   dormant,
@@ -151,6 +158,7 @@ export function AllocationCenter({
               : `Typical: no opportunity exceeds the replacement threshold (${OPPORTUNITY_THRESHOLD_HINT}) or portfolio is already near targets.`,
         ]
       : null;
+  const showHoldPanel = weakest.length > 0 || usingHoldFallback;
 
   return (
     <div className="relative z-0 isolate flex min-h-0 w-full min-w-0 flex-col gap-2 overflow-x-hidden">
@@ -226,10 +234,10 @@ export function AllocationCenter({
         )}
       </div>
 
-      <div className="grid min-h-0 w-full min-w-0 grid-cols-1 gap-3 overflow-hidden lg:grid-cols-2 lg:items-stretch">
+      <div className={`grid min-h-0 w-full min-w-0 grid-cols-1 gap-3 overflow-hidden ${showHoldPanel ? 'lg:grid-cols-2 lg:items-stretch' : ''}`}>
         <div className="flex min-h-0 min-w-0 flex-col gap-2 lg:min-w-0">
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 shrink-0 overflow-hidden">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Top opportunities</div>
+        <div className="rounded-xl border border-sky-500/20 bg-gradient-to-b from-sky-950/20 to-white/[0.02] p-2.5 min-h-0 shrink-0 overflow-hidden">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-400 mb-1.5">Active opportunities</div>
           {dormant ? (
             <div className="text-xs text-zinc-600">System off</div>
           ) : usingOppFallback ? (
@@ -239,102 +247,77 @@ export function AllocationCenter({
                 book.
               </div>
               <ScrollArea className="h-[150px]">
-                <table className="w-full text-[11px] font-mono">
-                  <thead>
-                    <tr className="text-left text-zinc-500 text-[10px]">
-                      <th className="pb-1">Sym</th>
-                      <th className="pb-1">Score</th>
-                      <th className="pb-1 hidden sm:table-cell">Stance</th>
-                      <th className="pb-1 hidden md:table-cell">Urgency</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <div className="space-y-1.5">
                     {opps.slice(0, 12).map((o, i) => {
                       const d = rowDisplay01(o);
                       const raw = parseOpportunityRowScore(o);
                       const isFirst = i === 0;
+                      const width = `${Math.max(6, Math.round(d * 100))}%`;
                       return (
-                        <motion.tr
+                        <motion.div
                           key={i}
                           title={rowTooltip(o)}
-                          className={`border-t border-white/5 ${isFirst ? 'bg-emerald-500/[0.07]' : ''}`}
+                          className={`rounded border border-white/5 px-2 py-1 ${isFirst ? 'bg-emerald-500/[0.07]' : 'bg-black/20'}`}
                           initial={isFirst ? { backgroundColor: 'rgba(16,185,129,0.12)' } : undefined}
                           animate={{ backgroundColor: isFirst ? 'rgba(16,185,129,0.07)' : 'transparent' }}
                           transition={{ duration: 0.6 }}
                         >
-                          <td className={`py-1 text-white/90 ${isFirst ? 'font-semibold' : ''}`}>
-                            {String(o.symbol ?? '')}
-                          </td>
-                          <td
-                            className={`py-1 tabular-nums ${convictionTextClass(d, true)}`}
-                          >
-                            {d.toFixed(2)} {arrowForRaw(raw)}
-                          </td>
-                          <td className="py-1 text-zinc-400 truncate max-w-[100px] hidden sm:table-cell">
-                            {opportunityTagsLine(o)}
-                          </td>
-                          <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
-                            {urgencyLabel(d)} · {bandFromDisplay01(d)}
-                          </td>
-                        </motion.tr>
+                          <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-mono">
+                            <span className={`text-white/90 ${isFirst ? 'font-semibold' : ''}`}>{String(o.symbol ?? '')}</span>
+                            <span className={`tabular-nums ${convictionTextClass(d, true)}`}>{d.toFixed(2)} {arrowForRaw(raw)}</span>
+                            <span className="text-[10px] text-zinc-500">{urgencyLabel(d)}</span>
+                          </div>
+                          <div className="h-1.5 rounded bg-zinc-800">
+                            <div className="h-full rounded bg-emerald-400/80" style={{ width }} />
+                          </div>
+                        </motion.div>
                       );
                     })}
-                  </tbody>
-                </table>
+                </div>
               </ScrollArea>
             </>
           ) : opps.length === 0 ? (
             <div className="text-xs text-zinc-600">No opportunities in snapshot.</div>
           ) : (
             <ScrollArea className="h-[150px]">
-              <table className="w-full text-[11px] font-mono">
-                <thead>
-                  <tr className="text-left text-zinc-500 text-[10px]">
-                    <th className="pb-1">Sym</th>
-                    <th className="pb-1">Score</th>
-                    <th className="pb-1 hidden sm:table-cell">Tags</th>
-                    <th className="pb-1 hidden md:table-cell">Urgency</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <div className="space-y-1.5">
                   {opps.slice(0, 12).map((o, i) => {
                     const d = rowDisplay01(o);
                     const raw = parseOpportunityRowScore(o);
                     const isFirst = i === 0;
+                    const width = `${Math.max(6, Math.round(d * 100))}%`;
                     return (
-                      <motion.tr
+                      <motion.div
                         key={i}
                         title={rowTooltip(o)}
-                        className={`border-t border-white/5 ${isFirst ? 'bg-emerald-500/[0.07]' : ''}`}
+                        className={`rounded border border-white/5 px-2 py-1 ${isFirst ? 'bg-emerald-500/[0.07]' : 'bg-black/20'}`}
                           initial={isFirst ? { backgroundColor: 'rgba(16,185,129,0.1)' } : undefined}
                           animate={{ backgroundColor: isFirst ? 'rgba(16,185,129,0.07)' : 'transparent' }}
                       >
-                        <td className={`py-1 text-white/90 ${isFirst ? 'font-semibold' : ''}`}>
-                          {String(o.symbol ?? '')}
-                        </td>
-                        <td className={`py-1 tabular-nums ${convictionTextClass(d, true)}`}>
-                          {d.toFixed(2)} {arrowForRaw(raw)}
-                        </td>
-                        <td className="py-1 text-zinc-500 truncate max-w-[120px] hidden sm:table-cell">
-                          {opportunityTagsLine(o)}
-                        </td>
-                        <td className="py-1 text-zinc-500 text-[10px] hidden md:table-cell">
-                          {urgencyLabel(d)}
-                        </td>
-                      </motion.tr>
+                        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-mono">
+                          <span className={`text-white/90 ${isFirst ? 'font-semibold' : ''}`}>{String(o.symbol ?? '')}</span>
+                          <span className={`tabular-nums ${convictionTextClass(d, true)}`}>
+                            {d.toFixed(2)} {arrowForRaw(raw)}
+                          </span>
+                          <span className="text-[10px] text-zinc-500">{urgencyLabel(d)}</span>
+                        </div>
+                        <div className="h-1.5 rounded bg-zinc-800">
+                          <div className="h-full rounded bg-emerald-400/80" style={{ width }} />
+                        </div>
+                        <div className="mt-1 text-[10px] text-zinc-500 truncate">{opportunityTagsLine(o)}</div>
+                      </motion.div>
                     );
                   })}
-                </tbody>
-              </table>
+              </div>
             </ScrollArea>
           )}
         </div>
 
-      <div className="rounded-xl border border-white/5 bg-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1 overflow-hidden">
-        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Next actions (allocator)</div>
+      <div className="rounded-xl border border-emerald-500/25 bg-gradient-to-b from-emerald-950/20 to-white/[0.02] p-2.5 min-h-0 flex flex-col flex-1 overflow-hidden">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-400 mb-1.5">What system is about to do</div>
         {!dormant && instr.length > 0 ? (
-          <div className="mb-1.5 text-[9px] leading-snug text-zinc-600">
-            Deployment intent from the coordinator — the risk gate can still reject (see right column).
+          <div className="mb-1.5 text-[9px] leading-snug text-zinc-500">
+            Deployment intent from coordinator. Live status moves pending → waiting risk → executing.
           </div>
         ) : null}
         {dormant || instr.length === 0 ? (
@@ -352,17 +335,23 @@ export function AllocationCenter({
             )}
           </div>
         ) : (
-          <ScrollArea className="h-[100px] min-h-[100px] w-full">
-            <ul className="space-y-0.5 font-mono text-[11px] text-zinc-300 pr-1">
+          <ScrollArea className="h-[120px] min-h-[120px] w-full">
+            <ul className="space-y-1 font-mono text-[11px] text-zinc-300 pr-1">
               {instr.slice(0, 14).map((x, i) => (
-                <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-white/5 pb-0.5">
-                  <span className="text-white/90 shrink-0">{formatCoordinatorKind(String(x.action ?? x.kind ?? ''))}</span>
-                  <span className="shrink-0">{String(x.symbol ?? '')}</span>
+                <li key={i} className="rounded border border-white/5 bg-black/20 px-2 py-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="text-white/90 shrink-0">{formatCoordinatorKind(String(x.action ?? x.kind ?? ''))}</span>
+                    <span className="shrink-0">{String(x.symbol ?? '')}</span>
+                    <span className="text-zinc-500 shrink-0">{String(x.side ?? '')}</span>
+                    <span className="text-emerald-300/90 tabular-nums shrink-0">{fmtDashNum(x.capital ?? x.target_notional)}</span>
+                  </div>
                   {x.strategy_name != null && String(x.strategy_name).trim() ? (
-                    <span className="text-zinc-500 truncate max-w-[140px]">{String(x.strategy_name)}</span>
+                    <div className="text-zinc-500 truncate max-w-[180px] text-[10px]">{String(x.strategy_name)}</div>
                   ) : null}
-                  <span className="text-zinc-500 shrink-0">{String(x.side ?? '')}</span>
-                  <span className="text-emerald-300/80 tabular-nums shrink-0">{fmtDashNum(x.capital ?? x.target_notional)}</span>
+                  <div className="mt-0.5 flex items-center justify-between text-[10px]">
+                    <span className="text-zinc-600">loop #{snapshot?.loop_iteration ?? '—'}</span>
+                    <span className="uppercase text-sky-300/90">{instructionStatus(String(x.action ?? x.kind ?? ''))}</span>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -371,6 +360,7 @@ export function AllocationCenter({
       </div>
         </div>
 
+        {showHoldPanel ? (
         <div className="flex h-full min-h-[300px] min-w-0 flex-col rounded-xl border border-white/5 bg-white/[0.02] p-2.5 lg:min-h-0">
           <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5 shrink-0">Hold pressure</div>
           {dormant ? (
@@ -426,6 +416,7 @@ export function AllocationCenter({
             </ScrollArea>
           )}
         </div>
+        ) : null}
       </div>
     </div>
   );

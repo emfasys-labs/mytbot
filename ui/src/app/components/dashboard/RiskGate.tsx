@@ -39,23 +39,28 @@ export function RiskGate({ signals, dormant }: Props) {
   const rejected = rows.filter((s) => (s.verdict ?? '').toLowerCase() !== 'approved');
 
   return (
-    <div className="flex flex-col h-full min-h-0 rounded-xl border border-white/5 bg-white/[0.02] p-2.5">
-      <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Risk gate</div>
+    <div className="flex flex-col h-full min-h-0 rounded-xl border border-rose-500/20 bg-gradient-to-b from-rose-950/15 to-white/[0.02] p-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-400">Risk decision engine</div>
+        <span className="text-[10px] font-mono text-zinc-500">
+          {dormant ? 'offline' : `${approved.length} approved · ${rejected.length} blocked`}
+        </span>
+      </div>
       {dormant ? (
         <div className="text-xs text-zinc-600">System off</div>
       ) : (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-3 pr-2">
-            <div>
-              <div className="text-[10px] text-emerald-500/90 mb-1 uppercase">Approved</div>
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-950/20 p-2">
+              <div className="text-[10px] text-emerald-300 mb-1 uppercase font-semibold">Approved</div>
               {approved.length === 0 ? (
                 <div className="text-[11px] text-zinc-600">None recent</div>
               ) : (
                 <ul className="space-y-2">
                   {approved.map((s) => (
-                    <li key={s.id} className="text-[11px] border-b border-white/5 pb-2">
-                      <div className="text-white/90">
-                        {s.symbol}{' '}
+                    <li key={s.id} className="text-[11px] border-b border-white/5 pb-2 last:border-b-0">
+                      <div className="text-white">
+                        <span className="text-emerald-300">✓</span> {s.symbol}{' '}
                         <span className="text-zinc-500">{s.side}</span>
                       </div>
                       <div className="text-zinc-500 text-[10px]">
@@ -67,8 +72,8 @@ export function RiskGate({ signals, dormant }: Props) {
                 </ul>
               )}
             </div>
-            <div>
-              <div className="text-[10px] text-rose-500/90 mb-1 uppercase">Rejected / blocked</div>
+            <div className="rounded-lg border border-rose-500/20 bg-rose-950/20 p-2">
+              <div className="text-[10px] text-rose-300 mb-1 uppercase font-semibold">Rejected</div>
               {rejected.length === 0 ? (
                 <div className="text-[11px] text-zinc-600">None recent</div>
               ) : (
@@ -78,9 +83,9 @@ export function RiskGate({ signals, dormant }: Props) {
                     const code = normalizeReason(raw) || raw;
                     const explain = humanizeReason(code, raw);
                     return (
-                      <li key={s.id} className="text-[11px] border-b border-white/5 pb-2">
+                      <li key={s.id} className="text-[11px] border-b border-white/5 pb-2 last:border-b-0">
                         <div className="text-white/90">
-                          <span className="text-rose-200/90">Rejected:</span>{' '}
+                          <span className="text-rose-300">✕</span>{' '}
                           <span className="uppercase">{s.side}</span> {s.symbol}
                         </div>
                         <div className="text-zinc-300 text-[10px] mt-0.5 leading-snug">{explain}</div>

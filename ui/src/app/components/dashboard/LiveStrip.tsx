@@ -62,8 +62,20 @@ export function LiveStrip({
   loopIntervalSec = 120,
   lastStartError = null,
 }: Props) {
+  const pctFromUnknown = (raw: unknown): number | null => {
+    if (raw == null || raw === '') return null;
+    const n = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+    if (!Number.isFinite(n) || n < 0) return null;
+    const pct = n > 1 ? n : n * 100;
+    return Math.max(0, Math.min(100, pct));
+  };
+
   const path = snapshot?.path ?? '—';
   const loopIt = snapshot?.loop_iteration;
+  const instructions = (snapshot?.execution_plan?.instructions ?? []) as Array<Record<string, unknown>>;
+  const next = instructions[0] ?? null;
+  const deployedPct = pctFromUnknown(snapshot?.portfolio?.gross_exposure);
+  const freePct = deployedPct == null ? null : Math.max(0, 100 - deployedPct);
 
   const d24 = discoverySummary?.last_24h;
   const showFirstCycleWait =
@@ -80,68 +92,94 @@ export function LiveStrip({
     totalCapital > 0 &&
     Math.abs(bookNav - totalCapital) / totalCapital > 0.0005;
 
+  const liveNow = (() => {
+    if (systemState === 'error') return 'ERROR';
+    if (systemState === 'starting') return 'BOOTING';
+    if (systemState === 'stopping') return 'STOPPING';
+    if (systemState !== 'running') return 'IDLE';
+    if (instructions.length > 0) return 'EXECUTION PREP';
+    return 'SCANNING';
+  })();
+
+  const nextActionLine = (() => {
+    if (systemState !== 'running') return 'none';
+    if (!next) return 'waiting for high-conviction setup';
+    const action = String(next.action ?? next.kind ?? 'act').toUpperCase();
+    const side = String(next.side ?? '').toUpperCase();
+    const sym = String(next.symbol ?? '').toUpperCase();
+    const cap = next.capital ?? next.target_notional;
+    const capTxt = cap != null && String(cap) !== '' ? ` · ${fmtDashMoneySigned(cap)}` : '';
+    return `${action}${side ? ` ${side}` : ''}${sym ? ` ${sym}` : ''}${capTxt}`;
+  })();
+
   return (
-    <div className="shrink-0 border-b border-white/10 bg-black/40 px-3 py-2 md:px-4">
+    <div className="shrink-0 border-b border-white/10 bg-gradient-to-b from-zinc-950 to-black px-3 py-2.5 md:px-4">
+      <div className="mb-2 rounded-xl border border-sky-500/25 bg-sky-950/20 px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="flex items-center gap-2">
+            <span className={`h-2.5 w-2.5 rounded-full ${systemState === 'running' ? 'animate-pulse bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]' : systemState === 'error' ? 'bg-rose-400' : 'bg-zinc-500'}`} />
+            <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-400">System</span>
+            <span className="text-sm font-semibold tracking-wide text-white">{liveNow}</span>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono">
+            <span className="text-zinc-400">MODE <span className="text-zinc-100">{String(mode).toUpperCase()}</span></span>
+            <span className="text-zinc-600">|</span>
+            <span className="text-zinc-400">DEPLOYED <span className="text-emerald-300">{isFlattened || deployedPct == null ? '—' : `${deployedPct.toFixed(0)}%`}</span></span>
+            <span className="text-zinc-600">|</span>
+            <span className="text-zinc-400">NEXT <span className="text-zinc-100">{isFlattened ? 'off' : nextActionLine}</span></span>
+          </div>
+        </div>
+      </div>
+
       <div className="flex flex-wrap items-center gap-x-4 gap-y-3 text-[11px] md:text-xs text-zinc-300">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
-          <div className="flex items-baseline gap-2">
-            <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
-            <span className="text-lg font-light text-white tabular-nums">
-              {isFlattened ? '—' : fmtDashMoneySigned(totalCapital)}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-5 gap-y-2">
+          <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
+            <div className="flex items-baseline gap-2">
+              <span className="text-zinc-500 uppercase tracking-wider">NAV</span>
+              <span className="text-2xl font-semibold text-white tabular-nums">
+                {isFlattened ? '—' : fmtDashMoneySigned(totalCapital)}
+              </span>
+            </div>
+            {navMismatch && !isFlattened ? (
+              <span className="text-[9px] leading-tight text-zinc-500 sm:max-w-[14rem]">
+                Book <span className="font-mono text-zinc-400">{fmtDashMoneySigned(bookNav!)}</span>
+              </span>
+            ) : null}
+          </div>
+
+          <div className="h-4 w-px bg-white/10 hidden sm:block" />
+          <div className="flex flex-wrap gap-3">
+            <span>
+              <span className="text-zinc-500">Today </span>
+              <span className={dailyPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'} tabular-nums>
+                {isFlattened ? '—' : `${dailyPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(dailyPnL)}`}
+              </span>
+            </span>
+            <span>
+              <span className="text-zinc-500">Week </span>
+              <span className={weekPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
+                {isFlattened ? '—' : `${weekPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(weekPnL)}`}
+              </span>
+            </span>
+            <span>
+              <span className="text-zinc-500">Month </span>
+              <span className={monthPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
+                {isFlattened ? '—' : `${monthPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(monthPnL)}`}
+              </span>
             </span>
           </div>
-          {navMismatch && !isFlattened ? (
-            <span className="text-[9px] leading-tight text-zinc-500 sm:max-w-[14rem]">
-              Book (allocator){' '}
-              <span className="font-mono text-zinc-400">{fmtDashMoneySigned(bookNav!)}</span>
-              {' — '}
-              can differ from broker headline
-            </span>
-          ) : null}
-        </div>
-        <div className="h-4 w-px bg-white/10 hidden sm:block" />
-        <div className="flex flex-wrap gap-3">
-          <span>
-            <span className="text-zinc-500">Today </span>
-            <span className={dailyPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'} tabular-nums>
-              {isFlattened ? '—' : `${dailyPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(dailyPnL)}`}
-            </span>
-          </span>
-          <span>
-            <span className="text-zinc-500">Week </span>
-            <span className={weekPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
-              {isFlattened ? '—' : `${weekPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(weekPnL)}`}
-            </span>
-          </span>
-          <span>
-            <span className="text-zinc-500">Month </span>
-            <span className={monthPnL >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'} tabular-nums>
-              {isFlattened ? '—' : `${monthPnL >= 0 ? '+' : ''}${fmtDashMoneySigned(monthPnL)}`}
-            </span>
-          </span>
-        </div>
-        <div className="h-4 w-px bg-white/10 hidden md:block" />
-        <div className="flex flex-wrap gap-2 items-center">
-          <span className="text-zinc-500">System</span>
-          <span
-            className={
-              systemState === 'running'
-                ? 'text-emerald-400'
-                : systemState === 'error'
-                  ? 'text-rose-400'
-                  : 'text-zinc-400'
-            }
-          >
-            {systemState}
-          </span>
-          <span className="text-zinc-600">·</span>
-          <span className="text-zinc-500">path {path}</span>
-          {loopIt != null ? <span className="text-zinc-600">#{loopIt}</span> : null}
-          {snapshotStale ? (
-            <span className="text-amber-400/90 text-[10px] uppercase">snapshot stale</span>
-          ) : null}
-        </div>
+          <div className="h-4 w-px bg-white/10 hidden sm:block" />
+          <div className="flex flex-wrap gap-2 items-center font-mono text-[10px]">
+            <span className="text-zinc-500">CAPITAL</span>
+            <span className="text-emerald-300">{isFlattened || deployedPct == null ? '—' : `${deployedPct.toFixed(0)}% deployed`}</span>
+            <span className="text-zinc-500">{isFlattened || freePct == null ? '' : `| ${freePct.toFixed(0)}% free`}</span>
+            <span className="text-zinc-600">·</span>
+            <span className="text-zinc-500">path {path}</span>
+            {loopIt != null ? <span className="text-zinc-600">#{loopIt}</span> : null}
+            {snapshotStale ? (
+              <span className="text-amber-400/90 text-[10px] uppercase">snapshot stale</span>
+            ) : null}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-3 md:ml-auto">
           <MasterControl

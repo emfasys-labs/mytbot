@@ -47,6 +47,8 @@ export function PerformancePanel({
   const todayN = periodPnL(pnl?.today);
   const winRate = pnl?.metrics?.win_rate_days;
   const maxDd = pnl?.metrics?.max_drawdown_pct;
+  const realisedToday = toNumber(pnl?.today?.realised, 0);
+  const unrealisedToday = toNumber(pnl?.today?.unrealised, 0);
 
   const chartValues = useMemo(() => {
     const h = [...equityHistory].filter((v) => Number.isFinite(v));
@@ -103,7 +105,7 @@ export function PerformancePanel({
           ))}
         </div>
       </div>
-      <div className="h-[148px] w-full mb-2 overflow-hidden rounded-md bg-black/30 isolate">
+      <div className="h-[118px] w-full mb-2 overflow-hidden rounded-md bg-black/30 isolate">
         <EquityLine
           compact
           balance={totalCapital}
@@ -131,7 +133,18 @@ export function PerformancePanel({
             {isFlattened ? '—' : lastTradeMinutes < 1 ? '<1m' : `${lastTradeMinutes}m ago`}
           </span>
         </span>
-        <span className="text-zinc-600">Dots on curve = fill days (green/red ≈ day portfolio Δ)</span>
+        <span>
+          Realised{' '}
+          <span className={realisedToday >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
+            {isFlattened ? '—' : `${realisedToday >= 0 ? '+' : ''}${fmtDashMoneySigned(realisedToday)}`}
+          </span>
+        </span>
+        <span>
+          Unrealised{' '}
+          <span className={unrealisedToday >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}>
+            {isFlattened ? '—' : `${unrealisedToday >= 0 ? '+' : ''}${fmtDashMoneySigned(unrealisedToday)}`}
+          </span>
+        </span>
       </div>
       {!isFlattened ? (
         <p className="mb-2 text-[9px] leading-snug text-zinc-600">
