@@ -34,6 +34,7 @@ import {
   mapPnlRollups,
   mapPositions,
   mapStrategies,
+  mergeStrategiesWithSignals,
   mapSystemState,
 } from './mapping';
 import type { Approved, BrokerStatus, Conviction, LiveEvent, NewsRow, Position, Rejected, Strategy } from './data';
@@ -364,7 +365,10 @@ export function useLiveSystem(): LiveData {
   const positions = useMemo(() => mapPositions(positionsRaw, nav), [positionsRaw, nav]);
   const conviction = useMemo(() => mapConviction(snapshot, positionChanges), [snapshot, positionChanges]);
   const { approved, rejected } = useMemo(() => mapApprovedRejected(intelligence), [intelligence]);
-  const strategies = useMemo(() => mapStrategies(snapshot), [snapshot]);
+  const strategies = useMemo(
+    () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence),
+    [snapshot, intelligence],
+  );
   const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(() => mapPnlRollups(pnl), [pnl]);

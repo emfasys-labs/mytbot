@@ -166,6 +166,32 @@ class BinanceAdapter(BrokerAdapter):
         self._client: Client | None = None
         self._order_symbol: dict[str, str] = {}
 
+    @staticmethod
+    def _is_time_skew_error(exc: Exception) -> bool:
+        if isinstance(exc, BinanceAPIException):
+            return int(getattr(exc, "code", 0)) == -1021
+        return "timestamp for this request was" in str(exc).lower()
+
+    async def _sync_time_offset(self) -> None:
+        if self._client is None:
+            return
+        server = await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
+        server_ms = int(server.get("serverTime", 0))
+        if server_ms <= 0:
+            return
+        local_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        self._client.timestamp_offset = server_ms - local_ms
+
+    async def _call_private_with_time_sync(self, fn: Callable[[], T]) -> T:
+        try:
+            return await self._run_sync(fn)
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_time_skew_error(exc):
+                raise
+            logger.warning("binance | timestamp skew detected (-1021) — syncing server time and retrying")
+            await self._sync_time_offset()
+            return await self._run_sync(fn)
+
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
             await self._rest_gap.wait()
@@ -204,8 +230,9 @@ class BinanceAdapter(BrokerAdapter):
                 testnet=self.testnet,
                 tld=self.tld,
             )
+            await self._sync_time_offset()
             if self.api_key and self.api_secret:
-                await self._run_sync(lambda: self._client.get_account())  # type: ignore[union-attr]
+                await self._call_private_with_time_sync(lambda: self._client.get_account())  # type: ignore[union-attr]
                 self._private_ok = True
                 logger.info(
                     "connect | Binance | private API | ok | testnet={}",
@@ -254,7 +281,7 @@ class BinanceAdapter(BrokerAdapter):
             assert self._client is not None
             return self._client.get_account()
 
-        raw = await self._run_sync(_fetch)
+        raw = await self._call_private_with_time_sync(_fetch)
         out: list[Balance] = []
         for row in raw.get("balances", []):
             free = _d(row.get("free", "0"))

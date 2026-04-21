@@ -56,6 +56,7 @@ class _FakeBroker:
         self.low_liquidity = low_liquidity
         self.thin_book = thin_book
         self.place_calls = 0
+        self.last_order = None
         self.get_order_calls = 0
         self.cancel_calls = 0
         self.open_order_results: list[OrderResult] = []
@@ -69,6 +70,7 @@ class _FakeBroker:
 
     async def place_order(self, order):
         self.place_calls += 1
+        self.last_order = order
         if self.fail_place:
             raise RuntimeError("broker down")
         return OrderResult(
@@ -223,6 +225,55 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     assert result is not None
     assert broker.place_calls == 1
     assert risk.killed is False
+
+
+@pytest.mark.asyncio
+async def test_ibkr_equity_quantity_is_normalized_to_whole_units(monkeypatch) -> None:
+    risk = _FakeRiskEngine(
+        {
+            "max_spread_pct": Decimal("0.05"),
+            "min_liquidity_usd": Decimal("1000"),
+            "max_slippage_pct": Decimal("0.05"),
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+    broker = _FakeBroker()
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+    s = _signal()
+    s.suggested_quantity = Decimal("10.999")
+    s.broker = "ibkr"
+    s.asset_class = "equity"
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    result = await engine.execute(s, _approved_decision())
+    assert result is not None
+    assert broker.last_order is not None
+    assert broker.last_order.quantity == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_ibkr_equity_fractional_under_one_is_skipped(monkeypatch) -> None:
+    risk = _FakeRiskEngine(
+        {
+            "max_spread_pct": Decimal("0.05"),
+            "min_liquidity_usd": Decimal("1000"),
+            "max_slippage_pct": Decimal("0.05"),
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+    broker = _FakeBroker()
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+    s = _signal()
+    s.suggested_quantity = Decimal("0.75")
+    s.broker = "ibkr"
+    s.asset_class = "equity"
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
+    result = await engine.execute(s, _approved_decision())
+    assert result is None
+    assert broker.place_calls == 0
 
 
 @pytest.mark.asyncio

@@ -193,8 +193,8 @@ class BrokerManager:
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
         "kraken": 90,
-        "binance": 30,
-        "bybit": 30,
+        "binance": 45,
+        "bybit": 45,
         "alpaca": 30,
     }
 
@@ -403,7 +403,10 @@ class BrokerManager:
                 logger.warning("broker | {} | connect failed (attempt {})", name, self._broker_fail_count[name])
         except asyncio.TimeoutError:
             self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
-            status.error = f"Connection timed out ({timeout}s)"
+            if name in {"binance", "bybit"}:
+                status.error = f"Connection timed out ({timeout}s) — will retry in background"
+            else:
+                status.error = f"Connection timed out ({timeout}s)"
             logger.warning("broker | {} | {}", name, status.error)
         except Exception as exc:
             self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
@@ -434,8 +437,31 @@ class BrokerManager:
             # Kraken may throttle private auth bursts at startup; retry sooner.
             base = min(10 * (2 ** fails), 120)
             return base + random.uniform(0, min(3.0, base * 0.2))
+        if name == "binance":
+            # Binance private endpoints can intermittently stall/throttle; retry sooner than default.
+            base = min(15 * (2 ** fails), 120)
+            return base + random.uniform(0, min(3.0, base * 0.2))
+        if name == "bybit":
+            # Bybit private wallet probes may time out transiently; keep reconnect cadence tighter.
+            base = min(20 * (2 ** fails), 180)
+            return base + random.uniform(0, min(4.0, base * 0.2))
         base = min(self._RECONNECT_BASE * (2 ** fails), self._RECONNECT_MAX)
         return base + random.uniform(0, min(5.0, base * 0.2))
+
+    def _connect_timeout(self, name: str) -> float:
+        """
+        Per-attempt connect timeout used by reconnect loop.
+
+        Slow private auth checks on some venues may require progressively longer
+        windows after repeated failures.
+        """
+        base = float(self._BROKER_TIMEOUTS.get(name, 30))
+        fails = self._broker_fail_count.get(name, 0)
+        if name == "bybit":
+            return min(90.0, base + (fails * 15.0))
+        if name == "binance":
+            return min(75.0, base + (fails * 10.0))
+        return base
 
     async def _reconnect_loop(self) -> None:
         await asyncio.sleep(self._HEALTH_POLL_SEC)
@@ -478,7 +504,7 @@ class BrokerManager:
                         "broker | {} | reconnect attempt (fails={} backoff={:.0f}s)",
                         name, fails, backoff,
                     )
-                    timeout = self._BROKER_TIMEOUTS.get(name, 30)
+                    timeout = self._connect_timeout(name)
                     await self._try_connect(name, cfg, status, timeout)
 
             newly = [n for n in attempted if n in self.adapters]

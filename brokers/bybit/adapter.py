@@ -164,6 +164,42 @@ class BybitAdapter(BrokerAdapter):
         self._private_ok = False
         self._client: HTTP | None = None
         self._order_symbol: dict[str, str] = {}
+        self._wallet_account_type: str = "UNIFIED"
+
+    def _candidate_wallet_account_types(self) -> list[str]:
+        # Support classic and unified account modes.
+        return ["UNIFIED", "CONTRACT", "SPOT", "FUND"]
+
+    async def _detect_wallet_account_type(self) -> str:
+        if self._client is None:
+            return "UNIFIED"
+        last_err: Exception | None = None
+        for account_type in self._candidate_wallet_account_types():
+            try:
+                await self._run_sync(
+                    lambda at=account_type: self._client.get_wallet_balance(accountType=at)  # type: ignore[union-attr]
+                )
+                return account_type
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                logger.debug(
+                    "connect | Bybit | wallet probe failed | accountType={} | {}",
+                    account_type,
+                    exc,
+                )
+        if last_err is not None:
+            # Some Bybit account setups reject all wallet accountType probes (ErrCode 400)
+            # even when API credentials are otherwise valid. Keep the adapter online and let
+            # subsequent balance/order endpoints drive readiness and behavior.
+            err_s = str(last_err).lower()
+            if "errcode: 400" in err_s and "accounttype" in err_s:
+                logger.warning(
+                    "connect | Bybit | wallet accountType autodetect failed for all probes; "
+                    "defaulting to UNIFIED and continuing"
+                )
+                return "UNIFIED"
+            raise last_err
+        return "UNIFIED"
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
@@ -183,17 +219,13 @@ class BybitAdapter(BrokerAdapter):
             )
             await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
             if self.api_key and self.api_secret:
-
-                def _ping_private() -> None:
-                    assert self._client is not None
-                    self._client.get_wallet_balance(accountType="UNIFIED")
-
-                await self._run_sync(_ping_private)
+                self._wallet_account_type = await self._detect_wallet_account_type()
                 self._private_ok = True
                 logger.info(
-                    "connect | Bybit | private API | ok | testnet={} category={}",
+                    "connect | Bybit | private API | ok | testnet={} category={} wallet_account_type={}",
                     self.testnet,
                     self.category,
+                    self._wallet_account_type,
                 )
             else:
                 self._private_ok = False
@@ -237,7 +269,7 @@ class BybitAdapter(BrokerAdapter):
 
         def _fetch() -> dict[str, Any]:
             assert self._client is not None
-            return self._client.get_wallet_balance(accountType="UNIFIED")
+            return self._client.get_wallet_balance(accountType=self._wallet_account_type)
 
         try:
             raw = await self._run_sync(_fetch)

@@ -366,6 +366,48 @@ export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
   return strategies.sort((a, b) => b.weight - a.weight).slice(0, 8);
 }
 
+export function mergeStrategiesWithSignals(
+  snapshotStrategies: Strategy[],
+  sigs: IntelligenceSignalsResponse | null,
+): Strategy[] {
+  const out = new Map<string, Strategy>();
+  for (const s of snapshotStrategies) out.set(s.name, s);
+
+  const rows = sigs?.signals ?? [];
+  if (!rows.length) return snapshotStrategies;
+
+  const sigAgg = new Map<string, { count: number; confSum: number }>();
+  let total = 0;
+  for (const r of rows) {
+    const nameRaw = String(r.strategy ?? '').trim();
+    if (!nameRaw) continue;
+    const name = nameRaw;
+    const conf = typeof r.confidence === 'number' && Number.isFinite(r.confidence)
+      ? Math.max(0, Math.min(1, r.confidence))
+      : 0;
+    const e = sigAgg.get(name) ?? { count: 0, confSum: 0 };
+    e.count += 1;
+    e.confSum += conf;
+    sigAgg.set(name, e);
+    total += 1;
+  }
+  if (!total) return snapshotStrategies;
+
+  for (const [name, v] of sigAgg.entries()) {
+    if (out.has(name)) continue;
+    const avgConf = v.count > 0 ? v.confSum / v.count : 0;
+    out.set(name, {
+      name,
+      weight: v.count / total,
+      sharpe: avgConf,
+      winRate: avgConf,
+      trades: v.count,
+    });
+  }
+
+  return [...out.values()].sort((a, b) => b.weight - a.weight).slice(0, 8);
+}
+
 export function estimateNavOpen(
   navNow: number,
   pnl: ApiPnlResponse | null,

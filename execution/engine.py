@@ -19,7 +19,8 @@ import uuid
 import logging
 import os
 import random
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 from typing import Any, Optional
 import asyncio
@@ -108,6 +109,17 @@ class ExecutionEngine:
             logger.error("Broker unavailable | signal_id=%s broker=%s", signal.signal_id, signal.broker)
             await self._send_critical_alert(
                 f"Broker unavailable for signal {signal.signal_id} ({signal.symbol}) on {signal.broker}"
+            )
+            return None
+
+        order = self._normalize_order_for_broker(order, signal)
+        if order.quantity <= 0:
+            logger.warning(
+                "Execution quantity invalid after broker normalization | signal_id=%s symbol=%s broker=%s qty=%s",
+                signal.signal_id,
+                signal.symbol,
+                signal.broker,
+                order.quantity,
             )
             return None
 
@@ -474,6 +486,24 @@ class ExecutionEngine:
             client_order_id=str(uuid.uuid4()),  # idempotency key
             instrument_metadata=inst_meta,
         )
+
+    def _normalize_order_for_broker(self, order: Order, signal: Signal) -> Order:
+        """
+        Apply venue-specific quantity constraints before placement.
+
+        IBKR rejects fractional quantity for many non-crypto instruments (error 10243).
+        Normalize those to whole units to avoid immediate cancel.
+        """
+        broker = str(getattr(signal, "broker", "") or "").strip().lower()
+        asset = str(getattr(signal, "asset_class", "") or "").strip().lower()
+        qty = Decimal(str(order.quantity))
+
+        if broker == "ibkr" and asset in {"equity", "etf", "bond", "future", "option"}:
+            qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+
+        if qty == order.quantity:
+            return order
+        return replace(order, quantity=qty)
 
     async def _get_broker(self, name: str):
         """Lazy-load broker adapter."""

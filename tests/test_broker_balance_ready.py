@@ -48,3 +48,21 @@ def test_kraken_backoff_is_shorter_than_default() -> None:
     mgr._broker_fail_count["kraken"] = 1
     mgr._broker_fail_count["binance"] = 1
     assert mgr._broker_backoff("kraken") < mgr._broker_backoff("binance")
+
+
+def test_binance_and_bybit_backoff_are_shorter_than_default() -> None:
+    mgr = BrokerManager(paper_mode=True)
+    mgr._broker_fail_count["binance"] = 1
+    mgr._broker_fail_count["bybit"] = 1
+    mgr._broker_fail_count["alpaca"] = 1
+    assert mgr._broker_backoff("binance") < mgr._broker_backoff("alpaca")
+    assert mgr._broker_backoff("bybit") < mgr._broker_backoff("alpaca")
+
+
+def test_connect_timeout_scales_for_binance_and_bybit() -> None:
+    mgr = BrokerManager(paper_mode=True)
+    mgr._broker_fail_count["bybit"] = 2
+    mgr._broker_fail_count["binance"] = 2
+    mgr._broker_fail_count["alpaca"] = 2
+    assert mgr._connect_timeout("bybit") > mgr._connect_timeout("alpaca")
+    assert mgr._connect_timeout("binance") > mgr._connect_timeout("alpaca")
