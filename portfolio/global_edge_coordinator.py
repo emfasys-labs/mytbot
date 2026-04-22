@@ -247,6 +247,41 @@ class GlobalEdgeCoordinator:
                 return 3
         return 3
 
+    def _notional_fraction_for_mode(self, mode: str) -> Decimal:
+        """Per-mode fraction applied to each opportunity's requested capital.
+
+        Defender trims aggressively (risk off), trader scales moderately, hunter
+        deploys the full strategy-requested size. Prior to D030 this was a single
+        scalar (``0.15``) uniformly applied to every mode — which silently
+        throttled hunter to ~15% of its intended deployment and produced the
+        "sleeping hunter" symptom where only a small fraction of capital was put
+        to work despite many valid opportunities.
+
+        Accepts:
+          * scalar (``"0.15"``) — legacy uniform cap, preserved for back-compat,
+          * dict keyed by mode (``{hunter: "1.0", trader: "0.5", defender: "0.15"}``).
+        Unknown / malformed values fall back to ``0.15``.
+        """
+        raw = self._cfg.get("max_notional_fraction_per_action", "0.15")
+        key = (mode or DEFAULT_MODE).strip().lower()
+        if key not in ("hunter", "trader", "defender"):
+            key = DEFAULT_MODE
+        # Scalar: legacy behaviour — one value for all modes.
+        if isinstance(raw, (int, float, str)):
+            try:
+                return Decimal(str(raw))
+            except Exception:  # noqa: BLE001
+                return Decimal("0.15")
+        if isinstance(raw, dict):
+            v = raw.get(key)
+            if v is None:
+                v = raw.get("trader", "0.15")
+            try:
+                return Decimal(str(v))
+            except Exception:  # noqa: BLE001
+                return Decimal("0.15")
+        return Decimal("0.15")
+
     def propose_actions(
         self,
         held: list[HeldPositionEdge],
@@ -304,7 +339,11 @@ class GlobalEdgeCoordinator:
                 if skip_churn:
                     continue
 
-            frac = Decimal(str(self._cfg.get("max_notional_fraction_per_action", "0.15")))
+            frac = self._notional_fraction_for_mode(active_mode)
+            # Hunter ``frac == 1.0`` → deploy the strategy-requested amount in
+            # full; defender ``frac == 0.15`` → trim to 15% of request. The
+            # ``min(1, frac)`` clamp prevents an accidental >100% blow-up if
+            # ops configures e.g. ``1.5``.
             cap = opp.capital_required * min(Decimal("1"), frac) if opp.capital_required > 0 else Decimal("0")
 
             out.append(

@@ -208,3 +208,99 @@ def test_max_actions_per_tick_explicit_kwarg_overrides_config() -> None:
     new_opps = [_opp(f"S{i}", str(Decimal("0.3") - Decimal(f"0.0{i}"))) for i in range(10)]
     actions = coord.propose_actions([], list(new_opps), active_mode="hunter", max_actions=2)
     assert len(actions) == 2
+
+
+# -----------------------------------------------------------------------------
+# D030: per-mode ``max_notional_fraction_per_action`` (sleeping-hunter fix)
+# -----------------------------------------------------------------------------
+
+
+def test_notional_fraction_scalar_is_mode_blind_backcompat() -> None:
+    """Legacy scalar config: same fraction applied to every mode (pre-D030)."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01", "trader": "0.01", "defender": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": "0.25",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+    for mode in ("hunter", "trader", "defender"):
+        actions = coord.propose_actions([], [opp], active_mode=mode)
+        assert len(actions) == 1
+        assert actions[0].capital == Decimal("2500"), f"mode={mode} scalar broke"
+
+
+def test_notional_fraction_mode_aware_hunter_gets_full_request() -> None:
+    """D030: hunter deploys the full strategy-requested capital; defender trims."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01", "trader": "0.01", "defender": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": {
+            "hunter": "1.00",
+            "trader": "0.50",
+            "defender": "0.15",
+        },
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+
+    hunter_a = coord.propose_actions([], [opp], active_mode="hunter")
+    trader_a = coord.propose_actions([], [opp], active_mode="trader")
+    defender_a = coord.propose_actions([], [opp], active_mode="defender")
+
+    assert hunter_a[0].capital == Decimal("10000"), "hunter must deploy full request"
+    assert trader_a[0].capital == Decimal("5000"), "trader scales to half"
+    assert defender_a[0].capital == Decimal("1500"), "defender trims to 15%"
+
+
+def test_notional_fraction_clamps_above_one() -> None:
+    """``min(1, frac)`` clamp prevents an accidental >100% blow-up."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": {"hunter": "1.50"},
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+    actions = coord.propose_actions([], [opp], active_mode="hunter")
+    assert actions[0].capital == Decimal("10000"), "must not exceed capital_required"
+
+
+def test_notional_fraction_unknown_mode_falls_back_to_trader() -> None:
+    cfg = {
+        "edge_advantage": {"trader": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": {
+            "hunter": "1.00",
+            "trader": "0.40",
+            "defender": "0.10",
+        },
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+    actions = coord.propose_actions([], [opp], active_mode="surge")
+    assert actions[0].capital == Decimal("4000"), "unknown mode must fall back to trader"
+
+
+def test_notional_fraction_malformed_value_defaults_to_015() -> None:
+    cfg = {
+        "edge_advantage": {"hunter": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": {"hunter": "banana"},
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+    actions = coord.propose_actions([], [opp], active_mode="hunter")
+    assert actions[0].capital == Decimal("1500"), "malformed → 0.15 default"
+
+
+def test_notional_fraction_default_when_missing_is_015() -> None:
+    """No config key at all → conservative 0.15 baseline."""
+    cfg = {
+        "edge_advantage": {"hunter": "0.01"},
+        "max_actions_per_tick": 1,
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    opp = _opp("BBB", "0.50", cap="10000")
+    actions = coord.propose_actions([], [opp], active_mode="hunter")
+    assert actions[0].capital == Decimal("1500")

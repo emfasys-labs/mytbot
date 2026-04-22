@@ -1049,11 +1049,22 @@ class ExecutionEngine:
                     remote[key] = remote.get(key, Decimal("0")) + Decimal(str(p.quantity))
                     remote_snapshots.append((broker_name, p))
 
+            # Compare first, then ALWAYS persist the remote snapshot. The
+            # broker is the authoritative source of truth for what we own; if
+            # the DB diverges, the correct response is to refresh the DB so
+            # downstream consumers (allocator's ``held`` input, UI positions,
+            # risk sizing) see reality — not to silently preserve the stale
+            # local view, which is what the pre-D030 early-return did.
             keys = set(local.keys()) | set(remote.keys())
+            any_mismatch = False
+            first_mismatch_broker: str | None = None
             for key in keys:
                 lq = local.get(key, Decimal("0"))
                 rq = remote.get(key, Decimal("0"))
                 if abs(lq - rq) > max_quantity_diff:
+                    any_mismatch = True
+                    if first_mismatch_broker is None:
+                        first_mismatch_broker = key[0]
                     logger.error(
                         "Position mismatch | broker=%s symbol=%s local_qty=%s remote_qty=%s",
                         key[0],
@@ -1061,10 +1072,9 @@ class ExecutionEngine:
                         lq,
                         rq,
                     )
-                    self._maybe_auto_kill_reconciliation("position mismatch", broker=key[0])
-                    return False
 
-            # Persist latest remote broker positions as a fresh snapshot so API/UI can show real holdings.
+            # Persist latest remote broker positions as a fresh snapshot so
+            # API/UI/allocator see real holdings, mismatch or not.
             if remote_snapshots:
                 snap_ts = datetime.now(timezone.utc)
                 async with sf() as session:
@@ -1086,6 +1096,15 @@ class ExecutionEngine:
                             )
                         )
                     await session.commit()
+
+            if any_mismatch:
+                # Still run the optional auto-kill hook — operators that opt in
+                # via ``auto_kill_on_reconciliation_failure`` get the same
+                # protection as before.
+                self._maybe_auto_kill_reconciliation(
+                    "position mismatch", broker=first_mismatch_broker
+                )
+                return False
             return True
         finally:
             if own_engine is not None:

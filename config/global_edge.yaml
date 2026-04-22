@@ -21,8 +21,17 @@ max_actions_per_tick:
   trader: 3
   defender: 1
 
-# Optional capital cap per action as fraction of tradable capital.
-max_notional_fraction_per_action: "0.15"
+# Per-mode fraction applied to each opportunity's strategy-requested capital
+# (D030). Hunter deploys the full request (aggressive), trader scales to half,
+# defender trims to 15% (risk-off). A scalar value (legacy) is still honoured
+# and applied uniformly to every mode.
+#   * ``hunter``   → 1.00 (full strategy request — broad, aggressive deployment)
+#   * ``trader``   → 0.50 (balanced)
+#   * ``defender`` → 0.15 (defensive, matches pre-D030 uniform default)
+max_notional_fraction_per_action:
+  hunter: "1.00"
+  trader: "0.50"
+  defender: "0.15"
 
 # Arbitrage short-horizon boost applied to expected_edge before compare (Decimal add).
 arbitrage_edge_boost:

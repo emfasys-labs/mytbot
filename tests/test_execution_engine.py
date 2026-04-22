@@ -304,10 +304,19 @@ async def test_reconcile_positions_mismatch_auto_kills(monkeypatch) -> None:
         def all(self):
             return []
 
+    added_rows: list = []
+    commits: list[int] = []
+
     class _FakeSession:
         async def execute(self, _stmt):
             # max timestamp exists, but no local rows -> mismatch vs remote qty=2
             return _FakeScalarResult(datetime.now(timezone.utc))
+
+        def add(self, obj) -> None:
+            added_rows.append(obj)
+
+        async def commit(self) -> None:
+            commits.append(1)
 
     class _FakeFactory:
         def __call__(self):
@@ -337,6 +346,10 @@ async def test_reconcile_positions_mismatch_auto_kills(monkeypatch) -> None:
     ok = await engine.reconcile_positions()
     assert ok is False
     assert "ibkr" in risk.disabled
+    # D030: broker-truth snapshot must still be persisted so the DB / allocator
+    # reflect reality even while the mismatch is flagged.
+    assert len(added_rows) == 1, "remote snapshot must be persisted on mismatch"
+    assert len(commits) == 1, "commit must fire on mismatch persistence"
 
 
 @pytest.mark.asyncio
@@ -400,6 +413,94 @@ async def test_reconcile_positions_happy_path(monkeypatch) -> None:
     ok = await engine.reconcile_positions()
     assert ok is True
     assert risk.killed is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_persists_broker_truth_on_quantity_mismatch(monkeypatch) -> None:
+    """D030: the broker is ground truth for positions.
+
+    Prior to the fix, a quantity mismatch (e.g. local DB says qty=164 while
+    IBKR reports 335) caused an early-return that *kept the stale local
+    snapshot*, so the allocator's ``held`` input silently diverged from
+    reality. The fix makes persistence unconditional — the DB always reflects
+    the broker's books, while ``return False`` still signals the mismatch to
+    upstream callers (and the optional auto-kill hook still fires).
+    """
+    risk = _FakeRiskEngine(
+        {
+            "auto_kill_on_reconciliation_failure": False,  # opt-in — default off
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+    broker = _FakeBroker()  # returns SPY qty=2 (see get_positions fixture)
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+
+    class _FakeScalarResult:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar_one_or_none(self):
+            return self._value
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            # Local DB claims we only hold qty=1 — diverges from broker's qty=2.
+            return [SimpleNamespace(broker="ibkr", symbol="SPY", quantity=Decimal("1"))]
+
+    added_rows: list = []
+    commits: list[int] = []
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            return _FakeScalarResult(datetime.now(timezone.utc))
+
+        def add(self, obj) -> None:
+            added_rows.append(obj)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    class _FakeFactory:
+        def __call__(self):
+            s = _FakeSession()
+
+            class _CM:
+                async def __aenter__(self_inner):
+                    return s
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _CM()
+
+    async def _fake_init_db():
+        return object(), _FakeFactory()
+
+    async def _fake_dispose(_engine):
+        return None
+
+    monkeypatch.setattr(ExecutionEngine, "_init_db", staticmethod(_fake_init_db))
+    monkeypatch.setattr(ExecutionEngine, "_dispose_db", staticmethod(_fake_dispose))
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    await engine._get_broker("ibkr")
+    ok = await engine.reconcile_positions()
+
+    # Still signals mismatch to upstream.
+    assert ok is False
+    # Auto-kill is OPT-IN and disabled here → broker stays enabled.
+    assert "ibkr" not in risk.disabled
+    assert risk.killed is False
+    # Critical: broker-truth persisted so the next allocator tick sees qty=2.
+    assert len(added_rows) == 1, "remote snapshot must be persisted on mismatch"
+    persisted = added_rows[0]
+    assert persisted.symbol == "SPY"
+    assert persisted.broker == "ibkr"
+    assert persisted.quantity == Decimal("2"), "persisted qty must match broker truth"
+    assert len(commits) == 1
 
 
 @pytest.mark.asyncio

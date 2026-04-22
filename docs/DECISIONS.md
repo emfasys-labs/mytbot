@@ -404,3 +404,32 @@ Full suite still green (276 passed, 3 skipped).
 **Operator follow-ups (next cycle):**
 - Consider surfacing `daily_pnl` as a TimescaleDB hypertable to make multi-year NAV history queries cheap.
 - Surface "last NAV heartbeat" timestamp on the System screen so operators can spot a stuck heartbeat before it causes drift.
+
+---
+
+## D030 — Hunter must hunt: mode-aware capital fraction + broker-truth reconciliation
+
+**Date:** 2026-04-22
+**Decision:** Two tightly-coupled fixes addressing the "sleeping hunter" symptom — the system ran with hunter regime but deployed only ~6% of tradable capital while rejecting or parking the rest.
+
+1. **Mode-aware `max_notional_fraction_per_action`.** `GlobalEdgeCoordinator` caps each emitted open action to `opp.capital_required × frac`. Prior to D030 `frac` was a single scalar (`0.15`) applied to every mode — so hunter (which wants to deploy aggressively) got the same 15% throttle as defender (which wants risk off). A strategy asking for £44,294 was trimmed to £6,644, exactly reproducing the observed 6.4% deployment. The config value is now either a scalar (legacy, preserved verbatim) **or** a dict keyed by mode. Defaults: `hunter: 1.00` (full strategy request), `trader: 0.50` (balanced), `defender: 0.15` (defensive, matches pre-D030 uniform behaviour). `min(1, frac)` clamp guards against accidental >100% blow-ups; malformed / unknown-mode values fall back to `0.15`. Lives alongside the already-mode-aware `max_actions_per_tick` — hunter now emits up to 10 actions × full-request capital per tick, which is what the mode was designed for.
+
+2. **Reconciliation persists broker truth unconditionally.** `ExecutionEngine._reconcile_positions_internal` compared local `PositionLog` rows against each broker's `get_positions()` output and, on any quantity divergence, logged the mismatch and returned early *before* writing the fresh remote snapshot to the DB. The unintended effect: once the DB drifted (e.g. IBKR actually held 335 COHR while our DB said 164), every subsequent reconciliation noticed the gap, logged it, and did nothing — so `GlobalEdgeCoordinator.held` permanently consumed a stale view of our holdings and kept over-proposing new opens on top of risk we already had. The fix splits the comparison from the persistence: the loop collects *all* mismatches, ALWAYS persists the remote snapshot (the broker's books are ground truth for what we own), then returns `False` after persistence so upstream still sees the divergence signal and the opt-in `auto_kill_on_reconciliation_failure` hook still fires when enabled.
+
+**Reason:** On 2026-04-22 the operator reported hunter was "sleeping again — only 6.3% of capital working". Investigation showed 4 compounding symptoms: 41 Alpaca rejections (`insufficient buying power [code=40310000]`), 33 IBKR limits sitting pending, 94 IBKR orders cancelled with zero fills, and COHR position reconciliation reporting `local_qty=164 remote_qty=335`. The two bugs above are the direct, mechanical causes of the deployment gap:
+- *Allocator bug:* even when the loop generated valid opportunities, the coordinator silently deflated their requested capital by 85%, so any single tick could only deploy ~£26k of new risk on a £1.05M NAV.
+- *Reconciliation bug:* the "held" input the coordinator used to rank new vs existing edges was stuck on a stale snapshot, which over time caused the system to either double-up (proposing opens for symbols we already held larger than we knew) or under-propose (if remote quantity grew). The snapshot drift also produced the £171k COHR discrepancy visible in the logs.
+
+**Rejected alternatives:**
+- *Raise the scalar `max_notional_fraction_per_action` to 1.0.* Fixes hunter but removes the risk-off brake on defender. The per-mode dict is the same amount of config with the correct semantics.
+- *Force local DB to match broker by deleting mismatched rows.* Brittle and asymmetric — it also loses the mismatch signal to upstream. The cleaner contract is "broker is truth, always persist, log and `return False` so upstream can alert / auto-kill if configured".
+- *Make the coordinator re-read broker positions directly instead of DB.* Bigger blast radius, couples allocator to broker I/O, and doesn't fix the UI which also reads `PositionLog`.
+
+**Status:** Implemented. Covered by:
+- `tests/test_global_edge_coordinator.py` — 6 new cases: scalar back-compat, mode-aware per-mode fractions, `min(1, frac)` clamp at >100%, unknown-mode → trader fallback, malformed → 0.15 default, missing-key → 0.15 default.
+- `tests/test_execution_engine.py` — updated mismatch test asserts persistence happened; new `test_reconcile_persists_broker_truth_on_quantity_mismatch` exercises the local≠remote case explicitly (local qty=1, broker qty=2) and asserts the persisted row carries the broker's quantity.
+- Config: `config/global_edge.yaml` ships the new dict form with hunter=1.00 / trader=0.50 / defender=0.15.
+
+**Operator follow-ups (next cycle):**
+- Per-broker buying-power-aware routing: even with the allocator deflation fix, we observed Alpaca rejecting ~£440k worth of orders sized against total NAV when only IBKR had room. Sizing at the execution layer should consult each broker's `get_balances()` and either re-route or size-down rather than bounce at the venue.
+- Surface position-mismatch events to the System screen so operators can see the broker-truth refresh happen in real time (currently only visible via the error log).
