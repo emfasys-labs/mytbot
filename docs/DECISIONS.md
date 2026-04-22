@@ -544,3 +544,99 @@ Implementation details:
 **Reason:** D031E delivered pure decision logic but left runtime enforcement pending. Without a monitor, `max_loss_per_trade_pct` only gates new entries and does not protect already-open positions intraday.
 
 **Status:** Implemented in `system/orchestrator.py` with tests in `tests/test_stop_loss_monitor.py` (close on breach, no-op when within budget, loop cancellation). Full suite green.
+
+---
+
+## D034 — Strategy expansion wave: event-driven + pairs + volume/flow
+
+**Date:** 2026-04-22
+**Decision:** Expand the live strategy roster with three new modules wired into the existing `RawSignal -> SignalEngine -> RiskEngine -> ExecutionEngine` contract:
+- `event_driven_news`: creates directional signals from AI/news shock context (`news_scores`, `news_details`, macro confidence).
+- `pairs_trading`: creates relative-value signals from configured pair spreads using rolling hedge-ratio spread z-scores.
+- `volume_flow`: creates continuation/exhaustion signals from volume anomaly + bar-return behavior.
+
+Integration constraints kept:
+- No risk bypasses.
+- Strategy sizing intent stays metadata-driven (`target_notional`, scaling diagnostics).
+- New strategies are YAML-gated in `config/strategies.yaml` and can be toggled via existing control flows.
+
+**Reason:** The allocator/risk architecture was already mature, but alpha diversity lagged. This adds high-ROI edges (event, relative value, flow) without cross-layer coupling or broker interface changes.
+
+**Status:** Implemented in `system/trading_loop/loop.py`, `strategies/event_driven.py`, `strategies/pairs_trading.py`, `strategies/volume_flow.py`, with coverage in `tests/test_strategies.py`.
+
+---
+
+## D035 — Demand-engine gating + volatility/regime/meta wave
+
+**Date:** 2026-04-22
+**Decision:** Introduce a global `DemandEngine` (`system/demand_engine.py`) that computes a bounded demand score from AI news/macro and cross-asset anchor returns, then apply it in three places: (1) strategy emission context (`regime_rotation`), (2) pre-allocation meta-label filtering (`signals/meta_labeler.py`) for candidate/raw signals, and (3) opportunity/coordinator ranking bias (`signals/opportunity_engine.py` demand multiplier + `portfolio/global_edge_coordinator.py` demand-adjusted regime-fit). Add two strategy modules: `volatility_regime` (ATR regime breakout/compression) and `regime_rotation` (risk-on/off proxy rotation).
+
+**Reason:** Move from signal-only architecture to opportunity-driven behavior with an explicit latent-demand variable that influences both candidate quality and allocation ranking across D015 and global-edge paths.
+
+**Status:** Implemented in loop/config/strategies with tests in `tests/test_strategies.py` and `tests/test_demand_meta.py`.
+
+---
+
+## D036 — Wave 3: cross-asset demand graph + volatility overlay + ML-style meta-labeling
+
+**Date:** 2026-04-22
+**Decision:** Add an explicit cross-asset demand graph module (`system/cross_asset_demand_graph.py`) and feed it into `DemandEngine` as a first-class component. Upgrade meta-labeling (`signals/meta_labeler.py`) from threshold-only rules to a feature-scored probability gate (sigmoid over confidence, demand alignment, volume/news features, strategy prior bias). Add a portfolio-level volatility overlay in `portfolio/allocation_engine.py` that scales gross exposure target using market-volatility proxies from regime metadata.
+
+**Reason:** Improve robustness in regime transitions by (1) extracting demand from structured cross-asset relationships, (2) selecting higher-quality candidates probabilistically rather than by hard cuts, and (3) reducing capital deployment during volatility shocks at allocator level.
+
+**Status:** Implemented with coverage in `tests/test_demand_meta.py` and `tests/test_allocation_vol_overlay.py`.
+
+---
+
+## D037 — Wave 4: demand telemetry + mode-calibrated meta-labeling + demand urgency planning
+
+**Date:** 2026-04-22
+**Decision:** Extend demand-awareness into observability and execution: (1) publish demand telemetry (`score`, `trend`, confidence, cross-asset components) via runner heartbeat and dashboard snapshots (`d015` and `global_edge` payloads), (2) support per-profile-mode calibration in meta-labeling (`defender/trader/hunter` probability thresholds), and (3) apply demand-conditioned urgency multipliers in `execution/planner.py` so aligned opens/increases are prioritized while countertrend expansion is de-prioritized.
+
+**Reason:** Keep allocator/execution behavior aligned with the same latent demand state and make that state visible to operators in both control-tower and heartbeat channels.
+
+**Status:** Implemented in `system/trading_loop/loop.py`, `system/dashboard_publish.py`, `signals/meta_labeler.py`, `execution/planner.py`, with tests in `tests/test_demand_meta.py` and `tests/test_execution_planner_demand_urgency.py`.
+
+---
+
+## D038 — Wave 5: demand-aware routing + adaptive meta priors + demand alerts
+
+**Date:** 2026-04-22
+**Decision:** Extend demand-awareness to execution venue selection and online strategy priors: `SmartOrderRouter.route(...)` now accepts optional metadata and applies demand/profile-aware venue preference for crypto/equity paths; trading loop periodically computes dynamic strategy bias from recent order outcomes (`signals/meta_adaptation.py`) and merges it into meta-label strategy priors; demand regime-shift alerts are emitted into heartbeat and dashboard snapshot payloads.
+
+**Reason:** Improve realized execution quality and adapt signal acceptance to live fill behavior without bypassing risk or changing frozen broker interfaces.
+
+**Status:** Implemented in `execution/router.py`, `system/trading_loop/loop.py`, `signals/meta_adaptation.py`, `system/dashboard_publish.py`, with tests in `tests/test_meta_adaptation.py` and `tests/test_router_demand_bias.py`.
+
+---
+
+## D039 — Wave 6: learned routing feedback + mode-adaptive demand thresholds + UI diagnostics
+
+**Date:** 2026-04-22
+**Decision:** Add a lightweight learned routing-quality map in `SmartOrderRouter` keyed by `(broker, symbol)`, updated from realized execution feedback (filled vs non-filled and slippage proxy) to influence future broker ranking. Extend demand-alert gating with per-mode thresholds (`defender/trader/hunter`) and persist short alert history in heartbeat/snapshot payloads. Surface demand/meta diagnostics in redesign Risk screen from runtime heartbeat and dashboard snapshot.
+
+**Reason:** Close the loop between execution outcomes and routing choice, adapt demand sensitivity to operating mode, and make latent-state adaptation observable to the operator.
+
+**Status:** Implemented in `execution/router.py`, `system/trading_loop/loop.py`, `config/strategies.yaml`, `ui/src/app/redesign/useLiveSystem.ts`, `ui/src/app/redesign/screens.tsx`, with tests in `tests/test_router_demand_bias.py` and `tests/test_demand_meta.py`.
+
+---
+
+## D040 — Wave 7: persistent routing trajectories + mode-adaptive alerts + diagnostics endpoint
+
+**Date:** 2026-04-22
+**Decision:** Persist learned routing quality state (`quality_map` + per-symbol short history) into control-state (`routing.quality.state`) and reload it on loop startup; apply configurable decay policy each N iterations to prevent stale overfit. Extend demand alerts with mode-aware thresholds and publish alert history in heartbeat/snapshot payloads. Add dedicated diagnostics API endpoint `/diagnostics/routing-quality` and wire redesign UI to show routing trajectories alongside demand/meta diagnostics.
+
+**Reason:** Make routing learning durable across restarts, keep signal/reactivity mode-consistent, and give operators direct visibility into execution-learning dynamics.
+
+**Status:** Implemented in `execution/router.py`, `system/trading_loop/loop.py`, `api/server.py`, `ui/src/app/redesign/useLiveSystem.ts`, `ui/src/app/redesign/screens.tsx`, with tests in `tests/test_router_demand_bias.py` and `tests/test_api_dashboard_extras.py`.
+
+---
+
+## D041 — Wave 8: routing confidence intervals + adaptive decay + trajectory sparklines
+
+**Date:** 2026-04-22
+**Decision:** Extend routing learning with broker-symbol confidence diagnostics and adaptive decay mechanics: routing export now includes per-broker sample stats (`n`, `std`, `ci95_half`) and decay can adapt to observation count, turnover/liquidity EMA proxies, and staleness. Trading loop now passes turnover/liquidity hints into routing feedback. Diagnostics payload/type expanded and redesign Risk diagnostics render per-symbol trajectory sparklines with CI95.
+
+**Reason:** Raw point scores are insufficient for operator trust and can overfit stale sparse samples; confidence-aware routing telemetry and adaptive forgetting make the learning loop safer and more interpretable.
+
+**Status:** Implemented in `execution/router.py`, `system/trading_loop/loop.py`, `ui/src/app/lib/api.ts`, `ui/src/app/redesign/screens.tsx`, with tests updated in `tests/test_router_demand_bias.py`.

@@ -112,3 +112,23 @@ Detail: `docs/BUILD_PLAN.md`. Decisions: `docs/DECISIONS.md`. Architecture: `doc
 - **Adapters are isolated** — no venue-specific imports outside `brokers/` (use `brokers/registry.py`).
 - **Paper mode first** — `paper_mode=True` default; live requires explicit config (e.g. `APP_ENV=live`, M8 profile when used).
 - **Decimal for money** in core trading logic; full audit logging of signals, risk, orders, and fills.
+
+## Active strategy roster
+
+- Directional: `momentum_breakout`, `mean_reversion`
+- Flow/volatility: `volume_flow`
+- Volatility: `volatility_regime`
+- Event-driven: `event_driven_news` (AI/news shock gated)
+- Relative value: `pairs_trading` (config-driven pair list)
+- Macro rotation: `regime_rotation` (demand-score driven proxies)
+- Demand modeling: cross-asset demand graph + demand engine composite score
+- Portfolio throttle: volatility overlay on gross exposure target
+- Execution: demand-conditioned urgency in execution planning
+- Routing: demand-aware venue preference (crypto/equity path bias)
+- Routing: learned broker-symbol execution quality feedback (fill/slippage aware)
+- Routing: persistent quality state + decay policy (control-state backed)
+- Routing: broker-level confidence intervals (CI95) and adaptive decay by activity/liquidity proxies
+- Meta-layer: adaptive strategy priors from recent execution outcomes
+- Dashboard: demand regime-shift alerts/history + meta-calibration diagnostics
+- Diagnostics: per-symbol routing quality trajectory endpoint (`/diagnostics/routing-quality`) + UI mini-sparklines
+- Structural arbitrage: `funding_rate_arbitrage`, `cross_exchange_arbitrage`

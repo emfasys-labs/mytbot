@@ -18,6 +18,7 @@ import {
   type ApiPositionsResponse,
   type DashboardSnapshot,
   type IntelligenceSignalsResponse,
+  type RoutingQualityResponse,
   type SystemState as BackendSystemState,
   type TradingMode,
 } from '../lib/api';
@@ -97,6 +98,9 @@ export interface LiveData {
   newsSourceStats: Record<string, NewsSourceStat>;
   orders: ApiOrderRow[];
   intelligence: IntelligenceSignalsResponse | null;
+  runtimeDemand: Record<string, unknown> | null;
+  runtimeMetaLabeling: Record<string, unknown> | null;
+  routingQuality: RoutingQualityResponse | null;
 
   loopIteration: number;
   path: string;
@@ -150,6 +154,9 @@ export function useLiveSystem(): LiveData {
   const [newsSourceStats, setNewsSourceStats] = useState<Record<string, NewsSourceStat>>({});
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
+  const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
+  const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
+  const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
     Array<{ name: string; enabled: boolean; kind?: string }>
   >([]);
@@ -176,6 +183,9 @@ export function useLiveSystem(): LiveData {
     setNewsSourceStats({});
     setOrders([]);
     setIntelligence(null);
+    setRuntimeDemand(null);
+    setRuntimeMetaLabeling(null);
+    setRoutingQuality(null);
     setWsEvents([]);
     setOrderEvents([]);
     setPnl(null);
@@ -211,6 +221,7 @@ export function useLiveSystem(): LiveData {
         api.getNews(30, true),
         api.getDashboardSnapshot(),
         api.getOrders(50),
+        api.getRoutingQuality(),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -220,6 +231,7 @@ export function useLiveSystem(): LiveData {
       const newsRes = res[5].status === 'fulfilled' ? res[5].value : null;
       const snapRes = res[6].status === 'fulfilled' ? res[6].value : null;
       const ordRes = res[7].status === 'fulfilled' ? res[7].value : null;
+      const routingRes = res[8].status === 'fulfilled' ? res[8].value : null;
 
       if (sysRes) {
         const newState: BackendSystemState = sysRes.state ?? 'off';
@@ -272,6 +284,20 @@ export function useLiveSystem(): LiveData {
       const feedsLive = (sysRes?.state ?? stateRef.current) === 'running';
 
       if (statusRes) setKillSwitch(!!statusRes.kill_switch);
+      if (statusRes?.runtime && typeof statusRes.runtime === 'object') {
+        const rt = statusRes.runtime as Record<string, unknown>;
+        const ex = (rt.extra && typeof rt.extra === 'object') ? (rt.extra as Record<string, unknown>) : {};
+        setRuntimeDemand((ex.demand && typeof ex.demand === 'object') ? (ex.demand as Record<string, unknown>) : null);
+        setRuntimeMetaLabeling(
+          (ex.meta_labeling && typeof ex.meta_labeling === 'object')
+            ? (ex.meta_labeling as Record<string, unknown>)
+            : null,
+        );
+      } else {
+        setRuntimeDemand(null);
+        setRuntimeMetaLabeling(null);
+      }
+      if (routingRes) setRoutingQuality(routingRes);
 
       if (feedsLive) {
         if (pnlRes) {
@@ -637,6 +663,9 @@ export function useLiveSystem(): LiveData {
     newsSourceStats,
     orders,
     intelligence,
+    runtimeDemand,
+    runtimeMetaLabeling,
+    routingQuality,
 
     loopIteration,
     path,

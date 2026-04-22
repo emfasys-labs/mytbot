@@ -170,6 +170,35 @@ def test_dashboard_snapshot_ok(monkeypatch, client: TestClient):
         app.dependency_overrides.pop(_command_bus, None)
 
 
+def test_diagnostics_routing_quality(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
+
+    def override_bus():
+        class B:
+            async def get_state(self, key: str, default=None):
+                if key == "routing.quality.state":
+                    return {
+                        "updated_at": "2026-04-22T00:00:00+00:00",
+                        "quality_map": {"BTC-USD": {"binance": 0.22}},
+                        "history": {"BTC-USD": [{"ts": "2026-04-22T00:00:00+00:00", "broker": "binance", "score": 0.22}]},
+                    }
+                if key == "runtime.heartbeat":
+                    return {"extra": {"routing_quality": {"symbols": 1}}}
+                return default
+
+        return B()
+
+    app.dependency_overrides[_command_bus] = override_bus
+    try:
+        r = client.get("/diagnostics/routing-quality")
+        assert r.status_code == 200
+        j = r.json()
+        assert j["quality_map"]["BTC-USD"]["binance"] == 0.22
+        assert j["runtime_summary"]["symbols"] == 1
+    finally:
+        app.dependency_overrides.pop(_command_bus, None)
+
+
 def test_pnl_includes_week_month_metrics(monkeypatch, client: TestClient):
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "tok")
     r = client.get("/pnl", headers={"X-Dashboard-Token": "tok"})

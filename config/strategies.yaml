@@ -57,6 +57,103 @@ strategies:
     # D032 sizing intent: strategy emits per-signal absolute target_notional.
     base_target_notional: 5000
 
+  volume_flow:
+    enabled: true
+    preferred_broker: ibkr
+    asset_classes: [equity, crypto, forex]
+    volume_lookback: 20
+    zscore_open_threshold: 1.8
+    zscore_exhaust_threshold: 3.4
+    min_bar_return: 0.0015
+    base_target_notional: 4000
+
+  event_driven_news:
+    enabled: true
+    shock_threshold: 0.45
+    base_target_notional: 6000
+
+  pairs_trading:
+    enabled: true
+    lookback_bars: 90
+    zscore_open: 2.0
+    base_target_notional: 5000
+    pairs:
+      - [SPY, QQQ]
+      - [XLE, USO]
+      - [GLD, TLT]
+
+  volatility_regime:
+    enabled: true
+    preferred_broker: ibkr
+    asset_classes: [equity, crypto, forex, future]
+    atr_lookback: 14
+    atr_expansion_ratio: 1.20
+    atr_compression_ratio: 0.85
+    min_bar_return: 0.0015
+    base_target_notional: 4500
+
+  regime_rotation:
+    enabled: true
+    score_trigger: 0.35
+    base_target_notional: 5500
+    risk_on_symbols: [SPY, QQQ, XLE, BTC-USD]
+    risk_off_symbols: [TLT, GLD, UUP]
+
+  demand_engine:
+    enabled: true
+    smoothing_alpha: 0.35
+    trend_threshold: 0.20
+    alert_threshold: 0.55
+    mode_alert_thresholds:
+      defender: 0.45
+      trader: 0.55
+      hunter: 0.65
+    cross_asset_scale: 30.0
+    weights:
+      news: 0.35
+      macro: 0.30
+      cross_asset: 0.35
+    risk_on_anchors: [SPY, QQQ, XLE, BTC-USD]
+    risk_off_anchors: [TLT, GLD, DXY]
+    graph_edges:
+      - [SPY, TLT, -1.0]
+      - [QQQ, GLD, -1.0]
+      - [XLE, TLT, -0.8]
+      - [BTC-USD, DXY, -1.0]
+
+  meta_labeling:
+    enabled: true
+    probability_threshold: 0.54
+    adapt_every_n_iterations: 12
+    adapt_lookback_hours: 72
+    adapt_min_samples: 16
+    mode_calibration:
+      defender:
+        probability_threshold: 0.60
+      trader:
+        probability_threshold: 0.54
+      hunter:
+        probability_threshold: 0.48
+    ml_weights:
+      bias: -0.15
+      confidence: 1.80
+      demand_alignment: 1.30
+      volume_feature: 0.45
+      news_feature: 0.55
+      demand_confidence: 0.60
+      strategy_bias: 1.00
+    strategy_bias:
+      momentum_breakout: 0.06
+      event_driven_news: 0.08
+      pairs_trading: 0.03
+      mean_reversion: -0.02
+
+  routing_learning:
+    decay_every_n_iterations: 8
+    decay_rate: 0.02
+    adaptive_decay: true
+    persist_every_n_iterations: 5
+
 # Broker capability map for arbitrage (YAML-driven; extend when adding venues).
 arbitrage_capabilities:
   brokers:

@@ -1363,6 +1363,23 @@ async def system_status(bus: CommandBus = Depends(_command_bus)):
     return out
 
 
+@app.get("/diagnostics/routing-quality")
+async def diagnostics_routing_quality(bus: CommandBus = Depends(_command_bus)):
+    """Return persisted broker-symbol routing quality map/history."""
+    state = await bus.get_state("routing.quality.state", {}) or {}
+    runtime = await bus.get_state("runtime.heartbeat", {}) or {}
+    rt_extra = runtime.get("extra") if isinstance(runtime, dict) else None
+    rt_rq = rt_extra.get("routing_quality") if isinstance(rt_extra, dict) else None
+    if not isinstance(state, dict):
+        state = {}
+    return {
+        "updated_at": state.get("updated_at"),
+        "quality_map": state.get("quality_map", {}),
+        "history": state.get("history", {}),
+        "runtime_summary": rt_rq if isinstance(rt_rq, dict) else {},
+    }
+
+
 @app.post("/system/start")
 async def system_start():
     """Start the entire trading system (one-button ON)."""

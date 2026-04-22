@@ -152,6 +152,11 @@ def build_opportunities(
         )
         denom = w_m + w_v + w_n + w_r + w_l + w_s + w_rs
         opportunity_score = clip_decimal(numer / denom if denom > 0 else conf, Decimal("0"), one)
+        demand_score = _f(regime_state.metadata.get("demand_score") if isinstance(regime_state.metadata, dict) else 0.0)
+        side_sign = 1.0 if _map_side(c.side) == "long" else -1.0
+        demand_alignment = max(-1.0, min(1.0, demand_score * side_sign))
+        demand_mult = Decimal(str(max(0.85, min(1.15, 1.0 + demand_alignment * 0.10))))
+        opportunity_score = clip_decimal(opportunity_score * demand_mult, Decimal("0"), one)
 
         ucfg = oe.scoring.urgency
         urgency = clip_decimal(
@@ -195,6 +200,8 @@ def build_opportunities(
                 "volume_refresh_context": vol_detection.refresh_context_recommended,
                 "d015_escalate_context": bool(esc),
                 "profile_mode": mode_eff,
+                "demand_score": round(demand_score, 6),
+                "demand_alignment": round(demand_alignment, 6),
             },
         )
         out.append(opp)

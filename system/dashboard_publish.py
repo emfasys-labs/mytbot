@@ -325,6 +325,17 @@ async def publish_dashboard_snapshot_d015(
     acc_blob: dict[str, Any] | None = None
     if accumulator is not None:
         acc_blob = accumulator.dashboard_snapshot(top_n=10)
+    demand_blob: dict[str, Any] = {}
+    if regime is not None and isinstance(regime.metadata, dict):
+        demand_blob = {
+            "score": regime.metadata.get("demand_score", 0.0),
+            "trend": regime.metadata.get("demand_trend", "flat"),
+            "confidence": regime.metadata.get("demand_confidence", 0.0),
+            "market_volatility": regime.metadata.get("market_volatility", 0.0),
+            "cross_asset_coverage": regime.metadata.get("cross_asset_coverage", 0.0),
+            "alert": regime.metadata.get("demand_alert"),
+            "alert_history": regime.metadata.get("demand_alert_history", []),
+        }
 
     payload: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -336,6 +347,7 @@ async def publish_dashboard_snapshot_d015(
         "allocation": serialize_allocation_decision(decision),
         "execution_plan": serialize_execution_plan(plan),
         "portfolio": serialize_held_positions(portfolio_state),
+        "demand": demand_blob,
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)
@@ -350,6 +362,7 @@ async def publish_dashboard_snapshot_global_edge(
     strategy_opportunities: list[StrategyOpportunity],
     coordinator_actions: list[Any],
     portfolio_state: PortfolioState,
+    demand: dict[str, Any] | None = None,
     max_opps: int = 15,
 ) -> None:
     acc_blob: dict[str, Any] | None = None
@@ -378,6 +391,7 @@ async def publish_dashboard_snapshot_global_edge(
             "held_edges": serialize_held_edges(held, limit=12),
             "ranked_new_edges": [serialize_strategy_opportunity(o) for o in ranked],
         },
+        "demand": demand or {},
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)

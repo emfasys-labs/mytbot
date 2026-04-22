@@ -60,7 +60,7 @@ Reference docs:
 ┌────────────────────▼────────────────────────────────┐
 │              STRATEGY ENGINE                         │
 │  Momentum breakout · Mean reversion                  │
-│  Event-driven · (more added over time)               │
+│  Volume/flow · Event-driven news · Pairs trading     │
 │  Each strategy → RawSignal (symbol, side, confidence)│
 └────────────────────┬────────────────────────────────┘
                      │
@@ -73,10 +73,22 @@ Reference docs:
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
+│               DEMAND ENGINE                          │
+│  Global demand score (macro + cross-asset + news)    │
+│  Biases strategy selection + opportunity weighting    │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
 │              SIGNAL ENGINE                           │
 │  RawSignal → accumulator update → unified Signal     │
 │  AI news modifier (legacy point score + dual veto) │
 │  Outputs unified Signal object                       │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│              META-LABEL FILTER                        │
+│  Candidate acceptance gate before allocator ranking   │
+│  Drops weak / demand-misaligned opportunities         │
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐

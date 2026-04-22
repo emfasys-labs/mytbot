@@ -21,6 +21,36 @@ def _pos_map(portfolio_state: PortfolioState) -> dict[str, Decimal]:
     return {p.symbol: p.market_value for p in portfolio_state.positions}
 
 
+def _demand_urgency_multiplier(
+    *,
+    decision: AllocationDecision,
+    action: str,
+    side: str,
+) -> Decimal:
+    """Demand-conditioned urgency multiplier.
+
+    Strong demand regimes accelerate aligned opens/increases and de-prioritize
+    countertrend expansion. Close actions keep a narrow adjustment band.
+    """
+    md = decision.metadata or {}
+    try:
+        ds = float(md.get("demand_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        ds = 0.0
+    strength = min(1.0, abs(ds))
+    if strength <= 1e-6:
+        return Decimal("1.0")
+    side_sign = 1.0 if str(side).strip().lower() in ("long", "buy") else -1.0
+    align = max(-1.0, min(1.0, ds * side_sign))
+    if action in ("open", "increase"):
+        mult = 1.0 + align * 0.35 * strength
+        return Decimal(str(max(0.70, min(1.35, mult))))
+    if action in ("close", "reduce"):
+        mult = 1.0 + (-align) * 0.15 * strength
+        return Decimal(str(max(0.85, min(1.20, mult))))
+    return Decimal("1.0")
+
+
 def build_execution_plan(
     *,
     decision: AllocationDecision,
@@ -43,7 +73,8 @@ def build_execution_plan(
                 side="long",
                 target_notional=pm.get(rc.old_symbol, Decimal("0")),
                 max_slippage_bps=slip_cap * Decimal("10000"),
-                urgency_score=Decimal(str(urg.replace_close_old)),
+                urgency_score=Decimal(str(urg.replace_close_old))
+                * _demand_urgency_multiplier(decision=decision, action="close", side="long"),
                 close_only=True,
                 reason=f"replace_with:{rc.new_symbol}",
                 metadata={"d015": True},
@@ -59,7 +90,8 @@ def build_execution_plan(
                     target_notional=tgt.target_notional,
                     target_weight=tgt.target_weight,
                     max_slippage_bps=slip_cap * Decimal("10000"),
-                    urgency_score=Decimal(str(urg.replacement_open)),
+                    urgency_score=Decimal(str(urg.replacement_open))
+                    * _demand_urgency_multiplier(decision=decision, action="open", side=tgt.side),
                     reason="replacement_open",
                     metadata={"d015": True},
                 )
@@ -75,7 +107,8 @@ def build_execution_plan(
                 side="long",
                 target_notional=pm.get(sym, Decimal("0")),
                 max_slippage_bps=slip_cap * Decimal("10000"),
-                urgency_score=Decimal(str(urg.allocation_close)),
+                urgency_score=Decimal(str(urg.allocation_close))
+                * _demand_urgency_multiplier(decision=decision, action="close", side="long"),
                 close_only=True,
                 reason="allocation_close",
                 metadata={"d015": True},
@@ -95,7 +128,8 @@ def build_execution_plan(
                         side=t.side,
                         target_notional=clip_decimal(cur - t.target_notional, Decimal("0"), cur),
                         max_slippage_bps=slip_cap * Decimal("10000"),
-                        urgency_score=Decimal(str(urg.allocation_reduce)),
+                        urgency_score=Decimal(str(urg.allocation_reduce))
+                        * _demand_urgency_multiplier(decision=decision, action="reduce", side=t.side),
                         reduce_only=True,
                         reason="allocation_reduce",
                         metadata={"d015": True},
@@ -112,7 +146,12 @@ def build_execution_plan(
                         target_notional=delta,
                         target_weight=t.target_weight,
                         max_slippage_bps=slip_cap * Decimal("10000"),
-                        urgency_score=Decimal(str(urg.allocation_open_or_increase)),
+                        urgency_score=Decimal(str(urg.allocation_open_or_increase))
+                        * _demand_urgency_multiplier(
+                            decision=decision,
+                            action="increase" if cur > 0 else "open",
+                            side=t.side,
+                        ),
                         reason="allocation_open_or_increase",
                         metadata={"d015": True},
                     )

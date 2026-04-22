@@ -391,6 +391,53 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
     return gauges;
   }, [live.snapshot, live.positions, live.orders, live.pnl]);
 
+  const demandDiag = useMemo(() => {
+    const d = (live.snapshot?.demand ?? {}) as Record<string, unknown>;
+    const rt = (live.runtimeDemand ?? {}) as Record<string, unknown>;
+    const score = Number(d.score ?? rt.score ?? 0) || 0;
+    const trend = String(d.trend ?? rt.trend ?? 'flat');
+    const conf = Number(d.confidence ?? rt.confidence ?? 0) || 0;
+    const vol = Number(d.market_volatility ?? (rt.components as Record<string, unknown> | undefined)?.market_volatility ?? 0) || 0;
+    const history = Array.isArray(d.alert_history) ? d.alert_history : Array.isArray(rt.alert_history) ? rt.alert_history : [];
+    return { score, trend, conf, vol, history };
+  }, [live.snapshot, live.runtimeDemand]);
+
+  const metaDiag = useMemo(() => {
+    const rt = (live.runtimeMetaLabeling ?? {}) as Record<string, unknown>;
+    const dyn = (rt.dynamic_bias && typeof rt.dynamic_bias === 'object') ? (rt.dynamic_bias as Record<string, unknown>) : {};
+    const diag = (rt.diagnostics && typeof rt.diagnostics === 'object') ? (rt.diagnostics as Record<string, unknown>) : {};
+    return { dyn, diag };
+  }, [live.runtimeMetaLabeling]);
+
+  const routingDiag = useMemo(() => {
+    const rq = live.routingQuality;
+    const qmap = (rq?.quality_map ?? {}) as Record<string, Record<string, number>>;
+    const qstats = (rq?.quality_stats ?? {}) as Record<string, Record<string, { n: number; std: number; ci95_half: number }>>;
+    const hist = (rq?.history ?? {}) as Record<string, Array<{ ts: string; broker: string; score: number }>>;
+    const rows = Object.entries(qmap)
+      .map(([sym, by]) => {
+        const best = Object.entries(by).sort((a, b) => b[1] - a[1])[0];
+        const bestBroker = best?.[0] ?? '—';
+        const seriesRaw = (Array.isArray(hist[sym]) ? hist[sym] : [])
+          .filter((x) => x.broker === bestBroker)
+          .slice(-16);
+        const series = seriesRaw.map((x) => Number(x.score) || 0);
+        const stat = (qstats[sym] && qstats[sym][bestBroker]) ? qstats[sym][bestBroker] : null;
+        return {
+          sym,
+          bestBroker,
+          bestScore: Number.isFinite(best?.[1] ?? NaN) ? Number(best?.[1]) : 0,
+          points: Array.isArray(hist[sym]) ? hist[sym].length : 0,
+          series,
+          ci95: stat?.ci95_half ?? 0,
+          n: stat?.n ?? 0,
+        };
+      })
+      .sort((a, b) => b.bestScore - a.bestScore)
+      .slice(0, 6);
+    return { rows, updatedAt: rq?.updated_at ?? null };
+  }, [live.routingQuality]);
+
   return (
     <div style={{
       padding: 20, display: 'grid', gap: 14,
@@ -537,6 +584,77 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
               </div>
             );
           })}
+        </div>
+      </Card>
+      <Card style={{ gridColumn: '1 / -1' }}>
+        <Label style={{ marginBottom: 10 }}>Demand & meta diagnostics</Label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
+          <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>
+              demand score {demandDiag.score.toFixed(2)} · {demandDiag.trend} · conf {(demandDiag.conf * 100).toFixed(0)}%
+            </div>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3, marginBottom: 8 }}>
+              market vol {(demandDiag.vol * 100).toFixed(2)}%
+            </div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {demandDiag.history.slice(-4).reverse().map((h, i) => (
+                <div key={i} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                  {String((h as Record<string, unknown>).at ?? 'n/a')} · {String((h as Record<string, unknown>).trend ?? 'flat')} · {String((h as Record<string, unknown>).score ?? '0')}
+                </div>
+              ))}
+              {demandDiag.history.length === 0 && (
+                <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no demand alerts yet</div>
+              )}
+            </div>
+          </div>
+          <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>
+              meta adaptation
+            </div>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 8 }}>
+              rows {Number((metaDiag.diag.rows as number) ?? 0)} · lookback {Number((metaDiag.diag.lookback_hours as number) ?? 0)}h
+            </div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {Object.entries(metaDiag.dyn).slice(0, 5).map(([k, v]) => (
+                <div key={k} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                  {k}: {(Number(v) || 0).toFixed(3)}
+                </div>
+              ))}
+              {Object.keys(metaDiag.dyn).length === 0 && (
+                <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no adaptive priors yet</div>
+              )}
+            </div>
+          </div>
+          <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>
+              routing quality {routingDiag.updatedAt ? '· persisted' : ''}
+            </div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {routingDiag.rows.map((r) => (
+                <div key={r.sym} style={{ display: 'grid', gridTemplateColumns: '1fr 72px', gap: 8, alignItems: 'center' }}>
+                  <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                    {prettySymbol(r.sym)} → {r.bestBroker} ({r.bestScore.toFixed(3)})
+                    {' · '}
+                    CI95 +/-{(Number(r.ci95) || 0).toFixed(3)}
+                    {' · n='}
+                    {Math.round(Number(r.n) || 0)}
+                  </div>
+                  {r.series.length >= 2 ? (
+                    <Spark values={r.series} width={72} height={20} accent={TOKENS.info} area={false} />
+                  ) : (
+                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4, textAlign: 'right' }}>
+                      {r.points} pts
+                    </div>
+                  )}
+                </div>
+              ))}
+              {routingDiag.rows.length === 0 && (
+                <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>
+                  no routing quality data yet
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </Card>
     </div>

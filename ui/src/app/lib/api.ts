@@ -189,6 +189,7 @@ export type ApiStatusResponse = {
   status?: string;
   system_state?: string;
   connected_brokers?: string[];
+  runtime?: Record<string, unknown>;
 };
 
 export type NewsHeadline = {
@@ -337,6 +338,15 @@ export type DashboardSnapshot = {
   } | null;
   portfolio?: Record<string, unknown>;
   global_edge?: Record<string, unknown>;
+  demand?: {
+    score?: number | string;
+    trend?: string;
+    confidence?: number | string;
+    market_volatility?: number | string;
+    cross_asset_coverage?: number | string;
+    alert?: Record<string, unknown> | null;
+    alert_history?: Array<Record<string, unknown>>;
+  };
 };
 
 export type SystemStatusResponse = {
@@ -399,6 +409,17 @@ export type SystemStatusResponse = {
     enabled: boolean;
     kind: 'signal' | 'arbitrage' | string;
   }>;
+};
+
+export type RoutingQualityResponse = {
+  updated_at?: string | null;
+  quality_map?: Record<string, Record<string, number>>;
+  quality_stats?: Record<
+    string,
+    Record<string, { n: number; std: number; ci95_half: number; turnover_ema?: number; liquidity_ema?: number }>
+  >;
+  history?: Record<string, Array<{ ts: string; broker: string; score: number }>>;
+  runtime_summary?: Record<string, unknown>;
 };
 
 async function getJson<T>(path: string): Promise<T> {
@@ -465,6 +486,7 @@ export const api = {
   getIntelligenceRegime: () => getJson<IntelligenceRegimeResponse>('/intelligence/regime'),
   getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
   getDashboardSnapshot: () => getJson<DashboardSnapshot>('/dashboard/snapshot'),
+  getRoutingQuality: () => getJson<RoutingQualityResponse>('/diagnostics/routing-quality'),
   getOrders: (limit = 40) => getJson<ApiOrdersResponse>(`/orders?limit=${limit}`),
 };
 

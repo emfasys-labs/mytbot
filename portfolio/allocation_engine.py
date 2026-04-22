@@ -53,6 +53,44 @@ def _capital_slider(portfolio_state: PortfolioState) -> Decimal:
         return Decimal("1")
 
 
+def _volatility_overlay(regime_state: RegimeState) -> tuple[Decimal, dict[str, float]]:
+    """
+    Portfolio-level volatility throttle.
+
+    Reads optional `regime_state.metadata["market_volatility"]` (from demand engine
+    cross-asset graph). Falls back to regime chaos proxy when unavailable.
+    """
+    md = regime_state.metadata or {}
+    try:
+        mvol = float(md.get("market_volatility", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        mvol = 0.0
+    if mvol <= 0:
+        try:
+            mvol = max(0.0, float(regime_state.components.chaos_penalty))
+        except Exception:  # noqa: BLE001
+            mvol = 0.0
+    try:
+        coverage = float(md.get("cross_asset_coverage", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        coverage = 1.0
+    coverage = max(0.0, min(1.0, coverage))
+    # Fallback values chosen to be conservative but non-disruptive.
+    threshold = 0.010
+    slope = 9.0
+    floor = 0.65
+    raw = 1.0 - max(0.0, mvol - threshold) * slope
+    if coverage < 0.45:
+        raw *= 0.95
+    overlay = Decimal(str(max(floor, min(1.05, raw))))
+    return overlay, {
+        "market_volatility": mvol,
+        "cross_asset_coverage": coverage,
+        "vol_overlay_raw": raw,
+        "vol_overlay_applied": float(overlay),
+    }
+
+
 def build_allocation_decision(
     *,
     opportunities: list[Opportunity],
@@ -94,6 +132,17 @@ def build_allocation_decision(
         clip_decimal(sig_arg, Decimal(str(sh.sigmoid_clip_min)), Decimal(str(sh.sigmoid_clip_max)))
     )
     ge = cap_slider * agg * ge_shape * regime_state.execution_quality * regime_state.drawdown_throttle
+    vol_overlay, vol_meta = _volatility_overlay(regime_state)
+    ge = ge * vol_overlay
+    try:
+        demand_score = float((regime_state.metadata or {}).get("demand_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        demand_score = 0.0
+    demand_trend = str((regime_state.metadata or {}).get("demand_trend", "flat"))
+    try:
+        demand_confidence = float((regime_state.metadata or {}).get("demand_confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        demand_confidence = 0.0
 
     max_ge = Decimal(str(profile_cfg.safety_bounds.absolute_max_gross_exposure.get(mode, 2.0)))
     ge = clip_decimal(ge, Decimal("0"), max_ge)
@@ -210,5 +259,9 @@ def build_allocation_decision(
             "d015": True,
             "opportunity_count": len(opportunities),
             "position_count": len(portfolio_state.positions),
+            **vol_meta,
+            "demand_score": demand_score,
+            "demand_trend": demand_trend,
+            "demand_confidence": demand_confidence,
         },
     )

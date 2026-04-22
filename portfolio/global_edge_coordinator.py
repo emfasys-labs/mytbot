@@ -150,6 +150,15 @@ def signal_candidate_to_strategy_opportunity(
     liq = Decimal("0.7")
     exe = Decimal("0.75")
     reg = Decimal("0.8")
+    try:
+        demand_score = float(cand_meta.get("demand_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        demand_score = 0.0
+    side_txt = str(getattr(cand, "side", "long")).strip().lower()
+    side_sign = 1.0 if side_txt in ("long", "buy") else -1.0
+    align = max(-1.0, min(1.0, demand_score * side_sign))
+    reg = Decimal(str(max(0.55, min(0.95, 0.8 + align * 0.12))))
+    cand_meta["demand_alignment"] = round(align, 6)
     risk = Decimal("0.05")
     ps = compute_priority_score(edge, conf, reg, exe, risk)
     return StrategyOpportunity(

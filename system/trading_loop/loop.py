@@ -79,6 +79,14 @@ from storage.discovery import persist_anomaly_log, persist_thesis_log
 from storage.models import AIOutputLog, FeatureSnapshot, OrderLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
+from strategies.volume_flow import VolumeFlowStrategy
+from strategies.event_driven import EventDrivenNewsStrategy
+from strategies.pairs_trading import PairsTradingStrategy
+from strategies.volatility_regime import VolatilityRegimeStrategy
+from strategies.regime_rotation import RegimeRotationStrategy
+from system.demand_engine import DemandEngine
+from signals.meta_labeler import filter_candidates as meta_filter_candidates, keep_raw_signal as meta_keep_raw_signal
+from signals.meta_adaptation import compute_dynamic_strategy_bias
 
 from data.arb_observability import log_arb_event
 from data.capability_registry import CapabilityRegistry
@@ -378,7 +386,36 @@ class TradingLoop:
             strat_cfg = strategies_cfg.get("strategies", {})
             momentum = MomentumBreakoutStrategy(strat_cfg.get("momentum_breakout", {}))
             mean_rev = MeanReversionStrategy(strat_cfg.get("mean_reversion", {}))
-            strategies = {momentum.name: momentum, mean_rev.name: mean_rev}
+            volume_flow = VolumeFlowStrategy(strat_cfg.get("volume_flow", {}))
+            event_driven = EventDrivenNewsStrategy(strat_cfg.get("event_driven_news", {}))
+            pairs_trading = PairsTradingStrategy(strat_cfg.get("pairs_trading", {}))
+            volatility_regime = VolatilityRegimeStrategy(strat_cfg.get("volatility_regime", {}))
+            regime_rotation = RegimeRotationStrategy(strat_cfg.get("regime_rotation", {}))
+            demand_engine = DemandEngine(strat_cfg.get("demand_engine", {}))
+            meta_cfg = dict(strat_cfg.get("meta_labeling", {}) or {})
+            meta_enabled = bool(meta_cfg.get("enabled", False))
+            meta_dynamic_bias: dict[str, float] = {}
+            meta_adapt_every_n = max(1, int(meta_cfg.get("adapt_every_n_iterations", 12) or 12))
+            meta_adapt_lookback_h = max(4, int(meta_cfg.get("adapt_lookback_hours", 72) or 72))
+            meta_adapt_min_samples = max(5, int(meta_cfg.get("adapt_min_samples", 16) or 16))
+            demand_alert_threshold = float(strat_cfg.get("demand_engine", {}).get("alert_threshold", 0.55) or 0.55)
+            demand_mode_thresholds = dict(strat_cfg.get("demand_engine", {}).get("mode_alert_thresholds", {}) or {})
+            last_demand_alert: dict[str, Any] | None = None
+            demand_alert_history: list[dict[str, Any]] = []
+            meta_dynamic_diag: dict[str, Any] = {}
+            routing_decay_every_n = max(1, int(strat_cfg.get("routing_learning", {}).get("decay_every_n_iterations", 8) or 8))
+            routing_decay_rate = float(strat_cfg.get("routing_learning", {}).get("decay_rate", 0.02) or 0.02)
+            routing_decay_adaptive = bool(strat_cfg.get("routing_learning", {}).get("adaptive_decay", True))
+            routing_persist_every_n = max(1, int(strat_cfg.get("routing_learning", {}).get("persist_every_n_iterations", 5) or 5))
+            strategies = {
+                momentum.name: momentum,
+                mean_rev.name: mean_rev,
+                volume_flow.name: volume_flow,
+                event_driven.name: event_driven,
+                pairs_trading.name: pairs_trading,
+                volatility_regime.name: volatility_regime,
+                regime_rotation.name: regime_rotation,
+            }
 
             bus = CommandBus(session_factory)
             alloc_cfg = load_allocation()
@@ -397,6 +434,12 @@ class TradingLoop:
             self._control_bus = bus
             self._strategies = strategies
             self._control_poll_task = asyncio.create_task(self._control_command_poll(), name="control-command-poll")
+            try:
+                rq = await bus.get_state("routing.quality.state", None)
+                if isinstance(rq, dict) and self.router is not None:
+                    self.router.import_quality_state(rq)
+            except Exception:  # noqa: BLE001
+                pass
 
             next_reconcile_at = datetime.now(timezone.utc).timestamp()
             universe_mode = str(pipeline_cfg.get("universe_mode", "static")).strip().lower()
@@ -453,7 +496,11 @@ class TradingLoop:
             ).strip().lower() in ("1", "true", "yes", "on")
 
             async def _process_signal(signal, *, symbol_hint: str | None = None) -> bool:
-                routed = self.router.route(signal.asset_class, signal.symbol)
+                routed = self.router.route(
+                    signal.asset_class,
+                    signal.symbol,
+                    metadata=getattr(signal, "metadata", None),
+                )
                 if routed is None:
                     return False
                 signal.broker = routed
@@ -512,13 +559,52 @@ class TradingLoop:
                     signal, risk_decision, session_factory=session_factory,
                 )
                 if result is None:
+                    try:
+                        turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        self.router.record_execution_feedback(
+                            broker=str(signal.broker or ""),
+                            symbol=str(signal.symbol or ""),
+                            filled=False,
+                            slippage_bps=None,
+                            turnover_hint=turnover_hint,
+                            liquidity_hint=liq_hint,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     return False
                 status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
                 if status_val != "filled":
+                    try:
+                        turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        self.router.record_execution_feedback(
+                            broker=str(signal.broker or ""),
+                            symbol=str(signal.symbol or ""),
+                            filled=False,
+                            slippage_bps=None,
+                            turnover_hint=turnover_hint,
+                            liquidity_hint=liq_hint,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     # Only treat fully filled orders as executed positions.
                     return False
                 filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
                 if filled_qty <= 0:
+                    try:
+                        turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                        self.router.record_execution_feedback(
+                            broker=str(signal.broker or ""),
+                            symbol=str(signal.symbol or ""),
+                            filled=False,
+                            slippage_bps=None,
+                            turnover_hint=turnover_hint,
+                            liquidity_hint=liq_hint,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     return False
                 # Refresh portfolio state after execution so persisted position/PnL
                 # reflect newly filled orders (not the pre-trade snapshot).
@@ -540,6 +626,21 @@ class TradingLoop:
                 _apply_signal_to_portfolio_state(post_trade_state, signal)
                 await _persist_position_snapshot(session_factory, post_trade_state)
                 await _upsert_daily_pnl(session_factory, post_trade_state)
+                try:
+                    slip_bps = None
+                    avg_fill = getattr(result, "avg_fill_price", None)
+                    if avg_fill is not None and signal.suggested_price is not None and signal.suggested_price > 0:
+                        slip_bps = float((Decimal(str(avg_fill)) - Decimal(str(signal.suggested_price))) / Decimal(str(signal.suggested_price)) * Decimal("10000"))
+                    self.router.record_execution_feedback(
+                        broker=str(signal.broker or ""),
+                        symbol=str(signal.symbol or ""),
+                        filled=True,
+                        slippage_bps=slip_bps,
+                        turnover_hint=float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0,
+                        liquidity_hint=float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return True
 
             while not self._stop_event.is_set():
@@ -570,6 +671,25 @@ class TradingLoop:
                     total_equity = Decimal(str(self.portfolio_value))
                 tradable = total_equity * Decimal(str(self.capital_pct))
                 effective_value = float(tradable)
+                if meta_enabled and (self.iterations % meta_adapt_every_n == 0):
+                    try:
+                        dyn_bias, dyn_diag = await compute_dynamic_strategy_bias(
+                            session_factory,
+                            lookback_hours=meta_adapt_lookback_h,
+                            min_samples=meta_adapt_min_samples,
+                        )
+                        if dyn_bias:
+                            meta_dynamic_bias = dyn_bias
+                            await bus.set_state("meta_label.dynamic_strategy_bias", dyn_bias)
+                            await bus.set_state("meta_label.dynamic_diagnostics", dyn_diag)
+                            meta_dynamic_diag = dict(dyn_diag or {})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("meta_adaptation failed: {}", exc)
+                if self.router is not None and (self.iterations % routing_decay_every_n == 0):
+                    try:
+                        self.router.apply_decay(routing_decay_rate, adaptive=routing_decay_adaptive)
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     generated = 0
                     executed = 0
@@ -643,8 +763,41 @@ class TradingLoop:
 
                     use_legacy = legacy_fb
                     batch_candidates: list[Any] = []
+                    demand_score = 0.0
+                    demand_trend = "flat"
+                    demand_confidence = 0.0
+                    demand_components: dict[str, Any] = {}
 
                     if use_legacy:
+                        demand_ctx = demand_engine.compute(
+                            ai_result=ai_result,
+                            feature_map={},
+                        )
+                        demand_score = float(demand_ctx.score)
+                        demand_trend = str(demand_ctx.trend)
+                        demand_confidence = float(demand_ctx.confidence)
+                        demand_components = dict(demand_ctx.components or {})
+                        threshold_eff = demand_alert_threshold
+                        try:
+                            if mode_raw in demand_mode_thresholds:
+                                threshold_eff = float(demand_mode_thresholds.get(mode_raw))
+                        except (TypeError, ValueError):
+                            threshold_eff = demand_alert_threshold
+                        if (
+                            abs(demand_score) >= threshold_eff
+                            and (last_demand_alert is None or last_demand_alert.get("trend") != demand_trend)
+                        ):
+                            last_demand_alert = {
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "trend": demand_trend,
+                                "score": round(float(demand_score), 6),
+                                "confidence": round(float(demand_confidence), 6),
+                                "kind": "demand_regime_shift",
+                                "threshold": round(float(threshold_eff), 6),
+                                "mode": mode_raw,
+                            }
+                            demand_alert_history.append(dict(last_demand_alert))
+                            demand_alert_history = demand_alert_history[-20:]
                         for symbol in symbols:
                             if self._stop_event.is_set():
                                 break
@@ -668,11 +821,57 @@ class TradingLoop:
                                 r_sig = mean_rev.generate_signal(symbol, df)
                                 if r_sig is not None:
                                     raw_candidates.append(r_sig)
+                            if volume_flow.supports_asset_class(sym_ac):
+                                vf_sig = volume_flow.generate_signal(symbol, df)
+                                if vf_sig is not None:
+                                    raw_candidates.append(vf_sig)
+                            if volatility_regime.supports_asset_class(sym_ac):
+                                vol_sig = volatility_regime.generate_signal(symbol, df)
+                                if vol_sig is not None:
+                                    raw_candidates.append(vol_sig)
+                            if ai_result is not None:
+                                ev_sig = event_driven.generate_from_context(
+                                    symbol=symbol,
+                                    asset_class=sym_ac,
+                                    news_score=ai_result.news_scores.get(symbol),
+                                    news_detail=ai_result.news_details.get(symbol),
+                                    macro_regime=ai_result.macro_regime,
+                                    macro_confidence=ai_result.macro_confidence,
+                                )
+                                if ev_sig is not None:
+                                    raw_candidates.append(ev_sig)
+                            rr_sig = regime_rotation.generate_from_demand(
+                                symbol=symbol,
+                                asset_class=sym_ac,
+                                demand_score=demand_score,
+                                demand_trend=demand_trend,
+                                demand_confidence=demand_confidence,
+                            )
+                            if rr_sig is not None:
+                                raw_candidates.append(rr_sig)
 
                             if ai_result is not None and ai_pipeline is not None:
                                 allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
                                 filtered = filter_by_allowed_strategies(raw_candidates, allowed)
                                 raw_candidates = filtered
+                            if meta_enabled and raw_candidates:
+                                meta_cfg_eff = dict(meta_cfg)
+                                static_bias = dict(meta_cfg_eff.get("strategy_bias", {}) or {})
+                                for k, v in meta_dynamic_bias.items():
+                                    try:
+                                        static_bias[k] = float(static_bias.get(k, 0.0)) + float(v)
+                                    except (TypeError, ValueError):
+                                        static_bias[k] = float(v)
+                                meta_cfg_eff["strategy_bias"] = static_bias
+                                raw_candidates = [
+                                    r for r in raw_candidates
+                                    if meta_keep_raw_signal(
+                                        r,
+                                        demand_score=demand_score,
+                                        cfg=meta_cfg_eff,
+                                        mode=mode_raw,
+                                    )
+                                ]
 
                             raw = _pick_best_signal(raw_candidates)
                             if raw is None:
@@ -767,6 +966,36 @@ class TradingLoop:
                                     )
                     else:
                         batch_candidates.clear()
+                        feature_map: dict[str, Any] = {}
+                        demand_ctx = demand_engine.compute(
+                            ai_result=ai_result,
+                            feature_map={},
+                        )
+                        demand_score = float(demand_ctx.score)
+                        demand_trend = str(demand_ctx.trend)
+                        demand_confidence = float(demand_ctx.confidence)
+                        demand_components = dict(demand_ctx.components or {})
+                        threshold_eff = demand_alert_threshold
+                        try:
+                            if mode_raw in demand_mode_thresholds:
+                                threshold_eff = float(demand_mode_thresholds.get(mode_raw))
+                        except (TypeError, ValueError):
+                            threshold_eff = demand_alert_threshold
+                        if (
+                            abs(demand_score) >= threshold_eff
+                            and (last_demand_alert is None or last_demand_alert.get("trend") != demand_trend)
+                        ):
+                            last_demand_alert = {
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "trend": demand_trend,
+                                "score": round(float(demand_score), 6),
+                                "confidence": round(float(demand_confidence), 6),
+                                "kind": "demand_regime_shift",
+                                "threshold": round(float(threshold_eff), 6),
+                                "mode": mode_raw,
+                            }
+                            demand_alert_history.append(dict(last_demand_alert))
+                            demand_alert_history = demand_alert_history[-20:]
                         for symbol in symbols:
                             if self._stop_event.is_set():
                                 break
@@ -781,6 +1010,7 @@ class TradingLoop:
                                 symbols_feature_empty += 1
                                 continue
                             symbols_with_features += 1
+                            feature_map[symbol.strip().upper()] = df
 
                             sym_ac = asset_class_for_symbol(symbol)
                             raw_candidates = []
@@ -792,6 +1022,34 @@ class TradingLoop:
                                 r_sig = mean_rev.generate_signal(symbol, df)
                                 if r_sig is not None:
                                     raw_candidates.append(r_sig)
+                            if volume_flow.supports_asset_class(sym_ac):
+                                vf_sig = volume_flow.generate_signal(symbol, df)
+                                if vf_sig is not None:
+                                    raw_candidates.append(vf_sig)
+                            if volatility_regime.supports_asset_class(sym_ac):
+                                vol_sig = volatility_regime.generate_signal(symbol, df)
+                                if vol_sig is not None:
+                                    raw_candidates.append(vol_sig)
+                            if ai_result is not None:
+                                ev_sig = event_driven.generate_from_context(
+                                    symbol=symbol,
+                                    asset_class=sym_ac,
+                                    news_score=ai_result.news_scores.get(symbol),
+                                    news_detail=ai_result.news_details.get(symbol),
+                                    macro_regime=ai_result.macro_regime,
+                                    macro_confidence=ai_result.macro_confidence,
+                                )
+                                if ev_sig is not None:
+                                    raw_candidates.append(ev_sig)
+                            rr_sig = regime_rotation.generate_from_demand(
+                                symbol=symbol,
+                                asset_class=sym_ac,
+                                demand_score=demand_score,
+                                demand_trend=demand_trend,
+                                demand_confidence=demand_confidence,
+                            )
+                            if rr_sig is not None:
+                                raw_candidates.append(rr_sig)
 
                             if ai_result is not None and ai_pipeline is not None:
                                 allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
@@ -818,6 +1076,80 @@ class TradingLoop:
 
                             enrich_candidate_volume_z(cand, df)
                             batch_candidates.append(cand)
+
+                        # Cross-symbol relative-value opportunities (pairs) are
+                        # generated once per cycle after all feature windows load.
+                        for pair_raw in pairs_trading.generate_signals(feature_map):
+                            pair_cand = self.sig_engine.raw_to_signal_candidate(
+                                pair_raw,
+                                news_score=(
+                                    ai_result.news_scores.get(pair_raw.symbol)
+                                    if ai_result is not None
+                                    else None
+                                ),
+                            )
+                            if pair_cand is not None:
+                                batch_candidates.append(pair_cand)
+
+                        # Recompute demand with cross-asset anchors once feature
+                        # windows are loaded; then apply meta-label filtering.
+                        demand_ctx = demand_engine.compute(
+                            ai_result=ai_result,
+                            feature_map=feature_map,
+                        )
+                        demand_score = float(demand_ctx.score)
+                        demand_trend = str(demand_ctx.trend)
+                        demand_confidence = float(demand_ctx.confidence)
+                        demand_components = dict(demand_ctx.components or {})
+                        threshold_eff = demand_alert_threshold
+                        try:
+                            if mode_raw in demand_mode_thresholds:
+                                threshold_eff = float(demand_mode_thresholds.get(mode_raw))
+                        except (TypeError, ValueError):
+                            threshold_eff = demand_alert_threshold
+                        if (
+                            abs(demand_score) >= threshold_eff
+                            and (last_demand_alert is None or last_demand_alert.get("trend") != demand_trend)
+                        ):
+                            last_demand_alert = {
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "trend": demand_trend,
+                                "score": round(float(demand_score), 6),
+                                "confidence": round(float(demand_confidence), 6),
+                                "kind": "demand_regime_shift",
+                                "threshold": round(float(threshold_eff), 6),
+                                "mode": mode_raw,
+                            }
+                            demand_alert_history.append(dict(last_demand_alert))
+                            demand_alert_history = demand_alert_history[-20:]
+                        for cand in batch_candidates:
+                            md = dict(getattr(cand, "metadata", {}) or {})
+                            md["demand_score"] = round(demand_score, 6)
+                            md["demand_trend"] = demand_trend
+                            md["demand_confidence"] = round(demand_confidence, 6)
+                            cand.metadata = md
+                        if meta_enabled and batch_candidates:
+                            meta_cfg_eff = dict(meta_cfg)
+                            static_bias = dict(meta_cfg_eff.get("strategy_bias", {}) or {})
+                            for k, v in meta_dynamic_bias.items():
+                                try:
+                                    static_bias[k] = float(static_bias.get(k, 0.0)) + float(v)
+                                except (TypeError, ValueError):
+                                    static_bias[k] = float(v)
+                            meta_cfg_eff["strategy_bias"] = static_bias
+                            batch_candidates, mlr = meta_filter_candidates(
+                                batch_candidates,
+                                demand_score=demand_score,
+                                cfg=meta_cfg_eff,
+                                mode=mode_raw,
+                            )
+                            if mlr.dropped > 0:
+                                logger.info(
+                                    "meta_labeling | dropped={} kept={} demand={:.3f}",
+                                    mlr.dropped,
+                                    mlr.kept,
+                                    demand_score,
+                                )
 
                         if discovery_pipeline is not None:
                             discovery_items = await discovery_pipeline.run_cycle_detailed(
@@ -875,6 +1207,12 @@ class TradingLoop:
                                     portfolio_dict=portfolio_dict,
                                     tradable=tradable_nav,
                                     mode_raw=mode_raw,
+                                    demand_score=demand_score,
+                                    demand_trend=demand_trend,
+                                    demand_confidence=demand_confidence,
+                                    demand_components=demand_components,
+                                    demand_alert=last_demand_alert,
+                                    demand_alert_history=list(demand_alert_history),
                                     bus=bus,
                                     session_factory=session_factory,
                                     strategies_cfg=strategies_cfg,
@@ -901,6 +1239,20 @@ class TradingLoop:
                                         universe_symbols=list(symbols),
                                         timeframe=self.timeframe,
                                     )
+                                    regime.metadata = dict(regime.metadata or {})
+                                    regime.metadata["demand_score"] = round(demand_score, 6)
+                                    regime.metadata["demand_trend"] = demand_trend
+                                    regime.metadata["demand_confidence"] = round(demand_confidence, 6)
+                                    regime.metadata["market_volatility"] = float(
+                                        demand_components.get("market_volatility", 0.0)
+                                    )
+                                    regime.metadata["cross_asset_coverage"] = float(
+                                        demand_components.get("cross_asset_coverage", 0.0)
+                                    )
+                                    if last_demand_alert is not None:
+                                        regime.metadata["demand_alert"] = dict(last_demand_alert)
+                                    if demand_alert_history:
+                                        regime.metadata["demand_alert_history"] = list(demand_alert_history[-8:])
                                     opps = await build_opportunities_async(
                                         signals=batch_candidates,
                                         regime_state=regime,
@@ -967,7 +1319,7 @@ class TradingLoop:
                                 for instr in plan.instructions:
                                     px = await _resolve_price_for_symbol(instr.symbol)
                                     ac = _asset_class_lookup(instr.symbol, batch_candidates)
-                                    routed = self.router.route(ac, instr.symbol)
+                                    routed = self.router.route(ac, instr.symbol, metadata={"profile_mode": mode_raw})
                                     if routed is None:
                                         continue
                                     rs = risk_signal_from_execution_instruction(
@@ -1052,6 +1404,31 @@ class TradingLoop:
                         next_reconcile_at = now_ts + self.reconcile_interval_sec
 
                     hb_extra: dict[str, Any] = {"paper_mode": self.paper_mode}
+                    hb_extra["demand"] = {
+                        "score": round(float(demand_score), 6),
+                        "trend": demand_trend,
+                        "confidence": round(float(demand_confidence), 6),
+                        "components": {
+                            k: round(float(v), 6) for k, v in (demand_components or {}).items()
+                        },
+                        "alert": dict(last_demand_alert) if last_demand_alert is not None else None,
+                        "alert_history": list(demand_alert_history[-8:]),
+                    }
+                    hb_extra["meta_labeling"] = {
+                        "dynamic_bias": dict(meta_dynamic_bias),
+                        "diagnostics": dict(meta_dynamic_diag),
+                    }
+                    if self.router is not None:
+                        rq = self.router.export_quality_state()
+                        hb_extra["routing_quality"] = {
+                            "symbols": len((rq.get("quality_map") or {})),
+                            "updated_at": rq.get("updated_at"),
+                        }
+                        if self.iterations % routing_persist_every_n == 0:
+                            try:
+                                await bus.set_state("routing.quality.state", rq)
+                            except Exception:  # noqa: BLE001
+                                pass
                     if ai_pipeline is not None and getattr(ai_pipeline, "classifier", None) is not None:
                         _cls = ai_pipeline.classifier
                         ai_status = _cls.runtime_ai_status()
@@ -1156,6 +1533,12 @@ class TradingLoop:
         portfolio_dict: dict[str, Any],
         tradable: Decimal,
         mode_raw: str,
+        demand_score: float,
+        demand_trend: str,
+        demand_confidence: float,
+        demand_components: dict[str, Any],
+        demand_alert: dict[str, Any] | None,
+        demand_alert_history: list[dict[str, Any]],
         bus: CommandBus,
         session_factory: Any,
         strategies_cfg: dict[str, Any],
@@ -1280,6 +1663,16 @@ class TradingLoop:
                 strategy_opportunities=new_opps,
                 coordinator_actions=actions,
                 portfolio_state=ps_ge,
+                demand={
+                    "score": round(float(demand_score), 6),
+                    "trend": demand_trend,
+                    "confidence": round(float(demand_confidence), 6),
+                    "components": {
+                        k: round(float(v), 6) for k, v in (demand_components or {}).items()
+                    },
+                    "alert": dict(demand_alert) if demand_alert is not None else None,
+                    "alert_history": list(demand_alert_history[-8:]),
+                },
             )
             dashboard_snapshot_written = True
         except Exception as pub_exc:  # noqa: BLE001
@@ -1343,7 +1736,11 @@ class TradingLoop:
         """Single-signal processing mirroring _process_signal for coordinator path."""
         if self.router is None or self.risk_engine is None or self.execution_engine is None:
             return False
-        routed = self.router.route(signal.asset_class, signal.symbol)
+        routed = self.router.route(
+            signal.asset_class,
+            signal.symbol,
+            metadata=getattr(signal, "metadata", None),
+        )
         if routed is None:
             return False
         signal.broker = routed
@@ -1403,12 +1800,51 @@ class TradingLoop:
             session_factory=session_factory,
         )
         if result is None:
+            try:
+                turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                self.router.record_execution_feedback(
+                    broker=str(signal.broker or ""),
+                    symbol=str(signal.symbol or ""),
+                    filled=False,
+                    slippage_bps=None,
+                    turnover_hint=turnover_hint,
+                    liquidity_hint=liq_hint,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
         status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
         if status_val != "filled":
+            try:
+                turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                self.router.record_execution_feedback(
+                    broker=str(signal.broker or ""),
+                    symbol=str(signal.symbol or ""),
+                    filled=False,
+                    slippage_bps=None,
+                    turnover_hint=turnover_hint,
+                    liquidity_hint=liq_hint,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
         filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
         if filled_qty <= 0:
+            try:
+                turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
+                self.router.record_execution_feedback(
+                    broker=str(signal.broker or ""),
+                    symbol=str(signal.symbol or ""),
+                    filled=False,
+                    slippage_bps=None,
+                    turnover_hint=turnover_hint,
+                    liquidity_hint=liq_hint,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
         post_trade_state = await _load_portfolio_state(
             session_factory,
@@ -1428,6 +1864,21 @@ class TradingLoop:
         _apply_signal_to_portfolio_state(post_trade_state, signal)
         await _persist_position_snapshot(session_factory, post_trade_state)
         await _upsert_daily_pnl(session_factory, post_trade_state)
+        try:
+            slip_bps = None
+            avg_fill = getattr(result, "avg_fill_price", None)
+            if avg_fill is not None and signal.suggested_price is not None and signal.suggested_price > 0:
+                slip_bps = float((Decimal(str(avg_fill)) - Decimal(str(signal.suggested_price))) / Decimal(str(signal.suggested_price)) * Decimal("10000"))
+            self.router.record_execution_feedback(
+                broker=str(signal.broker or ""),
+                symbol=str(signal.symbol or ""),
+                filled=True,
+                slippage_bps=slip_bps,
+                turnover_hint=float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0,
+                liquidity_hint=float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return True
 
     def _load_mode_cadence_map(self) -> dict[str, int]:
