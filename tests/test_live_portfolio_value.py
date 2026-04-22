@@ -1,0 +1,164 @@
+"""Regression tests for :func:`system.portfolio_equity.live_portfolio_value`.
+
+These tests pin the BASE-currency preference that makes IBKR's NetLiquidation
+(and similar multi-currency broker reports) aggregate correctly. Without this
+preference, naive ``max(balances)`` picks a single cash line and understates
+account NAV by the notional of held positions — the exact bug that caused the
+UI NAV card to show ~£884k while the true aggregated NAV was ~£1.05M.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+import pytest
+
+from brokers.base import Balance
+from system.portfolio_equity import live_portfolio_value
+
+
+class _StubAdapter:
+    def __init__(self, balances: list[Balance]) -> None:
+        self._balances = balances
+
+    async def get_balance(self) -> list[Balance]:
+        return list(self._balances)
+
+
+class _StubBrokerManager:
+    def __init__(self, adapters: dict[str, _StubAdapter]) -> None:
+        self.adapters = adapters
+
+
+def _bal(ccy: str, total: str) -> Balance:
+    t = Decimal(total)
+    return Balance(currency=ccy, total=t, available=t, reserved=Decimal("0"))
+
+
+@pytest.mark.asyncio
+async def test_returns_zero_when_broker_manager_is_none() -> None:
+    assert await live_portfolio_value(None) == Decimal(0)
+
+
+@pytest.mark.asyncio
+async def test_returns_zero_when_no_adapters() -> None:
+    bm = _StubBrokerManager({})
+    assert await live_portfolio_value(bm) == Decimal(0)
+
+
+@pytest.mark.asyncio
+async def test_prefers_base_row_over_larger_cash_row() -> None:
+    """IBKR-style: BASE row carries NetLiquidation; non-BASE is just that currency's cash.
+
+    If the helper naively took ``max(balances)`` it would pick the USD cash row
+    (884,000) and miss the ~170k of non-cash positions already reflected in
+    NetLiquidation (1,055,000).
+    """
+    ibkr = _StubAdapter(
+        [
+            _bal("USD", "884000"),
+            _bal("GBP", "100"),
+            _bal("BASE", "1055000"),
+        ]
+    )
+    bm = _StubBrokerManager({"ibkr": ibkr})
+    assert await live_portfolio_value(bm) == Decimal("1055000")
+
+
+@pytest.mark.asyncio
+async def test_prefers_base_even_when_smaller_than_other_rows() -> None:
+    """BASE is authoritative even if a non-BASE currency row reports a larger raw total.
+
+    Pins the intent: we trust the broker-reported NAV figure, not the biggest
+    number across currency rows.
+    """
+    ibkr = _StubAdapter(
+        [
+            _bal("USD", "2000000"),
+            _bal("BASE", "1055000"),
+        ]
+    )
+    bm = _StubBrokerManager({"ibkr": ibkr})
+    assert await live_portfolio_value(bm) == Decimal("1055000")
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_max_when_no_base_row() -> None:
+    """Crypto venues report per-asset rows without BASE — max preserves the old behaviour."""
+    binance = _StubAdapter(
+        [
+            _bal("USDT", "50000"),
+            _bal("BTC", "10000"),
+        ]
+    )
+    bm = _StubBrokerManager({"binance": binance})
+    assert await live_portfolio_value(bm) == Decimal("50000")
+
+
+@pytest.mark.asyncio
+async def test_sums_one_row_per_adapter() -> None:
+    """Each adapter contributes exactly one equity figure (avoid double-counting)."""
+    ibkr = _StubAdapter([_bal("BASE", "1000000"), _bal("USD", "800000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    bybit = _StubAdapter([_bal("USDT", "12000"), _bal("BTC", "3000")])
+    bm = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca, "bybit": bybit})
+    assert await live_portfolio_value(bm) == Decimal("1062000")
+
+
+@pytest.mark.asyncio
+async def test_empty_or_zero_balances_are_skipped() -> None:
+    empty = _StubAdapter([])
+    zero = _StubAdapter([_bal("USD", "0")])
+    ok = _StubAdapter([_bal("BASE", "100000")])
+    bm = _StubBrokerManager({"kraken": empty, "binance": zero, "ibkr": ok})
+    assert await live_portfolio_value(bm) == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_adapter_exception_does_not_abort_aggregation() -> None:
+    class _Broken:
+        async def get_balance(self) -> list[Balance]:
+            raise RuntimeError("boom")
+
+    ok = _StubAdapter([_bal("BASE", "100000")])
+    bm = _StubBrokerManager({"kraken": _Broken(), "ibkr": ok})  # type: ignore[dict-item]
+    assert await live_portfolio_value(bm) == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_base_currency_case_insensitive() -> None:
+    """Some adapters may emit 'base' or 'Base'; helper must still recognise it."""
+    ibkr = _StubAdapter([_bal("base", "1055000"), _bal("USD", "884000")])
+    bm = _StubBrokerManager({"ibkr": ibkr})
+    assert await live_portfolio_value(bm) == Decimal("1055000")
+
+
+@pytest.mark.asyncio
+async def test_pnl_and_dashboard_agree_on_same_data() -> None:
+    """Integration-ish: the /pnl helper (via _live_portfolio_value) must agree with
+    the trading loop (live_portfolio_value) on identical inputs.
+
+    This is the whole point of delegating from api.server._live_portfolio_value
+    to system.portfolio_equity.live_portfolio_value — prevents the UI NAV card
+    from drifting from portfolio.nav again.
+    """
+    from api import server as api_server
+
+    class _Orch:
+        _broker_manager: Any = None
+
+    orch = _Orch()
+    ibkr = _StubAdapter([_bal("BASE", "1055000"), _bal("USD", "884000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    orch._broker_manager = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca})
+
+    original_get = api_server._get_orchestrator
+    api_server._get_orchestrator = lambda: orch  # type: ignore[assignment]
+    try:
+        api_value = await api_server._live_portfolio_value()
+    finally:
+        api_server._get_orchestrator = original_get  # type: ignore[assignment]
+
+    loop_value = await live_portfolio_value(orch._broker_manager)
+    assert api_value == loop_value == Decimal("1105000")

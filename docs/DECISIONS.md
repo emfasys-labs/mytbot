@@ -380,3 +380,27 @@ Full suite still green (276 passed, 3 skipped).
 **Operator follow-ups (next cycle):**
 - Extend the coverage contract to the Risk screen: render an "excluded from NAV" chip on the Capital-at-work row when `coverage.full === false`.
 - `POST /admin/retry_broker/{name}` to force an immediate reconnect attempt on an excluded broker instead of waiting for the background reconnect loop — operator can one-click recover after launching IB Gateway.
+
+---
+
+## D029 — Single canonical NAV aggregator (BASE-aware) + periodic heartbeat persistence
+**Date:** 2026-04-22
+**Decision:** The aggregated NAV is now computed in **exactly one place** and persisted on a cadence so shutdown can never lose it. Two coordinated changes:
+
+1. **Single source of truth for live NAV.** `api/server.py::_live_portfolio_value()` used to duplicate (and subtly mis-implement) the trading-loop's broker aggregation: it took `max(balances)` per adapter, which for IBKR picked a single cash-currency line instead of the `BASE` row that carries `NetLiquidation`. The result was that `/pnl.today.portfolio_value` (which the UI NAV card reads) reported ~£884k while `/dashboard/snapshot.portfolio.nav` (built off the trading-loop aggregation) correctly reported ~£1,055k — a £170k phantom loss. `_live_portfolio_value()` now delegates to `system.portfolio_equity.live_portfolio_value()` — the canonical BASE-preferring helper that already backed the trading loop. One function, one behaviour, two callers.
+
+2. **NAV heartbeat (periodic + on-shutdown).** Before this change, `daily_pnl` only received a row when a trade filled. A quiet trading day plus an ungraceful shutdown (OS kill, power loss, crash) could leave the DB with either no row for today or a stale one from yesterday, so the `/pnl` DB fallback had nothing fresh to show when brokers were slow to report balances post-restart. A new orchestrator background task `_nav_heartbeat_loop` (tick `NAV_HEARTBEAT_INTERVAL_SEC`, default 60s) calls `_upsert_daily_pnl` with the live BASE-aware equity every minute, and `Orchestrator.stop()` flushes one final heartbeat with a 10s timeout before disconnecting brokers. A tick that sees zero aggregated equity is a **no-op** — we never clobber a valid historical row with a spurious zero. `/pnl` also now falls back to the most recent persisted row (any date) if today's is missing, so the UI still shows a meaningful NAV during the all-brokers-still-connecting window after a restart.
+
+**Reason:** On 2026-04-22 the operator reported NAV had "dropped by nearly £200,000 overnight" (£880k vs yesterday's £1M+). Root cause was entirely cosmetic — no capital had been lost; the UI was reading a buggy duplicate aggregator that understated IBKR's balance by ignoring the `BASE` NetLiquidation row. Secondary concern: "is it not secure to turn off the system?". It was safe (`daily_pnl` preserves yesterday's row on any shutdown) but the persistence cadence was fragile — tied to trade fills only — which created the exact class of "last persisted value is stale" failure modes that make honest NAV reporting impossible. Consolidating the aggregator and adding a heartbeat closes both gaps and makes the answer to "what is my NAV?" the same number from every code path.
+
+**Rejected alternatives:** "Keep the two aggregators and add a test that they agree" — still ships two ways to make the same mistake. "Emit NAV only when exposure changes" — does not solve the empty-trading-day case that triggered the report.
+
+**Status:** Implemented. Covered by:
+- `tests/test_live_portfolio_value.py` (10 cases — zero/empty inputs, BASE preference over larger cash rows, BASE even when smaller than non-BASE, `max` fallback when no BASE row, per-adapter dedup, zero rows skipped, adapter exceptions swallowed, case-insensitive BASE match, API ↔ loop consistency).
+- `tests/test_nav_heartbeat.py` (5 cases — upsert on non-zero equity, skip on zero equity, swallow DB errors, loop cancellable, idempotent start).
+- Full backend suite: 344 passed, 3 skipped.
+- Live reconciliation post-fix: `/pnl.today.portfolio_value` = `/dashboard/snapshot.portfolio.nav + today_unrealised` to the penny.
+
+**Operator follow-ups (next cycle):**
+- Consider surfacing `daily_pnl` as a TimescaleDB hypertable to make multi-year NAV history queries cheap.
+- Surface "last NAV heartbeat" timestamp on the System screen so operators can spot a stuck heartbeat before it causes drift.

@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import enum
 import os
-from datetime import datetime, timezone
 from collections.abc import Awaitable
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from dotenv import load_dotenv
@@ -90,6 +91,7 @@ class Orchestrator:
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_scan_idx: int = 0
         self._coverage_sync_task: asyncio.Task | None = None
+        self._nav_heartbeat_task: asyncio.Task | None = None
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
@@ -159,6 +161,7 @@ class Orchestrator:
 
                 self._broker_manager.start_reconnect_loop()
                 self._start_coverage_sync_loop()
+                self._start_nav_heartbeat_loop()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -262,6 +265,23 @@ class Orchestrator:
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._coverage_sync_task = None
+
+            # 3c. Flush one final NAV heartbeat *before* disconnecting brokers so
+            # the last row in daily_pnl reflects today's true NAV. Without this,
+            # a shutdown between heartbeat ticks would leave the DB with a
+            # slightly stale value (worst case: the previous day's row).
+            try:
+                await asyncio.wait_for(self._flush_nav_heartbeat(), timeout=10.0)
+            except Exception as exc:
+                logger.warning("orchestrator | final NAV flush error: {}", exc)
+
+            if self._nav_heartbeat_task is not None and not self._nav_heartbeat_task.done():
+                self._nav_heartbeat_task.cancel()
+                try:
+                    await self._nav_heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._nav_heartbeat_task = None
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
@@ -427,6 +447,84 @@ class Orchestrator:
                 last_disabled = excluded
             except Exception as exc:  # noqa: BLE001
                 logger.warning("orchestrator | coverage sync error (non-fatal): {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    def _start_nav_heartbeat_loop(self) -> None:
+        """Persist today's NAV to ``daily_pnl`` on a cadence (and at shutdown).
+
+        Without this heartbeat, ``daily_pnl`` only gets written when a trade
+        fills. A quiet trading day plus an ungraceful shutdown (OS kill, power
+        loss) would leave the system with either no row for today or a stale
+        one from yesterday — which is what made the operator think £200k had
+        evaporated overnight when in fact the live NAV figure was computed
+        incorrectly and the DB fallback had nothing fresh to show.
+        """
+        if self._nav_heartbeat_task is not None and not self._nav_heartbeat_task.done():
+            return
+        self._nav_heartbeat_task = asyncio.create_task(
+            self._nav_heartbeat_loop(), name="nav-heartbeat"
+        )
+
+    async def _flush_nav_heartbeat(self) -> None:
+        """Upsert today's NAV row once using the current broker-reported equity.
+
+        Used by the heartbeat loop and by ``stop()`` to guarantee the final
+        persisted NAV on graceful shutdown.
+        """
+        try:
+            from storage.db import init_async_database, dispose_engine as _dispose
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | nav heartbeat | db module unavailable: {}", exc)
+            return
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            from run_m3 import _load_portfolio_state, _upsert_daily_pnl
+            from system.portfolio_equity import live_portfolio_value
+
+            total_equity = await live_portfolio_value(self._broker_manager)
+            if total_equity <= 0:
+                # No broker reported a usable equity figure right now. Skip
+                # writing rather than clobber a valid prior row with zero.
+                return
+            portfolio_state = await _load_portfolio_state(
+                sf,
+                fallback_portfolio_value=total_equity,
+                capital_pct=Decimal(str(self.capital_pct)),
+            )
+            await _upsert_daily_pnl(sf, portfolio_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | nav heartbeat upsert error (non-fatal): {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
+    async def _nav_heartbeat_loop(self) -> None:
+        try:
+            interval = max(5.0, float(os.getenv("NAV_HEARTBEAT_INTERVAL_SEC", "60")))
+        except (TypeError, ValueError):
+            interval = 60.0
+        # Small initial delay so the first heartbeat lands after brokers have
+        # had a chance to report balances (avoids an avoidable skip on the
+        # very first tick).
+        try:
+            await self._sleep_cancellable(min(10.0, interval))
+        except asyncio.CancelledError:
+            return
+        while True:
+            try:
+                await self._flush_nav_heartbeat()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | nav heartbeat tick error: {}", exc)
             try:
                 await self._sleep_cancellable(interval)
             except asyncio.CancelledError:

@@ -36,6 +36,7 @@ from api.pnl_periods import (
 )
 from control.command_bus import CommandBus
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
+from system.portfolio_equity import live_portfolio_value
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
@@ -838,25 +839,23 @@ async def get_discovery_theses(limit: int = Query(50, ge=1, le=500), session_fac
 
 
 async def _live_portfolio_value() -> Decimal:
-    """Sum net-liquidation across all connected brokers."""
+    """Sum net-liquidation across all connected brokers.
+
+    Delegates to :func:`system.portfolio_equity.live_portfolio_value`, the
+    canonical helper used by the trading loop. Crucially, that helper prefers
+    the ``BASE`` currency row for each adapter (IBKR reports NetLiquidation on
+    that row) rather than naive ``max(balances)`` which would pick an
+    individual cash-currency line and understate account NAV by the size of
+    non-cash positions — the exact bug that caused the UI NAV card to show
+    ~£884k while the true aggregated NAV was ~£1.05M.
+    """
     orch = _get_orchestrator()
     if orch is None:
         return Decimal(0)
     bm = getattr(orch, "_broker_manager", None)
     if bm is None:
         return Decimal(0)
-    total = Decimal(0)
-    for _name, adapter in list(bm.adapters.items()):
-        try:
-            balances = await adapter.get_balance()
-            if not balances:
-                continue
-            best = max(balances, key=lambda b: b.total)
-            if best.total > 0:
-                total += best.total
-        except Exception:  # noqa: BLE001
-            pass
-    return total
+    return await live_portfolio_value(bm)
 
 
 def _configured_paper_nav() -> Decimal:
@@ -911,11 +910,16 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     today_unrealised = mtm_unrealised if mtm_unrealised != 0 else db_today_unrealised
 
     db_value = today_row.portfolio_value if today_row and today_row.portfolio_value else Decimal(0)
+    # If today's row has not been written yet (quiet morning, just-restarted
+    # backend, or heartbeat not fired yet), fall back to the most recent
+    # persisted NAV. Prevents the UI from dropping back to ``PORTFOLIO_VALUE``
+    # (100k default) when brokers are slow to report balances post-restart.
+    last_persisted_value = pv_vals[-1] if pv_vals else Decimal(0)
     live_value = await _live_portfolio_value()
     configured_nav = _configured_paper_nav()
     # Headline = best available total: brokers, DB snapshot, or PORTFOLIO_VALUE / trading_loop setting.
     # Stale DailyPnL (e.g. old scaled £46k) must not hide a higher configured or live equity.
-    display_value = max(live_value, db_value, configured_nav)
+    display_value = max(live_value, db_value, last_persisted_value, configured_nav)
     if APP_ENV != "live":
         display_value = max(Decimal(0), display_value + today_unrealised)
 
