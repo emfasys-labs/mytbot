@@ -757,62 +757,99 @@ function formatRelativeTime(ms: number): string {
   return `${d}d ago`;
 }
 
+const STRATEGY_TITLE: Record<string, string> = {
+  momentum_breakout: 'Momentum breakout',
+  mean_reversion: 'Mean reversion',
+  volume_flow: 'Volume flow',
+  event_driven_news: 'Event-driven (news)',
+  pairs_trading: 'Pairs trading',
+  volatility_regime: 'Volatility regime',
+  regime_rotation: 'Regime rotation',
+  funding_rate_arbitrage: 'Funding rate arb',
+  cross_exchange_arbitrage: 'Cross-exchange arb',
+};
+
+function strategyTitle(name: string): string {
+  return STRATEGY_TITLE[name] ?? name.replace(/_/g, ' ');
+}
+
 export function StrategiesScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
+  const rows = live.strategies;
   return (
     <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
       <Label style={{ marginBottom: 14 }}>Strategy mix</Label>
-      {live.strategies.length === 0 ? (
+      {rows.length === 0 ? (
         <Card>
           <div style={{ padding: 20, color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
-            No strategy weights yet · waiting for first allocator publish
+            No strategies to display
           </div>
         </Card>
       ) : (
-        <div style={{ display: 'grid', gap: 14, gridTemplateColumns: 'repeat(2, 1fr)' }}>
-          {live.strategies.map((s) => {
-            const isIdle = !!s.idle || (s.weight === 0 && s.trades === 0);
+        <div style={{
+          display: 'grid',
+          gap: 14,
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+        }}
+        >
+          {rows.map((s) => {
+            const trace = s.sparkValues && s.sparkValues.length >= 2 ? s.sparkValues : null;
+            const rosterIdle = !!s.idle || (s.weight === 0 && s.trades === 0);
             const isArb = s.kind === 'arbitrage';
+            const showSpark = trace != null || !rosterIdle;
+            const synthSpark =
+              !trace && !rosterIdle
+                ? Array.from({ length: 12 }, (_, i) => Math.max(0.02, s.weight) * (1 + 0.04 * Math.sin(i * 0.55)))
+                : null;
+            const confPct = (v: number) =>
+              v >= 0 && v <= 1 ? `${(v * 100).toFixed(0)}%` : (Number.isFinite(v) ? v.toFixed(2) : '—');
             return (
-              <Card key={s.name} style={isIdle ? { opacity: 0.72 } : undefined}>
+              <Card key={s.name} style={rosterIdle ? { opacity: 0.78 } : undefined}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 8 }}>
-                  <span style={{
-                    fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 500,
-                    color: TOKENS.ink0, letterSpacing: '-0.02em',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>{s.name}</span>
+                  <span
+                    title={s.name}
+                    style={{
+                      fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 500,
+                      color: TOKENS.ink0, letterSpacing: '-0.02em',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                  >{strategyTitle(s.name)}</span>
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                     {isArb && <Pill tone="neutral">arbitrage</Pill>}
                     {s.enabled === false && <Pill tone="loss">disabled</Pill>}
-                    {isIdle
+                    {rosterIdle
                       ? <Pill tone="neutral">idle</Pill>
-                      : <Pill tone="neutral">weight {(s.weight * 100).toFixed(0)}%</Pill>
+                      : <Pill tone="neutral">mix {(s.weight * 100).toFixed(0)}%</Pill>
                     }
                   </div>
                 </div>
-                {isIdle ? (
+                {showSpark ? (
+                  <Spark
+                    values={trace ?? synthSpark!}
+                    width={280}
+                    height={56}
+                    accent={accentColor}
+                  />
+                ) : (
                   <div style={{
                     height: 56, display: 'flex', alignItems: 'center', justifyContent: 'center',
                     color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11,
                     borderRadius: 6, background: 'rgba(255,255,255,0.02)',
+                    textAlign: 'center',
+                    padding: '0 8px',
                   }}>
                     {isArb
-                      ? 'awaiting arbitrage opportunity'
-                      : 'registered · no opportunities in current regime'}
+                      ? 'Awaiting spread / funding opportunity'
+                      : 'No recent signals in DB window · strategy registered'}
                   </div>
-                ) : (
-                  <Spark
-                    values={Array.from({ length: 12 }, (_, i) => 1 + Math.sin(i * 0.7 + s.weight * 10) * 0.2 + i * 0.05 * s.weight)}
-                    width={260} height={56} accent={accentColor}
-                  />
                 )}
                 <div style={{
                   display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12,
                   marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`,
                 }}>
-                  <StratStat label="Avg conf" value={s.sharpe ? s.sharpe.toFixed(2) : '—'} />
-                  <StratStat label="Opp score" value={s.winRate ? `${(s.winRate * 100).toFixed(0)}%` : '—'} />
-                  <StratStat label="Opps"   value={String(s.trades)} />
+                  <StratStat label="Conf" value={confPct(s.sharpe)} />
+                  <StratStat label="Avg opp conf" value={confPct(s.winRate)} />
+                  <StratStat label="Opps" value={String(s.trades)} />
                 </div>
               </Card>
             );

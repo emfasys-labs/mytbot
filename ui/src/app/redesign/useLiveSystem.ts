@@ -274,6 +274,8 @@ export function useLiveSystem(): LiveData {
               .filter((x) => x && typeof x.name === 'string' && x.name.trim())
               .map((x) => ({ name: x.name.trim(), enabled: !!x.enabled, kind: x.kind })),
           );
+        } else {
+          setLoadedStrategies([]);
         }
         if (typeof sysRes.capital_pct === 'number' && Number.isFinite(sysRes.capital_pct)) {
           const c = Math.max(0, Math.min(1, sysRes.capital_pct));

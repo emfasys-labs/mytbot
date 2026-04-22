@@ -435,6 +435,57 @@ export function mapOrdersToTradeLog(orders: ApiOrderRow[]) {
   });
 }
 
+/** Canonical roster matching `TradingLoop` + arbitrage stack (`config/strategies.yaml`). Used when the system is off or before the loop exposes `loaded_strategies`. */
+export const DEFAULT_STRATEGY_MIX_ROSTER: Array<{
+  name: string;
+  kind: 'signal' | 'arbitrage';
+  enabled: boolean;
+}> = [
+  { name: 'momentum_breakout', kind: 'signal', enabled: true },
+  { name: 'mean_reversion', kind: 'signal', enabled: true },
+  { name: 'volume_flow', kind: 'signal', enabled: true },
+  { name: 'event_driven_news', kind: 'signal', enabled: true },
+  { name: 'pairs_trading', kind: 'signal', enabled: true },
+  { name: 'volatility_regime', kind: 'signal', enabled: true },
+  { name: 'regime_rotation', kind: 'signal', enabled: true },
+  { name: 'funding_rate_arbitrage', kind: 'arbitrage', enabled: true },
+  { name: 'cross_exchange_arbitrage', kind: 'arbitrage', enabled: true },
+];
+
+function _parseSigTs(iso: string | null | undefined): number {
+  if (!iso) return 0;
+  const t = Date.parse(String(iso));
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Pull recent confidences for one strategy from intelligence API (newest window, ascending for sparkline). */
+export function intelligenceSparkForStrategy(
+  strategyName: string,
+  sigs: IntelligenceSignalsResponse | null,
+  maxPoints = 24,
+): { values: number[]; last: number | null } {
+  const key = (strategyName || '').trim();
+  if (!key) return { values: [], last: null };
+  const rows = sigs?.signals ?? [];
+  const matched = rows
+    .filter((r) => String(r.strategy ?? '').trim() === key)
+    .map((r) => ({
+      t: _parseSigTs(r.timestamp),
+      c: typeof r.confidence === 'number' && Number.isFinite(r.confidence)
+        ? Math.max(0, Math.min(1, r.confidence))
+        : NaN,
+    }))
+    .filter((x) => Number.isFinite(x.c));
+  matched.sort((a, b) => a.t - b.t);
+  const slice = matched.slice(-maxPoints);
+  const values = slice.map((x) => x.c);
+  const last = values.length ? values[values.length - 1]! : null;
+  if (values.length === 1) {
+    return { values: [values[0]!, values[0]!], last };
+  }
+  return { values, last };
+}
+
 export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
   const opps = (snapshot?.opportunities ?? []) as Array<Record<string, unknown>>;
   if (!opps.length) return [];
@@ -473,7 +524,7 @@ export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
       trades: v.count,
     });
   }
-  return strategies.sort((a, b) => b.weight - a.weight).slice(0, 8);
+  return strategies.sort((a, b) => b.weight - a.weight);
 }
 
 export function mergeStrategiesWithSignals(
@@ -539,9 +590,40 @@ export function mergeStrategiesWithSignals(
     });
   }
 
+  for (const d of DEFAULT_STRATEGY_MIX_ROSTER) {
+    if (out.has(d.name)) continue;
+    out.set(d.name, {
+      name: d.name,
+      weight: 0,
+      sharpe: 0,
+      winRate: 0,
+      trades: 0,
+      kind: d.kind,
+      enabled: d.enabled,
+      idle: true,
+    });
+  }
+
+  const kindRank = (k: string | undefined) => (String(k).toLowerCase() === 'arbitrage' ? 1 : 0);
+
   return [...out.values()]
-    .sort((a, b) => b.weight - a.weight || (a.idle === b.idle ? 0 : a.idle ? 1 : -1))
-    .slice(0, 12);
+    .map((s) => {
+      const sp = intelligenceSparkForStrategy(s.name, sigs);
+      const hasTrace = sp.values.length >= 2;
+      return {
+        ...s,
+        sparkValues: hasTrace ? sp.values : undefined,
+        lastConfidence: hasTrace ? sp.last : null,
+        sharpe: hasTrace && sp.last != null ? sp.last : s.sharpe,
+      };
+    })
+    .sort((a, b) => {
+      if (b.weight !== a.weight) return b.weight - a.weight;
+      if (!!a.idle !== !!b.idle) return a.idle ? 1 : -1;
+      const kd = kindRank(a.kind as string | undefined) - kindRank(b.kind as string | undefined);
+      if (kd !== 0) return kd;
+      return a.name.localeCompare(b.name);
+    });
 }
 
 export function estimateNavOpen(

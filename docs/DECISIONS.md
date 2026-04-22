@@ -651,3 +651,14 @@ Integration constraints kept:
 **Reason:** Sparse feedback should not dominate venue choice until evidence accumulates; operators need comparable slippage tail risk and fill reliability next to CI-aware scores; the diagnostics API should mirror what the loop persists so the UI and external clients stay consistent.
 
 **Status:** Implemented in `execution/router.py`, `api/server.py`, `ui/src/app/lib/api.ts`, `ui/src/app/redesign/screens.tsx`, with tests in `tests/test_router_wave9.py` plus updates to `tests/test_router_demand_bias.py` and `tests/test_api_dashboard_extras.py`.
+
+---
+
+## D043 — Strategy mix: default roster + live intelligence sparklines
+
+**Date:** 2026-04-22
+**Decision:** The redesign Strategy mix grid always seeds the canonical signal + arbitrage roster (matching `TradingLoop` / `config/strategies.yaml`) via `DEFAULT_STRATEGY_MIX_ROSTER` in `ui/src/app/redesign/mapping.ts`, merged with `loaded_strategies` and allocator snapshot weights. Per-strategy sparklines use recent confidences from `/intelligence/signals` (`intelligenceSparkForStrategy`); allocator-active rows without a DB trace use a lightweight synthetic series from mix weight. `GET /system/status` responses without `loaded_strategies` clear client roster state so off-mode does not show stale loop registrations.
+
+**Reason:** Operators saw an empty Strategy mix before the first allocator publish; the taxonomy roster and signal history should be visible whenever the dashboard loads.
+
+**Status:** Implemented in `ui/src/app/redesign/mapping.ts`, `ui/src/app/redesign/screens.tsx`, `ui/src/app/redesign/data.ts`, `ui/src/app/redesign/useLiveSystem.ts`.

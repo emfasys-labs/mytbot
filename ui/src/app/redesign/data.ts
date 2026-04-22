@@ -94,6 +94,10 @@ export interface Strategy {
   idle?: boolean;
   /** Whether the strategy is enabled in the trading loop registry. */
   enabled?: boolean;
+  /** Recent signal confidences (chronological) for this strategy from `/intelligence/signals`. */
+  sparkValues?: number[];
+  /** Latest confidence from `sparkValues`, when available. */
+  lastConfidence?: number | null;
 }
 
 export type BrokerUiState = 'live' | 'warming' | 'offline' | 'off';
