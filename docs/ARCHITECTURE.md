@@ -218,7 +218,7 @@ strategies/   Signal generation only. No broker calls.
 signals/      Signal aggregation, accumulator, opportunity/D015 hooks, AI modifier.
 ai/           Provider routing, scoring, rationale — no order placement.
 risk/         Risk checks and kill switch only.
-execution/    Order management and routing only.
+execution/    Order management and routing only (`SmartOrderRouter`: fee + learned quality with prior–posterior fusion, slippage tail stats, persisted `routing.quality.state`).
 portfolio/    Position tracking and P&L only.
 storage/      Database models and queries only.
 api/          FastAPI + WebSocket; thin controllers — domain logic in system/core.

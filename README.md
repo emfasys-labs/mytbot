@@ -131,4 +131,5 @@ Detail: `docs/BUILD_PLAN.md`. Decisions: `docs/DECISIONS.md`. Architecture: `doc
 - Meta-layer: adaptive strategy priors from recent execution outcomes
 - Dashboard: demand regime-shift alerts/history + meta-calibration diagnostics
 - Diagnostics: per-symbol routing quality trajectory endpoint (`/diagnostics/routing-quality`) + UI mini-sparklines
+- Diagnostics: routing quality API returns persisted `quality_stats`; Wave 9 adds fused prior+evidence scores, slippage p50/p90, fill rate, and a broker comparison table in Risk diagnostics
 - Structural arbitrage: `funding_rate_arbitrage`, `cross_exchange_arbitrage`

@@ -7,6 +7,7 @@ import { useMemo } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
+import type { RoutingBrokerRow } from '../lib/api';
 import { mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
@@ -412,21 +413,33 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
   const routingDiag = useMemo(() => {
     const rq = live.routingQuality;
     const qmap = (rq?.quality_map ?? {}) as Record<string, Record<string, number>>;
-    const qstats = (rq?.quality_stats ?? {}) as Record<string, Record<string, { n: number; std: number; ci95_half: number }>>;
+    const qstats = (rq?.quality_stats ?? {}) as Record<
+      string,
+      Record<string, { n: number; std: number; ci95_half: number; fused_score?: number }>
+    >;
     const hist = (rq?.history ?? {}) as Record<string, Array<{ ts: string; broker: string; score: number }>>;
     const rows = Object.entries(qmap)
       .map(([sym, by]) => {
-        const best = Object.entries(by).sort((a, b) => b[1] - a[1])[0];
+        const best = Object.entries(by).sort((a, b) => {
+          const rowA = qstats[sym]?.[a[0]];
+          const rowB = qstats[sym]?.[b[0]];
+          const fa = typeof rowA?.fused_score === 'number' && Number.isFinite(rowA.fused_score) ? rowA.fused_score : a[1];
+          const fb = typeof rowB?.fused_score === 'number' && Number.isFinite(rowB.fused_score) ? rowB.fused_score : b[1];
+          return fb - fa;
+        })[0];
         const bestBroker = best?.[0] ?? '—';
         const seriesRaw = (Array.isArray(hist[sym]) ? hist[sym] : [])
           .filter((x) => x.broker === bestBroker)
           .slice(-16);
         const series = seriesRaw.map((x) => Number(x.score) || 0);
         const stat = (qstats[sym] && qstats[sym][bestBroker]) ? qstats[sym][bestBroker] : null;
+        const fused = typeof stat?.fused_score === 'number' && Number.isFinite(stat.fused_score)
+          ? stat.fused_score
+          : (Number.isFinite(best?.[1] ?? NaN) ? Number(best?.[1]) : 0);
         return {
           sym,
           bestBroker,
-          bestScore: Number.isFinite(best?.[1] ?? NaN) ? Number(best?.[1]) : 0,
+          bestScore: fused,
           points: Array.isArray(hist[sym]) ? hist[sym].length : 0,
           series,
           ci95: stat?.ci95_half ?? 0,
@@ -436,6 +449,12 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
       .sort((a, b) => b.bestScore - a.bestScore)
       .slice(0, 6);
     return { rows, updatedAt: rq?.updated_at ?? null };
+  }, [live.routingQuality]);
+
+  const routingBrokerTable = useMemo(() => {
+    const raw = live.routingQuality?.broker_comparison;
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    return (raw as RoutingBrokerRow[]).slice(0, 32);
   }, [live.routingQuality]);
 
   return (
@@ -656,6 +675,58 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
             </div>
           </div>
         </div>
+        {routingBrokerTable.length > 0 && (
+          <div style={{
+            marginTop: 14,
+            borderTop: `1px solid ${TOKENS.line}`,
+            paddingTop: 12,
+            overflowX: 'auto',
+          }}
+          >
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>
+              Broker comparison (fused score · fee prior · CI95 · slip p50/p90 · fills)
+            </div>
+            <table style={{
+              width: '100%',
+              borderCollapse: 'collapse',
+              fontFamily: TOKENS.mono,
+              fontSize: 10,
+              color: TOKENS.ink3,
+            }}
+            >
+              <thead>
+                <tr style={{ color: TOKENS.ink2, textAlign: 'left' }}>
+                  <th style={{ padding: '4px 8px 4px 0' }}>symbol</th>
+                  <th style={{ padding: '4px 8px' }}>broker</th>
+                  <th style={{ padding: '4px 8px' }}>fused</th>
+                  <th style={{ padding: '4px 8px' }}>learned</th>
+                  <th style={{ padding: '4px 8px' }}>prior</th>
+                  <th style={{ padding: '4px 8px' }}>CI±</th>
+                  <th style={{ padding: '4px 8px' }}>n</th>
+                  <th style={{ padding: '4px 8px' }}>p50 slip</th>
+                  <th style={{ padding: '4px 8px' }}>p90 slip</th>
+                  <th style={{ padding: '4px 8px' }}>fill%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {routingBrokerTable.map((row, idx) => (
+                  <tr key={`${row.symbol}-${row.broker}-${idx}`} style={{ borderTop: `1px solid ${TOKENS.line}` }}>
+                    <td style={{ padding: '6px 8px 6px 0', color: TOKENS.ink0 }}>{prettySymbol(row.symbol)}</td>
+                    <td style={{ padding: '6px 8px' }}>{row.broker}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.fused_score).toFixed(3)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.learned_score).toFixed(3)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.fee_prior).toFixed(3)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.ci95_half).toFixed(3)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Math.round(Number(row.n) || 0)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.p50_slippage_bps).toFixed(2)}</td>
+                    <td style={{ padding: '6px 8px' }}>{Number(row.p90_slippage_bps).toFixed(2)}</td>
+                    <td style={{ padding: '6px 8px' }}>{(Number(row.fill_rate) * 100).toFixed(0)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
     </div>
   );

@@ -59,6 +59,44 @@ BROKER_FEE_MAP = {
     "alpaca":  Decimal("0.0000"),   # zero commission equities
 }
 
+# Pseudo-observation count for fee→routing prior when blending with online quality (Wave 9).
+ROUTING_PRIOR_PSEUDO_N = 8.0
+_SLIP_WINDOW = 32
+
+
+def _fee_prior_scores() -> dict[str, float]:
+    """Map broker → [-1, 1] prior from relative taker fee (lower fee → higher score)."""
+    vals = {k: float(v) for k, v in BROKER_FEE_MAP.items()}
+    if not vals:
+        return {}
+    fmin = min(vals.values())
+    fmax = max(vals.values())
+    span = fmax - fmin + 1e-15
+    out: dict[str, float] = {}
+    for k, v in vals.items():
+        prior = 1.0 - 2.0 * (v - fmin) / span
+        out[k] = max(-1.0, min(1.0, prior))
+    return out
+
+
+FEE_PRIOR_SCORE = _fee_prior_scores()
+
+
+def _slippage_percentiles_bps(samples: list[float]) -> tuple[float, float]:
+    if not samples:
+        return 0.0, 0.0
+    xs = sorted(float(x) for x in samples if isinstance(x, (int, float)) and math.isfinite(float(x)))
+    if not xs:
+        return 0.0, 0.0
+
+    def _pct(p: float) -> float:
+        if len(xs) == 1:
+            return xs[0]
+        idx = int(round((p / 100.0) * (len(xs) - 1)))
+        return xs[max(0, min(len(xs) - 1, idx))]
+
+    return _pct(50.0), _pct(90.0)
+
 
 class SmartOrderRouter:
 
@@ -70,6 +108,8 @@ class SmartOrderRouter:
         self._learned_quality: dict[tuple[str, str], float] = {}
         self._quality_history: dict[str, list[dict[str, float | str]]] = {}
         self._obs_stats: dict[tuple[str, str], dict[str, float | str]] = {}
+        # Per (broker, symbol): rolling slippage |bps| samples + fill counts for telemetry / persistence.
+        self._exec_metrics: dict[tuple[str, str], dict[str, object]] = {}
 
     def route(self, asset_class: str, symbol: str, metadata: dict | None = None) -> Optional[str]:
         """
@@ -104,11 +144,10 @@ class SmartOrderRouter:
             return None
 
         sym_u = (symbol or "").strip().upper()
-        # Sort by fee and learned execution quality.
-        # Better learned quality reduces effective rank value.
+        # Sort by fee, then by fused routing score (fee prior + online evidence).
         def _rank_key(b: str) -> tuple[Decimal, float]:
             fee = BROKER_FEE_MAP.get(b, Decimal("0.01"))
-            q = float(self._learned_quality.get((b, sym_u), 0.0))
+            q = self.fused_routing_score(b, sym_u)
             return fee, -q
 
         permitted.sort(key=_rank_key)
@@ -199,6 +238,21 @@ class SmartOrderRouter:
         st["liquidity_ema"] = prev_l * 0.9 + max(0.0, l_hint) * 0.1
         st["last_ts"] = datetime.now(timezone.utc).isoformat()
         self._obs_stats[key] = st
+        em = dict(self._exec_metrics.get(key, {}))
+        slips: list[float] = [float(x) for x in (em.get("slips") or []) if isinstance(x, (int, float))]
+        attempts = int(em.get("attempts", 0) or 0) + 1
+        fills_ct = int(em.get("fills", 0) or 0)
+        if filled:
+            fills_ct += 1
+        em["attempts"] = attempts
+        em["fills"] = fills_ct
+        if slippage_bps is not None:
+            try:
+                slips.append(abs(float(slippage_bps)))
+            except (TypeError, ValueError):
+                pass
+        em["slips"] = slips[-_SLIP_WINDOW:]
+        self._exec_metrics[key] = em
         hist = self._quality_history.setdefault(s, [])
         hist.append(
             {
@@ -242,12 +296,26 @@ class SmartOrderRouter:
                 eff = max(r * 0.35, min(r * 3.0, eff))
             self._learned_quality[k] = float(v) * (1.0 - eff)
 
+    def fused_routing_score(self, broker: str, symbol: str) -> float:
+        """Bayesian-style blend: fee prior (pseudo-obs) + mean learned score weighted by n."""
+        b = (broker or "").strip().lower()
+        s = (symbol or "").strip().upper()
+        prior = float(FEE_PRIOR_SCORE.get(b, 0.0))
+        learned = float(self._learned_quality.get((b, s), 0.0))
+        st = self._obs_stats.get((b, s), {})
+        n = max(0.0, min(100.0, float(st.get("n", 0.0) or 0.0)))
+        w0 = ROUTING_PRIOR_PSEUDO_N
+        fused = (w0 * prior + n * learned) / (w0 + n) if (w0 + n) > 0 else prior
+        return max(-1.0, min(1.0, float(fused)))
+
     def export_quality_state(self) -> dict[str, object]:
         map_out: dict[str, dict[str, float]] = {}
         stats_out: dict[str, dict[str, dict[str, float]]] = {}
-        for (broker, symbol), score in self._learned_quality.items():
+        all_keys = set(self._learned_quality.keys()) | set(self._exec_metrics.keys())
+        for (broker, symbol) in sorted(all_keys, key=lambda k: (k[1], k[0])):
+            score = float(self._learned_quality.get((broker, symbol), 0.0))
             by_sym = map_out.setdefault(symbol, {})
-            by_sym[broker] = round(float(score), 6)
+            by_sym[broker] = round(score, 6)
             st = self._obs_stats.get((broker, symbol), {})
             n = max(0.0, float(st.get("n", 0.0) or 0.0))
             m2 = max(0.0, float(st.get("m2", 0.0) or 0.0))
@@ -255,6 +323,14 @@ class SmartOrderRouter:
             std = math.sqrt(max(0.0, var))
             se = std / math.sqrt(n) if n > 0 else 0.0
             ci95_half = 1.96 * se
+            em = self._exec_metrics.get((broker, symbol), {})
+            slips = [float(x) for x in (em.get("slips") or []) if isinstance(x, (int, float))]
+            p50, p90 = _slippage_percentiles_bps(slips)
+            attempts = max(0, int(em.get("attempts", 0) or 0))
+            fills = max(0, int(em.get("fills", 0) or 0))
+            fill_rate = (fills / attempts) if attempts > 0 else 0.0
+            fee_prior = float(FEE_PRIOR_SCORE.get(broker, 0.0))
+            fused = self.fused_routing_score(broker, symbol)
             srow = stats_out.setdefault(symbol, {})
             srow[broker] = {
                 "n": round(n, 3),
@@ -262,12 +338,49 @@ class SmartOrderRouter:
                 "ci95_half": round(ci95_half, 6),
                 "turnover_ema": round(float(st.get("turnover_ema", 0.0) or 0.0), 6),
                 "liquidity_ema": round(float(st.get("liquidity_ema", 0.0) or 0.0), 6),
+                "fee_prior": round(fee_prior, 6),
+                "fused_score": round(fused, 6),
+                "p50_slippage_bps": round(p50, 4),
+                "p90_slippage_bps": round(p90, 4),
+                "fill_rate": round(fill_rate, 4),
+                "exec_attempts": float(attempts),
+                "exec_fills": float(fills),
+            }
+        broker_rows: list[dict[str, float | str]] = []
+        for (broker, symbol) in sorted(all_keys, key=lambda k: (k[1], k[0])):
+            st = stats_out.get(symbol, {}).get(broker, {})
+            broker_rows.append(
+                {
+                    "symbol": symbol,
+                    "broker": broker,
+                    "learned_score": float(map_out.get(symbol, {}).get(broker, 0.0)),
+                    "fused_score": float(st.get("fused_score", 0.0) or 0.0),
+                    "fee_prior": float(st.get("fee_prior", 0.0) or 0.0),
+                    "ci95_half": float(st.get("ci95_half", 0.0) or 0.0),
+                    "n": float(st.get("n", 0.0) or 0.0),
+                    "p50_slippage_bps": float(st.get("p50_slippage_bps", 0.0) or 0.0),
+                    "p90_slippage_bps": float(st.get("p90_slippage_bps", 0.0) or 0.0),
+                    "fill_rate": float(st.get("fill_rate", 0.0) or 0.0),
+                    "exec_attempts": float(st.get("exec_attempts", 0.0) or 0.0),
+                    "exec_fills": float(st.get("exec_fills", 0.0) or 0.0),
+                }
+            )
+        broker_rows.sort(key=lambda r: (-float(r["fused_score"]), str(r["symbol"]), str(r["broker"])))
+        exec_out: dict[str, dict[str, dict[str, object]]] = {}
+        for (broker, symbol), em in self._exec_metrics.items():
+            slips = [float(x) for x in (em.get("slips") or []) if isinstance(x, (int, float))]
+            exec_out.setdefault(symbol, {})[broker] = {
+                "slips": slips[-_SLIP_WINDOW:],
+                "attempts": int(em.get("attempts", 0) or 0),
+                "fills": int(em.get("fills", 0) or 0),
             }
         return {
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "quality_map": map_out,
             "quality_stats": stats_out,
             "history": dict(self._quality_history),
+            "broker_comparison": broker_rows,
+            "exec_metrics": exec_out,
         }
 
     def import_quality_state(self, data: dict | None) -> None:
@@ -311,6 +424,33 @@ class SmartOrderRouter:
                         "last_ts": datetime.now(timezone.utc).isoformat(),
                     }
             self._obs_stats = loaded_stats
+        ex = data.get("exec_metrics")
+        if isinstance(ex, dict):
+            loaded_ex: dict[tuple[str, str], dict[str, object]] = {}
+            for sym, by_broker in ex.items():
+                if not isinstance(by_broker, dict):
+                    continue
+                s = str(sym).strip().upper()
+                if not s:
+                    continue
+                for b, row in by_broker.items():
+                    if not isinstance(row, dict):
+                        continue
+                    key = (str(b).strip().lower(), s)
+                    slips_raw = row.get("slips")
+                    slips: list[float] = []
+                    if isinstance(slips_raw, list):
+                        for x in slips_raw[-_SLIP_WINDOW:]:
+                            try:
+                                slips.append(float(x))
+                            except (TypeError, ValueError):
+                                continue
+                    loaded_ex[key] = {
+                        "slips": slips,
+                        "attempts": int(row.get("attempts", 0) or 0),
+                        "fills": int(row.get("fills", 0) or 0),
+                    }
+            self._exec_metrics = loaded_ex
         hist = data.get("history")
         if isinstance(hist, dict):
             cleaned: dict[str, list[dict[str, float | str]]] = {}

@@ -640,3 +640,14 @@ Integration constraints kept:
 **Reason:** Raw point scores are insufficient for operator trust and can overfit stale sparse samples; confidence-aware routing telemetry and adaptive forgetting make the learning loop safer and more interpretable.
 
 **Status:** Implemented in `execution/router.py`, `system/trading_loop/loop.py`, `ui/src/app/lib/api.ts`, `ui/src/app/redesign/screens.tsx`, with tests updated in `tests/test_router_demand_bias.py`.
+
+---
+
+## D042 — Wave 9: fee-prior fusion + slippage percentiles + broker comparison diagnostics
+
+**Date:** 2026-04-22
+**Decision:** Extend `SmartOrderRouter` with (1) a Bayesian-style **fused routing score** that blends a fee-derived prior (`ROUTING_PRIOR_PSEUDO_N` pseudo-observations) with online learned quality using observation count `n`, used as the secondary sort key after explicit fee; (2) persistent per-(broker, symbol) **execution sidecar** metrics: rolling absolute slippage samples (bounded window) with exported **p50/p90 slippage bps** and **fill rate**; (3) structured export fields `broker_comparison` and `exec_metrics` alongside existing `quality_map` / `quality_stats` / `history` in `routing.quality.state`; (4) `/diagnostics/routing-quality` returns the full persisted blob including `quality_stats` (previously omitted); (5) redesign Risk diagnostics **broker comparison table** plus fused-aware “best venue” selection for the trajectory column.
+
+**Reason:** Sparse feedback should not dominate venue choice until evidence accumulates; operators need comparable slippage tail risk and fill reliability next to CI-aware scores; the diagnostics API should mirror what the loop persists so the UI and external clients stay consistent.
+
+**Status:** Implemented in `execution/router.py`, `api/server.py`, `ui/src/app/lib/api.ts`, `ui/src/app/redesign/screens.tsx`, with tests in `tests/test_router_wave9.py` plus updates to `tests/test_router_demand_bias.py` and `tests/test_api_dashboard_extras.py`.

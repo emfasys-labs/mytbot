@@ -180,6 +180,25 @@ def test_diagnostics_routing_quality(monkeypatch, client: TestClient):
                     return {
                         "updated_at": "2026-04-22T00:00:00+00:00",
                         "quality_map": {"BTC-USD": {"binance": 0.22}},
+                        "quality_stats": {
+                            "BTC-USD": {"binance": {"n": 3, "std": 0.01, "ci95_half": 0.02, "fused_score": 0.2}},
+                        },
+                        "broker_comparison": [
+                            {
+                                "symbol": "BTC-USD",
+                                "broker": "binance",
+                                "learned_score": 0.22,
+                                "fused_score": 0.2,
+                                "fee_prior": 0.5,
+                                "ci95_half": 0.02,
+                                "n": 3,
+                                "p50_slippage_bps": 1.0,
+                                "p90_slippage_bps": 2.0,
+                                "fill_rate": 1.0,
+                                "exec_attempts": 3,
+                                "exec_fills": 3,
+                            }
+                        ],
                         "history": {"BTC-USD": [{"ts": "2026-04-22T00:00:00+00:00", "broker": "binance", "score": 0.22}]},
                     }
                 if key == "runtime.heartbeat":
@@ -194,6 +213,8 @@ def test_diagnostics_routing_quality(monkeypatch, client: TestClient):
         assert r.status_code == 200
         j = r.json()
         assert j["quality_map"]["BTC-USD"]["binance"] == 0.22
+        assert j["quality_stats"]["BTC-USD"]["binance"]["n"] == 3
+        assert j["broker_comparison"][0]["symbol"] == "BTC-USD"
         assert j["runtime_summary"]["symbols"] == 1
     finally:
         app.dependency_overrides.pop(_command_bus, None)

@@ -60,3 +60,6 @@ def test_router_quality_state_roundtrip_and_decay() -> None:
     assert "quality_stats" in state2
     stats = (state2.get("quality_stats") or {}).get("BTC-USD", {}).get("binance", {})
     assert "ci95_half" in stats
+    assert "fused_score" in stats
+    assert isinstance(state2.get("broker_comparison"), list)
+    assert "exec_metrics" in state2

@@ -1375,7 +1375,10 @@ async def diagnostics_routing_quality(bus: CommandBus = Depends(_command_bus)):
     return {
         "updated_at": state.get("updated_at"),
         "quality_map": state.get("quality_map", {}),
+        "quality_stats": state.get("quality_stats", {}),
         "history": state.get("history", {}),
+        "broker_comparison": state.get("broker_comparison", []),
+        "exec_metrics": state.get("exec_metrics", {}),
         "runtime_summary": rt_rq if isinstance(rt_rq, dict) else {},
     }
 

@@ -411,14 +411,47 @@ export type SystemStatusResponse = {
   }>;
 };
 
+export type RoutingBrokerRow = {
+  symbol: string;
+  broker: string;
+  learned_score: number;
+  fused_score: number;
+  fee_prior: number;
+  ci95_half: number;
+  n: number;
+  p50_slippage_bps: number;
+  p90_slippage_bps: number;
+  fill_rate: number;
+  exec_attempts: number;
+  exec_fills: number;
+};
+
 export type RoutingQualityResponse = {
   updated_at?: string | null;
   quality_map?: Record<string, Record<string, number>>;
   quality_stats?: Record<
     string,
-    Record<string, { n: number; std: number; ci95_half: number; turnover_ema?: number; liquidity_ema?: number }>
+    Record<
+      string,
+      {
+        n: number;
+        std: number;
+        ci95_half: number;
+        turnover_ema?: number;
+        liquidity_ema?: number;
+        fee_prior?: number;
+        fused_score?: number;
+        p50_slippage_bps?: number;
+        p90_slippage_bps?: number;
+        fill_rate?: number;
+        exec_attempts?: number;
+        exec_fills?: number;
+      }
+    >
   >;
   history?: Record<string, Array<{ ts: string; broker: string; score: number }>>;
+  broker_comparison?: RoutingBrokerRow[];
+  exec_metrics?: Record<string, Record<string, { slips: number[]; attempts: number; fills: number }>>;
   runtime_summary?: Record<string, unknown>;
 };
 
