@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
@@ -24,6 +25,41 @@ class MeanReversionStrategy(Strategy):
     """
 
     name = "mean_reversion"
+
+    def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> dict[str, str]:
+        """D032: emit per-signal sizing intent for coordinator consumption."""
+        try:
+            base_notional = Decimal(str(self.config.get("base_target_notional", "5000")))
+        except (InvalidOperation, TypeError, ValueError):
+            base_notional = Decimal("5000")
+        if base_notional <= 0:
+            base_notional = Decimal("5000")
+
+        conf = max(0.0, min(1.0, float(confidence)))
+        conf_scale = Decimal(str(0.75 + 0.5 * conf))  # 0.75x .. 1.25x
+
+        try:
+            atr = max(float(atr_pct), 0.0)
+        except (TypeError, ValueError):
+            atr = 0.0
+        if atr > 0:
+            raw_vol_scale = 0.02 / atr
+            vol_scale = Decimal(str(max(0.70, min(1.30, raw_vol_scale))))
+        else:
+            vol_scale = Decimal("1.0")
+
+        gross = base_notional * conf_scale * vol_scale
+        min_notional = base_notional * Decimal("0.50")
+        max_notional = base_notional * Decimal("1.50")
+        target = max(min_notional, min(max_notional, gross)).quantize(Decimal("0.01"))
+
+        return {
+            "target_notional": str(target),
+            "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
+            "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
+            "sizing_volatility_scale": str(vol_scale.quantize(Decimal("0.0001"))),
+            "sizing_intent_source": "strategy_confidence_volatility",
+        }
 
     def generate_signal(self, symbol: str, features: pd.DataFrame) -> Optional[RawSignal]:
         if not self.enabled or features is None or features.empty:
@@ -63,6 +99,8 @@ class MeanReversionStrategy(Strategy):
         atr = self._calculate_atr(df, lookback)
         atr_pct = float(atr / close) if close > 0 else 0.0
 
+        sizing_md = self._compute_target_notional(confidence=float(confidence), atr_pct=float(atr_pct))
+
         return RawSignal(
             strategy=self.name,
             symbol=symbol,
@@ -77,6 +115,7 @@ class MeanReversionStrategy(Strategy):
                 "bb_upper": bb_upper,
                 "stretch": stretch,
                 "atr_pct": atr_pct,
+                **sizing_md,
             },
         )
 

@@ -488,3 +488,59 @@ Consequence: D031A as implemented strictly follows the brief (respect explicit m
 - Surface `oversized_position_flag` on the Positions dashboard panel with a one-click "trim to target" action.
 - Add confidence-aware scaling of the strategy target (confidence 0.85 → 1.3×, confidence 0.40 → 0.6×) so that hunter's lower confidence threshold doesn't translate to the same per-trade size as trader's higher bar.
 - **Current oversized positions:** on the live paper book at deploy time, COHR sat at ~£118k (≈11% of £1.05M NAV) — marginally above the 10% hard cap — and is now flagged by D031D (`oversized_position_flag=True`). FCOM (£10k ≈ 1% NAV) and FIX (pre-existing IBKR manual position) are within cap. Per D031D semantics no auto-liquidation happens; operator decides whether to trim manually or wait for the D032 stop-loss wiring.
+
+---
+
+## D032 — Strategy emits explicit per-signal target notional
+
+**Date:** 2026-04-22
+**Decision:** Directional strategies now emit an explicit absolute `target_notional` in `RawSignal.metadata`, so the D031 sizing priority path (`risk_notional_override` > `target_notional` > `nav_fallback`) can use genuine strategy intent rather than defaulting to NAV fallback.
+
+Implemented in:
+- `strategies/momentum.py`
+- `strategies/mean_reversion.py`
+- `config/strategies.yaml` (`base_target_notional` for both strategies)
+
+Each strategy now computes target size from:
+1. `base_target_notional` (default 5000)
+2. confidence scale (bounded 0.75x..1.25x)
+3. ATR%-based volatility scale (bounded 0.70x..1.30x)
+4. final clamp to 0.50x..1.50x of base notional
+
+The emitted metadata fields are:
+- `target_notional`
+- `sizing_base_notional`
+- `sizing_confidence_scale`
+- `sizing_volatility_scale`
+- `sizing_intent_source=strategy_confidence_volatility`
+
+**Reason:** D031 fixed coordinator/execution plumbing but directional strategies still emitted no explicit target size, causing universal `sizing_source=nav_fallback`. That made the boundary guard protect against oversizing, but did not restore strategy-level notional intent. D032 makes the intent explicit at the source.
+
+**Status:** Implemented and covered by tests:
+- `tests/test_strategies.py` now asserts both strategies emit `target_notional` and validates ATR-aware scaling behavior.
+- Existing D031/D031C suites remain green.
+
+**Operational impact:** This removes the last structural reason for bulk sizing-guard rejects caused by mismatched intent vs computed quantity. Sizing is now strategy-owned, auditable, and still capped by downstream hard risk ceilings.
+
+---
+
+## D033 — Runtime post-open stop-loss monitor (D031E wired)
+
+**Date:** 2026-04-22
+**Decision:** Wire `risk/stop_loss.py::evaluate_stop_loss` into a dedicated orchestrator background task that runs every 5-30s (default 15s) and submits `reduce_only` close signals for positions breaching either:
+- portfolio loss budget (`max_loss_per_trade_pct`), or
+- structural stop metadata (`stop_loss_atr` + `atr`/`atr_pct`).
+
+Implementation details:
+- New orchestrator task lifecycle:
+  - starts on `Orchestrator.start()`
+  - cancels on `Orchestrator.stop()`
+- Close path is **not** a risk bypass:
+  - builds a `RiskSignal(strategy="stop_loss_monitor", reduce_only=True)`
+  - runs `RiskEngine.evaluate_and_persist(...)`
+  - only then routes to `ExecutionEngine.execute(...)`
+- Added per-position close cooldown (`STOP_LOSS_CLOSE_COOLDOWN_SEC`, default 60s) to prevent repeated close spam while fills/reconciliation settle.
+
+**Reason:** D031E delivered pure decision logic but left runtime enforcement pending. Without a monitor, `max_loss_per_trade_pct` only gates new entries and does not protect already-open positions intraday.
+
+**Status:** Implemented in `system/orchestrator.py` with tests in `tests/test_stop_loss_monitor.py` (close on breach, no-op when within budget, loop cancellation). Full suite green.

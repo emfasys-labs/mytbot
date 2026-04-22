@@ -27,6 +27,9 @@ from typing import Any
 from dotenv import load_dotenv
 from loguru import logger
 
+from risk.engine import Signal as RiskSignal
+from risk.engine import RiskVerdict
+from risk.stop_loss import evaluate_stop_loss
 from system.broker_manager import BrokerManager, BrokerReport
 from system.dependency_manager import DependencyManager, DependencyReport
 from system.trading_loop import TradingLoop
@@ -92,6 +95,10 @@ class Orchestrator:
         self._pipeline_scan_idx: int = 0
         self._coverage_sync_task: asyncio.Task | None = None
         self._nav_heartbeat_task: asyncio.Task | None = None
+        self._stop_loss_task: asyncio.Task | None = None
+        # Per-position close throttle to avoid re-emitting closes every monitor tick
+        # while broker/order status is still settling.
+        self._stop_loss_last_close_ts: dict[str, float] = {}
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
@@ -162,6 +169,7 @@ class Orchestrator:
                 self._broker_manager.start_reconnect_loop()
                 self._start_coverage_sync_loop()
                 self._start_nav_heartbeat_loop()
+                self._start_stop_loss_loop()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -282,6 +290,15 @@ class Orchestrator:
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._nav_heartbeat_task = None
+
+            if self._stop_loss_task is not None and not self._stop_loss_task.done():
+                self._stop_loss_task.cancel()
+                try:
+                    await self._stop_loss_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._stop_loss_task = None
+            self._stop_loss_last_close_ts.clear()
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
@@ -525,6 +542,206 @@ class Orchestrator:
                 await self._flush_nav_heartbeat()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("orchestrator | nav heartbeat tick error: {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    def _start_stop_loss_loop(self) -> None:
+        """Start post-open stop-loss monitor task (D031E runtime wiring)."""
+        if self._stop_loss_task is not None and not self._stop_loss_task.done():
+            return
+        self._stop_loss_task = asyncio.create_task(
+            self._stop_loss_loop(), name="stop-loss-monitor"
+        )
+
+    async def _run_stop_loss_tick(self) -> None:
+        """Evaluate live positions against `max_loss_per_trade_pct` and close when breached."""
+        tl = self._trading_loop
+        if tl is None:
+            return
+        risk_engine = getattr(tl, "risk_engine", None)
+        execution_engine = getattr(tl, "execution_engine", None)
+        if risk_engine is None or execution_engine is None:
+            return
+        if self._broker_manager is None:
+            return
+
+        try:
+            max_loss_pct = Decimal(str(getattr(risk_engine, "config", {}).get("max_loss_per_trade_pct", "0")))
+        except Exception:  # noqa: BLE001
+            max_loss_pct = Decimal("0")
+        if max_loss_pct <= 0:
+            return
+
+        try:
+            close_cooldown_sec = max(5.0, float(os.getenv("STOP_LOSS_CLOSE_COOLDOWN_SEC", "60")))
+        except (TypeError, ValueError):
+            close_cooldown_sec = 60.0
+
+        try:
+            from storage.db import init_async_database, dispose_engine as _dispose
+            from run_m3 import _load_portfolio_state
+            from system.portfolio_equity import live_portfolio_value
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | stop-loss tick imports unavailable: {}", exc)
+            return
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+
+            nav = await live_portfolio_value(self._broker_manager)
+            if nav <= 0:
+                return
+
+            now_ts = datetime.now(timezone.utc).timestamp()
+
+            for broker_name, adapter in self._broker_manager.adapters.items():
+                bname = str(broker_name or "").strip().lower()
+                if not bname:
+                    continue
+                if hasattr(risk_engine, "is_broker_disabled") and risk_engine.is_broker_disabled(bname):
+                    continue
+                try:
+                    positions = await adapter.get_positions()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("orchestrator | stop-loss | positions fetch failed | broker={} | {}", bname, exc)
+                    continue
+
+                for pos in positions:
+                    try:
+                        qty = Decimal(str(getattr(pos, "quantity", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        qty = Decimal("0")
+                    if qty == 0:
+                        continue
+                    sym = str(getattr(pos, "symbol", "") or "").strip().upper()
+                    if not sym:
+                        continue
+                    direction = "long" if qty > 0 else "short"
+                    close_key = f"{bname}:{sym}:{direction}"
+                    last_ts = self._stop_loss_last_close_ts.get(close_key, 0.0)
+                    if now_ts - last_ts < close_cooldown_sec:
+                        continue
+
+                    try:
+                        entry = Decimal(str(getattr(pos, "avg_entry_price", "0") or "0"))
+                        current = Decimal(str(getattr(pos, "current_price", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        continue
+
+                    md = dict(getattr(pos, "instrument_metadata", {}) or {})
+                    decision = evaluate_stop_loss(
+                        symbol=sym,
+                        quantity=qty,
+                        avg_entry_price=entry,
+                        current_price=current,
+                        nav=nav,
+                        max_loss_per_trade_pct=max_loss_pct,
+                        metadata=md,
+                    )
+                    if not decision.should_close:
+                        continue
+
+                    side = "sell" if qty > 0 else "buy"
+                    asset_class_raw = getattr(pos, "asset_class", "equity")
+                    asset_class = str(getattr(asset_class_raw, "value", asset_class_raw)).lower()
+                    signal = RiskSignal(
+                        signal_id=f"stoploss-{sym}-{int(now_ts)}",
+                        symbol=sym,
+                        side=side,
+                        strategy="stop_loss_monitor",
+                        confidence=1.0,
+                        suggested_quantity=abs(qty),
+                        suggested_price=current if current > 0 else entry,
+                        broker=bname,
+                        asset_class=asset_class,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        metadata={
+                            "reduce_only": True,
+                            "stop_loss_monitor": True,
+                            "stop_loss_reason": decision.reason,
+                            "stop_loss_loss_absolute": str(decision.loss_absolute),
+                            "stop_loss_loss_pct_of_nav": str(decision.loss_pct),
+                            "stop_loss_structural_stop_breached": bool(decision.structural_stop_breached),
+                            "stop_loss_structural_stop_price": (
+                                str(decision.structural_stop_price)
+                                if decision.structural_stop_price is not None
+                                else None
+                            ),
+                        },
+                    )
+
+                    portfolio_state = await _load_portfolio_state(
+                        sf,
+                        fallback_portfolio_value=nav,
+                        signal_price_fallback=signal.suggested_price,
+                        capital_pct=Decimal(str(self.capital_pct)),
+                    )
+                    risk_engine.update_high_watermark(
+                        Decimal(str(portfolio_state.get("high_watermark_value", nav)))
+                    )
+                    risk_engine.restore_runtime_state(portfolio_state)
+                    risk_decision = await risk_engine.evaluate_and_persist(sf, signal, portfolio_state)
+                    if risk_decision.verdict != RiskVerdict.APPROVED:
+                        logger.warning(
+                            "orchestrator | stop-loss close rejected by risk | broker={} symbol={} reason={}",
+                            bname,
+                            sym,
+                            risk_decision.reason,
+                        )
+                        self._stop_loss_last_close_ts[close_key] = now_ts
+                        continue
+
+                    result = await execution_engine.execute(
+                        signal, risk_decision, session_factory=sf
+                    )
+                    self._stop_loss_last_close_ts[close_key] = now_ts
+                    if result is None:
+                        logger.warning(
+                            "orchestrator | stop-loss close did not execute | broker={} symbol={} reason={}",
+                            bname,
+                            sym,
+                            decision.reason,
+                        )
+                        continue
+                    logger.warning(
+                        "orchestrator | stop-loss close submitted | broker={} symbol={} side={} qty={} reason={}",
+                        bname,
+                        sym,
+                        side,
+                        abs(qty),
+                        decision.reason,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | stop-loss tick error (non-fatal): {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
+    async def _stop_loss_loop(self) -> None:
+        """Periodic post-open stop-loss monitor loop."""
+        try:
+            interval = max(5.0, float(os.getenv("STOP_LOSS_MONITOR_INTERVAL_SEC", "15")))
+        except (TypeError, ValueError):
+            interval = 15.0
+
+        try:
+            await self._sleep_cancellable(min(5.0, interval))
+        except asyncio.CancelledError:
+            return
+
+        while True:
+            try:
+                await self._run_stop_loss_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | stop-loss monitor error: {}", exc)
             try:
                 await self._sleep_cancellable(interval)
             except asyncio.CancelledError:

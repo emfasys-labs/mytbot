@@ -42,6 +42,8 @@ strategies:
     atr_min: 0.004
     atr_max: 0.06
     momentum_threshold: 0.001
+    # D032 sizing intent: strategy emits per-signal absolute target_notional.
+    base_target_notional: 5000
 
   mean_reversion:
     enabled: true
@@ -52,6 +54,8 @@ strategies:
     rsi_buy_threshold: 42
     rsi_sell_threshold: 58
     band_epsilon: 0.003
+    # D032 sizing intent: strategy emits per-signal absolute target_notional.
+    base_target_notional: 5000
 
 # Broker capability map for arbitrage (YAML-driven; extend when adding venues).
 arbitrage_capabilities:

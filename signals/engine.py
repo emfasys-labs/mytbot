@@ -194,36 +194,82 @@ class SignalEngine:
             apply_news_overlay=True,
         )
 
-        # Size the position (fixed fraction; optional ATR scaling; M4 risk refines further)
-        position_pct = self.config.get("default_position_pct", 0.05)
+        # Size the position.
+        #
+        # D031 closure — respect coordinator-supplied sizing when present:
+        #   1. risk_notional_override   (hard target from risk layer)
+        #   2. target_notional          (coordinator/strategy intent)
+        #   3. nav * default_position_pct   (legacy fallback)
+        #
+        # When (1) or (2) is present, the coordinator has already decided the
+        # final deployed capital (including volatility and mode adjustments),
+        # so we MUST NOT re-apply volatility sizing on top — doing so
+        # double-scales and was the cause of the "Sizing boundary guard
+        # rejected signal" wave (2x inflation for low-ATR symbols).
         last_price = self._extract_last_price(raw.metadata)
-        suggested_quantity = self._calculate_quantity(
-            portfolio_value,
-            position_pct,
-            raw.symbol,
-            last_price=last_price,
-        )
         qty_decimals = int(self.config.get("quantity_decimals", 8))
         tick = Decimal("1").scaleb(-qty_decimals)
-        vs = self.config.get("volatility_sizing")
-        if isinstance(vs, dict) and vs.get("enabled"):
-            md = raw.metadata or {}
-            atr_pct = md.get("atr_pct")
-            if atr_pct is not None:
-                try:
-                    ap = float(atr_pct)
-                    if ap > 0:
-                        target = float(vs.get("target_atr_pct", 0.02))
-                        scale = target / ap
-                        mn = float(vs.get("min_scale", 0.25))
-                        mx = float(vs.get("max_scale", 2.0))
-                        scale = max(mn, min(mx, scale))
-                        suggested_quantity = (suggested_quantity * Decimal(str(scale))).quantize(tick)
-                except (TypeError, ValueError, InvalidOperation):
-                    pass
+
+        raw_md = raw.metadata or {}
+
+        def _positive_decimal(v: object) -> Optional[Decimal]:
+            if v is None:
+                return None
+            try:
+                d = Decimal(str(v))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            return d if d > 0 else None
+
+        coord_risk_override = _positive_decimal(raw_md.get("risk_notional_override"))
+        coord_target = _positive_decimal(raw_md.get("target_notional"))
+        coord_notional = coord_risk_override or coord_target
+
+        if coord_notional is not None and last_price is not None and last_price > 0:
+            # Coordinator sizing path — single source of truth.
+            suggested_quantity = (coord_notional / last_price).quantize(tick)
+            sizing_path = (
+                "risk_notional_override" if coord_risk_override is not None else "target_notional"
+            )
+        else:
+            # Legacy fallback: nav * fixed fraction with optional volatility scaling.
+            position_pct = self.config.get("default_position_pct", 0.05)
+            suggested_quantity = self._calculate_quantity(
+                portfolio_value,
+                position_pct,
+                raw.symbol,
+                last_price=last_price,
+            )
+            sizing_path = "nav_fallback"
+            vs = self.config.get("volatility_sizing")
+            if isinstance(vs, dict) and vs.get("enabled"):
+                atr_pct = raw_md.get("atr_pct")
+                if atr_pct is not None:
+                    try:
+                        ap = float(atr_pct)
+                        if ap > 0:
+                            target = float(vs.get("target_atr_pct", 0.02))
+                            scale = target / ap
+                            mn = float(vs.get("min_scale", 0.25))
+                            mx = float(vs.get("max_scale", 2.0))
+                            scale = max(mn, min(mx, scale))
+                            suggested_quantity = (
+                                suggested_quantity * Decimal(str(scale))
+                            ).quantize(tick)
+                    except (TypeError, ValueError, InvalidOperation):
+                        pass
+
+        min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
+        if suggested_quantity < min_qty:
+            suggested_quantity = min_qty
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
+        md["signal_engine_sizing_path"] = sizing_path
+        if last_price is not None and last_price > 0:
+            md["signal_engine_resolved_notional"] = str(
+                (suggested_quantity * last_price).quantize(Decimal("0.01"))
+            )
         effective_news = float(net.score) if net is not None else news_score
 
         signal = Signal(

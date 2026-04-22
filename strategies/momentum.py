@@ -20,6 +20,7 @@ Config (from config/strategies.yaml):
 """
 
 from typing import Optional
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import logging
 
@@ -37,6 +38,48 @@ class MomentumBreakoutStrategy(Strategy):
     """
 
     name = "momentum_breakout"
+
+    def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> dict[str, str]:
+        """D032: strategy-level sizing intent (confidence + volatility aware).
+
+        Emits an absolute ``target_notional`` so downstream coordinator/execution
+        layers can respect strategy intent without falling back to NAV defaults.
+        """
+        try:
+            base_notional = Decimal(str(self.config.get("base_target_notional", "5000")))
+        except (InvalidOperation, TypeError, ValueError):
+            base_notional = Decimal("5000")
+        if base_notional <= 0:
+            base_notional = Decimal("5000")
+
+        # Confidence scaling: bounded around 1.0.
+        conf = max(0.0, min(1.0, float(confidence)))
+        conf_scale = Decimal(str(0.75 + 0.5 * conf))  # 0.75x .. 1.25x
+
+        # Volatility scaling: lower ATR% allows modestly larger notional.
+        try:
+            atr = max(float(atr_pct), 0.0)
+        except (TypeError, ValueError):
+            atr = 0.0
+        if atr > 0:
+            raw_vol_scale = 0.02 / atr
+            vol_scale = Decimal(str(max(0.70, min(1.30, raw_vol_scale))))
+        else:
+            vol_scale = Decimal("1.0")
+
+        # Clamp final target around base to avoid runaway values.
+        gross = base_notional * conf_scale * vol_scale
+        min_notional = base_notional * Decimal("0.50")
+        max_notional = base_notional * Decimal("1.50")
+        target = max(min_notional, min(max_notional, gross)).quantize(Decimal("0.01"))
+
+        return {
+            "target_notional": str(target),
+            "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
+            "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
+            "sizing_volatility_scale": str(vol_scale.quantize(Decimal("0.0001"))),
+            "sizing_intent_source": "strategy_confidence_volatility",
+        }
 
     def generate_signal(
         self,
@@ -106,6 +149,8 @@ class MomentumBreakoutStrategy(Strategy):
         volume_strength   = min((volume / avg_volume) / 3, 0.3)
         confidence        = min(0.5 + breakout_strength * 10 + volume_strength, 0.95)
 
+        sizing_md = self._compute_target_notional(confidence=float(confidence), atr_pct=float(atr_pct))
+
         return RawSignal(
             strategy=self.name,
             symbol=symbol,
@@ -120,6 +165,7 @@ class MomentumBreakoutStrategy(Strategy):
                 "volume_ratio":       float(volume / avg_volume),
                 "atr_pct":            float(atr_pct),
                 "lookback":           lookback,
+                **sizing_md,
             },
         )
 

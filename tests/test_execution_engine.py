@@ -812,3 +812,162 @@ def test_d031c_boundary_guard_exempts_arbitrage() -> None:
     sig.side = "ARBITRAGE_SPOT_SPREAD"
     assert eng._passes_sizing_boundary_guard(order, sig) is True
 
+
+# =============================================================================
+# Telegram notifications — only open/close events (post-D031 operator prefs)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_maybe_notify_fill_sends_for_filled_orders(monkeypatch) -> None:
+    """A FILLED OrderResult triggers a Telegram message via _send_critical_alert."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+
+    captured: list[str] = []
+
+    async def _fake_alert(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr(eng, "_send_critical_alert", _fake_alert)
+
+    order = Order(
+        symbol="COHR",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("22"),
+        limit_price=Decimal("355"),
+        client_order_id="x-fill-1",
+    )
+    result = OrderResult(
+        broker_order_id="bid-1",
+        client_order_id="x-fill-1",
+        status=OrderStatus.FILLED,
+        symbol="COHR",
+        side=OrderSide.BUY,
+        quantity=Decimal("22"),
+        filled_quantity=Decimal("22"),
+        avg_fill_price=Decimal("355.10"),
+        fee=Decimal("0"),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    signal = _sizing_signal({"coordinator_kind": "open_strategy"})
+    await eng._maybe_notify_fill(order, result, signal)
+
+    assert len(captured) == 1
+    msg = captured[0]
+    assert "OPEN" in msg
+    assert "FILLED" in msg
+    assert "COHR" in msg
+    assert "BUY" in msg
+
+
+@pytest.mark.asyncio
+async def test_maybe_notify_fill_labels_close_on_reduce_only(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+
+    captured: list[str] = []
+
+    async def _fake_alert(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr(eng, "_send_critical_alert", _fake_alert)
+
+    order = Order(
+        symbol="COHR",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("22"),
+        limit_price=Decimal("360"),
+        client_order_id="x-close-1",
+    )
+    result = OrderResult(
+        broker_order_id="bid-2",
+        client_order_id="x-close-1",
+        status=OrderStatus.FILLED,
+        symbol="COHR",
+        side=OrderSide.SELL,
+        quantity=Decimal("22"),
+        filled_quantity=Decimal("22"),
+        avg_fill_price=Decimal("360.00"),
+        fee=Decimal("0"),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    signal = _sizing_signal({"reduce_only": True})
+    signal.side = "sell"
+    await eng._maybe_notify_fill(order, result, signal)
+    assert len(captured) == 1
+    assert "CLOSE" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_maybe_notify_fill_skips_non_filled_statuses(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+
+    captured: list[str] = []
+
+    async def _fake_alert(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr(eng, "_send_critical_alert", _fake_alert)
+
+    order = Order(
+        symbol="COHR",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("22"),
+        limit_price=Decimal("355"),
+        client_order_id="x-pending-1",
+    )
+    for status in (OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.CANCELLED, OrderStatus.REJECTED):
+        result = OrderResult(
+            broker_order_id="bid-3",
+            client_order_id="x-pending-1",
+            status=status,
+            symbol="COHR",
+            side=OrderSide.BUY,
+            quantity=Decimal("22"),
+            filled_quantity=Decimal("0"),
+            avg_fill_price=None,
+            fee=Decimal("0"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        signal = _sizing_signal({})
+        await eng._maybe_notify_fill(order, result, signal)
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_sizing_guard_reject_no_longer_sends_telegram(monkeypatch) -> None:
+    """The sizing boundary guard must NOT spam Telegram on reject.
+
+    Regression: the April 2026 Telegram flood (100+ "Sizing boundary guard
+    rejected signal" messages). Operators now watch the CRITICAL log instead.
+    """
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+
+    captured: list[str] = []
+
+    async def _fake_alert(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr(eng, "_send_critical_alert", _fake_alert)
+
+    order = _sizing_order("COHR", Decimal("164"), Decimal("355"))  # 7.35x intended
+    sig = _sizing_signal({
+        "sizing_final_capital_required": "7913.22",
+        "sizing_source": "target_notional",
+    })
+    # Guard would reject ...
+    assert eng._passes_sizing_boundary_guard(order, sig) is False
+    # ... but must not have called alert itself. (execute() used to call it
+    # right after this returned False; that code was removed.)
+    assert captured == []

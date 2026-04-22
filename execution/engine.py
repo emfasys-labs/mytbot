@@ -175,11 +175,10 @@ class ExecutionEngine:
         # notional about to hit the broker materially exceeds the coordinator's
         # intended final capital. This is a defensive backstop, not the primary
         # sizing mechanism; normal flows never trigger it.
+        # Telegram notification is intentionally suppressed: this path can fire
+        # per-signal across a batch and would spam the channel. Operators watch
+        # the `SIZING GUARD REJECT` CRITICAL logs instead.
         if not self._passes_sizing_boundary_guard(order, signal):
-            await self._send_critical_alert(
-                f"Sizing boundary guard rejected signal {signal.signal_id} "
-                f"({signal.symbol} {signal.side}) — see logs"
-            )
             return None
 
         await self._publish_symbol_constraints(signal, broker)
@@ -478,6 +477,10 @@ class ExecutionEngine:
     async def _persist_result(
         self, session_factory, order: Order, result: OrderResult, signal: Signal
     ) -> None:
+        # Telegram notification for fills is emitted regardless of persistence,
+        # so a missing session_factory (unit test / degraded mode) still surfaces
+        # the trade to the operator.
+        await self._maybe_notify_fill(order, result, signal)
         if session_factory is None:
             return
         try:
@@ -492,6 +495,63 @@ class ExecutionEngine:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Order log persistence failed | signal_id=%s | %s", signal.signal_id, exc)
+
+    async def _maybe_notify_fill(
+        self, order: Order, result: OrderResult, signal: Signal
+    ) -> None:
+        """Emit a single Telegram notification per persisted fill.
+
+        Operator preference (post-D031): only open/close position events reach
+        Telegram — no per-signal or per-reject chatter. A FILLED or
+        PARTIALLY_FILLED OrderResult is the authoritative trigger because every
+        fill either opens, adds to, reduces, or closes a position.
+        """
+        try:
+            status = getattr(result, "status", None)
+            if status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                return
+            filled_qty = Decimal(str(getattr(result, "filled_quantity", 0) or 0))
+            if filled_qty <= 0:
+                return
+            price = getattr(result, "avg_fill_price", None)
+            price_dec = Decimal(str(price)) if price is not None else Decimal("0")
+            notional = (filled_qty * price_dec).quantize(Decimal("0.01")) if price_dec > 0 else None
+
+            if signal.side:
+                side = str(signal.side).upper()
+            elif hasattr(order.side, "value"):
+                side = str(order.side.value).upper()
+            else:
+                side = str(order.side).upper()
+            sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+            reduce_only = bool(
+                getattr(order, "reduce_only", False)
+                or getattr(signal, "reduce_only", False)
+                or sig_md.get("reduce_only")
+                or str(sig_md.get("coordinator_kind", "")).lower().startswith("close")
+            )
+            action_label = "CLOSE" if reduce_only else "OPEN"
+            status_label = "FILLED" if status == OrderStatus.FILLED else "PARTIAL"
+            mode_label = "PAPER" if self.paper_mode else "LIVE"
+
+            parts = [
+                f"{mode_label} {action_label} {status_label}",
+                f"{signal.symbol} {side}",
+                f"qty={filled_qty.normalize() if filled_qty == filled_qty.to_integral() else filled_qty}",
+            ]
+            if price_dec > 0:
+                parts.append(f"@ {price_dec}")
+            if notional is not None:
+                parts.append(f"notional={notional}")
+            parts.append(f"broker={signal.broker}")
+            message = " | ".join(parts)
+            await self._send_critical_alert(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Fill Telegram notification failed | signal_id=%s | %s",
+                getattr(signal, "signal_id", "?"),
+                exc,
+            )
 
     async def cancel_all(self) -> None:
         """Emergency: cancel all open orders across all brokers."""
