@@ -143,7 +143,15 @@ def test_pairs_trading_generates_signal_on_spread_dislocation() -> None:
     )
     out = strat.generate_signals({"SPY": spy, "QQQ": qqq})
     assert len(out) == 1
-    assert out[0].strategy == "pairs_trading"
+    sig = out[0]
+    assert sig.strategy == "pairs_trading"
+    assert sig.symbol == "SPY"
+    assert sig.side in ("buy", "sell")
+    assert "pair_spread_z" in sig.metadata
+    assert abs(float(sig.metadata["pair_spread_z"])) >= 1.0
+    assert "pair_beta" in sig.metadata
+    assert sig.metadata.get("sizing_intent_source") == "pairs_spread_zscore"
+    assert Decimal(str(sig.metadata["target_notional"])) > 0
 
 
 def test_volatility_regime_generates_breakout_signal() -> None:
@@ -164,6 +172,45 @@ def test_volatility_regime_generates_breakout_signal() -> None:
     sig = strat.generate_signal("SPY", df)
     assert sig is not None
     assert sig.strategy == "volatility_regime"
+    assert sig.metadata.get("vol_mode") == "vol_breakout"
+    assert Decimal(str(sig.metadata["target_notional"])) > 0
+
+
+def test_volatility_regime_compression_mean_revert_branch() -> None:
+    """Flat high/low/close tail drives low ATR_fast vs ATR_slow + tiny bar return."""
+    n = 120
+    idx = pd.date_range("2024-01-01", periods=n, freq="D", tz="UTC")
+    base = 100.0
+    rows = []
+    for i in range(n):
+        c = base + (i % 7) * 0.4 + (i // 20) * 0.05
+        rows.append({"open": c, "high": c + 1.2, "low": c - 1.2, "close": c})
+    df = pd.DataFrame(rows, index=idx)
+    # Last 18 bars: zero range → TR collapses → atr_ratio drops.
+    for j in range(n - 18, n):
+        c = base
+        df.iloc[j, df.columns.get_loc("open")] = c
+        df.iloc[j, df.columns.get_loc("high")] = c
+        df.iloc[j, df.columns.get_loc("low")] = c
+        df.iloc[j, df.columns.get_loc("close")] = c
+    # Tiny last bar return vs prior (still inside compression bar-return bound).
+    df.iloc[-2, df.columns.get_loc("close")] = base + 0.0005
+    df.iloc[-1, df.columns.get_loc("close")] = base
+    df.iloc[-1, df.columns.get_loc("high")] = base
+    df.iloc[-1, df.columns.get_loc("low")] = base
+    strat = VolatilityRegimeStrategy(
+        {
+            "enabled": True,
+            "atr_lookback": 8,
+            "atr_expansion_ratio": 1.5,
+            "atr_compression_ratio": 0.95,
+            "min_bar_return": 0.002,
+        }
+    )
+    sig = strat.generate_signal("SPY", df)
+    assert sig is not None
+    assert sig.metadata.get("vol_mode") == "vol_compression_revert"
+    assert sig.side in ("buy", "sell")
 
 
 def test_regime_rotation_generates_proxy_signal() -> None:
@@ -184,4 +231,42 @@ def test_regime_rotation_generates_proxy_signal() -> None:
     )
     assert sig is not None
     assert sig.side == "buy"
+    assert sig.metadata.get("regime_bucket") == "risk_on_proxy"
+    assert sig.metadata.get("sizing_intent_source") == "regime_rotation"
+    assert Decimal(str(sig.metadata["target_notional"])) > 0
+
+
+def test_regime_rotation_risk_off_proxy_longs_on_negative_demand() -> None:
+    strat = RegimeRotationStrategy(
+        {
+            "enabled": True,
+            "score_trigger": 0.2,
+            "risk_on_symbols": ["SPY"],
+            "risk_off_symbols": ["TLT"],
+        }
+    )
+    sig = strat.generate_from_demand(
+        symbol="TLT",
+        asset_class="equity",
+        demand_score=-0.5,
+        demand_trend="falling",
+        demand_confidence=0.7,
+    )
+    assert sig is not None
+    assert sig.side == "buy"
+    assert sig.metadata.get("regime_bucket") == "risk_off_proxy"
+
+
+def test_regime_rotation_disabled_returns_none() -> None:
+    strat = RegimeRotationStrategy({"enabled": False})
+    assert (
+        strat.generate_from_demand(
+            symbol="SPY",
+            asset_class="equity",
+            demand_score=0.9,
+            demand_trend="rising",
+            demand_confidence=0.5,
+        )
+        is None
+    )
 
