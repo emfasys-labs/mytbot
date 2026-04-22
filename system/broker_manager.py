@@ -231,6 +231,10 @@ class BrokerManager:
         self._ibkr_last_attempt: float = 0
         self._broker_fail_count: dict[str, int] = {}
         self._broker_last_attempt: dict[str, float] = {}
+        # Consecutive rate-limit fails per broker. Resets on success or on any
+        # non-rate-limit failure. Used to escalate backoff and error text when a
+        # venue is persistently throttled server-side (e.g. Kraken key punishment).
+        self._broker_rate_limit_streak: dict[str, int] = {}
 
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
@@ -433,16 +437,47 @@ class BrokerManager:
                 status.balance_ready = False
                 self.adapters[name] = adapter
                 self._broker_fail_count[name] = 0
+                self._broker_rate_limit_streak[name] = 0
                 logger.info("broker | {} | connected", name)
                 await self._mark_balance_ready(name, adapter, status)
             else:
                 self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
-                status.error = (
-                    "Startup connect deferred (transient exchange throttle/retry)"
-                    if name == "kraken"
-                    else "connect() returned False"
-                )
-                logger.warning("broker | {} | connect failed (attempt {})", name, self._broker_fail_count[name])
+                adapter_hint = getattr(adapter, "_last_connect_error", None)
+                if adapter_hint == "rate_limit":
+                    streak = self._broker_rate_limit_streak.get(name, 0) + 1
+                    self._broker_rate_limit_streak[name] = streak
+                    if name == "kraken" and streak >= 3:
+                        status.error = (
+                            "Kraken API key persistently blocked by exchange "
+                            "(rate-limit or temporary lockout across consecutive attempts) — "
+                            "likely a server-side throttle on the key or account. "
+                            "Fix: rotate KRAKEN_API_KEY in Kraken account settings, "
+                            "or wait for Kraken's penalty window (often 15–60 min) to clear. "
+                            "Reconnect will back off to reduce the chance of re-triggering it."
+                        )
+                    else:
+                        status.error = (
+                            "Startup connect deferred (transient exchange throttle/retry)"
+                            if name == "kraken"
+                            else "connect() returned False"
+                        )
+                else:
+                    self._broker_rate_limit_streak[name] = 0
+                    if adapter_hint == "invalid_nonce":
+                        status.error = (
+                            "Invalid nonce (another client is using this API key with "
+                            "a higher nonce) — rotate the key or increase the nonce "
+                            "window in the exchange's API settings"
+                        )
+                    elif adapter_hint:
+                        status.error = str(adapter_hint)[:200]
+                    else:
+                        status.error = (
+                            "Startup connect deferred (transient exchange throttle/retry)"
+                            if name == "kraken"
+                            else "connect() returned False"
+                        )
+                logger.warning("broker | {} | connect failed (attempt {}): {}", name, self._broker_fail_count[name], status.error)
         except asyncio.TimeoutError:
             self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1
             if name in {"binance", "bybit"}:
@@ -476,7 +511,17 @@ class BrokerManager:
         """Exponential backoff for any broker: 60 -> 120 -> 240 -> 300 (capped)."""
         fails = self._broker_fail_count.get(name, 0)
         if name == "kraken":
-            # Kraken may throttle private auth bursts at startup; retry sooner.
+            # Kraken uses a counter-based private-API limiter. Short bursts drain
+            # in seconds, so start aggressively; but once we've seen ≥3 consecutive
+            # "EAPI:Rate limit exceeded" responses, Kraken has applied a persistent
+            # server-side throttle to the key itself (verified empirically: the
+            # counter does not drain even with 3+ minutes of zero traffic). Back
+            # off hard to let the penalty expire and to avoid retriggering it.
+            streak = self._broker_rate_limit_streak.get(name, 0)
+            if streak >= 3:
+                # 10m → 20m → 30m → 30m (cap). Jitter stays modest.
+                persistent_base = min(600 * max(1, streak - 2), 1800)
+                return persistent_base + random.uniform(0, min(15.0, persistent_base * 0.05))
             base = min(10 * (2 ** fails), 120)
             return base + random.uniform(0, min(3.0, base * 0.2))
         if name == "binance":

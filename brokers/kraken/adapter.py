@@ -74,8 +74,32 @@ def _d(v: object) -> Decimal:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
+    """True for Kraken errors that require a *long* backoff.
+
+    Covers the classic counter-based limiter (``EAPI:Rate limit exceeded``)
+    and the account-wide ``EGeneral:Temporary lockout`` — both auto-expire on
+    Kraken's side only if we stop hitting the API. Each new attempt while the
+    block is active can extend the penalty window, so both are routed through
+    the same persistent-throttle escalation in the broker manager.
+    """
     s = str(exc).lower()
-    return "rate limit" in s or "eapi:rate limit" in s
+    return (
+        "rate limit" in s
+        or "eapi:rate limit" in s
+        or "temporary lockout" in s
+        or "egeneral:temporary lockout" in s
+    )
+
+
+def _is_account_lockout(exc: Exception) -> bool:
+    """Distinguish Kraken's account-wide lockout from the counter-based rate limit.
+
+    Lockout is an account-level security penalty (minutes-to-hours) triggered
+    by repeated failed auth. Unlike the counter limiter, retrying 2s/5s later
+    never helps — and extra calls extend the penalty. Bail on the first hit.
+    """
+    s = str(exc).lower()
+    return "temporary lockout" in s or "egeneral:temporary lockout" in s
 
 
 def _iso_now() -> str:
@@ -181,6 +205,10 @@ class KrakenAdapter(BrokerAdapter):
         self._trade: Any = None
         self._last_health_check: float = 0.0
         self._health_ok: bool = False
+        # Structured hint for the broker manager when connect() returns False, so
+        # persistent-throttle conditions can be surfaced honestly instead of being
+        # reported as a generic "connect() returned False".
+        self._last_connect_error: str | None = None
         # Proactive REST rate limiting — Kraken private API uses a counter-based
         # system; ≥100 ms between calls keeps the counter from accumulating.
         self._rest_gap = AsyncRestGap.from_env("KRAKEN", default_seconds=0.1)
@@ -195,10 +223,12 @@ class KrakenAdapter(BrokerAdapter):
             raise RuntimeError("Kraken private API not available (connect with API keys)")
 
     async def connect(self) -> bool:
+        self._last_connect_error = None
         for attempt in range(2):
             try:
                 return await self._try_connect()
             except Exception as exc:  # noqa: BLE001
+                err_str = str(exc).lower()
                 is_rate_limit = _is_rate_limit_error(exc)
                 if is_rate_limit:
                     logger.warning(
@@ -206,15 +236,20 @@ class KrakenAdapter(BrokerAdapter):
                     )
                     self._connected = False
                     self._private_ok = False
+                    self._last_connect_error = "rate_limit"
                     return False
                 is_nonce = "nonce" in err_str
                 if is_nonce and attempt == 0:
                     logger.warning("connect | Kraken | nonce error — retrying in 2s")
                     await asyncio.sleep(2)
                     continue
+                if is_nonce:
+                    self._last_connect_error = "invalid_nonce"
                 logger.exception("connect | Kraken | failed | error={}", exc)
                 self._connected = False
                 self._private_ok = False
+                if self._last_connect_error is None:
+                    self._last_connect_error = str(exc)[:200]
                 return False
         return False
 
@@ -233,6 +268,12 @@ class KrakenAdapter(BrokerAdapter):
                     auth_ok = True
                     break
                 except Exception as exc:  # noqa: BLE001
+                    if _is_account_lockout(exc):
+                        logger.warning(
+                            "connect | Kraken | account temporary lockout — "
+                            "aborting inner retry loop (backoff handled by reconnect loop)",
+                        )
+                        raise
                     if not _is_rate_limit_error(exc) or auth_attempt == 2:
                         raise
                     sleep_s = 2 + auth_attempt * 3
