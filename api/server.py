@@ -82,6 +82,77 @@ def _pick_strongest_news_log_per_symbol(news_rows: list[Any]) -> dict[str, Any]:
     return by_symbol
 
 
+def _float_or_zero(v: Any) -> float:
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, max_items: int = 2) -> list[dict[str, Any]]:
+    """
+    Build per-signal explainability rows from nearby AI news logs.
+    """
+    ts = getattr(signal_row, "timestamp", None)
+    if ts is None:
+        return []
+    sig_ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    picked: list[tuple[float, float, Any]] = []
+    for r in symbol_news_rows:
+        r_ts = getattr(r, "timestamp", None)
+        if r_ts is None:
+            continue
+        row_ts = r_ts if r_ts.tzinfo else r_ts.replace(tzinfo=timezone.utc)
+        # Prefer news from before the signal, but allow a small lag after logging delays.
+        delta_s = (sig_ts - row_ts).total_seconds()
+        if delta_s < -1800 or delta_s > 6 * 3600:
+            continue
+        score = _float_or_zero(getattr(r, "score", None))
+        if score == 0.0:
+            continue
+        abs_delta = abs(delta_s)
+        picked.append((abs_delta, -abs(score), r))
+    if not picked:
+        return []
+    picked.sort(key=lambda x: (x[0], x[1]))
+    out: list[dict[str, Any]] = []
+    for _, _, r in picked[:max_items]:
+        payload = r.payload if isinstance(getattr(r, "payload", None), dict) else {}
+        headline = str(payload.get("headline") or "").strip()
+        source = str(payload.get("provider") or getattr(r, "source", None) or "").strip()
+        out.append(
+            {
+                "headline": headline,
+                "source": source or None,
+                "score": _float_or_zero(getattr(r, "score", None)),
+                "event_type": getattr(r, "event_type", None),
+                "scored_at": r.timestamp.isoformat() if getattr(r, "timestamp", None) else None,
+            }
+        )
+    return out
+
+
+def _alias_symbols_for_signal(symbol: str) -> list[str]:
+    s = (symbol or "").strip().upper()
+    alias_map: dict[str, list[str]] = {
+        "ES": ["SPY", "ES", "SPX"],
+        "NQ": ["QQQ", "NQ", "NDX"],
+        "YM": ["DIA", "YM", "DJI"],
+        "CL": ["USO", "CL", "OIL", "WTI"],
+        "GC": ["GLD", "GC", "GOLD", "XAUUSD", "XAU"],
+        "SI": ["SLV", "SI", "SILVER", "XAGUSD", "XAG"],
+        "EURUSD": ["EURUSD", "EUR", "USD", "DXY"],
+        "USDJPY": ["USDJPY", "USD", "JPY", "DXY"],
+        "GBPUSD": ["GBPUSD", "GBP", "USD", "DXY"],
+        "AUDUSD": ["AUDUSD", "AUD", "USD", "DXY"],
+        "USDCHF": ["USDCHF", "USD", "CHF", "DXY"],
+        "USDCAD": ["USDCAD", "USD", "CAD", "DXY"],
+    }
+    if s.endswith("=F"):
+        s = s[:-2]
+    return alias_map.get(s, [s])
+
+
 def _is_public_spa_get(path: str, method: str) -> bool:
     """Browser navigation to / has no custom headers — allow loading the SPA shell and Vite assets only."""
     if method != "GET":
@@ -796,6 +867,7 @@ async def get_intelligence_signals(
             sigs = [s for s in sigs_raw if s.id not in legacy_signal_ids]
 
         verdicts: dict[str, dict] = {}
+        attribution_by_signal: dict[str, list[dict[str, Any]]] = {}
         if sigs:
             sig_ids = [s.id for s in sigs]
             risk_q = await session.execute(
@@ -808,6 +880,57 @@ async def get_intelligence_signals(
                         "reason": rv.reason,
                         "checks_failed": rv.checks_failed or [],
                     }
+            # News attribution: map each signal to nearby AI "news" logs for same symbol.
+            sig_symbols = sorted({(s.symbol or "").strip().upper() for s in sigs if (s.symbol or "").strip()})
+            if sig_symbols:
+                min_ts = min((s.timestamp for s in sigs if s.timestamp is not None), default=None)
+                max_ts = max((s.timestamp for s in sigs if s.timestamp is not None), default=None)
+                if min_ts is not None and max_ts is not None:
+                    min_cutoff = (min_ts if min_ts.tzinfo else min_ts.replace(tzinfo=timezone.utc)) - timedelta(hours=6)
+                    max_cutoff = (max_ts if max_ts.tzinfo else max_ts.replace(tzinfo=timezone.utc)) + timedelta(minutes=30)
+                    ai_q = await session.execute(
+                        select(AIOutputLog)
+                        .where(
+                            AIOutputLog.context_type == "news",
+                            AIOutputLog.symbol.in_(sig_symbols),
+                            AIOutputLog.timestamp >= min_cutoff,
+                            AIOutputLog.timestamp <= max_cutoff,
+                        )
+                        .order_by(AIOutputLog.timestamp.desc())
+                        .limit(3000)
+                    )
+                    ai_rows = list(ai_q.scalars().all())
+                    by_sym: dict[str, list[Any]] = {}
+                    market_rows: list[Any] = []
+                    for r in ai_rows:
+                        sym = (getattr(r, "symbol", None) or "").strip().upper()
+                        if not sym:
+                            continue
+                        by_sym.setdefault(sym, []).append(r)
+                        market_rows.append(r)
+                    for s in sigs:
+                        sig_sym = (s.symbol or "").strip().upper()
+                        if not sig_sym:
+                            continue
+                        direct = _signal_news_attribution(s, by_sym.get(sig_sym, []), max_items=2)
+                        if direct:
+                            for d in direct:
+                                d["match_mode"] = "direct"
+                            attribution_by_signal[s.id] = direct
+                            continue
+                        aliased_rows: list[Any] = []
+                        for a in _alias_symbols_for_signal(sig_sym):
+                            aliased_rows.extend(by_sym.get(a, []))
+                        alias_attr = _signal_news_attribution(s, aliased_rows, max_items=2)
+                        if alias_attr:
+                            for d in alias_attr:
+                                d["match_mode"] = "alias"
+                            attribution_by_signal[s.id] = alias_attr
+                            continue
+                        market_attr = _signal_news_attribution(s, market_rows, max_items=2)
+                        for d in market_attr:
+                            d["match_mode"] = "market"
+                        attribution_by_signal[s.id] = market_attr
 
     # Dashboard: one row per (symbol, strategy, side) — keep the newest only. The runner may log
     # the same idea every few minutes; showing six identical lines is correct historically but noisy.
@@ -843,6 +966,7 @@ async def get_intelligence_signals(
                 "verdict": verdicts.get(s.id, {}).get("verdict", "unknown"),
                 "risk_reason": verdicts.get(s.id, {}).get("reason", ""),
                 "checks_failed": verdicts.get(s.id, {}).get("checks_failed", []),
+                "news_attribution": attribution_by_signal.get(s.id, []),
             }
             for s in sigs_deduped
         ]

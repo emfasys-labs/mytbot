@@ -226,7 +226,6 @@ export default function App() {
         </div>
         <NewsFooterTicker
           news={live.news}
-          sourceStats={live.newsSourceStats}
           paused={state === 'off' || state === 'error'}
         />
       </main>
@@ -298,11 +297,9 @@ function ErrorOverlay({ message }: { message?: string }) {
 
 function NewsFooterTicker({
   news,
-  sourceStats,
   paused,
 }: {
   news: Array<{ text: string; src: string; age: string; s: -1 | 0 | 1 }>;
-  sourceStats: Record<string, { fresh_rows_in_window: number; latest_age_hours: number | null; stale: boolean }>;
   paused: boolean;
 }) {
   const [x, setX] = useState(0);
@@ -331,27 +328,12 @@ function NewsFooterTicker({
     return () => cancelAnimationFrame(raf);
   }, [news, paused]);
 
-  const dots = Object.entries(sourceStats).sort(([a], [b]) => a.localeCompare(b));
   const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '—', s: 0 as const }];
   const doubled = [...rows, ...rows];
 
   return (
     <div style={{ borderTop: `1px solid ${TOKENS.line}`, background: TOKENS.bg1 }}>
-      <div style={{ padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        {dots.length > 0 ? (
-          dots.map(([src, st]) => (
-            <span key={src} style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: st.stale ? TOKENS.caution : TOKENS.profit }} />
-              <span style={{ color: TOKENS.ink2, textTransform: 'uppercase' }}>{src}</span>
-              <span>{st.fresh_rows_in_window} fresh</span>
-              <span>{st.latest_age_hours == null ? 'n/a' : `${st.latest_age_hours.toFixed(1)}h`}</span>
-            </span>
-          ))
-        ) : news.length === 0 ? (
-          <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>news source health pending...</span>
-        ) : null}
-      </div>
-      <div style={{ borderTop: `1px solid ${TOKENS.line}`, overflow: 'hidden', height: 28 }}>
+      <div style={{ overflow: 'hidden', height: 28 }}>
         <div
           ref={trackRef}
           style={{

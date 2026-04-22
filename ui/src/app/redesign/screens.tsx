@@ -11,7 +11,7 @@ import { mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
-  const cols = '80px 60px 120px 1fr 80px 80px 100px';
+  const cols = '80px 60px 120px 1fr 80px 80px 1.3fr 100px';
 
   const rows = useMemo(() => {
     const sigs = live.intelligence?.signals ?? [];
@@ -22,6 +22,21 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
       const urg: 'high' | 'med' | 'low' = score >= 0.7 ? 'high' : score >= 0.45 ? 'med' : 'low';
       const ts = s.timestamp ? Date.parse(s.timestamp) : 0;
       const age = ts > 0 ? minutesAgo(ts) : '—';
+      const attr = Array.isArray(s.news_attribution) ? s.news_attribution : [];
+      const top = attr[0];
+      const impact = typeof top?.score === 'number' && Number.isFinite(top.score) ? top.score : null;
+      const mode = top?.match_mode ? String(top.match_mode).toLowerCase() : '';
+      const evt = top?.event_type ? String(top.event_type).toLowerCase() : '';
+      const headline = top?.headline ? String(top.headline) : '';
+      const conciseTopic = evt
+        ? evt.replace(/_/g, ' ')
+        : headline
+            .replace(/\s+/g, ' ')
+            .trim()
+            .split(' ')
+            .slice(0, 3)
+            .join(' ')
+            .toLowerCase();
       return {
         sym: (s.symbol ?? '').toUpperCase(),
         side,
@@ -30,6 +45,11 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
         urg,
         verdict: verdict === 'approved' ? 'ok' : 'blocked',
         age,
+        newsHeadline: top?.headline ? String(top.headline) : '',
+        newsSource: top?.source ? String(top.source) : '',
+        newsImpact: impact,
+        newsMatchMode: mode,
+        newsTopic: conciseTopic,
       };
     });
   }, [live.intelligence]);
@@ -47,7 +67,7 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
           textTransform: 'uppercase', letterSpacing: '0.1em',
         }}>
           <span>Symbol</span><span>Side</span><span>Score</span><span>Strategy</span>
-          <span>Urgency</span><span>Verdict</span><span>Time</span>
+          <span>Urgency</span><span>Verdict</span><span>News impact</span><span>Time</span>
         </div>
         {rows.length === 0 ? (
           <div style={{ padding: 40, textAlign: 'center', color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
@@ -88,6 +108,33 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
             }}>{r.strat}</span>
             <Pill size="sm" tone={r.urg === 'high' ? 'caution' : 'neutral'}>{r.urg}</Pill>
             <Pill size="sm" tone={r.verdict === 'blocked' ? 'danger' : 'profit'}>{r.verdict}</Pill>
+            <span
+              title={r.newsHeadline || 'No linked news attribution'}
+              style={{
+                fontFamily: TOKENS.mono,
+                fontSize: 10,
+                color: r.newsHeadline ? TOKENS.ink2 : TOKENS.ink3,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {r.newsHeadline ? (
+                <>
+                  <span style={{ color: TOKENS.ink3 }}>
+                    {r.newsMatchMode === 'direct' ? 'D' : r.newsMatchMode === 'alias' ? 'A' : 'M'}
+                  </span>
+                  {' · '}
+                  <span style={{ color: r.newsImpact != null && r.newsImpact >= 0 ? TOKENS.profit : TOKENS.loss }}>
+                    {r.newsImpact != null ? `${r.newsImpact >= 0 ? '+' : ''}${r.newsImpact.toFixed(2)}` : 'n/a'}
+                  </span>
+                  {' · '}
+                  <span style={{ color: TOKENS.ink2 }}>
+                    {(r.newsTopic || 'market news').slice(0, 36)}
+                  </span>
+                </>
+              ) : '—'}
+            </span>
             <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{r.age}</span>
           </div>
         ))}

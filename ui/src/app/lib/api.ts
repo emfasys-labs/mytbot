@@ -262,6 +262,14 @@ export type IntelligenceSignalsResponse = {
     verdict: string;
     risk_reason: string;
     checks_failed: string[];
+    news_attribution?: Array<{
+      headline?: string | null;
+      source?: string | null;
+      score?: number | null;
+      event_type?: string | null;
+      scored_at?: string | null;
+      match_mode?: string | null;
+    }>;
   }>;
 };
 
