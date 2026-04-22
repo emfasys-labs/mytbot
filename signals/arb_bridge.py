@@ -36,12 +36,25 @@ def strategy_opportunity_to_raw_signal(opp: StrategyOpportunity, *, nav: Decimal
 
 
 def coordinator_action_to_raw_signal(action: CoordinatorAction, *, nav: Decimal) -> RawSignal:
-    """Build ``RawSignal`` from a coordinator incremental action."""
+    """Build ``RawSignal`` from a coordinator incremental action.
+
+    D031 note: ``target_notional`` / ``risk_notional_override`` here always
+    equal the coordinator's ``action.capital`` because that is the final
+    intended deployment after (1) strategy-requested sizing and (2) mode /
+    hard-cap adjustments. The full audit trail (``sizing_source``,
+    ``sizing_strategy_target_notional``, ``sizing_clipped`` etc.) was
+    populated upstream in ``signal_candidate_to_strategy_opportunity`` /
+    ``propose_actions`` and is passed through via ``dict(action.metadata)``
+    so downstream execution guards and the dashboard can inspect it.
+    """
     md = dict(action.metadata)
     md["coordinator_kind"] = action.kind
     md["target_notional"] = str(action.capital)
     md["risk_notional_override"] = str(action.capital)
     md["priority_score"] = str(action.priority_score)
+    # Execution-boundary guard (D031C) reads this to compare against the
+    # actual order notional about to be placed.
+    md.setdefault("sizing_final_capital_required", str(action.capital))
 
     if action.strategy_name == "funding_rate_arbitrage":
         return RawSignal(

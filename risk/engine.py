@@ -538,6 +538,17 @@ class RiskEngine:
         return (drawdown <= max_drawdown_pct, "drawdown_limit")
 
     def _check_max_loss_per_trade_pct(self, signal, portfolio) -> tuple[bool, str]:
+        """Pre-trade loss-budget gate.
+
+        **D031E scope note.** This function is a *pre-open* check: it refuses
+        to approve a NEW signal whose expected loss (notional × stop distance
+        proxy) would exceed ``portfolio_value * max_loss_per_trade_pct``.
+
+        It does NOT enforce the loss budget on an already-open position that
+        drifts into the red after entry. That post-open monitor is scaffolded
+        in ``risk/stop_loss.py::evaluate_stop_loss`` but not yet wired to a
+        runtime task. See ``docs/DECISIONS.md`` D031 for the rollout plan.
+        """
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "max_loss_per_trade_pct")

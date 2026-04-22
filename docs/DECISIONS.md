@@ -433,3 +433,58 @@ Full suite still green (276 passed, 3 skipped).
 **Operator follow-ups (next cycle):**
 - Per-broker buying-power-aware routing: even with the allocator deflation fix, we observed Alpaca rejecting ~£440k worth of orders sized against total NAV when only IBKR had room. Sizing at the execution layer should consult each broker's `get_balances()` and either re-route or size-down rather than bounce at the venue.
 - Surface position-mismatch events to the System screen so operators can see the broker-truth refresh happen in real time (currently only visible via the error log).
+
+---
+
+## D031 — Respect strategy sizing: end of systematic over-sizing + sizing audit trail
+
+**Date:** 2026-04-22
+**Decision:** Five tightly-scoped fixes around the sizing pipeline in the global-edge path. Together they end a multi-week bug where every directional equity signal was silently deployed at `NAV × default_position_pct` (~5% of NAV, typically £50k on £1M NAV) regardless of what the strategy actually requested — producing a systematic 7–13× over-sizing of low/medium-conviction trades and, after D030 made the coordinator deploy its full action budget, large adverse P&L swings on any signal that did not immediately move in our favour.
+
+1. **(D031A) Respect strategy sizing in `signal_candidate_to_strategy_opportunity`.** The D015 candidate → opportunity conversion ignored `candidate.metadata["risk_notional_override"]` and `candidate.metadata["target_notional"]` and instead set `capital_required = nav * position_pct`. This silently replaced the strategy's volatility-aware, conviction-weighted sizing (e.g. £750 for a weak FCOM mean-reversion probe at ATR 0.36%; £7,913 for a COHR momentum_breakout at ATR 1.8%) with a blanket fixed-size slug. The new sizing priority is explicit:
+   1. `metadata["risk_notional_override"]` if present and > 0 (most specific signal-level override)
+   2. else `metadata["target_notional"]` if present and > 0
+   3. else `nav * position_pct` (legacy fallback for signals that carry no sizing metadata)
+
+   A hard ceiling of `nav × max_position_pct` (default 0.10, from `config/risk_limits.yaml`) is applied AFTER the priority pick. The ceiling is a cap only — it never inflates a smaller strategy-requested size upwards. Under-requested sizes stay small; over-requested sizes get clipped and the clip is logged.
+
+2. **(D031B) Sizing audit trail.** Every emitted `StrategyOpportunity` / `CoordinatorAction` now carries explicit sizing-provenance fields in its `metadata`: `sizing_source` (one of `risk_notional_override` | `target_notional` | `nav_fallback`), `sizing_strategy_target_notional`, `sizing_risk_notional_override`, `sizing_proposed_base_notional`, `sizing_hard_cap_notional`, `sizing_final_capital_required`, `sizing_clipped` (bool), `sizing_clip_reason`, `sizing_nav_at_decision`, `sizing_max_position_pct`, plus post-mode-fraction fields (`sizing_pre_mode_capital`, `sizing_mode`, `sizing_mode_fraction`, `sizing_final_action_capital`). `coordinator_action_to_raw_signal` preserves them into the `RawSignal` so they survive into the order placement path. This makes every sizing decision auditable from dashboard / logs / tests — one of the reasons D031 stayed invisible for as long as it did was that nothing in the logs ever said *why* a £750 idea had become a £10,000 order.
+
+3. **(D031C) Execution-boundary sanity guard.** A new helper `ExecutionEngine._passes_sizing_boundary_guard` runs immediately before broker placement. It rejects any order whose `abs(quantity) * limit_price` exceeds the intended `sizing_final_capital_required` by more than 1.25× (configurable by editing the helper's `tolerance` constant) or exceeds the declared `sizing_hard_cap_notional`. Arbitrage legs are exempt (capital flows via different paths). Signals without sizing metadata (legacy path / external signals) pass through — the guard never fabricates a ceiling from nothing. This is a defensive backstop, not the primary sizing mechanism: it catches upstream bugs where quantity calculation drifts away from the coordinator's intent.
+
+4. **(D031D) Oversized-held-position detection.** `held_positions_from_portfolio` now accepts `nav` and `max_position_pct`. When provided, each held position's live notional is compared against the ceiling and the result is written to metadata as `position_above_target_ratio` + `oversized_position_flag` (`True` when `ratio > oversize_flag_ratio`, default 1.25×). Detection only — no auto-liquidation. The flag is available for the dashboard to surface "this position is larger than it should be" warnings and for a future remediation task.
+
+5. **(D031E) Stop-loss framework scaffold.** A new module `risk/stop_loss.py` exposes `evaluate_stop_loss(...) → StopLossDecision`, a pure function that given a position and NAV decides whether the position's per-trade loss budget (`nav * max_loss_per_trade_pct`) has been breached. Supports ATR-based structural stops when strategy metadata carries `stop_loss_atr` + (`atr` or `atr_pct`). Not yet wired to a runtime task — `risk/engine.py::_check_max_loss_per_trade_pct` remains the pre-open gate, and the post-open monitor is a scheduled follow-up. The scaffold is intentionally limited to freeze the decision logic so the wiring task cannot silently regress it.
+
+**Reason:** On 2026-04-22 the operator asked "Why are we opening positions that go down and negatively effect our capital?" Investigation of two losing positions (COHR -£3,454, FCOM -£59) showed strategy metadata asked for £7,913 and £750 respectively, while the actual fills were £57,920 and £10,010 — over-sized by 7.3× and 13.3×. That over-sizing, not bad signals, was the mechanical cause of the adverse P&L magnitudes: at the strategy's intended sizing COHR's -2.9% drift would have cost ~£230 (not £3,454) and FCOM's -0.6% would have cost ~£4.50 (not £59). The bug violated the architecture's stated principle that sizing is a computed output respecting strategy intent (D015), not a uniform fixed slug applied by the allocator.
+
+**Rejected alternatives:**
+- *Patch the symptom at `coordinator_action_to_raw_signal`* (overwrite `target_notional` there). Rejected — moves the fix downstream of where the wrong size is decided and makes the audit trail lossy.
+- *Lower `default_position_pct` to 0.01.* Rejected — shrinks everything uniformly (including legitimate high-conviction momentum breakouts) without restoring conviction-based scaling; also masks the underlying bug rather than fixing it.
+- *Drop the hard cap entirely and trust strategies.* Rejected — a misconfigured strategy requesting 50% of NAV should still be clipped. The cap is a cheap safety net.
+- *Enforce post-open stops in this same task.* Rejected — stop-loss enforcement is a separate surface (monitor cadence, close-order routing, idempotency) and mixing it into a sizing correction would bloat the blast radius. Scaffold now, wire in a dedicated follow-up.
+
+**Status:** Implemented. Covered by:
+- `tests/test_global_edge_coordinator.py` — 7 new cases: `target_notional` honoured, `risk_notional_override` wins, hard-cap clips absurd requests, `nav_fallback` preserved, small sizes never inflated, audit metadata completeness, arbitrage path unchanged, oversized held-position flag.
+- `tests/test_execution_engine.py` — 5 new cases for the boundary guard: within-tolerance pass, gross over-sizing reject, hard-cap reject, no-metadata no-op, arbitrage exempt.
+- `tests/test_stop_loss_scaffold.py` — 5 new cases for the pure `evaluate_stop_loss` helper: portfolio stop triggers / stays quiet, ATR-pct structural stop, short-position structural stop, invalid-price safe default.
+- `system/trading_loop/loop.py` threads `max_position_pct` (read from risk-engine config, default 0.10) into both the opportunity builder and the held-position builder.
+- No config schema changes required — all new behaviour derives from existing keys (`max_position_pct` in `config/risk_limits.yaml`).
+
+**Expected behaviour after D031** (on the same £1M NAV, £7,913 COHR breakout, £750 FCOM mean-reversion):
+- COHR opens at £7,913 not £57,920. A 1-ATR adverse move (~1.8%) loses ~£142 instead of ~£1,040.
+- FCOM opens at £750 not £10,010. A 0.6% adverse drift loses ~£4.50 instead of ~£59.
+- A hypothetical mis-configured strategy requesting £500k is clipped to £100k (10% NAV cap) and the clip is logged with reason `nav*0.10`.
+- Existing oversized positions are flagged (`oversized_position_flag=True`) on every tick but NOT auto-trimmed; operator or a follow-up remediation task decides how to unwind.
+
+**Important scope limitation: strategies do not yet emit per-signal target notional.**
+The D031 audit trail (verified against live DB post-deploy) consistently records `sizing_source=nav_fallback` for directional signals because `strategies/momentum.py` and `strategies/mean_reversion.py` currently emit RawSignal metadata with `atr_pct`, `breakout_strength` etc. but NOT `target_notional` or `risk_notional_override`. The values we saw in earlier signal rows (e.g. COHR `target_notional=7913`, FCOM `target_notional=750`) came from the coordinator's own self-loop: `coordinator_action_to_raw_signal` writes `md["target_notional"] = str(action.capital)`, which on a subsequent accumulator round-trip can appear as if a strategy had "requested" that number. It did not.
+
+Consequence: D031A as implemented strictly follows the brief (respect explicit metadata when present, fall back otherwise) but its *practical* effect on existing strategy sizes is (a) enforce the `nav * max_position_pct` hard cap on the nav-fraction baseline, and (b) make every sizing decision auditable. The *expected* win from "respect strategy intent" only materialises once a strategy actually emits intent — see D032 below.
+
+**Operator follow-ups (next cycle):**
+- **D032 — Strategies emit per-signal target notional.** Modify `strategies/momentum.py` and `strategies/mean_reversion.py` (and any other directional strategy) to populate `RawSignal.metadata["target_notional"]` based on the strategy's own conviction (confidence) and volatility (ATR%). Without this, the D031A priority path (step 1/2) never fires. Likely shape: a per-strategy `base_notional_usd` config × confidence scalar × volatility scalar, with the coordinator applying the hard cap on top. This is the change that actually turns D031's plumbing into the 7-13× sizing reduction the user expected.
+- Wire `evaluate_stop_loss` into a 5–30 s monitor task in `system/orchestrator.py` (similar to the D029 NAV heartbeat) that closes positions whose loss exceeds budget.
+- Surface `oversized_position_flag` on the Positions dashboard panel with a one-click "trim to target" action.
+- Add confidence-aware scaling of the strategy target (confidence 0.85 → 1.3×, confidence 0.40 → 0.6×) so that hunter's lower confidence threshold doesn't translate to the same per-trade size as trader's higher bar.
+- **Current oversized positions:** on the live paper book at deploy time, COHR sat at ~£118k (≈11% of £1.05M NAV) — marginally above the 10% hard cap — and is now flagged by D031D (`oversized_position_flag=True`). FCOM (£10k ≈ 1% NAV) and FIX (pre-existing IBKR manual position) are within cap. Per D031D semantics no auto-liquidation happens; operator decides whether to trim manually or wait for the D032 stop-loss wiring.

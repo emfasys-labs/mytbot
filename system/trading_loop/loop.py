@@ -1174,7 +1174,21 @@ class TradingLoop:
             await self._treasury.refresh(self._broker_manager)
         merge_treasury_into_portfolio_state(portfolio_dict, self._treasury)
 
-        held = held_positions_from_portfolio(portfolio_dict, decay=Decimal(str(self._global_edge_cfg.get("held_edge_decay_per_day", "0.08"))))
+        # D031: the hard per-position ceiling is ``nav * max_position_pct``
+        # (default 10 % from ``config/risk_limits.yaml``). Strategy-requested
+        # notionals above this are clipped; smaller requests are honoured.
+        risk_cfg = getattr(self.risk_engine, "config", {}) or {}
+        try:
+            max_pos_pct = Decimal(str(risk_cfg.get("max_position_pct", "0.10")))
+        except Exception:  # noqa: BLE001
+            max_pos_pct = Decimal("0.10")
+
+        held = held_positions_from_portfolio(
+            portfolio_dict,
+            decay=Decimal(str(self._global_edge_cfg.get("held_edge_decay_per_day", "0.08"))),
+            nav=total_equity,
+            max_position_pct=max_pos_pct,
+        )
         new_opps: list[Any] = []
         pos_pct = Decimal(str(strategies_cfg.get("signal_engine", {}).get("default_position_pct", "0.05")))
         for cand in batch_candidates:
@@ -1187,6 +1201,7 @@ class TradingLoop:
                 nav=tradable,
                 position_pct=pos_pct,
                 price=px,
+                max_position_pct=max_pos_pct,
             )
             if so is not None:
                 new_opps.append(so)

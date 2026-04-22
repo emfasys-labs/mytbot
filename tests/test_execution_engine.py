@@ -717,3 +717,98 @@ async def test_get_broker_uses_broker_manager_adapter(monkeypatch) -> None:
     finally:
         set_execution_engine(None)
 
+
+# =============================================================================
+# D031C — execution-boundary sizing guard
+# =============================================================================
+
+
+def _sizing_order(symbol: str, qty: Decimal, limit_px: Decimal) -> Order:
+    return Order(
+        symbol=symbol,
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=qty,
+        limit_price=limit_px,
+        client_order_id="x-1",
+    )
+
+
+def _sizing_signal(md: dict) -> Signal:
+    return Signal(
+        signal_id="s-1",
+        symbol="COHR",
+        side="buy",
+        strategy="momentum_breakout",
+        confidence=0.8,
+        suggested_quantity=Decimal("22"),
+        suggested_price=Decimal("355"),
+        broker="ibkr",
+        asset_class="equity",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata=md,
+    )
+
+
+def test_d031c_boundary_guard_allows_order_within_tolerance() -> None:
+    """Order notional ≤ 1.25× intended is accepted."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    # intended = 7913, actual = 22 × 355 = 7810 → ratio 0.987, OK
+    order = _sizing_order("COHR", Decimal("22"), Decimal("355"))
+    sig = _sizing_signal({
+        "sizing_final_capital_required": "7913.22",
+        "sizing_source": "target_notional",
+    })
+    assert eng._passes_sizing_boundary_guard(order, sig) is True
+
+
+def test_d031c_boundary_guard_rejects_gross_over_sizing() -> None:
+    """Order notional >> 1.25× intended is rejected loudly."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    # intended = 7913, actual = 164 × 355 = 58,220 → ratio 7.35, REJECT
+    order = _sizing_order("COHR", Decimal("164"), Decimal("355"))
+    sig = _sizing_signal({
+        "sizing_final_capital_required": "7913.22",
+        "sizing_source": "target_notional",
+    })
+    assert eng._passes_sizing_boundary_guard(order, sig) is False
+
+
+def test_d031c_boundary_guard_rejects_over_hard_cap() -> None:
+    """Exceeding the hard cap is always rejected even without intended size."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = _sizing_order("COHR", Decimal("1000"), Decimal("355"))  # 355k
+    sig = _sizing_signal({
+        "sizing_hard_cap_notional": "100000",  # 100k cap
+    })
+    assert eng._passes_sizing_boundary_guard(order, sig) is False
+
+
+def test_d031c_boundary_guard_noop_when_no_sizing_metadata() -> None:
+    """Legacy signals without D031 audit metadata pass through (no fabrication)."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = _sizing_order("COHR", Decimal("10000"), Decimal("355"))
+    sig = _sizing_signal({})
+    assert eng._passes_sizing_boundary_guard(order, sig) is True
+
+
+def test_d031c_boundary_guard_exempts_arbitrage() -> None:
+    """Arbitrage sides are exempt (capital flows via different path)."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = _sizing_order("BTC-USDT", Decimal("5"), Decimal("70000"))
+    sig = _sizing_signal({
+        "sizing_final_capital_required": "1000",  # would fail if not arb
+    })
+    sig.side = "ARBITRAGE_SPOT_SPREAD"
+    assert eng._passes_sizing_boundary_guard(order, sig) is True
+

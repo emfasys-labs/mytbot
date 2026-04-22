@@ -304,3 +304,195 @@ def test_notional_fraction_default_when_missing_is_015() -> None:
     opp = _opp("BBB", "0.50", cap="10000")
     actions = coord.propose_actions([], [opp], active_mode="hunter")
     assert actions[0].capital == Decimal("1500")
+
+
+# -----------------------------------------------------------------------------
+# D031: respect strategy-proposed sizing (end of over-sizing bug)
+# -----------------------------------------------------------------------------
+
+
+def test_d031_respects_target_notional_over_nav_fallback() -> None:
+    """Signal's ``target_notional`` must be honoured verbatim when no override is set."""
+    cand = _FakeSignalCandidate(
+        "COHR",
+        asset_class="equity",
+        metadata={"target_notional": "7913.22"},
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("355"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+    assert opp.capital_required == Decimal("7913.22")
+    assert opp.metadata["sizing_source"] == "target_notional"
+    assert opp.metadata["sizing_clipped"] is False
+    assert opp.metadata["sizing_final_capital_required"] == "7913.22"
+
+
+def test_d031_respects_risk_notional_override_over_target() -> None:
+    """``risk_notional_override`` wins over ``target_notional`` (more specific)."""
+    cand = _FakeSignalCandidate(
+        "FCOM",
+        asset_class="equity",
+        metadata={
+            "target_notional": "5000",
+            "risk_notional_override": "750",
+        },
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("74.18"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+    assert opp.capital_required == Decimal("750")
+    assert opp.metadata["sizing_source"] == "risk_notional_override"
+    assert opp.metadata["sizing_clipped"] is False
+
+
+def test_d031_hard_cap_clips_absurd_strategy_request() -> None:
+    """Strategy asking for a stupid size must be clipped at ``nav * max_position_pct``."""
+    cand = _FakeSignalCandidate(
+        "XYZ",
+        asset_class="equity",
+        metadata={"target_notional": "500000"},  # 50% of NAV
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("100"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+    assert opp.capital_required == Decimal("100000")  # capped at 10% NAV
+    assert opp.metadata["sizing_clipped"] is True
+    assert "nav*0.10" in opp.metadata["sizing_clip_reason"]
+
+
+def test_d031_nav_fallback_when_no_sizing_metadata() -> None:
+    """Legacy signals without sizing metadata fall back to ``nav * position_pct``."""
+    cand = _FakeSignalCandidate("ABC", asset_class="equity", metadata={})
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("50"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+    assert opp.capital_required == Decimal("50000")
+    assert opp.metadata["sizing_source"] == "nav_fallback"
+    assert opp.metadata["sizing_clipped"] is False
+
+
+def test_d031_does_not_inflate_small_strategy_request_to_nav_fallback() -> None:
+    """The hard cap is a ceiling only — small requests stay small."""
+    cand = _FakeSignalCandidate(
+        "TINY",
+        asset_class="equity",
+        metadata={"target_notional": "500"},
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),  # fallback would be 50k
+        price=Decimal("10"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+    assert opp.capital_required == Decimal("500")
+    assert opp.metadata["sizing_source"] == "target_notional"
+
+
+def test_d031_audit_metadata_complete_on_emitted_action() -> None:
+    """CoordinatorAction must carry the full sizing audit trail through to RawSignal."""
+    cand = _FakeSignalCandidate(
+        "COHR",
+        asset_class="equity",
+        metadata={"target_notional": "7913.22"},
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("1000000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("355"),
+        max_position_pct=Decimal("0.10"),
+    )
+    assert opp is not None
+
+    cfg = {
+        "edge_advantage": {"hunter": "0.01"},
+        "max_actions_per_tick": 1,
+        "max_notional_fraction_per_action": {"hunter": "1.00"},
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    actions = coord.propose_actions([], [opp], active_mode="hunter")
+    assert len(actions) == 1
+    md = actions[0].metadata
+    for key in (
+        "sizing_source",
+        "sizing_proposed_base_notional",
+        "sizing_hard_cap_notional",
+        "sizing_final_capital_required",
+        "sizing_clipped",
+        "sizing_pre_mode_capital",
+        "sizing_mode",
+        "sizing_mode_fraction",
+        "sizing_final_action_capital",
+    ):
+        assert key in md, f"missing audit field: {key}"
+    assert md["sizing_source"] == "target_notional"
+    assert md["sizing_mode"] == "hunter"
+    assert Decimal(md["sizing_mode_fraction"]) == Decimal("1")
+    assert actions[0].capital == Decimal("7913.22")
+
+
+def test_d031_held_position_oversized_flag_when_above_ceiling() -> None:
+    """Held position > nav*max_position_pct*1.25 must carry oversized flag."""
+    from portfolio.global_edge_coordinator import held_positions_from_portfolio
+
+    # COHR at £160k on £1M NAV = 16 % gross, ratio = 1.60 (above 1.25 flag)
+    # TINY at £50 on £1M = 0.000005 % gross, ratio well under 1.0
+    portfolio = {
+        "positions": {
+            "COHR": {"quantity": "500", "current_price": "320", "broker": "ibkr"},
+            "TINY": {"quantity": "10", "current_price": "5.00", "broker": "alpaca"},
+        }
+    }
+    nav = Decimal("1000000")
+    held = held_positions_from_portfolio(
+        portfolio,
+        nav=nav,
+        max_position_pct=Decimal("0.10"),
+        oversize_flag_ratio=Decimal("1.25"),
+    )
+    by_sym = {h.symbol: h for h in held}
+    assert "COHR" in by_sym and "TINY" in by_sym
+    assert by_sym["COHR"].metadata.get("oversized_position_flag") is True
+    assert Decimal(by_sym["COHR"].metadata["position_above_target_ratio"]) > Decimal("1.25")
+    assert by_sym["TINY"].metadata.get("oversized_position_flag") is False
+
+
+def test_d031_arbitrage_path_capital_unchanged() -> None:
+    """Arbitrage opportunity builders must NOT be affected by D031."""
+    from portfolio.global_edge_coordinator import cross_exchange_dict_to_strategy_opportunity
+
+    d = {
+        "symbol": "BTC-USDT",
+        "side": "ARBITRAGE_SPOT_SPREAD",
+        "confidence": "0.8",
+        "metadata": {"net_spread": "100"},
+    }
+    opp = cross_exchange_dict_to_strategy_opportunity(
+        d, capital=Decimal("5000"), edge_boost=Decimal("0.015")
+    )
+    assert opp.capital_required == Decimal("5000")  # unchanged
+    # Arb path does not populate D031 sizing audit keys; that's fine — the
+    # execution boundary guard exempts arbitrage sides explicitly.
+    assert "sizing_source" not in opp.metadata

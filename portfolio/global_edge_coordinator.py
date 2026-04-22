@@ -40,14 +40,52 @@ class CoordinatorAction:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _decimal_or_none(v: Any) -> Decimal | None:
+    """Parse a value into ``Decimal``, returning ``None`` on missing/invalid.
+
+    Used by the D031 sizing pipeline to coerce heterogenous metadata values
+    (``str``, ``int``, ``float``, ``Decimal``) without throwing.
+    """
+    if v is None:
+        return None
+    try:
+        d = Decimal(str(v))
+    except Exception:  # noqa: BLE001
+        return None
+    return d
+
+
 def signal_candidate_to_strategy_opportunity(
     cand: Any,
     *,
     nav: Decimal,
     position_pct: Decimal,
     price: Decimal,
+    max_position_pct: Decimal = Decimal("0.10"),
 ) -> StrategyOpportunity | None:
-    """Map a D015 ``SignalCandidate`` to comparable ``StrategyOpportunity`` (edge ~ adjusted strength)."""
+    """Map a D015 ``SignalCandidate`` to comparable ``StrategyOpportunity``.
+
+    **Sizing pipeline (D031)** — strategy intent is the source of truth:
+
+      1. If ``cand.metadata["risk_notional_override"]`` is present, it is the
+         proposed base notional. This is the volatility / ATR-aware size the
+         strategy actually asked for (see ``signals/engine.py``).
+      2. Else if ``cand.metadata["target_notional"]`` is present, use it.
+      3. Else fall back to ``nav * position_pct`` (legacy behaviour).
+
+    Then apply a **hard cap only** of ``nav * max_position_pct`` (risk-limits
+    ceiling). The cap is a ceiling, never a floor — small strategy-requested
+    sizes are NEVER inflated upwards.
+
+    All sizing decisions are recorded transparently in ``metadata`` under
+    ``sizing_*`` keys so that the dashboard, logs and tests can audit why
+    each trade was sized the way it was.
+
+    Prior to D031 this function silently threw away the strategy's
+    volatility-aware sizing and forced every directional signal through
+    ``cap = nav * position_pct``, producing a systematic 7-13× over-sizing
+    of low/medium-conviction trades (see ``docs/DECISIONS.md`` D031).
+    """
     try:
         edge = Decimal(str(getattr(cand, "adjusted_signal_strength", "0") or "0"))
         conf = Decimal(str(getattr(cand, "confidence", "0") or "0"))
@@ -55,23 +93,65 @@ def signal_candidate_to_strategy_opportunity(
         return None
     if price <= 0 or nav <= 0:
         return None
-    cap = nav * position_pct
-    if cap <= 0:
+
+    cand_meta = dict(getattr(cand, "metadata", {}) or {})
+    cand_ac = getattr(cand, "asset_class", None)
+    if cand_ac and "asset_class" not in cand_meta:
+        cand_meta["asset_class"] = str(cand_ac)
+
+    # ------------------------------------------------------------------ D031A
+    # Priority: risk_notional_override > target_notional > nav * position_pct
+    strategy_target_notional = _decimal_or_none(cand_meta.get("target_notional"))
+    strategy_risk_override = _decimal_or_none(cand_meta.get("risk_notional_override"))
+    nav_fallback = nav * position_pct
+
+    if strategy_risk_override is not None and strategy_risk_override > 0:
+        proposed_base = strategy_risk_override
+        sizing_source = "risk_notional_override"
+    elif strategy_target_notional is not None and strategy_target_notional > 0:
+        proposed_base = strategy_target_notional
+        sizing_source = "target_notional"
+    else:
+        proposed_base = nav_fallback
+        sizing_source = "nav_fallback"
+
+    if proposed_base <= 0:
         return None
+
+    hard_cap = nav * max_position_pct
+    if hard_cap > 0 and proposed_base > hard_cap:
+        final_cap = hard_cap
+        sizing_clipped = True
+        sizing_clip_reason = f"nav*{max_position_pct}"
+    else:
+        final_cap = proposed_base
+        sizing_clipped = False
+        sizing_clip_reason = None
+
+    if final_cap <= 0:
+        return None
+
+    # ------------------------------------------------------------------ D031B
+    cand_meta["sizing_strategy_target_notional"] = (
+        str(strategy_target_notional) if strategy_target_notional is not None else None
+    )
+    cand_meta["sizing_risk_notional_override"] = (
+        str(strategy_risk_override) if strategy_risk_override is not None else None
+    )
+    cand_meta["sizing_source"] = sizing_source
+    cand_meta["sizing_proposed_base_notional"] = str(proposed_base)
+    cand_meta["sizing_hard_cap_notional"] = str(hard_cap)
+    cand_meta["sizing_final_capital_required"] = str(final_cap)
+    cand_meta["sizing_clipped"] = sizing_clipped
+    cand_meta["sizing_clip_reason"] = sizing_clip_reason
+    cand_meta["sizing_nav_at_decision"] = str(nav)
+    cand_meta["sizing_max_position_pct"] = str(max_position_pct)
+
     liq = Decimal("0.7")
     exe = Decimal("0.75")
     reg = Decimal("0.8")
     risk = Decimal("0.05")
     ps = compute_priority_score(edge, conf, reg, exe, risk)
-    # Carry the candidate's asset_class into metadata so it survives the
-    # SignalCandidate → StrategyOpportunity → CoordinatorAction → RawSignal
-    # round-trip. Without this, ``coordinator_action_to_raw_signal`` defaults
-    # to "equity" and mislabels crypto / forex / futures signals on the way
-    # back to the execution engine (which then routes to the wrong broker).
-    cand_meta = dict(getattr(cand, "metadata", {}) or {})
-    cand_ac = getattr(cand, "asset_class", None)
-    if cand_ac and "asset_class" not in cand_meta:
-        cand_meta["asset_class"] = str(cand_ac)
     return StrategyOpportunity(
         strategy_name=str(getattr(cand, "strategy_name", "unknown")),
         symbol=str(getattr(cand, "symbol", "")),
@@ -79,7 +159,7 @@ def signal_candidate_to_strategy_opportunity(
         created_at=getattr(cand, "timestamp", datetime.now(timezone.utc)),
         expected_edge=edge,
         confidence=conf,
-        capital_required=cap,
+        capital_required=final_cap,
         expected_holding_hours=24,
         liquidity_score=liq,
         execution_score=exe,
@@ -344,16 +424,30 @@ class GlobalEdgeCoordinator:
             # full; defender ``frac == 0.15`` → trim to 15% of request. The
             # ``min(1, frac)`` clamp prevents an accidental >100% blow-up if
             # ops configures e.g. ``1.5``.
-            cap = opp.capital_required * min(Decimal("1"), frac) if opp.capital_required > 0 else Decimal("0")
+            clamped_frac = min(Decimal("1"), frac)
+            cap = opp.capital_required * clamped_frac if opp.capital_required > 0 else Decimal("0")
+            final_capital = cap if cap > 0 else opp.capital_required
+
+            # D031B: propagate + extend sizing audit trail so the final
+            # CoordinatorAction carries the full sizing provenance (pre-mode
+            # capital_required, the mode fraction applied, and the post-mode
+            # final capital). ``coordinator_action_to_raw_signal`` preserves
+            # these fields into the RawSignal metadata for execution-boundary
+            # guards and dashboard display.
+            action_meta = dict(opp.metadata)
+            action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
+            action_meta["sizing_mode"] = (active_mode or DEFAULT_MODE).strip().lower()
+            action_meta["sizing_mode_fraction"] = str(clamped_frac)
+            action_meta["sizing_final_action_capital"] = str(final_capital)
 
             out.append(
                 CoordinatorAction(
                     kind="open_strategy",
                     symbol=opp.symbol,
                     strategy_name=opp.strategy_name,
-                    capital=cap if cap > 0 else opp.capital_required,
+                    capital=final_capital,
                     priority_score=opp.priority_score,
-                    metadata=dict(opp.metadata),
+                    metadata=action_meta,
                 )
             )
 
@@ -364,14 +458,33 @@ def held_positions_from_portfolio(
     portfolio: dict[str, Any],
     *,
     decay: Decimal = Decimal("0.08"),
+    nav: Decimal | None = None,
+    max_position_pct: Decimal = Decimal("0.10"),
+    oversize_flag_ratio: Decimal = Decimal("1.25"),
 ) -> list[HeldPositionEdge]:
     """
-    Build held edges from portfolio ``positions``; expected_remaining_edge is a proxy (v1).
+    Build held edges from portfolio ``positions``; ``expected_remaining_edge`` is a proxy (v1).
+
+    **D031D — oversized position detection.** When ``nav`` is supplied, each
+    held position is compared against the intended ceiling
+    ``nav * max_position_pct`` (default 10 %). Positions whose live notional
+    exceeds the ceiling by more than ``oversize_flag_ratio`` (default 1.25×)
+    are flagged in ``metadata`` with:
+
+      * ``oversized_position_flag`` — ``True``
+      * ``position_above_target_ratio`` — live notional / ceiling
+
+    This is **detection only** — no auto-liquidation is performed here. The
+    dashboard and monitoring layer surface the flag so operators (or a later
+    remediation step) can trim. See docs/DECISIONS.md D031 for rationale.
     """
     pos = portfolio.get("positions") or {}
     if not isinstance(pos, dict):
         return []
     out: list[HeldPositionEdge] = []
+    ceiling: Decimal | None = None
+    if nav is not None and nav > 0 and max_position_pct > 0:
+        ceiling = nav * max_position_pct
     for sym, row in pos.items():
         if not isinstance(row, dict):
             continue
@@ -385,13 +498,19 @@ def held_positions_from_portfolio(
             continue
         base_edge = Decimal("0.15")
         rem = max(Decimal("0"), base_edge * (Decimal("1") - decay))
+        meta: dict[str, Any] = {"source": "portfolio_snapshot"}
+        if ceiling is not None and ceiling > 0:
+            ratio = (n / ceiling).quantize(Decimal("0.0001"))
+            meta["position_above_target_ratio"] = str(ratio)
+            meta["sizing_hard_cap_notional"] = str(ceiling)
+            meta["oversized_position_flag"] = ratio > oversize_flag_ratio
         out.append(
             HeldPositionEdge(
                 symbol=str(sym),
                 notional=n,
                 expected_remaining_edge=rem,
                 broker=str(row.get("broker", "")),
-                metadata={"source": "portfolio_snapshot"},
+                metadata=meta,
             )
         )
     return out

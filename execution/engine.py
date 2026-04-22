@@ -171,6 +171,17 @@ class ExecutionEngine:
             )
             return None
 
+        # D031C — execution-boundary sanity guard. Reject loudly if the order
+        # notional about to hit the broker materially exceeds the coordinator's
+        # intended final capital. This is a defensive backstop, not the primary
+        # sizing mechanism; normal flows never trigger it.
+        if not self._passes_sizing_boundary_guard(order, signal):
+            await self._send_critical_alert(
+                f"Sizing boundary guard rejected signal {signal.signal_id} "
+                f"({signal.symbol} {signal.side}) — see logs"
+            )
+            return None
+
         await self._publish_symbol_constraints(signal, broker)
 
         logger.info(
@@ -770,6 +781,88 @@ class ExecutionEngine:
             "auto_kill_on_api_failure": bool(cfg.get("auto_kill_on_api_failure", False)),
             "auto_kill_on_reconciliation_failure": bool(cfg.get("auto_kill_on_reconciliation_failure", False)),
         }
+
+    def _passes_sizing_boundary_guard(self, order: Order, signal: Signal) -> bool:
+        """D031C — reject orders whose notional materially exceeds the coordinator's intent.
+
+        The global-edge coordinator attaches ``sizing_final_capital_required``
+        (and, as a fallback, ``target_notional``) to every directional signal's
+        metadata. If the concrete order about to hit the broker deviates by
+        more than ``SIZING_BOUNDARY_TOLERANCE`` (default 1.25×) from that
+        intended size, *something upstream is broken* — the safe action is to
+        refuse to place the order.
+
+        Also rejects when the order exceeds the sizing hard cap
+        (``sizing_hard_cap_notional``) regardless of intent, in case the
+        strategy requested an absurd size that slipped through.
+
+        Arbitrage legs are exempt (they carry capital via different paths).
+        If the signal metadata carries no sizing audit fields at all (legacy
+        path or external signal) the guard is a no-op — we never fabricate a
+        limit from nothing.
+        """
+        side_up = (signal.side or "").strip().upper()
+        if side_up.startswith("ARBITRAGE_"):
+            return True
+
+        md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+
+        def _to_dec(v: Any) -> Optional[Decimal]:
+            if v is None:
+                return None
+            try:
+                return Decimal(str(v))
+            except Exception:  # noqa: BLE001
+                return None
+
+        intended = _to_dec(md.get("sizing_final_capital_required")) or _to_dec(md.get("target_notional"))
+        hard_cap = _to_dec(md.get("sizing_hard_cap_notional"))
+
+        px = order.limit_price if (order.limit_price is not None and order.limit_price > 0) else signal.suggested_price
+        if px is None or px <= 0:
+            return True
+        actual_notional = abs(Decimal(str(order.quantity))) * Decimal(str(px))
+
+        tolerance = Decimal("1.25")
+        if intended is not None and intended > 0 and actual_notional > intended * tolerance:
+            logger.critical(
+                "SIZING GUARD REJECT | signal_id=%s symbol=%s side=%s broker=%s | "
+                "actual_notional=%s > intended=%s * %s | sizing_source=%s",
+                signal.signal_id,
+                signal.symbol,
+                signal.side,
+                signal.broker,
+                actual_notional,
+                intended,
+                tolerance,
+                md.get("sizing_source"),
+            )
+            return False
+
+        if hard_cap is not None and hard_cap > 0 and actual_notional > hard_cap:
+            logger.critical(
+                "SIZING GUARD REJECT (hard cap) | signal_id=%s symbol=%s | "
+                "actual_notional=%s > hard_cap=%s",
+                signal.signal_id,
+                signal.symbol,
+                actual_notional,
+                hard_cap,
+            )
+            return False
+
+        if intended is not None and intended > 0:
+            ratio = (actual_notional / intended).quantize(Decimal("0.0001"))
+            logger.info(
+                "SIZING OK | signal_id=%s %s %s | actual=%s intended=%s ratio=%s source=%s",
+                signal.signal_id,
+                signal.symbol,
+                signal.side,
+                actual_notional,
+                intended,
+                ratio,
+                md.get("sizing_source"),
+            )
+        return True
 
     async def _passes_execution_limits(self, broker, order: Order, *, broker_name: str) -> bool:
         if self.paper_mode:
