@@ -342,6 +342,21 @@ export type SystemStatusResponse = {
     string,
     { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
   >;
+  /** Portfolio coverage summary: is NAV reflecting every configured wallet?
+   *  When ``full`` is false, ``excluded`` carries the failing brokers with
+   *  their last known error so the UI can render partial-coverage states
+   *  honestly instead of silently truncating NAV. */
+  coverage?: {
+    full: boolean;
+    configured: string[];
+    included: string[];
+    excluded: Array<{
+      name: string;
+      connected: boolean;
+      balance_ready: boolean;
+      reason: string;
+    }>;
+  };
   infrastructure?: Record<string, { healthy: boolean; error?: string | null }>;
   trading?: {
     running: boolean;

@@ -89,6 +89,7 @@ class Orchestrator:
         self._trading_loop: TradingLoop | None = None
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_scan_idx: int = 0
+        self._coverage_sync_task: asyncio.Task | None = None
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
@@ -157,6 +158,7 @@ class Orchestrator:
                     logger.warning("orchestrator | no brokers — observation mode")
 
                 self._broker_manager.start_reconnect_loop()
+                self._start_coverage_sync_loop()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -252,6 +254,15 @@ class Orchestrator:
                     pass
                 self._pipeline_task = None
 
+            # 3b. Stop broker-coverage sync loop
+            if self._coverage_sync_task is not None and not self._coverage_sync_task.done():
+                self._coverage_sync_task.cancel()
+                try:
+                    await self._coverage_sync_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._coverage_sync_task = None
+
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
                 await _await_shutdown_step(
@@ -304,12 +315,20 @@ class Orchestrator:
         if isinstance(ts_ls, list):
             loaded_strategies = ts_ls
 
+        coverage = self._broker_report.coverage() if self._broker_report else {
+            "full": False,
+            "configured": [],
+            "included": [],
+            "excluded": [],
+        }
+
         out: dict[str, Any] = {
             "state": self.state.value,
             "state_changed_at": self.state_changed_at.isoformat(),
             "paper_mode": paper_mode,
             "active_brokers": active_brokers,
             "brokers": broker_status,
+            "coverage": coverage,
             "infrastructure": dep_status,
             "trading": trading_status,
             "errors": list(self.errors),
@@ -348,6 +367,70 @@ class Orchestrator:
         if self._pipeline_task is not None and not self._pipeline_task.done():
             return
         self._pipeline_task = asyncio.create_task(self._pipeline_runner(), name="data-pipeline")
+
+    def _start_coverage_sync_loop(self) -> None:
+        """Start the broker-coverage → risk-engine sync task."""
+        if self._coverage_sync_task is not None and not self._coverage_sync_task.done():
+            return
+        self._coverage_sync_task = asyncio.create_task(
+            self._coverage_sync_loop(), name="coverage-sync"
+        )
+
+    async def _coverage_sync_loop(self) -> None:
+        """
+        Keep the risk engine's ``disabled_brokers`` set in sync with broker
+        coverage.
+
+        A broker that is configured but not ``connected + balance_ready``
+        must never receive new orders: its position state is stale and any
+        order routed to it would either bounce (disconnected) or deepen
+        exposure the operator cannot currently see (mid-flap). This loop
+        disables every excluded broker at the risk layer (the same gate
+        used by the kill switch) and re-enables brokers the moment they
+        come fully back, without requiring a full orchestrator restart.
+        """
+        try:
+            interval = max(1.0, float(os.getenv("COVERAGE_SYNC_INTERVAL_SEC", "5")))
+        except (TypeError, ValueError):
+            interval = 5.0
+        from control.runtime import get_risk_engine
+
+        last_disabled: set[str] = set()
+        while True:
+            try:
+                report = self._broker_report
+                if report is None:
+                    await self._sleep_cancellable(interval)
+                    continue
+                risk = get_risk_engine()
+                if risk is None:
+                    await self._sleep_cancellable(interval)
+                    continue
+                cov = report.coverage()
+                excluded = {str(e.get("name") or "").strip().lower() for e in cov.get("excluded", [])}
+                excluded.discard("")
+                included = {str(n or "").strip().lower() for n in cov.get("included", [])}
+                included.discard("")
+
+                for name in excluded - last_disabled:
+                    risk.disable_broker(name)
+                    logger.warning(
+                        "orchestrator | coverage | disabled '{}' at risk engine (excluded from NAV)",
+                        name,
+                    )
+                for name in last_disabled & included:
+                    risk.enable_broker(name)
+                    logger.info(
+                        "orchestrator | coverage | re-enabled '{}' at risk engine (back in NAV)",
+                        name,
+                    )
+                last_disabled = excluded
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("orchestrator | coverage sync error (non-fatal): {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
 
     async def _pipeline_runner(self) -> None:
         """Periodically run the data pipeline (feature ingestion)."""

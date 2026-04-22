@@ -77,6 +77,48 @@ class BrokerReport:
     def any_connected(self) -> bool:
         return any(s.connected for s in self.brokers.values())
 
+    @property
+    def included_names(self) -> list[str]:
+        """Brokers whose balances are trustworthy and reflected in NAV."""
+        return [n for n, s in self.brokers.items() if s.connected and s.balance_ready]
+
+    @property
+    def excluded(self) -> list[BrokerStatus]:
+        """Configured brokers that are NOT contributing to NAV right now."""
+        return [
+            s for s in self.brokers.values()
+            if s.configured and not (s.connected and s.balance_ready)
+        ]
+
+    def coverage(self) -> dict[str, Any]:
+        """
+        Machine-readable portfolio coverage summary.
+
+        ``full`` is true when every configured broker is both connected and
+        has produced a balance snapshot — i.e. the NAV reported by the
+        dashboard reflects 100% of the wallets the operator asked for.
+        When ``full`` is false, ``excluded`` lists the missing brokers with
+        their last known error, so the UI can render "partial coverage"
+        honestly instead of silently truncating NAV.
+        """
+        configured = [s for s in self.brokers.values() if s.configured]
+        included = self.included_names
+        excluded = [
+            {
+                "name": s.name,
+                "connected": bool(s.connected),
+                "balance_ready": bool(s.balance_ready),
+                "reason": (s.error or "not ready").strip(),
+            }
+            for s in self.excluded
+        ]
+        return {
+            "full": bool(configured) and not excluded,
+            "configured": [s.name for s in configured],
+            "included": included,
+            "excluded": excluded,
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             name: {

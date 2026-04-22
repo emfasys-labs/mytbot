@@ -355,3 +355,28 @@ Full suite still green (276 passed, 3 skipped).
 - IBKR futures contract resolver (`ES=F` → `Future("ES", "<current-month>", "CME")`) to flip `FUTURES_EXECUTION_ENABLED=1`.
 - Surface `marketable_adjusted` / `dedup_skipped` on `/system/status` so the UI can show "N orders priced-to-market / M deduped this hour".
 - Treat stale pending orders > N minutes as auto-cancellable without operator interaction.
+
+---
+
+## D028 — Honest broker coverage: partial-NAV transparency + auto-disable on exclusion
+**Date:** 2026-04-22
+**Decision:** The aggregated NAV on the dashboard is now **coverage-aware**, and the risk engine auto-disables any broker that is not contributing to it. Three coordinated changes:
+
+1. **Backend coverage contract.** `BrokerReport.coverage()` returns `{full, configured, included, excluded: [{name, connected, balance_ready, reason}]}`. `full` is true iff every configured broker is both connected and balance-ready — i.e. NAV truly reflects all wallets the operator asked for. `included` lists the brokers whose balances are in NAV right now; `excluded` carries the failing brokers with the concrete error from `BrokerStatus.error` (e.g. `"Startup connect deferred (transient exchange throttle/retry)"`). The orchestrator's `status()` exposes this as a top-level `coverage` key on `GET /system/status` (and therefore the WebSocket `tick.system` payload).
+
+2. **Risk engine auto-sync.** A new orchestrator background task `_coverage_sync_loop` (tick `COVERAGE_SYNC_INTERVAL_SEC`, default 5s) diff-applies coverage transitions onto `RiskEngine._disabled_brokers`: every excluded broker gets `risk.disable_broker(name)`, every freshly-included broker gets `risk.enable_broker(name)`. This guarantees no new orders are routed to a broker whose position state is stale — the same gate used by the kill switch, so the existing `_check_broker_disabled` risk rule covers it with zero additional checks. Idempotent, cancellable, survives a missing risk engine (pre-loop phase) with a no-op cycle. Stopped cleanly in `Orchestrator.stop()`.
+
+3. **UI "honest degrade".** `BrokerStatus.state` expanded from `live | warming | off` to `live | warming | offline | off`. `mapBrokers` now distinguishes a broker that is genuinely still connecting (no error, pill = `warming` / caution tone) from one that is down with a concrete failure (error present, pill = `offline` / danger tone with the backend's error surfaced on hover via `title`). The NAV card on the Dashboard renders an amber **"Partial NAV"** banner whenever `coverage.full === false`, naming the excluded brokers and exposing each one's reason on hover, plus a compact footnote `· partial NAV (excl. kraken)` next to the Tradable / Allocation chips. `useLiveSystem` exports a `coverage: Coverage` field so other screens (Book, Risk, Log) can reason about which venues are in the NAV.
+
+**Reason:** On 2026-04-22 the system transitioned to `RUNNING` with IBKR showing a `warming` pill while its Gateway was actually not running at all — NAV read £98k instead of the real £1.05M because the aggregator had silently skipped the IBKR wallet, and the UI gave no indication that anything was wrong. The "warming" state conflated three meaningfully different backend conditions — genuinely connecting, connected but no balance yet, and configured-but-offline-with-an-error — and the orchestrator flipped to `RUNNING` the moment *any* broker was live, which is correct for trading availability but misleading for NAV interpretation. The right system behaviour is (a) always show an aggregated NAV for whatever wallets are currently trustworthy, (b) tell the operator explicitly that NAV is partial and which wallets are missing with their concrete reasons, and (c) refuse to route new orders to excluded brokers at the risk layer so partial coverage cannot drift into partial exposure.
+
+**Rejected alternatives:** "Block `RUNNING` until every broker is up" (Option A): hides the working capital stack behind one broker's outage, which is exactly the opposite of the multi-venue architecture's value. "Kill-switch on partial coverage" (Option B): indistinguishable from a real emergency and would stop strategies on correctly-attributed wallets. Both failed the review because the real failure mode is *unknown* partial coverage, not partial coverage per se.
+
+**Status:** Implemented. Covered by:
+- `tests/test_broker_coverage.py` (10 cases — full coverage, partial-one-down, connected-but-no-balance-ready, unconfigured broker ignored, empty-configured is not "full", status dict shape with/without report, risk-engine disable on exclude, re-enable on recovery, no-risk-engine graceful no-op).
+- Backend suite remains green (323 passed, 3 skipped).
+- UI builds clean under Vite + TS strict.
+
+**Operator follow-ups (next cycle):**
+- Extend the coverage contract to the Risk screen: render an "excluded from NAV" chip on the Capital-at-work row when `coverage.full === false`.
+- `POST /admin/retry_broker/{name}` to force an immediate reconnect attempt on an excluded broker instead of waiting for the background reconnect loop — operator can one-click recover after launching IB Gateway.

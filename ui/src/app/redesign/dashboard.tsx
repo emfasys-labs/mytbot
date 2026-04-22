@@ -4,7 +4,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Conviction, LiveEvent, Position } from './data';
+import { Conviction, Coverage, LiveEvent, Position } from './data';
 import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, Density, SystemState, TOKENS } from './tokens';
@@ -77,6 +77,9 @@ export function DashboardScreen({
             opacity: 0.8, pointerEvents: 'none', animation: 'ds-fade-out-slow 2s ease',
           }} />
         )}
+        {state !== 'off' && !live.coverage.full && live.coverage.excluded.length > 0 && (
+          <PartialCoverageBanner coverage={live.coverage} />
+        )}
         {state === 'off' ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, minHeight: 128 }}>
             <div>
@@ -142,6 +145,7 @@ export function DashboardScreen({
             {tradable != null && (
               <div style={{
                 marginTop: 10, display: 'flex', gap: 12, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
+                flexWrap: 'wrap',
               }}>
                 <span>Tradable £{Math.round(tradable).toLocaleString()}</span>
                 <span>·</span>
@@ -149,6 +153,16 @@ export function DashboardScreen({
                 {state !== 'running' && (
                   <span style={{ color: TOKENS.caution }}>
                     · system {state === 'starting' ? 'warming up' : state}
+                  </span>
+                )}
+                {!live.coverage.full && live.coverage.excluded.length > 0 && (
+                  <span
+                    style={{ color: TOKENS.caution }}
+                    title={live.coverage.excluded
+                      .map((e) => `${e.name}: ${e.reason}`)
+                      .join('\n')}
+                  >
+                    · partial NAV (excl. {live.coverage.excluded.map((e) => e.name).join(', ')})
                   </span>
                 )}
               </div>
@@ -212,6 +226,52 @@ function BookFooter({ live }: { live: LiveData }) {
         </>
       )}
     </span>
+  );
+}
+
+/**
+ * Amber banner sitting at the top of the NAV card whenever the aggregated
+ * NAV is missing one or more configured brokers.
+ *
+ * The NAV number itself is unchanged — showing zero brokers is never
+ * "zero notional"; it's an incomplete view of the real book. The banner
+ * names the missing wallets and surfaces the backend's reason on hover so
+ * the operator can go straight to the fix (launch the Gateway, rotate keys,
+ * whatever the ``reason`` says). Without this the dashboard silently showed
+ * a partial NAV with no indication that anything was wrong — the bug
+ * behind the "£98k" scare on 2026-04-22.
+ */
+function PartialCoverageBanner({ coverage }: { coverage: Coverage }) {
+  const names = coverage.excluded.map((e) => e.name).join(', ');
+  const title = coverage.excluded
+    .map((e) => `${e.name}: ${e.reason || 'not ready'}`)
+    .join('\n');
+  return (
+    <div
+      title={title}
+      style={{
+        marginBottom: 14,
+        padding: '8px 12px',
+        borderRadius: 6,
+        background: 'rgba(255, 191, 0, 0.08)',
+        border: '1px solid rgba(255, 191, 0, 0.25)',
+        color: TOKENS.caution,
+        fontFamily: TOKENS.mono,
+        fontSize: 11,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        cursor: 'help',
+      }}
+    >
+      <span style={{ fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+        Partial NAV
+      </span>
+      <span style={{ color: TOKENS.ink2 }}>
+        NAV below reflects {coverage.included.length} of {coverage.configured.length} configured brokers.
+        Excluded: {names}. Hover for details.
+      </span>
+    </div>
   );
 }
 

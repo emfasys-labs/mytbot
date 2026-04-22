@@ -90,7 +90,26 @@ export interface Strategy {
   enabled?: boolean;
 }
 
+export type BrokerUiState = 'live' | 'warming' | 'offline' | 'off';
+
 export interface BrokerStatus {
   name: string;
-  state: 'live' | 'warming' | 'off';
+  state: BrokerUiState;
+  /** Backend error text, shown in the row's tooltip when present. */
+  error?: string | null;
+  /** Whether this broker is excluded from the aggregated NAV right now. */
+  excluded?: boolean;
+}
+
+/** Portfolio coverage summary mirroring the backend's /system/status.coverage. */
+export interface Coverage {
+  full: boolean;
+  configured: string[];
+  included: string[];
+  excluded: Array<{
+    name: string;
+    connected: boolean;
+    balance_ready: boolean;
+    reason: string;
+  }>;
 }

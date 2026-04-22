@@ -28,6 +28,7 @@ import {
   mapApprovedRejected,
   mapBrokers,
   mapConviction,
+  mapCoverage,
   mapExecutionRejections,
   mapExposure,
   mapNews,
@@ -38,7 +39,18 @@ import {
   mergeStrategiesWithSignals,
   mapSystemState,
 } from './mapping';
-import type { Approved, BrokerStatus, Conviction, ExecutionRejection, LiveEvent, NewsRow, Position, Rejected, Strategy } from './data';
+import type {
+  Approved,
+  BrokerStatus,
+  Conviction,
+  Coverage,
+  ExecutionRejection,
+  LiveEvent,
+  NewsRow,
+  Position,
+  Rejected,
+  Strategy,
+} from './data';
 import type { SystemState as DesignSystemState } from './tokens';
 
 const REFRESH_INTERVAL_MS = 10_000;
@@ -57,6 +69,7 @@ export interface LiveData {
 
   brokers: BrokerStatus[];
   activeBrokers: string[];
+  coverage: Coverage;
 
   nav: number;
   navOpen: number;
@@ -115,7 +128,10 @@ export function useLiveSystem(): LiveData {
   const [snapshotFetchFailed, setSnapshotFetchFailed] = useState(false);
   const [lastStartError, setLastStartError] = useState<string | null>(null);
   const [activeBrokers, setActiveBrokers] = useState<string[]>([]);
-  const [brokersRaw, setBrokersRaw] = useState<Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean }>>({});
+  const [brokersRaw, setBrokersRaw] = useState<
+    Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }>
+  >({});
+  const [coverageRaw, setCoverageRaw] = useState<unknown>(null);
   const [mode, setModeState] = useState<TradingMode>('trader');
   const [capitalPct, setCapitalPctState] = useState<number>(() => {
     try {
@@ -160,6 +176,7 @@ export function useLiveSystem(): LiveData {
     setOrderEvents([]);
     setPnl(null);
     setActiveBrokers([]);
+    setCoverageRaw(null);
     setSnapshotFetchFailed(false);
     setKillSwitch(false);
     setLiveNavSamples([]);
@@ -208,7 +225,13 @@ export function useLiveSystem(): LiveData {
             ? sysRes.last_start_error.trim() : null,
         );
         if (Array.isArray(sysRes.active_brokers)) setActiveBrokers(sysRes.active_brokers);
-        if (sysRes.brokers) setBrokersRaw(sysRes.brokers as Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean }>);
+        if (sysRes.brokers) setBrokersRaw(
+          sysRes.brokers as Record<
+            string,
+            { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
+          >,
+        );
+        setCoverageRaw(sysRes.coverage ?? null);
         if (Array.isArray(sysRes.loaded_strategies)) {
           setLoadedStrategies(
             sysRes.loaded_strategies
@@ -343,7 +366,13 @@ export function useLiveSystem(): LiveData {
           setKillSwitch(wsKill);
           if (sys?.state && typeof sys.state === 'string') setBackendState(sys.state as BackendSystemState);
           if (sys?.active_brokers && Array.isArray(sys.active_brokers)) setActiveBrokers(sys.active_brokers as string[]);
-          if (sys?.brokers && typeof sys.brokers === 'object') setBrokersRaw(sys.brokers as Record<string, { configured: boolean; connected: boolean; balance_ready?: boolean }>);
+          if (sys?.brokers && typeof sys.brokers === 'object') setBrokersRaw(
+            sys.brokers as Record<
+              string,
+              { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
+            >,
+          );
+          if (sys?.coverage !== undefined) setCoverageRaw(sys.coverage);
           void refresh();
         } catch { /* malformed frame */ }
       };
@@ -439,7 +468,43 @@ export function useLiveSystem(): LiveData {
   const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(() => mapPnlRollups(pnl), [pnl]);
-  const brokers = useMemo(() => mapBrokers(brokersRaw), [brokersRaw]);
+  // Derive coverage before brokers so mapBrokers can mark excluded wallets
+  // for tooltip consumers (e.g. the NAV card footnote).
+  const coverage = useMemo<Coverage>(() => {
+    const mapped = mapCoverage(coverageRaw);
+    if (mapped) return mapped;
+    // Old backend without coverage — infer from brokersRaw so the UI still
+    // renders correctly rather than defaulting to "full" (which would hide
+    // partial-NAV errors on a mixed-version deployment).
+    const configured: string[] = [];
+    const included: string[] = [];
+    const excluded: Coverage['excluded'] = [];
+    for (const [name, b] of Object.entries(brokersRaw)) {
+      if (!b.configured) continue;
+      configured.push(name);
+      if (b.connected && b.balance_ready !== false) {
+        included.push(name);
+      } else {
+        excluded.push({
+          name,
+          connected: !!b.connected,
+          balance_ready: !!b.balance_ready,
+          reason: (typeof b.error === 'string' && b.error.trim()) || 'not ready',
+        });
+      }
+    }
+    return {
+      full: configured.length > 0 && excluded.length === 0,
+      configured,
+      included,
+      excluded,
+    };
+  }, [coverageRaw, brokersRaw]);
+
+  const brokers = useMemo(() => {
+    const excludedSet = new Set(coverage.excluded.map((e) => e.name));
+    return mapBrokers(brokersRaw, excludedSet);
+  }, [brokersRaw, coverage]);
 
   // ────── event log: merge WS + orders, newest first ──────
   const events = useMemo<LiveEvent[]>(() => {
@@ -509,6 +574,7 @@ export function useLiveSystem(): LiveData {
 
     brokers,
     activeBrokers,
+    coverage,
 
     nav,
     navOpen,

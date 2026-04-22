@@ -18,6 +18,7 @@ import {
   Approved,
   BrokerStatus,
   Conviction,
+  Coverage,
   ExecutionRejection,
   LiveEvent,
   NewsRow,
@@ -47,20 +48,78 @@ export function mapSystemState(
   }
 }
 
+/**
+ * Map raw ``/system/status.brokers`` rows into dashboard badges.
+ *
+ * The backend distinguishes four meaningful broker states — ``live``,
+ * ``warming`` (connected but account snapshot not yet ready), ``offline``
+ * (configured but unreachable, with a concrete error), and ``off`` (no
+ * credentials). Collapsing the last two into a single "warming" pill — as
+ * the original mapper did — lies to the operator: a zombie IB Gateway or a
+ * broker with revoked keys looks indistinguishable from one that's going to
+ * come up in the next two seconds. The explicit ``offline`` state plus the
+ * backend's error text in ``error`` let the BROKERS card render a red pill
+ * with a tooltip so the operator immediately sees *why* NAV is partial.
+ *
+ * ``excluded`` is set when the broker is not contributing to aggregated NAV,
+ * which is used by the NAV card footnote to name the missing wallets.
+ */
 export function mapBrokers(
   brokers: Record<
     string,
-    { configured: boolean; connected: boolean; balance_ready?: boolean }
+    { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
   >,
+  excludedNames?: Set<string>,
 ): BrokerStatus[] {
   return Object.entries(brokers)
     .map(([name, b]): BrokerStatus => {
-      if (!b.configured) return { name, state: 'off' };
-      if (!b.connected) return { name, state: 'warming' };
-      if (b.balance_ready === false) return { name, state: 'warming' };
-      return { name, state: 'live' };
+      const err = typeof b.error === 'string' && b.error.trim() ? b.error.trim() : null;
+      const excluded = excludedNames ? excludedNames.has(name) : undefined;
+      if (!b.configured) return { name, state: 'off', error: err, excluded };
+      if (!b.connected) {
+        // Distinguish "genuinely still connecting" from "broker is down".
+        // The only signal we have pre-coverage is the presence of an error
+        // from the last connect attempt: if there's a concrete reason, it's
+        // not warming — it's a user-actionable failure.
+        const state: BrokerStatus['state'] = err ? 'offline' : 'warming';
+        return { name, state, error: err, excluded };
+      }
+      if (b.balance_ready === false) return { name, state: 'warming', error: err, excluded };
+      return { name, state: 'live', error: err, excluded };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Coerce the backend's coverage block into the strict shape consumed by the
+ * dashboard. Defensive against missing/partial payloads (old backends or
+ * in-flight upgrades) so the UI never crashes when the coverage field is
+ * absent — it simply falls back to "assume full" and the BROKERS card stays
+ * authoritative.
+ */
+export function mapCoverage(raw: unknown): Coverage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const asStringList = (v: unknown): string[] => {
+    if (!Array.isArray(v)) return [];
+    return v.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((s) => s.trim());
+  };
+  const excluded = Array.isArray(r.excluded)
+    ? (r.excluded as Array<Record<string, unknown>>)
+        .map((e) => ({
+          name: String(e.name ?? '').trim(),
+          connected: !!e.connected,
+          balance_ready: !!e.balance_ready,
+          reason: String(e.reason ?? '').trim(),
+        }))
+        .filter((e) => !!e.name)
+    : [];
+  return {
+    full: !!r.full,
+    configured: asStringList(r.configured),
+    included: asStringList(r.included),
+    excluded,
+  };
 }
 
 function urgencyFromDisplay(d: number): Urgency {

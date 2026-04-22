@@ -255,15 +255,38 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
           {live.brokers.length === 0 ? (
             <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>No brokers configured</div>
           ) : (
-            live.brokers.map((b) => (
-              <div key={b.name} style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '6px 0', fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2,
-              }}>
-                <span>{b.name}</span>
-                <Pill size="sm" tone={b.state === 'live' ? 'profit' : b.state === 'warming' ? 'caution' : 'neutral'}>{b.state}</Pill>
-              </div>
-            ))
+            live.brokers.map((b) => {
+              // Distinct pill tone per broker state so an operator can tell
+              // at a glance whether a broker is live, transiently warming,
+              // or in a user-actionable failure (offline). The ``title``
+              // surfaces the backend's concrete error without crowding the
+              // card — same pattern the status bar uses for kill-switch
+              // tooltips.
+              const tone: 'profit' | 'caution' | 'danger' | 'neutral' =
+                b.state === 'live' ? 'profit' :
+                b.state === 'warming' ? 'caution' :
+                b.state === 'offline' ? 'danger' :
+                'neutral';
+              const title = b.error
+                ? `${b.name}: ${b.error}`
+                : b.excluded
+                  ? `${b.name} is excluded from NAV`
+                  : b.name;
+              return (
+                <div
+                  key={b.name}
+                  title={title}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '6px 0', fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2,
+                    cursor: b.error ? 'help' : 'default',
+                  }}
+                >
+                  <span>{b.name}</span>
+                  <Pill size="sm" tone={tone}>{b.state}</Pill>
+                </div>
+              );
+            })
           )}
         </Card>
       </div>
