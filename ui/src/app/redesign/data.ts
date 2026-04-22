@@ -73,6 +73,12 @@ export interface NewsRow {
   s: -1 | 0 | 1;
 }
 
+export interface NewsSourceStat {
+  fresh_rows_in_window: number;
+  latest_age_hours: number | null;
+  stale: boolean;
+}
+
 export interface Strategy {
   name: string;
   weight: number;

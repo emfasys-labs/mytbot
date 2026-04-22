@@ -9,7 +9,7 @@
  * Pass ?legacy=1 in the URL to load the previous production shell.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DashboardScreen } from './dashboard';
 import { MobileApp } from './mobile';
 import { Glyph, Label } from './primitives';
@@ -224,6 +224,11 @@ export default function App() {
           {state === 'error' && <ErrorOverlay message={live.lastStartError ?? undefined} />}
           {armed && <ArmOverlay />}
         </div>
+        <NewsFooterTicker
+          news={live.news}
+          sourceStats={live.newsSourceStats}
+          paused={state === 'off' || state === 'error'}
+        />
       </main>
       <CmdPalette
         open={cmdOpen}
@@ -286,6 +291,87 @@ function ErrorOverlay({ message }: { message?: string }) {
       </div>
       <div style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink1, lineHeight: 1.4 }}>
         {message || 'Trading halted. See server logs for details.'}
+      </div>
+    </div>
+  );
+}
+
+function NewsFooterTicker({
+  news,
+  sourceStats,
+  paused,
+}: {
+  news: Array<{ text: string; src: string; age: string; s: -1 | 0 | 1 }>;
+  sourceStats: Record<string, { fresh_rows_in_window: number; latest_age_hours: number | null; stale: boolean }>;
+  paused: boolean;
+}) {
+  const [x, setX] = useState(0);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (paused || news.length === 0) return;
+    let raf = 0;
+    let last = 0;
+    const speed = 34; // px/s
+    const tick = (ts: number) => {
+      if (last > 0) {
+        const dt = Math.min(80, ts - last);
+        setX((prev) => {
+          const el = trackRef.current;
+          const half = el ? el.scrollWidth / 2 : 0;
+          if (half <= 0) return 0;
+          const next = prev + (speed * dt) / 1000;
+          return next >= half ? next - half : next;
+        });
+      }
+      last = ts;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [news, paused]);
+
+  const dots = Object.entries(sourceStats).sort(([a], [b]) => a.localeCompare(b));
+  const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '—', s: 0 as const }];
+  const doubled = [...rows, ...rows];
+
+  return (
+    <div style={{ borderTop: `1px solid ${TOKENS.line}`, background: TOKENS.bg1 }}>
+      <div style={{ padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {dots.length > 0 ? (
+          dots.map(([src, st]) => (
+            <span key={src} style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: st.stale ? TOKENS.caution : TOKENS.profit }} />
+              <span style={{ color: TOKENS.ink2, textTransform: 'uppercase' }}>{src}</span>
+              <span>{st.fresh_rows_in_window} fresh</span>
+              <span>{st.latest_age_hours == null ? 'n/a' : `${st.latest_age_hours.toFixed(1)}h`}</span>
+            </span>
+          ))
+        ) : news.length === 0 ? (
+          <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>news source health pending...</span>
+        ) : null}
+      </div>
+      <div style={{ borderTop: `1px solid ${TOKENS.line}`, overflow: 'hidden', height: 28 }}>
+        <div
+          ref={trackRef}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            transform: `translateX(-${x}px)`,
+            willChange: 'transform',
+            height: '100%',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {doubled.map((n, i) => (
+            <span key={`${n.text}-${i}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '0 14px', fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink2 }}>
+              <span style={{ width: 5, height: 5, borderRadius: 999, background: n.s > 0 ? TOKENS.profit : n.s < 0 ? TOKENS.loss : TOKENS.ink3 }} />
+              <span style={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: 10, color: TOKENS.ink3 }}>{n.src}</span>
+              <span style={{ color: TOKENS.ink1 }}>{n.text}</span>
+              <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{n.age}</span>
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   );

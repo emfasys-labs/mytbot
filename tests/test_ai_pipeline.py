@@ -10,8 +10,11 @@ from ai.pipeline import AIPipeline
 
 
 class _FakeClassifier:
+    def __init__(self) -> None:
+        self.last_items = []
+
     async def score_batch(self, items):  # noqa: ANN001
-        _ = items
+        self.last_items = list(items or [])
         return [
             NewsScore(
                 headline="spy up",
@@ -126,3 +129,22 @@ def test_airouter_runtime_ai_status_degraded_when_no_providers():
     for k in list(r._providers_enabled.keys()):
         r._providers_enabled[k] = False
     assert r.runtime_ai_status()["ai_degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_score_news_balances_rows_across_sources():
+    clf = _FakeClassifier()
+    p = AIPipeline({"max_news_items_per_cycle": 3}, classifier=clf)
+    now = datetime.now(timezone.utc)
+    rows = [
+        SimpleNamespace(title="n1", source_name="newsapi", published_at=now, description="d"),
+        SimpleNamespace(title="n2", source_name="newsapi", published_at=now, description="d"),
+        SimpleNamespace(title="n3", source_name="newsapi", published_at=now, description="d"),
+        SimpleNamespace(title="av1", source_name="alphavantage", published_at=now, description="d"),
+        SimpleNamespace(title="fh1", source_name="finnhub", published_at=now, description="d"),
+    ]
+    await p._score_news(symbols=["SPY"], rows=rows)
+    used_sources = {str(i.source).lower() for i in clf.last_items}
+    assert "newsapi" in used_sources
+    assert "alphavantage" in used_sources
+    assert "finnhub" in used_sources

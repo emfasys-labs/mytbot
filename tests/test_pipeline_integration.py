@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from data.fred_client import FredObservation
+from data.alphavantage_client import NormalizedArticle as AVNormalizedArticle
 from data.newsapi_client import NormalizedArticle, headline_content_hash
 from data.pipeline import run_once
 from storage.db import dispose_engine, init_async_database
@@ -43,6 +44,9 @@ async def test_pipeline_run_once_backfill_with_disposable_postgres(monkeypatch: 
 
         # Enable optional feeds and mock network calls deterministically.
         monkeypatch.setenv("NEWS_API_KEY", "test-news-key")
+        monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test-av-key")
+        monkeypatch.setenv("FINNHUB_API_KEY", "test-fh-key")
+        monkeypatch.setenv("MARKETAUX_API_TOKEN", "test-mx-key")
         monkeypatch.setenv("FRED_API_KEY", "test-fred-key")
 
         def fake_fetch_history(symbol: str, *, interval: str, period: str):
@@ -84,8 +88,66 @@ async def test_pipeline_run_once_backfill_with_disposable_postgres(monkeypatch: 
                 FredObservation(obs_date="2026-02-01", value="4.35"),
             ]
 
+        def fake_fetch_news_sentiment(api_key: str, *, limit: int, sort: str = "LATEST"):
+            _ = (api_key, limit, sort)
+            now = datetime(2026, 4, 6, 1, tzinfo=timezone.utc)
+            url = "https://example.com/av/1"
+            title = "AV headline"
+            return [
+                AVNormalizedArticle(
+                    content_hash=headline_content_hash(url=url, title=title),
+                    url=url,
+                    title=title,
+                    description="integration test av",
+                    source_name="alphavantage",
+                    published_at=now,
+                )
+            ]
+
+        def fake_fetch_general_news(api_key: str, *, category: str = "general", timeout_sec: float = 30.0, limit: int = 100):
+            _ = (api_key, category, timeout_sec, limit)
+            now = datetime(2026, 4, 6, 2, tzinfo=timezone.utc)
+            url = "https://example.com/fh/1"
+            title = "FH headline"
+            return [
+                AVNormalizedArticle(
+                    content_hash=headline_content_hash(url=url, title=title),
+                    url=url,
+                    title=title,
+                    description="integration test fh",
+                    source_name="finnhub",
+                    published_at=now,
+                )
+            ]
+
+        def fake_fetch_all_news(
+            api_token: str,
+            *,
+            language: str = "en",
+            limit: int = 100,
+            must_have_entities: bool = True,
+            timeout_sec: float = 30.0,
+        ):
+            _ = (api_token, language, limit, must_have_entities, timeout_sec)
+            now = datetime(2026, 4, 6, 3, tzinfo=timezone.utc)
+            url = "https://example.com/mx/1"
+            title = "MX headline"
+            return [
+                AVNormalizedArticle(
+                    content_hash=headline_content_hash(url=url, title=title),
+                    url=url,
+                    title=title,
+                    description="integration test mx",
+                    source_name="marketaux",
+                    published_at=now,
+                )
+            ]
+
         monkeypatch.setattr("data.pipeline.fetch_history", fake_fetch_history)
         monkeypatch.setattr("data.pipeline.fetch_everything", fake_fetch_everything)
+        monkeypatch.setattr("data.pipeline.fetch_news_sentiment", fake_fetch_news_sentiment)
+        monkeypatch.setattr("data.pipeline.fetch_general_news", fake_fetch_general_news)
+        monkeypatch.setattr("data.pipeline.fetch_all_news", fake_fetch_all_news)
         monkeypatch.setattr(
             "data.pipeline.fetch_series_observations",
             fake_fetch_series_observations,
@@ -129,7 +191,7 @@ async def test_pipeline_run_once_backfill_with_disposable_postgres(monkeypatch: 
             macro_count = int(rs3.scalar_one())
 
         assert feature_count >= 50
-        assert news_count == 1
+        assert news_count == 4
         assert macro_count == 2
     finally:
         if engine is not None:

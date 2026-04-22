@@ -47,6 +47,7 @@ import type {
   ExecutionRejection,
   LiveEvent,
   NewsRow,
+  NewsSourceStat,
   Position,
   Rejected,
   Strategy,
@@ -93,6 +94,7 @@ export interface LiveData {
   events: LiveEvent[];
   eventLines: string[];
   news: NewsRow[];
+  newsSourceStats: Record<string, NewsSourceStat>;
   orders: ApiOrderRow[];
   intelligence: IntelligenceSignalsResponse | null;
 
@@ -145,6 +147,7 @@ export function useLiveSystem(): LiveData {
   const [positionsRaw, setPositionsRaw] = useState<ApiPositionsResponse | null>(null);
   const [equitySeries, setEquitySeries] = useState<Array<{ date: string; value: number }>>([]);
   const [news, setNews] = useState<ApiNewsResponse | null>(null);
+  const [newsSourceStats, setNewsSourceStats] = useState<Record<string, NewsSourceStat>>({});
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
@@ -170,6 +173,7 @@ export function useLiveSystem(): LiveData {
     setPositionsRaw(null);
     setEquitySeries([]);
     setNews(null);
+    setNewsSourceStats({});
     setOrders([]);
     setIntelligence(null);
     setWsEvents([]);
@@ -204,7 +208,7 @@ export function useLiveSystem(): LiveData {
         api.getPositions(16),
         api.getStatus(),
         api.getSystemStatus(),
-        api.getNews(30),
+        api.getNews(30, true),
         api.getDashboardSnapshot(),
         api.getOrders(50),
       ]);
@@ -232,6 +236,26 @@ export function useLiveSystem(): LiveData {
           >,
         );
         setCoverageRaw(sysRes.coverage ?? null);
+        const ai = sysRes.trading?.ai;
+        if (ai && typeof ai === 'object' && ai.news_source_stats && typeof ai.news_source_stats === 'object') {
+          const stats: Record<string, NewsSourceStat> = {};
+          for (const [k, raw] of Object.entries(ai.news_source_stats as Record<string, unknown>)) {
+            if (!raw || typeof raw !== 'object') continue;
+            const rr = raw as Record<string, unknown>;
+            stats[k] = {
+              fresh_rows_in_window: Number.isFinite(Number(rr.fresh_rows_in_window))
+                ? Number(rr.fresh_rows_in_window)
+                : 0,
+              latest_age_hours: Number.isFinite(Number(rr.latest_age_hours))
+                ? Number(rr.latest_age_hours)
+                : null,
+              stale: !!rr.stale,
+            };
+          }
+          setNewsSourceStats(stats);
+        } else {
+          setNewsSourceStats({});
+        }
         if (Array.isArray(sysRes.loaded_strategies)) {
           setLoadedStrategies(
             sysRes.loaded_strategies
@@ -282,7 +306,19 @@ export function useLiveSystem(): LiveData {
           setEquitySeries(series);
         }
         if (posRes) setPositionsRaw(posRes);
-        if (newsRes) setNews(newsRes);
+        if (newsRes) {
+          const heads = newsRes.headlines ?? [];
+          if (heads.length > 0) {
+            setNews(newsRes);
+          } else {
+            try {
+              const fallback = await api.getNews(30, false);
+              setNews(fallback);
+            } catch {
+              setNews(newsRes);
+            }
+          }
+        }
         if (ordRes) {
           const rows = (ordRes as { orders?: ApiOrderRow[] }).orders ?? [];
           setOrders(rows);
@@ -598,6 +634,7 @@ export function useLiveSystem(): LiveData {
     events,
     eventLines,
     news: newsRows,
+    newsSourceStats,
     orders,
     intelligence,
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -21,6 +21,7 @@ class AIPipelineResult:
     macro_payload: dict[str, Any]
     news_details: dict[str, dict[str, Any]]
     anomalies: list[dict[str, Any]]
+    news_feed_status: dict[str, Any] = field(default_factory=dict)
 
 
 class AIPipeline:
@@ -29,6 +30,11 @@ class AIPipeline:
         self.config = cfg
         self.classifier = classifier or NewsClassifier()
         self.news_lookback_hours = int(cfg.get("news_lookback_hours", 24))
+        # Hard freshness gate for headline *publication* age. This is separate
+        # from lookback and protects against delayed provider plans returning
+        # yesterday's "latest" headlines (which would otherwise still pass a
+        # 24h lookback and influence live signals with stale context).
+        self.news_max_age_hours = int(cfg.get("news_max_age_hours", 6))
         self.news_limit = int(cfg.get("news_limit", 200))
         self.max_news_items_per_cycle = max(1, int(cfg.get("max_news_items_per_cycle", 40)))
         self.regime_strategy_gates = cfg.get("regime_strategy_gates", {})
@@ -65,6 +71,7 @@ class AIPipeline:
         await self._refresh_news_if_stale(session_factory, force=self._first_run)
         self._first_run = False
         news = await self._load_recent_news(session_factory)
+        news_feed_status = await self._news_feed_status(session_factory)
         macro_regime, macro_conf, macro_payload = await self._compute_macro_regime(session_factory)
         news_scores, details, anomalies = await self._score_news(symbols=norm_symbols, rows=news)
         result = AIPipelineResult(
@@ -74,6 +81,7 @@ class AIPipeline:
             macro_payload=macro_payload,
             news_details=details,
             anomalies=anomalies,
+            news_feed_status=news_feed_status,
         )
         self._last_result = result
         self._last_result_ts = now
@@ -177,29 +185,151 @@ class AIPipeline:
             reason = "startup flush" if force else "stale"
             logger.info("ai.pipeline | news {} | fetching from NewsAPI", reason)
             await ingest_news(session_factory, news_cfg)
+            # Detect delayed feeds (e.g. provider plan returns ~24h-old content)
+            # so operators can see why news influence may be muted.
+            async with session_factory() as session:
+                latest_q = await session.execute(select(func.max(NewsHeadline.published_at)))
+                latest_pub = latest_q.scalar_one()
+            if latest_pub is not None:
+                lp = latest_pub if latest_pub.tzinfo else latest_pub.replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - lp).total_seconds() / 3600.0
+                if age_h > float(max(1, self.news_max_age_hours)):
+                    logger.warning(
+                        "ai.pipeline | news feed appears delayed | latest_published_at={} age_hours={:.1f} > max_age_hours={} | stale headlines will be ignored for scoring",
+                        lp.isoformat(),
+                        age_h,
+                        self.news_max_age_hours,
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ai.pipeline | news refresh failed (non-fatal) | {}", exc)
 
     async def _load_recent_news(self, session_factory) -> list[NewsHeadline]:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.news_lookback_hours)
+        now = datetime.now(timezone.utc)
+        lookback_cutoff = now - timedelta(hours=self.news_lookback_hours)
+        max_age_cutoff = now - timedelta(hours=max(1, self.news_max_age_hours))
         async with session_factory() as session:
             q = await session.execute(
                 select(NewsHeadline)
-                .where(NewsHeadline.published_at >= cutoff)
+                .where(
+                    NewsHeadline.published_at >= lookback_cutoff,
+                    NewsHeadline.published_at >= max_age_cutoff,
+                )
                 .order_by(NewsHeadline.published_at.desc())
                 .limit(self.news_limit)
             )
             rows = list(q.scalars().all())
             if rows:
                 return rows
-            # Fallback: if published_at window is empty (common with delayed feeds),
-            # use most recently fetched headlines so intelligence panels are not blank.
-            fq = await session.execute(
-                select(NewsHeadline)
-                .order_by(NewsHeadline.fetched_at.desc())
-                .limit(self.news_limit)
+            # If no publication-fresh headlines exist, return nothing instead of
+            # backfilling stale fetched rows into the live scoring path.
+            logger.warning(
+                "ai.pipeline | no fresh headlines within max age window | max_age_hours={} lookback_hours={} | news scores default to 0 this cycle",
+                self.news_max_age_hours,
+                self.news_lookback_hours,
             )
-            return list(fq.scalars().all())
+            return []
+
+    async def _news_feed_status(self, session_factory) -> dict[str, Any]:
+        """Runtime observability payload for /system/status -> trading.ai."""
+        now = datetime.now(timezone.utc)
+        fresh_cutoff = now - timedelta(hours=max(1, self.news_max_age_hours))
+        lookback_cutoff = now - timedelta(hours=max(1, self.news_lookback_hours))
+        scoring_cutoff = max(fresh_cutoff, lookback_cutoff)
+        async with session_factory() as session:
+            q = await session.execute(
+                select(
+                    func.max(NewsHeadline.published_at).label("latest_published_at"),
+                    func.max(NewsHeadline.fetched_at).label("latest_fetched_at"),
+                )
+            )
+            row = q.one()
+            latest_pub = row.latest_published_at
+            latest_fetch = row.latest_fetched_at
+            src_q = await session.execute(
+                select(
+                    NewsHeadline.source_name,
+                    func.count().label("count"),
+                    func.max(NewsHeadline.published_at).label("latest_published_at"),
+                    func.max(NewsHeadline.fetched_at).label("latest_fetched_at"),
+                )
+                .where(NewsHeadline.published_at >= scoring_cutoff)
+                .group_by(NewsHeadline.source_name)
+                .order_by(func.count().desc())
+            )
+            src_rows = list(src_q.all())
+
+        pub_iso: str | None = None
+        fetch_iso: str | None = None
+        age_hours: float | None = None
+        stale = True
+        if latest_pub is not None:
+            lp = latest_pub if latest_pub.tzinfo else latest_pub.replace(tzinfo=timezone.utc)
+            age_hours = (now - lp).total_seconds() / 3600.0
+            stale = age_hours > float(max(1, self.news_max_age_hours))
+            pub_iso = lp.isoformat()
+        if latest_fetch is not None:
+            lf = latest_fetch if latest_fetch.tzinfo else latest_fetch.replace(tzinfo=timezone.utc)
+            fetch_iso = lf.isoformat()
+
+        by_source: dict[str, Any] = {}
+        for src_name, count, src_pub, src_fetch in src_rows:
+            source = str(src_name or "unknown").strip() or "unknown"
+            src_pub_iso: str | None = None
+            src_fetch_iso: str | None = None
+            src_age_hours: float | None = None
+            src_stale = True
+            if src_pub is not None:
+                sp = src_pub if src_pub.tzinfo else src_pub.replace(tzinfo=timezone.utc)
+                src_age_hours = (now - sp).total_seconds() / 3600.0
+                src_stale = src_age_hours > float(max(1, self.news_max_age_hours))
+                src_pub_iso = sp.isoformat()
+            if src_fetch is not None:
+                sf = src_fetch if src_fetch.tzinfo else src_fetch.replace(tzinfo=timezone.utc)
+                src_fetch_iso = sf.isoformat()
+            by_source[source] = {
+                "fresh_rows_in_window": int(count or 0),
+                "latest_published_at": src_pub_iso,
+                "latest_fetched_at": src_fetch_iso,
+                "latest_age_hours": (round(src_age_hours, 2) if src_age_hours is not None else None),
+                "stale": bool(src_stale),
+            }
+
+        return {
+            "news_feed_stale": bool(stale),
+            "news_max_age_hours": int(self.news_max_age_hours),
+            "latest_news_published_at": pub_iso,
+            "latest_news_fetched_at": fetch_iso,
+            "latest_news_age_hours": (round(age_hours, 2) if age_hours is not None else None),
+            "news_sources_in_scoring_window": sorted(by_source.keys()),
+            "news_source_stats": by_source,
+        }
+
+    def _select_rows_for_scoring(self, rows: list[NewsHeadline]) -> list[NewsHeadline]:
+        """
+        Pick up to max_news_items_per_cycle rows with source-aware balancing.
+        Prevents one high-volume provider from starving others out of scoring.
+        """
+        if not rows:
+            return []
+        by_source: dict[str, list[NewsHeadline]] = {}
+        for row in rows:
+            src = (getattr(row, "source_name", None) or "unknown").strip().lower()
+            by_source.setdefault(src, []).append(row)
+        selected: list[NewsHeadline] = []
+        source_keys = sorted(by_source.keys())
+        while len(selected) < self.max_news_items_per_cycle and source_keys:
+            next_keys: list[str] = []
+            for src in source_keys:
+                bucket = by_source.get(src) or []
+                if not bucket:
+                    continue
+                selected.append(bucket.pop(0))
+                if bucket:
+                    next_keys.append(src)
+                if len(selected) >= self.max_news_items_per_cycle:
+                    break
+            source_keys = next_keys
+        return selected
 
     async def _score_news(
         self,
@@ -210,8 +340,9 @@ class AIPipeline:
         if not rows:
             return ({s: 0.0 for s in symbols}, {}, [])
 
+        picked_rows = self._select_rows_for_scoring(rows)
         items: list[NewsItem] = []
-        for row in rows[: self.max_news_items_per_cycle]:
+        for row in picked_rows:
             items.append(
                 NewsItem(
                     headline=row.title,

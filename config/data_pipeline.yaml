@@ -1,4 +1,4 @@
-# M2 data pipeline — yfinance OHLCV, technical features, NewsAPI, FRED.
+# M2 data pipeline — yfinance OHLCV, technical features, NewsAPI, Alpha Vantage, Finnhub, Marketaux, FRED.
 # Run: python run_pipeline.py --once
 # Backfill ~2y daily: python run_pipeline.py --backfill
 
@@ -86,6 +86,11 @@ news:
   query: "(market OR stocks OR equities OR bonds OR forex OR commodities OR crypto) AND (surge OR rally OR crash OR guidance OR rates OR inflation OR conflict)"
   page_size: 100
   language: en
+  alphavantage_limit: 200
+  finnhub_limit: 100
+  finnhub_category: general
+  marketaux_limit: 100
+  marketaux_must_have_entities: true
 
 fred:
   enabled: true

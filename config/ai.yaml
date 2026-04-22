@@ -13,6 +13,9 @@ mode: local_first    # local_first | api_only | hybrid
 # ── Pipeline settings (unchanged from M6) ──────────────────────────────────
 pipeline:
   news_lookback_hours: 24
+  # Hard freshness guard: ignore headlines older than this publication age
+  # even if they still sit inside the broader lookback window.
+  news_max_age_hours: 6
   news_limit: 200
   max_news_items_per_cycle: 40
   cycle_timeout_seconds: 300      # GPU: 45s is plenty; CPU: LLM ensemble needs up to 180s
@@ -67,6 +70,7 @@ providers:
   fin_sentiment:
     enabled: true
     model_name: ProsusAI/finbert
+    device: auto                  # auto|cuda|cpu (auto prefers CUDA when torch has GPU support)
     local_only: true
     batch_size: 16
     max_text_length: 512

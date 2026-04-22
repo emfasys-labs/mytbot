@@ -1054,7 +1054,10 @@ class TradingLoop:
                     hb_extra: dict[str, Any] = {"paper_mode": self.paper_mode}
                     if ai_pipeline is not None and getattr(ai_pipeline, "classifier", None) is not None:
                         _cls = ai_pipeline.classifier
-                        hb_extra["ai"] = _cls.runtime_ai_status()
+                        ai_status = _cls.runtime_ai_status()
+                        if ai_result is not None and isinstance(getattr(ai_result, "news_feed_status", None), dict):
+                            ai_status = {**ai_status, **ai_result.news_feed_status}
+                        hb_extra["ai"] = ai_status
                     else:
                         hb_extra["ai"] = {"kind": "off", "ai_degraded": False}
 

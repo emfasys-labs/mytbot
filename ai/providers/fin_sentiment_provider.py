@@ -22,6 +22,12 @@ try:
 except ImportError:
     _HAS_TRANSFORMERS = False
 
+try:  # pragma: no cover - optional dependency branch
+    import torch  # type: ignore[import-untyped]
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover - handled gracefully at runtime
+    _HAS_TORCH = False
+
 
 class FinSentimentProvider(AIProvider):
     """Local FinBERT sentiment on financial headlines (positive / negative / neutral)."""
@@ -31,6 +37,11 @@ class FinSentimentProvider(AIProvider):
         self._model_name = str(cfg.get("model_name", "ProsusAI/finbert"))
         self._batch_size = max(1, int(cfg.get("batch_size", 16)))
         self._max_text_length = max(32, int(cfg.get("max_text_length", 512)))
+        # Device policy:
+        #   auto (default): use CUDA when available, else CPU
+        #   cuda: force CUDA (falls back with warning if unavailable)
+        #   cpu: force CPU
+        self._device_mode = str(cfg.get("device", "auto")).strip().lower()
         self._pipeline: Any = None
         self._available = False
 
@@ -124,12 +135,32 @@ class FinSentimentProvider(AIProvider):
     def _load_model(self) -> None:
         if self._pipeline is not None:
             return
+        device = self._resolve_device()
         self._pipeline = hf_pipeline(
             "sentiment-analysis",
             model=self._model_name,
             tokenizer=self._model_name,
             return_all_scores=False,
+            device=device,
         )
+        if device >= 0:
+            logger.info("fin_sentiment | device=cuda:{}", device)
+        else:
+            logger.info("fin_sentiment | device=cpu")
+
+    def _resolve_device(self) -> int:
+        """Transformers pipeline device index: -1=CPU, >=0 CUDA index."""
+        if self._device_mode == "cpu":
+            return -1
+        if self._device_mode == "cuda":
+            if _HAS_TORCH and bool(torch.cuda.is_available()):  # type: ignore[name-defined]
+                return 0
+            logger.warning("fin_sentiment | device=cuda requested but CUDA unavailable, falling back to CPU")
+            return -1
+        # auto
+        if _HAS_TORCH and bool(torch.cuda.is_available()):  # type: ignore[name-defined]
+            return 0
+        return -1
 
     @staticmethod
     def _interpret(result: Any) -> tuple[float, float]:

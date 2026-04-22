@@ -61,7 +61,7 @@ pytest
 
 ### Data pipeline (M2)
 
-After migrations: `.\.venv\Scripts\python.exe run_pipeline.py --backfill` for historical bars + features (`config/data_pipeline.yaml`). Incremental: `run_pipeline.py` or `run_pipeline.py --loop`. Optional: `NEWS_API_KEY`, `FRED_API_KEY`.
+After migrations: `.\.venv\Scripts\python.exe run_pipeline.py --backfill` for historical bars + features (`config/data_pipeline.yaml`). Incremental: `run_pipeline.py` or `run_pipeline.py --loop`. Optional: `NEWS_API_KEY`, `ALPHAVANTAGE_API_KEY`, `FINNHUB_API_KEY`, `MARKETAUX_API_TOKEN`, `FRED_API_KEY`.
 
 ### Run the full system
 

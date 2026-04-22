@@ -366,6 +366,19 @@ export type SystemStatusResponse = {
     last_error?: string | null;
     /** ISO time of last `dashboard.snapshot` write (full or heartbeat); mirrors snapshot.updated_at when in sync. */
     snapshot_published_at?: string | null;
+    ai?: {
+      news_feed_stale?: boolean;
+      latest_news_age_hours?: number | null;
+      news_sources_in_scoring_window?: string[];
+      news_source_stats?: Record<
+        string,
+        {
+          fresh_rows_in_window?: number;
+          latest_age_hours?: number | null;
+          stale?: boolean;
+        }
+      >;
+    };
   };
   errors?: string[];
   pipeline_running?: boolean;
@@ -428,7 +441,8 @@ export const api = {
   getPnlHistory: (limit = 90) => getJson<ApiPnlHistoryResponse>(`/pnl/history?limit=${limit}`),
   getPositions: (limit = 20) => getJson<ApiPositionsResponse>(`/positions?limit=${limit}`),
   getSignals: (limit = 20) => getJson<ApiSignalsResponse>(`/signals?limit=${limit}`),
-  getNews: (limit = 30) => getJson<ApiNewsResponse>(`/news?limit=${limit}`),
+  getNews: (limit = 30, impactfulOnly = false) =>
+    getJson<ApiNewsResponse>(`/news?limit=${limit}&impactful_only=${impactfulOnly ? 'true' : 'false'}`),
   getStatus: () => getJson<ApiStatusResponse>('/status'),
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),

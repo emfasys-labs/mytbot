@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -503,23 +503,84 @@ async def get_signals(limit: int = Query(50, ge=1, le=500), session_factory=Depe
 
 
 @app.get("/news")
-async def get_news(limit: int = Query(30, ge=1, le=100), session_factory=Depends(_session_factory)):
+async def get_news(
+    limit: int = Query(30, ge=1, le=100),
+    impactful_only: bool = Query(False, description="Only headlines that influenced recent signal news_score"),
+    lookback_hours: int = Query(24, ge=1, le=168),
+    session_factory=Depends(_session_factory),
+):
     async with session_factory() as session:
-        hq = await session.execute(
-            select(NewsHeadline)
-            .order_by(NewsHeadline.published_at.desc())
-            .limit(limit)
-        )
-        headlines = list(hq.scalars().all())
-
         ai_limit = min(2000, max(300, limit * 40))
-        aq = await session.execute(
-            select(AIOutputLog)
-            .where(AIOutputLog.context_type == "news", AIOutputLog.symbol.isnot(None))
-            .order_by(AIOutputLog.timestamp.desc())
-            .limit(ai_limit)
-        )
-        ai_rows = list(aq.scalars().all())
+        if not impactful_only:
+            hq = await session.execute(
+                select(NewsHeadline)
+                .order_by(NewsHeadline.published_at.desc())
+                .limit(limit)
+            )
+            headlines = list(hq.scalars().all())
+            aq = await session.execute(
+                select(AIOutputLog)
+                .where(AIOutputLog.context_type == "news", AIOutputLog.symbol.isnot(None))
+                .order_by(AIOutputLog.timestamp.desc())
+                .limit(ai_limit)
+            )
+            ai_rows = list(aq.scalars().all())
+        else:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+            sq = await session.execute(
+                select(SignalLog.symbol.distinct())
+                .where(
+                    SignalLog.timestamp >= cutoff,
+                    SignalLog.symbol.isnot(None),
+                    SignalLog.news_score.isnot(None),
+                    func.abs(SignalLog.news_score) > 0,
+                )
+                .limit(ai_limit)
+            )
+            impacted_symbols = [str(s).strip().upper() for s in sq.scalars().all() if str(s).strip()]
+            if not impacted_symbols:
+                return {"headlines": [], "ai_scores": []}
+
+            aq = await session.execute(
+                select(AIOutputLog)
+                .where(
+                    AIOutputLog.context_type == "news",
+                    AIOutputLog.symbol.in_(impacted_symbols),
+                    AIOutputLog.score.isnot(None),
+                    func.abs(AIOutputLog.score) > 0,
+                    AIOutputLog.timestamp >= cutoff,
+                )
+                .order_by(AIOutputLog.timestamp.desc())
+                .limit(ai_limit)
+            )
+            ai_rows = list(aq.scalars().all())
+            # Build ticker headlines from AI-linked rows to guarantee "had effect".
+            # Keep first seen per (symbol, headline) in timestamp-desc order.
+            seen: set[tuple[str, str]] = set()
+            headline_rows: list[dict[str, Any]] = []
+            for r in ai_rows:
+                payload = r.payload if isinstance(r.payload, dict) else {}
+                head = str(payload.get("headline") or "").strip()
+                if not head:
+                    continue
+                sym = str(r.symbol or "").strip().upper()
+                key = (sym, head.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                source_name = str(payload.get("provider") or r.source or "ai")
+                headline_rows.append(
+                    {
+                        "title": head,
+                        "source": source_name,
+                        "published_at": r.timestamp.isoformat() if r.timestamp else None,
+                        "url": "",
+                        "description": str(r.rationale or "")[:300] or None,
+                    }
+                )
+                if len(headline_rows) >= limit:
+                    break
+            headlines = []
 
     best_per_sym = _pick_strongest_news_log_per_symbol(ai_rows)
     ranked = sorted(
@@ -540,16 +601,20 @@ async def get_news(limit: int = Query(30, ge=1, le=100), session_factory=Depends
     ]
 
     return {
-        "headlines": [
-            {
-                "title": h.title,
-                "source": h.source_name,
-                "published_at": h.published_at.isoformat() if h.published_at else None,
-                "url": h.url,
-                "description": h.description,
-            }
-            for h in headlines
-        ],
+        "headlines": (
+            headline_rows
+            if impactful_only
+            else [
+                {
+                    "title": h.title,
+                    "source": h.source_name,
+                    "published_at": h.published_at.isoformat() if h.published_at else None,
+                    "url": h.url,
+                    "description": h.description,
+                }
+                for h in headlines
+            ]
+        ),
         "ai_scores": ai_scores,
     }
 

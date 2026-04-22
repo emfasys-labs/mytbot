@@ -1,6 +1,6 @@
 """
-Orchestrate M2 ingestion: yfinance → features → validation → Postgres;
-NewsAPI + FRED when API keys are set.
+Orchestrate M2 ingestion: yfinance -> features -> validation -> Postgres;
+NewsAPI + Alpha Vantage + Finnhub + Marketaux + FRED when API keys are set.
 """
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from data.features import compute_feature_columns, row_features_to_json_dict
 from data.fred_client import fetch_series_observations, fred_fetch_wallclock
+from data.alphavantage_client import fetch_news_sentiment
+from data.finnhub_client import fetch_general_news
+from data.marketaux_client import fetch_all_news
 from data.newsapi_client import fetch_everything
 from data.persist import (
     insert_news_ignore_duplicates,
@@ -208,25 +211,94 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
     block = cfg.get("news") or {}
     if not block.get("enabled", False):
         return
-    key = _clean_api_key(os.getenv("NEWS_API_KEY"))
-    if not key:
-        logger.info("data | news | skipped | NEWS_API_KEY unset")
+    newsapi_key = _clean_api_key(os.getenv("NEWS_API_KEY"))
+    alphavantage_key = _clean_api_key(os.getenv("ALPHAVANTAGE_API_KEY"))
+    finnhub_key = _clean_api_key(os.getenv("FINNHUB_API_KEY"))
+    marketaux_key = _clean_api_key(os.getenv("MARKETAUX_API_TOKEN"))
+    if not newsapi_key and not alphavantage_key and not finnhub_key and not marketaux_key:
+        logger.info(
+            "data | news | skipped | NEWS_API_KEY, ALPHAVANTAGE_API_KEY, FINNHUB_API_KEY, and MARKETAUX_API_TOKEN unset"
+        )
         return
+
     q = str(block.get("query", "market"))
     page_size = int(block.get("page_size", 100))
     language = str(block.get("language", "en"))
-    try:
-        articles = await _to_thread_with_retry(
+    av_limit = int(block.get("alphavantage_limit", 200))
+    finnhub_limit = int(block.get("finnhub_limit", 100))
+    finnhub_category = str(block.get("finnhub_category", "general"))
+    marketaux_limit = int(block.get("marketaux_limit", 100))
+    marketaux_must_have_entities = bool(block.get("marketaux_must_have_entities", True))
+
+    async def _fetch_newsapi():
+        if not newsapi_key:
+            return []
+        return await _to_thread_with_retry(
             fetch_everything,
-            key,
+            newsapi_key,
             op_name="newsapi:everything",
             q=q,
             language=language,
             page_size=page_size,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("data | news | skipped | fetch failed | {}", exc)
+
+    async def _fetch_alphavantage():
+        if not alphavantage_key:
+            return []
+        return await _to_thread_with_retry(
+            fetch_news_sentiment,
+            alphavantage_key,
+            op_name="alphavantage:news_sentiment",
+            limit=av_limit,
+        )
+
+    async def _fetch_finnhub():
+        if not finnhub_key:
+            return []
+        return await _to_thread_with_retry(
+            fetch_general_news,
+            finnhub_key,
+            op_name="finnhub:general_news",
+            category=finnhub_category,
+            limit=finnhub_limit,
+        )
+
+    async def _fetch_marketaux():
+        if not marketaux_key:
+            return []
+        return await _to_thread_with_retry(
+            fetch_all_news,
+            marketaux_key,
+            op_name="marketaux:news_all",
+            language=language,
+            limit=marketaux_limit,
+            must_have_entities=marketaux_must_have_entities,
+        )
+
+    results = await asyncio.gather(
+        _fetch_newsapi(),
+        _fetch_alphavantage(),
+        _fetch_finnhub(),
+        _fetch_marketaux(),
+        return_exceptions=True,
+    )
+    articles = []
+    source_counts: dict[str, int] = {}
+    for source, result in (
+        ("newsapi", results[0]),
+        ("alphavantage", results[1]),
+        ("finnhub", results[2]),
+        ("marketaux", results[3]),
+    ):
+        if isinstance(result, Exception):
+            logger.warning("data | news | source failed | source={} | {}", source, result)
+            continue
+        source_counts[source] = len(result)
+        articles.extend(result)
+    if not articles:
+        logger.warning("data | news | skipped | all enabled sources failed or empty")
         return
+
     now = datetime.now(timezone.utc)
     rows = [
         {
@@ -243,7 +315,7 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
     async with session_factory() as session:
         await insert_news_ignore_duplicates(session, rows)
         await session.commit()
-    logger.info("data | news | batch | articles={}", len(rows))
+    logger.info("data | news | batch | total={} | per_source={}", len(rows), source_counts)
 
 
 async def ingest_fred(session_factory: async_sessionmaker[AsyncSession], cfg: dict[str, Any]) -> None:

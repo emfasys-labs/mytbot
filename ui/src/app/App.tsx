@@ -76,6 +76,9 @@ function App() {
   const [snapshotPublishedAt, setSnapshotPublishedAt] = useState<string | null>(null);
   const [tradingIterations, setTradingIterations] = useState(0);
   const [lastStartError, setLastStartError] = useState<string | null>(null);
+  const [newsSourceStats, setNewsSourceStats] = useState<
+    Record<string, { fresh_rows_in_window?: number; latest_age_hours?: number | null; stale?: boolean }>
+  >({});
 
   const triggerHaptic = useHaptic();
 
@@ -132,6 +135,7 @@ function App() {
     setSnapshotPublishedAt(null);
     setTradingIterations(0);
     setLastStartError(null);
+    setNewsSourceStats({});
     setEquityHistory([]);
     setEquityHistorySeries([]);
     setRecentOrders([]);
@@ -198,7 +202,7 @@ function App() {
         api.getSignals(20),
         api.getStatus(),
         api.getSystemStatus(),
-        api.getNews(30),
+        api.getNews(30, true),
         api.getDashboardSnapshot(),
         api.getOrders(50),
       ]);
@@ -233,9 +237,21 @@ function App() {
           setSnapshotPublishedAt(spa);
           const it = tr.iterations;
           setTradingIterations(typeof it === 'number' && Number.isFinite(it) && it >= 0 ? Math.trunc(it) : 0);
+          const ai = tr.ai;
+          if (ai && typeof ai === 'object' && ai.news_source_stats && typeof ai.news_source_stats === 'object') {
+            setNewsSourceStats(
+              ai.news_source_stats as Record<
+                string,
+                { fresh_rows_in_window?: number; latest_age_hours?: number | null; stale?: boolean }
+              >,
+            );
+          } else {
+            setNewsSourceStats({});
+          }
         } else {
           setTradingIterations(0);
           setSnapshotPublishedAt(null);
+          setNewsSourceStats({});
         }
         if (sysStatus.active_brokers) setActiveBrokers(sysStatus.active_brokers);
         if (sysStatus.brokers)
@@ -341,7 +357,24 @@ function App() {
           for (const [, v] of aiMap) { sentiment = v.sentiment; break; }
           return { text: h.title, source: h.source, time: h.published_at ?? undefined, sentiment };
         });
-        if (tickerItems.length > 0) setNewsItems(tickerItems);
+        if (tickerItems.length > 0) {
+          setNewsItems(tickerItems);
+        } else {
+          // Fallback: if impactful-only is empty this cycle, keep ticker alive with all-news feed.
+          try {
+            const allNews = await api.getNews(20, false);
+            const allHeadlines = allNews.headlines ?? [];
+            const fallbackItems: TickerItem[] = allHeadlines.slice(0, 20).map((h) => ({
+              text: h.title,
+              source: h.source,
+              time: h.published_at ?? undefined,
+              sentiment: 'neutral',
+            }));
+            setNewsItems(fallbackItems);
+          } catch {
+            setNewsItems([]);
+          }
+        }
       }
 
       if (feedsLive && sig) {
@@ -553,8 +586,6 @@ function App() {
       <HapticFeedback />
 
       <div className="w-full h-screen flex flex-col min-h-0">
-        <NewsTicker items={newsItems} paused={isFlattened} />
-
         <DashboardAuthBanner
           visible={snapshotFetchFailed && systemState === 'running'}
           onTokenSaved={() => {
@@ -653,6 +684,28 @@ function App() {
           regime={intelligenceRegime}
           watchlist={watchlistRanked}
         />
+        <div className="border-t border-white/5 bg-black/30 px-3 py-1.5 text-[10px] text-zinc-400">
+          {Object.keys(newsSourceStats).length > 0 ? (
+            Object.entries(newsSourceStats)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([src, st]) => {
+                const fresh = typeof st.fresh_rows_in_window === 'number' ? st.fresh_rows_in_window : 0;
+                const age = st.latest_age_hours;
+                const stale = !!st.stale;
+                return (
+                  <span key={src} className="mr-3 inline-flex items-center gap-1.5">
+                    <span className={`h-1.5 w-1.5 rounded-full ${stale ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                    <span className="uppercase">{src}</span>
+                    <span className="text-zinc-500">{fresh} fresh</span>
+                    <span className="text-zinc-500">{age != null ? `${age.toFixed(1)}h` : 'n/a'}</span>
+                  </span>
+                );
+              })
+          ) : (
+            <span className="text-zinc-500">news source health pending...</span>
+          )}
+        </div>
+        <NewsTicker items={newsItems} paused={isFlattened} />
       </div>
     </div>
   );

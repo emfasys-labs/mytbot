@@ -8,8 +8,11 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from data.alphavantage_client import fetch_news_sentiment
 from data.features import compute_feature_columns
+from data.finnhub_client import fetch_general_news
 from data.fred_client import fetch_series_observations
+from data.marketaux_client import fetch_all_news
 from data.newsapi_client import fetch_everything
 from data import http_retry
 
@@ -134,3 +137,69 @@ def test_compute_feature_columns_smoke() -> None:
     assert "close" in out.columns
     bb_cols = [c for c in out.columns if "BB" in c.upper() or "bb" in c.lower()]
     assert len(bb_cols) >= 1
+
+
+def test_fetch_news_sentiment_parses_feed(monkeypatch) -> None:
+    payload = {
+        "feed": [
+            {
+                "url": "https://x.test/av1",
+                "title": "AV Headline",
+                "summary": "fresh article",
+                "source": "AVWire",
+                "time_published": "20260422T123000",
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "data.alphavantage_client.httpx_get_with_retry",
+        lambda *a, **kw: _FakeResponse(200, payload),
+    )
+    arts = fetch_news_sentiment("key", limit=10)
+    assert len(arts) == 1
+    assert arts[0].title == "AV Headline"
+    assert arts[0].source_name == "AVWire"
+    assert arts[0].published_at.tzinfo is not None
+
+
+def test_fetch_finnhub_general_news_parses_rows(monkeypatch) -> None:
+    payload = [
+        {
+            "url": "https://x.test/fh1",
+            "headline": "Finnhub headline",
+            "summary": "headline summary",
+            "source": "Reuters",
+            "datetime": 1776870460,
+        }
+    ]
+    monkeypatch.setattr(
+        "data.finnhub_client.httpx_get_with_retry",
+        lambda *a, **kw: _FakeResponse(200, payload),
+    )
+    arts = fetch_general_news("key", limit=10)
+    assert len(arts) == 1
+    assert arts[0].title == "Finnhub headline"
+    assert arts[0].source_name == "Reuters"
+
+
+def test_fetch_marketaux_all_news_parses_rows(monkeypatch) -> None:
+    payload = {
+        "meta": {"found": 1, "returned": 1, "limit": 1, "page": 1},
+        "data": [
+            {
+                "url": "https://x.test/mx1",
+                "title": "Marketaux headline",
+                "description": "headline summary",
+                "source": "marketwatch.com",
+                "published_at": "2026-04-22T12:30:00.000000Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "data.marketaux_client.httpx_get_with_retry",
+        lambda *a, **kw: _FakeResponse(200, payload),
+    )
+    arts = fetch_all_news("key", limit=10)
+    assert len(arts) == 1
+    assert arts[0].title == "Marketaux headline"
+    assert arts[0].source_name == "marketwatch.com"
