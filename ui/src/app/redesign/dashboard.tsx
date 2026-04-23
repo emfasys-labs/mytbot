@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { CapitalPanel } from './capital';
 import { Conviction, Coverage, LiveEvent, Position } from './data';
 import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
@@ -66,7 +67,11 @@ export function DashboardScreen({
     <div style={{
       padding: pad, display: 'grid', gap,
       gridTemplateColumns: 'minmax(0,1fr) 320px',
-      gridTemplateRows: 'minmax(260px, auto) minmax(300px, 1fr) auto',
+      // Row order: hero NAV · capital allocation · conviction+live-feed · book.
+      // The capital row gets its own full-width band directly under NAV so
+      // the "deployed · free" figures stay visually tied to the account
+      // number above; `auto` lets the card size to its 360px track + paddings.
+      gridTemplateRows: 'minmax(260px, auto) auto minmax(300px, 1fr) auto',
       height: '100%', overflow: 'auto',
     }}>
       <Card style={{ gridColumn: '1 / -1', padding: '22px 26px', position: 'relative' }}>
@@ -170,6 +175,17 @@ export function DashboardScreen({
           </>
         )}
       </Card>
+
+      {/* Capital allocation — always mounted so the ceiling can be set
+          while the system is off too (the control-state write is honoured
+          on next start). When NAV=0 the panel shows 0 deployed but remains
+          functional for pre-setting the cap. */}
+      <CapitalPanel
+        live={live}
+        accent={accentColor}
+        style={{ gridColumn: '1 / -1' }}
+      />
+
 
       <Card style={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>

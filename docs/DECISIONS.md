@@ -662,3 +662,22 @@ Integration constraints kept:
 **Reason:** Operators saw an empty Strategy mix before the first allocator publish; the taxonomy roster and signal history should be visible whenever the dashboard loads.
 
 **Status:** Implemented in `ui/src/app/redesign/mapping.ts`, `ui/src/app/redesign/screens.tsx`, `ui/src/app/redesign/data.ts`, `ui/src/app/redesign/useLiveSystem.ts`.
+
+---
+
+## D044 — Dashboard capital allocation: hybrid slider (raise commits · lower stages)
+
+**Date:** 2026-04-23
+**Decision:** The redesign dashboard grows a dedicated, full-width **Capital allocation** panel (`ui/src/app/redesign/capital.tsx`) mounted between the NAV hero and the conviction/live-feed row. Interaction is asymmetric by design:
+
+- **Dragging up past the deployed line commits the ceiling on release** via `PUT /system/capital-allocation` (`live.setCapitalPct`) — new-position headroom expansions are low-risk and don't warrant a confirm step.
+- **Dragging below the deployed line stages a trim** with a weakest-first preview (ascending unrealised P&L as the hold-score proxy), a per-symbol protect list, and an explicit *Confirm* that lowers the ceiling. The preview is honest: the engine unwinds on its own signals — this is **not** a force-close. Per-symbol close lives in Book.
+- **Dragging below `FLATTEN_THRESHOLD` (3%) opens the flatten confirm** with a 1.2s hold-to-confirm. Until `POST /positions/flatten` ships, confirm lowers the ceiling to 0% (prevents new deploys) and surfaces a "backend pending" banner. No fake success.
+
+`useLiveSystem.setCapitalPct` was hardened to **revert optimistic local state on failure** and to adopt the server-confirmed value when the backend clamps or rejects; `CapitalPanel` relies on this contract to suppress the "committed" banner when the PUT never took effect. Three keyframes were added to `src/styles/design-system.css`: `ds-tick-flash` (deployed-line crossing), `ds-danger-pulse` (flatten thumb halo), `ds-slide-up` (confirm/result banners). The panel is always mounted — even when the system is off — so the ceiling can be pre-set and will be honoured on next start.
+
+The Kill Switch control that ships alongside the slider in the design bundle was deliberately **not** wired: the scope was the slider only, and the top-bar Power control already provides the graceful halt path.
+
+**Reason:** Operators need a single, discoverable surface for "raise the cap now" and "reduce my book" that (a) distinguishes the safe case (raise headroom, commit immediately) from the consequential case (trim or flatten, explicit confirm with preview) and (b) is truthful about which backend actions are available today — a mis-labelled "flatten" button that silently lowers the ceiling would erode trust. The ledger contract for `PUT /system/capital-allocation` (idempotent, clamped, returns confirmed value) already supports the UI's optimistic-with-revert model.
+
+**Status:** Implemented in `ui/src/app/redesign/capital.tsx` (new), `ui/src/app/redesign/dashboard.tsx` (mount + grid row), `ui/src/app/redesign/useLiveSystem.ts` (hardened `setCapitalPct`), `ui/src/styles/design-system.css` (three new keyframes). Sourced from `ui/newui/project/prototypes/redesign_capital_port/capital.tsx`; `KillSwitchButton` and inlined `CAPITAL_KEYFRAMES` export deliberately omitted.

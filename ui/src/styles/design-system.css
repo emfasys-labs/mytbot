@@ -108,3 +108,22 @@ html.ds-root input::placeholder {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
+
+/* Capital allocation slider — deployed-line flash when the thumb crosses it. */
+@keyframes ds-tick-flash {
+  0%   { opacity: 1; transform: scaleX(1); }
+  50%  { opacity: 1; transform: scaleX(1.6); }
+  100% { opacity: 0.5; transform: scaleX(1); }
+}
+
+/* Capital allocation slider — danger halo on the flatten thumb / kill state. */
+@keyframes ds-danger-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.4); }
+  50%      { box-shadow: 0 0 0 8px rgba(248, 113, 113, 0); }
+}
+
+/* Capital allocation slider — confirm / result banners slide up on mount. */
+@keyframes ds-slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

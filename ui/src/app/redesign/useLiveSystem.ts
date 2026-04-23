@@ -496,12 +496,32 @@ export function useLiveSystem(): LiveData {
     try { await api.setSystemMode(m); } catch { /* ignore */ }
   }, []);
 
+  // Capital-ceiling writer. Optimistically updates local state so the slider
+  // stays in sync with the cursor, then reconciles with whatever the backend
+  // confirms (it may clamp, or the server-side policy may reject outright).
+  // On failure we revert to the previous value and rethrow so callers can
+  // surface the error — `CapitalPanel` uses this to suppress its "committed"
+  // banner when the write never took effect.
   const setCapitalPct = useCallback(async (p: number) => {
     const c = Math.max(0, Math.min(1, p));
+    const prev = capitalPct;
     setCapitalPctState(c);
     try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
-    try { await api.setCapitalAllocation(c); } catch { /* ignore */ }
-  }, []);
+    try {
+      const r = await api.setCapitalAllocation(c);
+      if (typeof r.capital_pct === 'number' && Number.isFinite(r.capital_pct)) {
+        const confirmed = Math.max(0, Math.min(1, r.capital_pct));
+        if (confirmed !== c) {
+          setCapitalPctState(confirmed);
+          try { localStorage.setItem('mytbot_capital_pct', String(confirmed)); } catch { /* ignore */ }
+        }
+      }
+    } catch (err) {
+      setCapitalPctState(prev);
+      try { localStorage.setItem('mytbot_capital_pct', String(prev)); } catch { /* ignore */ }
+      throw err;
+    }
+  }, [capitalPct]);
 
   // ────── derived views ──────
   const positionChanges = useMemo(() => toPositionChanges(positionsRaw), [positionsRaw]);
