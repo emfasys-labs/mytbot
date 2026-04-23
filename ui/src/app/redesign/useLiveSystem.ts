@@ -185,14 +185,24 @@ export function useLiveSystem(): LiveData {
   const lastIntelRefresh = useRef(0);
   const stateRef = useRef(backendState);
   useEffect(() => { stateRef.current = backendState; }, [backendState]);
-  // In-flight local capital writes. While > 0, `refresh` must NOT adopt
-  // `sys.capital_pct` from `/system/status` — the optimistic value in
-  // `capitalPct` is newer than anything the backend has yet observed, and
-  // a stale WS-driven refresh would otherwise snap the slider back to the
-  // pre-write value for a poll cycle or two before jumping forward again.
-  // (Symptom seen pre-fix: release thumb → snaps back → 3–4 s later
-  // jumps to the committed value.)
+  // Guards for the capital-allocation slider against two distinct races
+  // with the refresh loop:
+  //
+  //   1. `pendingCapitalWrites` — a counter bumped around the PUT. While
+  //      > 0 the refresh must not adopt `sys.capital_pct`; the optimistic
+  //      value is newer than anything the backend has yet observed.
+  //
+  //   2. `capitalWriteGen` — a generation counter bumped the instant a
+  //      local write begins. Every refresh captures the generation at
+  //      its start; if the generation changed by the time results are
+  //      processed, its status read was initiated before the write and
+  //      therefore reflects the pre-write world. Without this, a tick
+  //      that fires 1–2 ms before the drag release would land with a
+  //      stale `capital_pct` ~30 ms later — after pendingCapitalWrites
+  //      has already dropped back to 0 if the PUT completes first —
+  //      and snap the slider back for one poll cycle.
   const pendingCapitalWrites = useRef(0);
+  const capitalWriteGen = useRef(0);
 
   // ────── clear ephemeral live data when we're off ──────
   const clearLive = useCallback(() => {
@@ -231,6 +241,11 @@ export function useLiveSystem(): LiveData {
   const refresh = useCallback(async () => {
     if (refreshLock.current) { refreshPending.current = true; return; }
     refreshLock.current = true;
+    // Snapshot the capital-write generation at the moment the refresh
+    // begins. If it changes before we finish processing results, at
+    // least one local capital write happened *during* this refresh and
+    // the `sys.capital_pct` below must be considered stale.
+    const capitalGenAtStart = capitalWriteGen.current;
     try {
       const res = await Promise.allSettled([
         api.getPnl(),
@@ -301,9 +316,14 @@ export function useLiveSystem(): LiveData {
           typeof sysRes.capital_pct === 'number'
           && Number.isFinite(sysRes.capital_pct)
           // Don't reconcile while a local write is in flight — the PUT
-          // below is the source of truth for the next few hundred ms and
-          // a concurrent status read may still show the pre-write value.
+          // is the source of truth for the next few hundred ms and a
+          // concurrent status read may still show the pre-write value.
           && pendingCapitalWrites.current === 0
+          // Don't reconcile if a local write *started* during this
+          // refresh: its status fetch was already in flight when the
+          // write happened, so the result reflects the pre-write world.
+          // The next refresh (post-write) will carry the fresh value.
+          && capitalGenAtStart === capitalWriteGen.current
         ) {
           const c = Math.max(0, Math.min(1, sysRes.capital_pct));
           setCapitalPctState(c);
@@ -526,6 +546,11 @@ export function useLiveSystem(): LiveData {
   const setCapitalPct = useCallback(async (p: number) => {
     const c = Math.max(0, Math.min(1, p));
     const prev = capitalPct;
+    // Bump the generation FIRST so any already-in-flight refresh knows
+    // its status read is now stale. Then flip the optimistic value and
+    // start the PUT. Order matters: the generation bump must happen
+    // before the refresh could possibly observe the new local state.
+    capitalWriteGen.current += 1;
     setCapitalPctState(c);
     try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
     pendingCapitalWrites.current += 1;
