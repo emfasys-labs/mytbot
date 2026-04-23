@@ -82,21 +82,32 @@ async function resolveApiBase(): Promise<string> {
   }
 
   const host = window.location.hostname || 'localhost';
+  let firstReachable: string | null = null;
   for (const port of CANDIDATE_PORTS) {
     const candidate = `http://${host}:${port}`;
     try {
-      const r = await fetch(`${candidate}/status`, {
+      const r = await fetch(`${candidate}/system/status`, {
         signal: AbortSignal.timeout(1500),
         headers: dashboardReadHeaders(),
       });
-      if (r.ok) {
+      if (!r.ok) continue;
+      if (!firstReachable) firstReachable = candidate;
+      const payload = await parseJsonBody<SystemStatusResponse>(r, '/system/status');
+      const ib = payload?.brokers?.ibkr;
+      const ibOk = !!(ib && ib.connected && ib.balance_ready !== false);
+      if (ibOk) {
         _resolvedBase = candidate;
-        console.log(`[api] connected to ${candidate}`);
+        console.log(`[api] connected to ${candidate} (ibkr ready)`);
         return _resolvedBase;
       }
     } catch {
       /* port not reachable, try next */
     }
+  }
+  if (firstReachable) {
+    _resolvedBase = firstReachable;
+    console.log(`[api] connected to ${firstReachable}`);
+    return _resolvedBase;
   }
 
   _resolvedBase = `http://${host}:8000`;

@@ -400,8 +400,13 @@ class BrokerManager:
                     await self._mark_balance_ready("ibkr", adapter, status)
                 else:
                     self._ibkr_fail_count += 1
-                    status.error = "connect() returned False"
-                    logger.warning("broker | ibkr | connect failed (attempt {})", self._ibkr_fail_count)
+                    adapter_hint = getattr(adapter, "_last_connect_error", None)
+                    status.error = str(adapter_hint)[:200] if adapter_hint else "connect() returned False"
+                    logger.warning(
+                        "broker | ibkr | connect failed (attempt {}): {}",
+                        self._ibkr_fail_count,
+                        status.error,
+                    )
             except asyncio.TimeoutError:
                 self._ibkr_fail_count += 1
                 status.error = f"Timed out ({self._BROKER_TIMEOUTS['ibkr']}s)"

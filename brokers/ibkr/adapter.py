@@ -170,6 +170,8 @@ class IBKRAdapter(BrokerAdapter):
         self.client_id = client_id
         self.account_id = account_id
         self.paper_mode = paper_mode
+        # BrokerManager reads this when connect() returns False so UI shows a useful reason.
+        self._last_connect_error: str | None = None
         self._ib: Optional[IB] = None
         self._last_ib_order_snapshot_monotonic: float = -1e9
         self._ib_order_snap_lock = asyncio.Lock()
@@ -676,6 +678,7 @@ class IBKRAdapter(BrokerAdapter):
 
     async def connect(self) -> bool:
         """Establish connection to IB Gateway / TWS. Return True if successful."""
+        self._last_connect_error = None
         try:
             if self._ib is None:
                 self._ib = IB()
@@ -741,12 +744,26 @@ class IBKRAdapter(BrokerAdapter):
                 await asyncio.sleep(3.0)
                 await self._ib.connectAsync(**connect_kw)
             if not self._ib.managedAccounts():
-                logger.error(
-                    "connect | IBKR | still no managed accounts after reconnect | "
-                    "raise IBKR_CONNECT_TIMEOUT (e.g. 90–120) or wait for Gateway API"
-                )
-                self._force_close_ib()
-                return False
+                # Avoid false negative when account summary is already alive or explicit account_id is set.
+                if acct:
+                    logger.warning(
+                        "connect | IBKR | no managed accounts yet; proceeding with explicit account_id={}",
+                        acct,
+                    )
+                elif await self._account_summary_probe_ok(timeout=max(5.0, connect_timeout)):
+                    logger.warning(
+                        "connect | IBKR | no managed accounts yet, but account summary is alive; proceeding",
+                    )
+                else:
+                    self._last_connect_error = (
+                        "No managed accounts after reconnect/account-summary probe"
+                    )
+                    logger.error(
+                        "connect | IBKR | still no managed accounts after reconnect | "
+                        "raise IBKR_CONNECT_TIMEOUT (e.g. 90–120) or wait for Gateway API"
+                    )
+                    self._force_close_ib()
+                    return False
 
             if self._post_connect_summary_probe_enabled():
                 try:
@@ -769,11 +786,19 @@ class IBKRAdapter(BrokerAdapter):
                     await asyncio.sleep(2.0)
                     await self._ib.connectAsync(**connect_kw_boost)
                     if not self._ib.managedAccounts():
-                        logger.error(
-                            "connect | IBKR | no managed accounts after boosted reconnect"
-                        )
-                        self._force_close_ib()
-                        return False
+                        if acct:
+                            logger.warning(
+                                "connect | IBKR | no managed accounts after boosted reconnect; "
+                                "proceeding with explicit account_id={}",
+                                acct,
+                            )
+                        elif not await self._account_summary_probe_ok(probe_to):
+                            self._last_connect_error = "No managed accounts after boosted reconnect"
+                            logger.error(
+                                "connect | IBKR | no managed accounts after boosted reconnect"
+                            )
+                            self._force_close_ib()
+                            return False
                     if not await self._account_summary_probe_ok(probe_to):
                         logger.warning(
                             "connect | IBKR | account summary still failing after boosted "
@@ -795,6 +820,7 @@ class IBKRAdapter(BrokerAdapter):
                 )
             return True
         except OSError as exc:
+            self._last_connect_error = str(exc)[:200]
             logger.warning(
                 "connect | IBKR | unreachable | host={} | port={} | error={} | "
                 "start IB Gateway or TWS with API enabled on this port (paper=7497, live=7496)",
@@ -805,6 +831,7 @@ class IBKRAdapter(BrokerAdapter):
             self._force_close_ib()
             return False
         except Exception as exc:  # noqa: BLE001 — broker connectivity
+            self._last_connect_error = str(exc)[:200]
             logger.exception("connect | IBKR | failed | error={}", exc)
             self._force_close_ib()
             return False
