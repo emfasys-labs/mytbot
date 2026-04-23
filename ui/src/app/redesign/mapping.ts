@@ -209,6 +209,69 @@ export function mapConviction(
   });
 }
 
+/**
+ * Order statuses that still reserve capital from the allocator's point of
+ * view — i.e. unfilled but live orders that haven't been rejected/cancelled.
+ * Anything in this set contributes to the ``capital at work`` gauge
+ * alongside filled positions.
+ */
+export function isPendingOrderStatus(status: string | null | undefined): boolean {
+  const s = String(status ?? '').toLowerCase();
+  return s === 'pending' || s === 'open' || s === 'submitted' || s === 'partially_filled';
+}
+
+function _orderFinite(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Notional reserved by unfilled orders: ``|qty × (limit_price or avg_fill)|``
+ * across every order whose status is still "open-ish". Shared by the Book
+ * screen's Capital-at-work card and the dashboard's capital-allocation
+ * slider so the two surfaces can never drift apart.
+ */
+export function pendingOrderNotional(orders: ApiOrderRow[]): number {
+  if (!Array.isArray(orders)) return 0;
+  let sum = 0;
+  for (const o of orders) {
+    if (!isPendingOrderStatus(o.status)) continue;
+    // ApiOrderRow only types the canonical fields; ``quantity`` and
+    // ``limit_price`` come from the backend's wider OrdersResponse and are
+    // accessed through a defensive cast.
+    const extras = o as unknown as { quantity?: unknown; limit_price?: unknown };
+    const qty = _orderFinite(extras.quantity);
+    const px = _orderFinite(extras.limit_price ?? o.avg_fill_price);
+    if (qty <= 0 || px <= 0) continue;
+    sum += qty * px;
+  }
+  return sum;
+}
+
+/**
+ * Combined capital-at-work view used by every headroom-vs-ceiling surface.
+ *
+ * The backend's ``cap_slider`` gates ``deploy = NAV × ge × cap_slider`` in
+ * ``portfolio/allocation_engine.py`` — and "deploy" there covers both new
+ * positions AND the buy orders feeding them, because a pending order has
+ * already consumed allocator budget. Showing positions-only in the UI
+ * slider under-reports the real commitment by the pending-order notional,
+ * so the ceiling gauge lies about headroom and the snap landmark sits in
+ * the wrong place. This helper is the single source of truth.
+ *
+ * ``deployed`` — filled-position notional (canonical ``p.notional``).
+ * ``pending``  — notional of still-open orders.
+ * ``working``  — ``deployed + pending`` (the figure the ceiling gates).
+ */
+export function capitalAtWork(
+  positions: Position[],
+  orders: ApiOrderRow[],
+): { deployed: number; pending: number; working: number } {
+  const deployed = (positions ?? []).reduce((s, p) => s + (p.notional || 0), 0);
+  const pending = pendingOrderNotional(orders);
+  return { deployed, pending, working: deployed + pending };
+}
+
 export function mapPositions(
   pos: ApiPositionsResponse | null,
   totalNav: number,

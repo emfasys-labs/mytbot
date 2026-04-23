@@ -8,7 +8,7 @@ import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 import type { RoutingBrokerRow } from '../lib/api';
-import { mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
+import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
@@ -156,20 +156,14 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
   const accentColor = ACCENTS[accent].main;
   const totalPnl = live.positions.reduce((s, p) => s + p.pnl, 0);
   const nav = live.nav > 0 ? live.nav : 0;
-  // Sum the actual position notionals instead of deriving from ``nav *
-  // exposure.gross`` — the latter was unreliable when the backend shipped
-  // exposure as an absolute £ figure rather than a ratio (see D026).
-  const deployedCapital = live.positions.reduce((sum, p) => sum + (p.notional || 0), 0);
-  const pendingCapital = live.orders
-    .filter((o) => isPendingOrder(o.status))
-    .reduce((sum, o) => {
-      const qty = toFiniteNumber(o.quantity);
-      const px = toFiniteNumber(o.limit_price ?? o.avg_fill_price);
-      if (qty <= 0 || px <= 0) return sum;
-      return sum + (qty * px);
-    }, 0);
-  const capitalAtWork = deployedCapital + pendingCapital;
-  const capitalAtWorkPct = nav > 0 ? Math.max(0, Math.min(1, capitalAtWork / nav)) : 0;
+  // Shared helper — same computation the dashboard's capital-allocation
+  // slider uses, so the two surfaces can never disagree. Sums filled
+  // positions plus reserved notional of still-open orders (see D026/D044).
+  const { deployed: deployedCapital, pending: pendingCapital, working: capitalAtWorkValue } = capitalAtWork(
+    live.positions,
+    live.orders,
+  );
+  const capitalAtWorkPct = nav > 0 ? Math.max(0, Math.min(1, capitalAtWorkValue / nav)) : 0;
 
   return (
     <div style={{
@@ -292,7 +286,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <span style={{ color: TOKENS.ink3 }}>total working</span>
                 <span style={{ color: TOKENS.ink1 }}>
-                  £{capitalAtWork.toFixed(2)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
+                  £{capitalAtWorkValue.toFixed(2)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
                 </span>
               </div>
             </div>
@@ -340,16 +334,6 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
       </div>
     </div>
   );
-}
-
-function toFiniteNumber(v: unknown): number {
-  const n = typeof v === 'number' ? v : Number(v ?? 0);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function isPendingOrder(status: string | null | undefined): boolean {
-  const s = String(status ?? '').toLowerCase();
-  return s === 'pending' || s === 'open' || s === 'submitted' || s === 'partially_filled';
 }
 
 function fmtPrice(v: number): string {

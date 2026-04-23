@@ -11,9 +11,9 @@
  *
  * Behaviour
  * ─────────
- *   • Drag UP past the deployed line → commits on release via
+ *   • Drag UP past the at-work line → commits on release via
  *     `live.setCapitalPct(pct)` → `PUT /system/capital-allocation`.
- *   • Drag DOWN below the deployed line → stages a trim with a
+ *   • Drag DOWN below the at-work line → stages a trim with a
  *     weakest-first preview and explicit confirm. On confirm the ceiling
  *     is lowered (same endpoint); the engine unwinds on its own signals —
  *     no force-close, and the UI says so.
@@ -22,6 +22,12 @@
  *     honest about that — it lowers the ceiling to 0 (prevents new
  *     deploys) and shows a "backend pending" banner. When the endpoint
  *     ships, only `confirmFlatten` needs rewiring.
+ *
+ * The landmark line is gauged against **capital at work** = filled
+ * position notional + reserved notional of still-open orders. That's
+ * what the backend's ``cap_slider`` gates (``deploy = NAV × ge ×
+ * cap_slider`` in ``portfolio/allocation_engine.py``), so the slider
+ * reports the same % as the Book screen's "Capital at work" card.
  *
  * Wiring
  * ──────
@@ -40,6 +46,7 @@ import {
 } from 'react';
 import { Card, Label } from './primitives';
 import { TOKENS } from './tokens';
+import { capitalAtWork } from './mapping';
 import type { LiveData } from './useLiveSystem';
 import type { Position } from './data';
 
@@ -72,15 +79,20 @@ function positionNotional(p: Position): number {
 
 function computeTrim(
   targetPct: number,
-  deployedValue: number,
+  workingValue: number,
   nav: number,
   positions: Position[],
   protectedSyms: Set<string>,
 ): { closes: Position[]; released: number; mustRelease: number; remaining: number } {
+  // ``workingValue`` is positions + pending-order notional — the same figure
+  // the backend ceiling gates against. ``mustRelease`` is therefore honest
+  // about the full over-commitment, while the close list below only offers
+  // positions (pending orders unwind via cancel / engine signals, not
+  // through this UI).
   const targetValue = nav * targetPct;
-  const mustRelease = Math.max(0, deployedValue - targetValue);
+  const mustRelease = Math.max(0, workingValue - targetValue);
   if (mustRelease <= 0 || positions.length === 0) {
-    return { closes: [], released: 0, mustRelease: 0, remaining: deployedValue };
+    return { closes: [], released: 0, mustRelease: 0, remaining: workingValue };
   }
   // Weakest-first = ascending unrealised P&L as a hold-score proxy. If/when
   // the backend exposes a per-position hold score we swap this in without
@@ -94,7 +106,7 @@ function computeTrim(
     closes.push(p);
     released += positionNotional(p);
   }
-  return { closes, released, mustRelease, remaining: deployedValue - released };
+  return { closes, released, mustRelease, remaining: workingValue - released };
 }
 
 // ───────────────────────── core component ─────────────────────────────
@@ -107,11 +119,18 @@ export interface CapitalPanelProps {
 export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
   const nav = live.nav;
   const ceilingPct = live.capitalPct;
-  const deployedValue = useMemo(
-    () => live.positions.reduce((s, p) => s + positionNotional(p), 0),
-    [live.positions],
+  // Gauge the slider against **capital at work** — positions + pending
+  // orders — because that's what the backend's ``cap_slider`` actually
+  // gates (see ``portfolio/allocation_engine.py`` and ``mapping.capitalAtWork``).
+  // Using positions-only here under-reports commitment by the pending-order
+  // book, which puts the snap landmark and "free to deploy" headroom in the
+  // wrong place. ``deployedValue`` is still tracked separately so the trim
+  // close list can honestly show which positions are actually closable.
+  const { deployed: deployedValue, pending: pendingValue, working: workingValue } = useMemo(
+    () => capitalAtWork(live.positions, live.orders),
+    [live.positions, live.orders],
   );
-  const deployedPct = nav > 0 ? Math.min(1, deployedValue / nav) : 0;
+  const workingPct = nav > 0 ? Math.min(1, workingValue / nav) : 0;
 
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -129,19 +148,19 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
     if (!dragging && stagedPct == null) setDragPct(ceilingPct);
   }, [ceilingPct, dragging, stagedPct]);
 
-  // Tick flash when the thumb first crosses the deployed line downward.
+  // Tick flash when the thumb first crosses the at-work line downward.
   useEffect(() => {
     if (!dragging) return;
-    if (dragPct < deployedPct && !crossedRef.current) {
+    if (dragPct < workingPct && !crossedRef.current) {
       crossedRef.current = true;
       setFlashTick(true);
       const t = setTimeout(() => setFlashTick(false), 400);
       return () => clearTimeout(t);
     }
-    if (dragPct >= deployedPct && crossedRef.current) {
+    if (dragPct >= workingPct && crossedRef.current) {
       crossedRef.current = false;
     }
-  }, [dragPct, dragging, deployedPct]);
+  }, [dragPct, dragging, workingPct]);
 
   const shownPct = dragging ? dragPct : stagedPct ?? ceilingPct;
 
@@ -154,9 +173,9 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
       const clamped = Math.max(0, Math.min(1, raw));
       // Snap to the deployed landmark so small hand tremors don't
       // accidentally stage a trim when the user is hovering at parity.
-      return Math.abs(clamped - deployedPct) < SNAP_PCT ? deployedPct : clamped;
+      return Math.abs(clamped - workingPct) < SNAP_PCT ? workingPct : clamped;
     },
-    [ceilingPct, deployedPct],
+    [ceilingPct, workingPct],
   );
 
   const commitCeiling = useCallback(
@@ -185,7 +204,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
         window.removeEventListener('pointerup', up);
         setDragging(false);
         setDragPct((prev) => {
-          if (prev >= deployedPct - 0.005) {
+          if (prev >= workingPct - 0.005) {
             // Upward (or unchanged) — commit immediately.
             void commitCeiling(prev);
             setStagedPct(null);
@@ -201,7 +220,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
-    [readPointerPct, deployedPct, commitCeiling],
+    [readPointerPct, workingPct, commitCeiling],
   );
 
   const cancelStage = useCallback(() => {
@@ -228,13 +247,13 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
   }, [commitCeiling]);
 
   const previewPct = stagedPct ?? (dragging ? dragPct : ceilingPct);
-  const previewBelow = previewPct < deployedPct - 0.005;
+  const previewBelow = previewPct < workingPct - 0.005;
   const trim = useMemo(
     () =>
       previewBelow
-        ? computeTrim(previewPct, deployedValue, nav, live.positions, protectedSyms)
+        ? computeTrim(previewPct, workingValue, nav, live.positions, protectedSyms)
         : null,
-    [previewPct, previewBelow, deployedValue, nav, live.positions, protectedSyms],
+    [previewPct, previewBelow, workingValue, nav, live.positions, protectedSyms],
   );
 
   const isFlatten = stagedPct != null && stagedPct < FLATTEN_THRESHOLD;
@@ -242,7 +261,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
 
   const height = 360;
   const thumbY = (1 - shownPct) * height;
-  const deployedY = (1 - deployedPct) * height;
+  const workingY = (1 - workingPct) * height;
 
   return (
     <Card style={{ padding: 20, ...style }}>
@@ -256,7 +275,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
       >
         <Label>Capital allocation</Label>
         <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-          ceiling · deployed · free
+          ceiling · at work · free
         </span>
       </div>
 
@@ -305,14 +324,14 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             }}
           >
             {/* deployed fill (dim) */}
-            {deployedPct > 0 && (
+            {workingPct > 0 && (
               <div
                 style={{
                   position: 'absolute',
                   left: 0,
                   right: 0,
                   bottom: 0,
-                  height: `${deployedPct * 100}%`,
+                  height: `${workingPct * 100}%`,
                   background: `${accent}26`,
                   borderBottomLeftRadius: 10,
                   borderBottomRightRadius: 10,
@@ -321,14 +340,14 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             )}
 
             {/* ceiling headroom fill */}
-            {shownPct > deployedPct && (
+            {shownPct > workingPct && (
               <div
                 style={{
                   position: 'absolute',
                   left: 0,
                   right: 0,
-                  bottom: `${deployedPct * 100}%`,
-                  height: `${(shownPct - deployedPct) * 100}%`,
+                  bottom: `${workingPct * 100}%`,
+                  height: `${(shownPct - workingPct) * 100}%`,
                   background: `linear-gradient(to top, ${accent}55, ${accent}22)`,
                   transition: dragging ? 'none' : `all 400ms ${TOKENS.ease}`,
                 }}
@@ -336,14 +355,14 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             )}
 
             {/* release zone (below deployed) */}
-            {shownPct < deployedPct && (
+            {shownPct < workingPct && (
               <div
                 style={{
                   position: 'absolute',
                   left: 0,
                   right: 0,
                   bottom: `${shownPct * 100}%`,
-                  height: `${(deployedPct - shownPct) * 100}%`,
+                  height: `${(workingPct - shownPct) * 100}%`,
                   background: `repeating-linear-gradient(135deg, ${
                     isFlatten || shownPct < FLATTEN_THRESHOLD
                       ? 'rgba(248,113,113,0.14)'
@@ -362,7 +381,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
                 position: 'absolute',
                 left: -6,
                 right: -6,
-                top: deployedY - 0.5,
+                top: workingY - 0.5,
                 height: 1,
                 background: TOKENS.ink1,
                 pointerEvents: 'none',
@@ -373,7 +392,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               style={{
                 position: 'absolute',
                 left: 44,
-                top: deployedY - 9,
+                top: workingY - 9,
                 fontFamily: TOKENS.mono,
                 fontSize: 10,
                 color: TOKENS.ink2,
@@ -384,7 +403,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               }}
             >
               <span style={{ width: 14, height: 1, background: TOKENS.ink2 }} />
-              deployed · {(deployedPct * 100).toFixed(1)}%
+              at work · {(workingPct * 100).toFixed(1)}%
             </div>
 
             {/* thumb */}
@@ -456,19 +475,21 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               dragging={dragging}
               nav={nav}
               deployedValue={deployedValue}
+              pendingValue={pendingValue}
+              workingValue={workingValue}
               accent={accent}
             />
           ) : isFlatten ? (
             <FlattenConfirm
               positionsCount={live.positions.length}
-              deployedValue={deployedValue}
+              workingValue={workingValue}
               onCancel={cancelStage}
               onConfirm={confirmFlatten}
             />
           ) : (
             <TrimPreview
               stagedPct={stagedPct}
-              deployedPct={deployedPct}
+              workingPct={workingPct}
               trim={trim!}
               positions={live.positions}
               reviewing={reviewing}
@@ -492,6 +513,8 @@ function IdleInfo({
   dragging,
   nav,
   deployedValue,
+  pendingValue,
+  workingValue,
   accent,
 }: {
   ceilingPct: number;
@@ -499,12 +522,18 @@ function IdleInfo({
   dragging: boolean;
   nav: number;
   deployedValue: number;
+  pendingValue: number;
+  workingValue: number;
   accent: string;
 }) {
   const targetValue = nav * shownPct;
   const delta = shownPct - ceilingPct;
   const up = delta > 0.005;
   const down = delta < -0.005;
+  // Only surface the pending breakdown when it's materially non-zero — most
+  // of the time the slider is gauging a book of filled positions and the
+  // extra row would just be noise.
+  const showPendingBreakdown = pendingValue > 0.5;
   return (
     <div style={{ animation: `ds-fade-in 200ms ${TOKENS.ease}` }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
@@ -535,10 +564,26 @@ function IdleInfo({
           gap: 8,
         }}
       >
-        <Row label="Deployed now" value={money(deployedValue, 12, TOKENS.ink1)} />
+        <Row label="At work" value={money(workingValue, 12, TOKENS.ink1)} />
+        {showPendingBreakdown && (
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              fontFamily: TOKENS.mono,
+              fontSize: 10,
+              color: TOKENS.ink3,
+              marginTop: -2,
+              paddingLeft: 2,
+            }}
+          >
+            <span>positions {money(deployedValue, 10, TOKENS.ink3)}</span>
+            <span>pending {money(pendingValue, 10, TOKENS.ink3)}</span>
+          </div>
+        )}
         <Row
           label="Free to deploy"
-          value={money(Math.max(0, targetValue - deployedValue), 12, up ? accent : TOKENS.ink2)}
+          value={money(Math.max(0, targetValue - workingValue), 12, up ? accent : TOKENS.ink2)}
         />
       </div>
 
@@ -559,12 +604,12 @@ function IdleInfo({
         {dragging && !up && !down && <>No change. Release to keep current ceiling.</>}
         {dragging && down && (
           <span style={{ color: TOKENS.caution }}>
-            Below deployed line — drop to stage a release with position preview.
+            Below at-work line — drop to stage a release with position preview.
           </span>
         )}
         {!dragging && (
           <>
-            Drag up to raise the ceiling for new positions. Drag below the deployed line to stage a
+            Drag up to raise the ceiling for new positions. Drag below the at-work line to stage a
             reduction; 0% triggers a hold-to-flatten.
           </>
         )}
@@ -594,7 +639,7 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
 
 function TrimPreview({
   stagedPct,
-  deployedPct,
+  workingPct,
   trim,
   positions,
   reviewing,
@@ -605,7 +650,7 @@ function TrimPreview({
   onConfirm,
 }: {
   stagedPct: number;
-  deployedPct: number;
+  workingPct: number;
   trim: { closes: Position[]; released: number; mustRelease: number; remaining: number };
   positions: Position[];
   reviewing: boolean;
@@ -648,7 +693,7 @@ function TrimPreview({
             color: TOKENS.ink0,
           }}
         >
-          {(deployedPct * 100).toFixed(0)}
+          {(workingPct * 100).toFixed(0)}
           <span style={{ fontSize: 14, color: TOKENS.ink3 }}>%</span>
           <span style={{ color: TOKENS.ink3, margin: '0 8px', fontWeight: 200 }}>→</span>
           <span style={{ color: TOKENS.caution }}>{(stagedPct * 100).toFixed(0)}%</span>
@@ -858,12 +903,12 @@ function TrimPreview({
 
 function FlattenConfirm({
   positionsCount,
-  deployedValue,
+  workingValue,
   onCancel,
   onConfirm,
 }: {
   positionsCount: number;
-  deployedValue: number;
+  workingValue: number;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -927,7 +972,7 @@ function FlattenConfirm({
         Zero capital · {positionsCount} open
       </div>
       <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 12, color: TOKENS.ink2 }}>
-        Deployed {money(deployedValue, 12, TOKENS.ink1, true)} · ceiling → 0%
+        At work {money(workingValue, 12, TOKENS.ink1, true)} · ceiling → 0%
       </div>
 
       <div
