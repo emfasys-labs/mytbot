@@ -48,12 +48,6 @@ const SNAP_PCT = 0.015;         // snap radius around the deployed line
 const FLATTEN_THRESHOLD = 0.03; // below this, the stage turns into flatten
 const HOLD_MS = 1200;           // hold-to-flatten duration
 
-// ────────────────────────── result banner type ────────────────────────
-type CapitalResult =
-  | { kind: 'committed'; at: number }
-  | { kind: 'trim-requested'; at: number; pct: number }
-  | { kind: 'flatten-requested'; at: number };
-
 // ────────────────────────── utility helpers ───────────────────────────
 function money(v: number, size = 14, tone?: string, bold?: boolean): ReactNode {
   return (
@@ -126,7 +120,6 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
   const [flashTick, setFlashTick] = useState(false);
   const [protectedSyms, setProtectedSyms] = useState<Set<string>>(new Set());
   const [reviewing, setReviewing] = useState(false);
-  const [lastResult, setLastResult] = useState<CapitalResult | null>(null);
   const crossedRef = useRef(false);
 
   // If the ceiling changes under us (e.g. WS tick from another client) while
@@ -170,11 +163,9 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
     async (pct: number) => {
       try {
         await live.setCapitalPct(pct);
-        setLastResult({ kind: 'committed', at: Date.now() });
       } catch {
         // `setCapitalPct` already reverts optimistic state on failure; the
-        // next status poll will reconcile the slider with reality. We just
-        // suppress the banner so the UI doesn't falsely claim success.
+        // next status poll reconciles the slider with reality.
       }
     },
     [live],
@@ -186,7 +177,6 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
       setDragging(true);
       setStagedPct(null);
       setReviewing(false);
-      setLastResult(null);
       setDragPct(readPointerPct(e.clientY));
 
       const move = (ev: PointerEvent) => setDragPct(readPointerPct(ev.clientY));
@@ -223,12 +213,10 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
 
   const confirmTrim = useCallback(async () => {
     if (stagedPct == null) return;
-    const target = stagedPct;
-    await commitCeiling(target);
+    await commitCeiling(stagedPct);
     setStagedPct(null);
     setReviewing(false);
     setProtectedSyms(new Set());
-    setLastResult({ kind: 'trim-requested', at: Date.now(), pct: target });
   }, [stagedPct, commitCeiling]);
 
   const confirmFlatten = useCallback(async () => {
@@ -237,7 +225,6 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
     // until the backend exposes `POST /positions/flatten`.
     await commitCeiling(0);
     setStagedPct(null);
-    setLastResult({ kind: 'flatten-requested', at: Date.now() });
   }, [commitCeiling]);
 
   const previewPct = stagedPct ?? (dragging ? dragPct : ceilingPct);
@@ -462,13 +449,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
 
         {/* Info / action panel */}
         <div style={{ flex: 1, minWidth: 280 }}>
-          {lastResult && !dragging && stagedPct == null ? (
-            <ResultBanner
-              result={lastResult}
-              accent={accent}
-              onDismiss={() => setLastResult(null)}
-            />
-          ) : stagedPct == null ? (
+          {stagedPct == null ? (
             <IdleInfo
               ceilingPct={ceilingPct}
               shownPct={shownPct}
@@ -1033,77 +1014,3 @@ function FlattenConfirm({
   );
 }
 
-function ResultBanner({
-  result,
-  accent,
-  onDismiss,
-}: {
-  result: CapitalResult;
-  accent: string;
-  onDismiss: () => void;
-}) {
-  useEffect(() => {
-    const t = setTimeout(onDismiss, 5000);
-    return () => clearTimeout(t);
-  }, [onDismiss]);
-
-  const { kind } = result;
-  const tone =
-    kind === 'committed' ? accent : kind === 'trim-requested' ? TOKENS.caution : TOKENS.danger;
-  const title =
-    kind === 'committed'
-      ? 'Ceiling updated'
-      : kind === 'trim-requested'
-        ? 'Ceiling lowered'
-        : 'Flatten requested';
-  const body =
-    kind === 'committed'
-      ? 'Applied to trading loop. New positions will respect the new cap.'
-      : kind === 'trim-requested'
-        ? `New ceiling ${Math.round(result.pct * 100)}%. Engine will unwind excess on its own signals — not a force-close.`
-        : 'Ceiling → 0%. No new positions will open. Use Book to close per-symbol or stop the engine.';
-
-  return (
-    <div
-      style={{
-        animation: `ds-slide-up 260ms ${TOKENS.ease}`,
-        padding: 14,
-        border: `1px solid ${tone}66`,
-        borderRadius: 10,
-        background: `${tone}0a`,
-      }}
-    >
-      <Label accent={tone}>{title}</Label>
-      <div
-        style={{
-          marginTop: 8,
-          fontFamily: TOKENS.sans,
-          fontSize: 13,
-          color: TOKENS.ink1,
-          lineHeight: 1.5,
-        }}
-      >
-        {body}
-      </div>
-      <button
-        type="button"
-        onClick={onDismiss}
-        style={{
-          marginTop: 10,
-          padding: '5px 10px',
-          background: 'transparent',
-          border: `1px solid ${TOKENS.line}`,
-          borderRadius: 4,
-          color: TOKENS.ink3,
-          fontFamily: TOKENS.sans,
-          fontSize: 10,
-          textTransform: 'uppercase',
-          letterSpacing: '0.08em',
-          cursor: 'pointer',
-        }}
-      >
-        dismiss
-      </button>
-    </div>
-  );
-}
