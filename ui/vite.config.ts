@@ -3,6 +3,8 @@ import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 
+const BUILD_ID = String(Date.now())
+
 export default defineConfig({
   plugins: [
     // The React and Tailwind plugins are both required for Make, even if
@@ -19,4 +21,23 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+
+  // Inject a build id so every build emits a distinct chunk hash — prevents
+  // browsers from serving a stale bundle when the content-hash happens to
+  // collide across builds with the same entry graph.
+  define: {
+    __MYTBOT_BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
+
+  build: {
+    rollupOptions: {
+      output: {
+        // Force a unique hash window so any change to source produces a new
+        // filename; dashed format keeps the old cache-busting contract.
+        entryFileNames: `assets/[name]-[hash].js`,
+        chunkFileNames: `assets/[name]-[hash].js`,
+        assetFileNames: `assets/[name]-[hash][extname]`,
+      },
+    },
+  },
 })

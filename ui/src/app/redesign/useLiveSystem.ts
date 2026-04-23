@@ -57,6 +57,18 @@ import type { SystemState as DesignSystemState } from './tokens';
 
 const REFRESH_INTERVAL_MS = 10_000;
 const INTEL_THROTTLE_MS = 12_000;
+
+// Bundled at build time (see vite.config.ts). Surfaced in the console so a
+// stale cache can be spotted at a glance; also participates in the chunk
+// hash so any change forces a new bundle URL.
+declare const __MYTBOT_BUILD_ID__: string;
+try {
+  const buildId = typeof __MYTBOT_BUILD_ID__ !== 'undefined' ? __MYTBOT_BUILD_ID__ : 'dev';
+  // eslint-disable-next-line no-console
+  console.info(`[mytbot] UI build id: ${buildId}`);
+} catch {
+  /* ignore */
+}
 // ~1h of intraday NAV samples at 10s cadence. Keeps the hero equity line
 // responsive while the system is running without blowing up memory.
 const MAX_LIVE_NAV_SAMPLES = 360;
