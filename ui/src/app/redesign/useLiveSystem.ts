@@ -185,6 +185,14 @@ export function useLiveSystem(): LiveData {
   const lastIntelRefresh = useRef(0);
   const stateRef = useRef(backendState);
   useEffect(() => { stateRef.current = backendState; }, [backendState]);
+  // In-flight local capital writes. While > 0, `refresh` must NOT adopt
+  // `sys.capital_pct` from `/system/status` — the optimistic value in
+  // `capitalPct` is newer than anything the backend has yet observed, and
+  // a stale WS-driven refresh would otherwise snap the slider back to the
+  // pre-write value for a poll cycle or two before jumping forward again.
+  // (Symptom seen pre-fix: release thumb → snaps back → 3–4 s later
+  // jumps to the committed value.)
+  const pendingCapitalWrites = useRef(0);
 
   // ────── clear ephemeral live data when we're off ──────
   const clearLive = useCallback(() => {
@@ -289,7 +297,14 @@ export function useLiveSystem(): LiveData {
         } else {
           setLoadedStrategies([]);
         }
-        if (typeof sysRes.capital_pct === 'number' && Number.isFinite(sysRes.capital_pct)) {
+        if (
+          typeof sysRes.capital_pct === 'number'
+          && Number.isFinite(sysRes.capital_pct)
+          // Don't reconcile while a local write is in flight — the PUT
+          // below is the source of truth for the next few hundred ms and
+          // a concurrent status read may still show the pre-write value.
+          && pendingCapitalWrites.current === 0
+        ) {
           const c = Math.max(0, Math.min(1, sysRes.capital_pct));
           setCapitalPctState(c);
           try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
@@ -502,11 +517,18 @@ export function useLiveSystem(): LiveData {
   // On failure we revert to the previous value and rethrow so callers can
   // surface the error — `CapitalPanel` uses this to suppress its "committed"
   // banner when the write never took effect.
+  //
+  // While the PUT is in flight we bump `pendingCapitalWrites`, which
+  // suppresses `refresh()` from overwriting our optimistic value with a
+  // stale `sys.capital_pct` read (WS ticks fire refresh every 1–2 s, so
+  // without this guard the thumb visibly snaps back for a cycle or two
+  // before the next refresh catches up to the committed value).
   const setCapitalPct = useCallback(async (p: number) => {
     const c = Math.max(0, Math.min(1, p));
     const prev = capitalPct;
     setCapitalPctState(c);
     try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
+    pendingCapitalWrites.current += 1;
     try {
       const r = await api.setCapitalAllocation(c);
       if (typeof r.capital_pct === 'number' && Number.isFinite(r.capital_pct)) {
@@ -520,6 +542,8 @@ export function useLiveSystem(): LiveData {
       setCapitalPctState(prev);
       try { localStorage.setItem('mytbot_capital_pct', String(prev)); } catch { /* ignore */ }
       throw err;
+    } finally {
+      pendingCapitalWrites.current = Math.max(0, pendingCapitalWrites.current - 1);
     }
   }, [capitalPct]);
 
