@@ -77,6 +77,45 @@ export interface NewsSourceStat {
   fresh_rows_in_window: number;
   latest_age_hours: number | null;
   stale: boolean;
+  /** ISO timestamp of newest headline ``published_at`` in the scoring window (when present). */
+  latest_published_at?: string | null;
+  /** ISO timestamp of newest ``fetched_at`` for that source (when present). */
+  latest_fetched_at?: string | null;
+}
+
+/** One row in the Book screen “News & data” card (NewsAPI, FRED, etc.). */
+export interface NewsDataProviderRow {
+  id: string;
+  label: string;
+  configured: boolean;
+  state: 'live' | 'stale' | 'never' | 'off' | 'error';
+  lastIngestAt: string | null;
+  ageLabel: string;
+  ok?: boolean;
+  error?: string | null;
+}
+
+/** Canonical ids/labels; mirrors ``data.ingest_telemetry.NEWS_DATA_PROVIDERS`` (for UI when status omits rows). */
+export const NEWS_DATA_PROVIDER_CATALOG: { id: string; label: string }[] = [
+  { id: 'newsapi', label: 'NewsAPI' },
+  { id: 'alphavantage', label: 'Alpha Vantage' },
+  { id: 'finnhub', label: 'Finnhub' },
+  { id: 'marketaux', label: 'Marketaux' },
+  { id: 'fred', label: 'FRED' },
+];
+
+/** Placeholder rows before the first successful ``/system/status`` (or if the field is missing on old servers). */
+export function defaultNewsDataProviderRows(): NewsDataProviderRow[] {
+  return NEWS_DATA_PROVIDER_CATALOG.map((p) => ({
+    id: p.id,
+    label: p.label,
+    configured: false,
+    state: 'off' as const,
+    lastIngestAt: null,
+    ageLabel: '—',
+    ok: true,
+    error: null,
+  }));
 }
 
 export interface Strategy {

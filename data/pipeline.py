@@ -30,6 +30,7 @@ from data.persist import (
 )
 from data.validation import validate_ohlcv_frame
 from data.yfinance_fetch import fetch_history
+from data.ingest_telemetry import record_provider_ingest
 
 
 def _clean_api_key(raw: str | None) -> str:
@@ -292,9 +293,21 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
     ):
         if isinstance(result, Exception):
             logger.warning("data | news | source failed | source={} | {}", source, result)
+            try:
+                await record_provider_ingest(
+                    session_factory, source, ok=False, error=str(result)[:2000]
+                )
+            except Exception:  # noqa: BLE001
+                pass
             continue
         source_counts[source] = len(result)
         articles.extend(result)
+        n = len(result)
+        if n > 0:
+            try:
+                await record_provider_ingest(session_factory, source, ok=True, rows=n)
+            except Exception:  # noqa: BLE001
+                pass
     if not articles:
         logger.warning("data | news | skipped | all enabled sources failed or empty")
         return
@@ -360,6 +373,10 @@ async def ingest_fred(session_factory: async_sessionmaker[AsyncSession], cfg: di
     async with session_factory() as session:
         await upsert_macro_observations(session, all_rows)
         await session.commit()
+    try:
+        await record_provider_ingest(session_factory, "fred", ok=True, rows=len(all_rows))
+    except Exception:  # noqa: BLE001
+        pass
     logger.info("data | fred | upserted | observations={}", len(all_rows))
 
 

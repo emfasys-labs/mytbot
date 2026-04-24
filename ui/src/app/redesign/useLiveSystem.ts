@@ -41,6 +41,7 @@ import {
   mergeStrategiesWithSignals,
   mapSystemState,
 } from './mapping';
+import { defaultNewsDataProviderRows } from './data';
 import type {
   Approved,
   BrokerStatus,
@@ -49,6 +50,7 @@ import type {
   ExecutionRejection,
   LiveEvent,
   NewsRow,
+  NewsDataProviderRow,
   NewsSourceStat,
   Position,
   Rejected,
@@ -109,6 +111,8 @@ export interface LiveData {
   eventLines: string[];
   news: NewsRow[];
   newsSourceStats: Record<string, NewsSourceStat>;
+  /** NewsAPI / FRED / etc. from ``/system/status`` ``news_data_providers``. */
+  newsDataProviders: NewsDataProviderRow[];
   orders: ApiOrderRow[];
   intelligence: IntelligenceSignalsResponse | null;
   runtimeDemand: Record<string, unknown> | null;
@@ -165,6 +169,9 @@ export function useLiveSystem(): LiveData {
   const [equitySeries, setEquitySeries] = useState<Array<{ date: string; value: number }>>([]);
   const [news, setNews] = useState<ApiNewsResponse | null>(null);
   const [newsSourceStats, setNewsSourceStats] = useState<Record<string, NewsSourceStat>>({});
+  const [newsDataProviders, setNewsDataProviders] = useState<NewsDataProviderRow[]>(
+    () => defaultNewsDataProviderRows(),
+  );
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
   const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
@@ -213,6 +220,7 @@ export function useLiveSystem(): LiveData {
     setEquitySeries([]);
     setNews(null);
     setNewsSourceStats({});
+    setNewsDataProviders(defaultNewsDataProviderRows());
     setOrders([]);
     setIntelligence(null);
     setRuntimeDemand(null);
@@ -302,11 +310,33 @@ export function useLiveSystem(): LiveData {
                 ? Number(rr.latest_age_hours)
                 : null,
               stale: !!rr.stale,
+              latest_published_at: typeof rr.latest_published_at === 'string' ? rr.latest_published_at : null,
+              latest_fetched_at: typeof rr.latest_fetched_at === 'string' ? rr.latest_fetched_at : null,
             };
           }
           setNewsSourceStats(stats);
         } else {
           setNewsSourceStats({});
+        }
+        if (Array.isArray(sysRes.news_data_providers) && sysRes.news_data_providers.length > 0) {
+          const valid: NewsDataProviderRow['state'][] = ['live', 'stale', 'never', 'off', 'error'];
+          setNewsDataProviders(
+            sysRes.news_data_providers.map((p) => {
+              const st = String(p.state ?? 'off');
+              return {
+                id: String(p.id ?? ''),
+                label: String(p.label ?? p.id ?? ''),
+                configured: !!p.configured,
+                state: (valid.includes(st as NewsDataProviderRow['state']) ? st : 'off') as NewsDataProviderRow['state'],
+                lastIngestAt: typeof p.last_ingest_at === 'string' ? p.last_ingest_at : null,
+                ageLabel: typeof p.age_label === 'string' ? p.age_label : '—',
+                ok: p.ok !== false,
+                error: typeof p.error === 'string' ? p.error : null,
+              };
+            }),
+          );
+        } else {
+          setNewsDataProviders(defaultNewsDataProviderRows());
         }
         if (Array.isArray(sysRes.loaded_strategies)) {
           setLoadedStrategies(
@@ -334,6 +364,8 @@ export function useLiveSystem(): LiveData {
           setCapitalPctState(c);
           try { localStorage.setItem('mytbot_capital_pct', String(c)); } catch { /* ignore */ }
         }
+      } else {
+        setNewsDataProviders(defaultNewsDataProviderRows());
       }
       const feedsLive = (sysRes?.state ?? stateRef.current) === 'running';
 
@@ -752,6 +784,7 @@ export function useLiveSystem(): LiveData {
     eventLines,
     news: newsRows,
     newsSourceStats,
+    newsDataProviders,
     orders,
     intelligence,
     runtimeDemand,

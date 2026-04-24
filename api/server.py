@@ -1330,20 +1330,38 @@ async def toggle_strategy(
 
 
 @app.get("/system/status")
-async def system_status(bus: CommandBus = Depends(_command_bus)):
-    """Full system status including state, brokers, infrastructure."""
+async def system_status(
+    bus: CommandBus = Depends(_command_bus),
+    session_factory=Depends(_session_factory),
+):
+    """Full system status including state, brokers, infrastructure, data providers."""
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+
+    async def _merge_providers(data: dict) -> dict:
+        npp: list[dict] = build_news_data_provider_status_env_only()
+        if session_factory is not None:
+            try:
+                npp = await build_news_data_provider_status(session_factory)
+            except Exception:  # noqa: BLE001
+                npp = build_news_data_provider_status_env_only()
+        if not npp:
+            npp = build_news_data_provider_status_env_only()
+        return {**data, "news_data_providers": npp}
+
     orch = _get_orchestrator()
     if orch is None:
-        return {
-            "state": "off",
-            "paper_mode": APP_ENV != "live",
-            "active_brokers": [],
-            "brokers": {},
-            "infrastructure": {},
-            "trading": {"running": False},
-            "errors": ["Orchestrator not initialized"],
-            "pipeline_running": False,
-        }
+        return await _merge_providers(
+            {
+                "state": "off",
+                "paper_mode": APP_ENV != "live",
+                "active_brokers": [],
+                "brokers": {},
+                "infrastructure": {},
+                "trading": {"running": False},
+                "errors": ["Orchestrator not initialized"],
+                "pipeline_running": False,
+            }
+        )
     out = orch.status()
     try:
         dash_raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
@@ -1362,7 +1380,7 @@ async def system_status(bus: CommandBus = Depends(_command_bus)):
                     out["trading"] = {**tr2, "ai": ai_st}
     except Exception:  # noqa: BLE001
         pass
-    return out
+    return await _merge_providers(out)
 
 
 @app.get("/diagnostics/strategy-candidates")
@@ -1651,6 +1669,9 @@ async def set_system_mode(body: _ModeBody):
 # Serve the React UI from ui/dist (must be LAST so API routes take priority)
 # ---------------------------------------------------------------------------
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
+# Avoid stale `index.html` in browsers that cache aggressively: new builds change chunk hashes
+# in this file, so a cached shell can load an old app bundle.
+_UI_INDEX_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
 if _UI_DIR.is_dir():
     _index_html = _UI_DIR / "index.html"
 
@@ -1660,7 +1681,10 @@ if _UI_DIR.is_dir():
         from starlette.responses import FileResponse
 
         if (_UI_DIR / full_path).is_file():
-            return FileResponse(_UI_DIR / full_path)
+            p = _UI_DIR / full_path
+            if p.name == "index.html":
+                return FileResponse(p, headers=_UI_INDEX_HEADERS)
+            return FileResponse(p)
         if _index_html.is_file():
-            return FileResponse(_index_html)
+            return FileResponse(_index_html, headers=_UI_INDEX_HEADERS)
         raise HTTPException(404)

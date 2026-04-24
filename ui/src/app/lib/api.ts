@@ -456,6 +456,17 @@ export type SystemStatusResponse = {
     enabled: boolean;
     kind: 'signal' | 'arbitrage' | string;
   }>;
+  /** News & macro API keys: ingest recency (``data/ingest_telemetry``). */
+  news_data_providers?: Array<{
+    id: string;
+    label: string;
+    configured: boolean;
+    state: 'live' | 'stale' | 'never' | 'off' | 'error';
+    last_ingest_at: string | null;
+    age_label: string;
+    ok?: boolean;
+    error?: string | null;
+  }>;
 };
 
 export type RoutingBrokerRow = {

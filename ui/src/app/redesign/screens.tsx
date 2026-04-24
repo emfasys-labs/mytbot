@@ -331,6 +331,57 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
             })
           )}
         </Card>
+        <Card>
+          <Label style={{ marginBottom: 10 }}>News & data</Label>
+          {live.newsDataProviders.length === 0 ? (
+            <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+              No provider status from API
+            </div>
+          ) : (
+            live.newsDataProviders.map((p) => {
+              const tone: 'profit' | 'caution' | 'danger' | 'neutral' =
+                p.state === 'live' ? 'profit' :
+                p.state === 'stale' ? 'caution' :
+                p.state === 'error' ? 'danger' :
+                'neutral';
+              const pillText = p.state;
+              const title = p.error?.trim()
+                ? `${p.label}: ${p.error.trim()}`
+                : [p.ageLabel, p.lastIngestAt ? `ingest ${p.lastIngestAt}` : ''].filter(Boolean).join(' · ') || p.label;
+              return (
+                <div
+                  key={p.id}
+                  title={title}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    padding: '6px 0',
+                    fontFamily: TOKENS.mono,
+                    fontSize: 11,
+                    color: p.configured ? TOKENS.ink2 : TOKENS.ink3,
+                    cursor: p.error ? 'help' : 'default',
+                  }}
+                >
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.label}</span>
+                  <span
+                    style={{
+                      flex: 1,
+                      textAlign: 'right',
+                      color: TOKENS.ink3,
+                      fontSize: 10,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {p.ageLabel}
+                  </span>
+                  <Pill size="sm" tone={tone}>{pillText}</Pill>
+                </div>
+              );
+            })
+          )}
+        </Card>
       </div>
     </div>
   );
