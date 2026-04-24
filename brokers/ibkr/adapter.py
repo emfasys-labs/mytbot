@@ -84,6 +84,21 @@ _KNOWN_PAXOS_CRYPTO: frozenset[str] = frozenset(
 )
 
 
+def _total_from_account_summary_tags(tags: dict[str, Decimal]) -> Decimal:
+    """Pick one equity figure per currency from IB account-summary tag bag.
+
+    **NetLiquidation** is full account NAV (incl. margin positions). For USD-only accounts IB
+    often emits only ``currency=USD`` rows (no BASE line in ``get_balance`` output); preferring
+    cash tags first would understate equity — see :func:`system.portfolio_equity.live_portfolio_value`.
+    """
+    return (
+        tags.get("NetLiquidation")
+        or tags.get("TotalCashValue")
+        or tags.get("CashBalance")
+        or Decimal(0)
+    )
+
+
 def _d(v: object) -> Decimal:
     """Convert a numeric API value to Decimal (never float in public models)."""
     if v is None:
@@ -916,12 +931,7 @@ class IBKRAdapter(BrokerAdapter):
                     continue
             out: list[Balance] = []
             for ccy, tags in tags_by_ccy.items():
-                total = (
-                    tags.get("CashBalance")
-                    or tags.get("TotalCashValue")
-                    or tags.get("NetLiquidation")
-                    or Decimal(0)
-                )
+                total = _total_from_account_summary_tags(tags)
                 available = tags.get("AvailableFunds") or tags.get("SettledCash") or total
                 reserved = (total - available) if total > available else Decimal(0)
                 out.append(
