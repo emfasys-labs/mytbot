@@ -10,7 +10,9 @@ UI NAV card to show ~£884k while the true aggregated NAV was ~£1.05M.
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -26,9 +28,26 @@ class _StubAdapter:
         return list(self._balances)
 
 
+class _StubReport:
+    def __init__(self, included: list[str]) -> None:
+        self._included = included
+
+    @property
+    def included_names(self) -> list[str]:
+        return list(self._included)
+
+
 class _StubBrokerManager:
-    def __init__(self, adapters: dict[str, _StubAdapter]) -> None:
+    def __init__(
+        self,
+        adapters: dict[str, _StubAdapter],
+        *,
+        included: list[str] | None = None,
+    ) -> None:
         self.adapters = adapters
+        if included is None:
+            included = list(adapters.keys())
+        self.report = _StubReport(included)
 
 
 def _bal(ccy: str, total: str) -> Balance:
@@ -132,6 +151,25 @@ async def test_base_currency_case_insensitive() -> None:
     ibkr = _StubAdapter([_bal("base", "1055000"), _bal("USD", "884000")])
     bm = _StubBrokerManager({"ibkr": ibkr})
     assert await live_portfolio_value(bm) == Decimal("1055000")
+
+
+@pytest.mark.asyncio
+async def test_excludes_broker_not_in_included_names() -> None:
+    """Stale adapters in ``adapters`` must not contribute if not in coverage (D031)."""
+    ibkr = _StubAdapter([_bal("BASE", "1000000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    bm = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca}, included=["alpaca"])
+    assert await live_portfolio_value(bm) == Decimal("50000")
+
+
+@pytest.mark.asyncio
+async def test_excludes_risk_engine_disabled() -> None:
+    """Risk engine disabled set must be subtracted from the NAV allowlist (D031)."""
+    ibkr = _StubAdapter([_bal("BASE", "1000000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    bm = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca}, included=["ibkr", "alpaca"])
+    with patch("system.portfolio_equity.get_risk_engine", return_value=SimpleNamespace(disabled_brokers=frozenset({"ibkr"}))):
+        assert await live_portfolio_value(bm) == Decimal("50000")
 
 
 @pytest.mark.asyncio

@@ -1028,15 +1028,12 @@ async def get_discovery_theses(limit: int = Query(50, ge=1, le=500), session_fac
 
 
 async def _live_portfolio_value() -> Decimal:
-    """Sum net-liquidation across all connected brokers.
+    """Sum net-liquidation for brokers in coverage (D031).
 
     Delegates to :func:`system.portfolio_equity.live_portfolio_value`, the
-    canonical helper used by the trading loop. Crucially, that helper prefers
-    the ``BASE`` currency row for each adapter (IBKR reports NetLiquidation on
-    that row) rather than naive ``max(balances)`` which would pick an
-    individual cash-currency line and understate account NAV by the size of
-    non-cash positions — the exact bug that caused the UI NAV card to show
-    ~£884k while the true aggregated NAV was ~£1.05M.
+    canonical helper used by the trading loop. It prefers the ``BASE`` currency
+    row (IBKR NetLiquidation) and only includes adapters in
+    ``BrokerManager.report.included_names`` and not in ``RiskEngine.disabled_brokers``.
     """
     orch = _get_orchestrator()
     if orch is None:
@@ -1106,9 +1103,14 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     last_persisted_value = pv_vals[-1] if pv_vals else Decimal(0)
     live_value = await _live_portfolio_value()
     configured_nav = _configured_paper_nav()
-    # Headline = best available total: brokers, DB snapshot, or PORTFOLIO_VALUE / trading_loop setting.
-    # Stale DailyPnL (e.g. old scaled £46k) must not hide a higher configured or live equity.
-    display_value = max(live_value, db_value, last_persisted_value, configured_nav)
+    # When brokers report a positive live sum, that figure wins — do not `max` with
+    # `daily_pnl` or older persisted rows that were written while an excluded/buggy
+    # broker was still in the pre-allowlist live sum (D031). The DB is used only
+    # when `live_value` is still zero (e.g. slow first snapshot post-restart).
+    if live_value > 0:
+        display_value = live_value
+    else:
+        display_value = max(live_value, db_value, last_persisted_value, configured_nav)
     if APP_ENV != "live":
         display_value = max(Decimal(0), display_value + today_unrealised)
 

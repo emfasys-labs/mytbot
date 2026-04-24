@@ -407,6 +407,23 @@ Full suite still green (276 passed, 3 skipped).
 
 ---
 
+## D031 — NAV allowlist + live wins over stale `daily_pnl` (coverage / kill alignment)
+**Date:** 2026-04-24
+**Decision:** Two fixes that were stacking and making headline NAV "sticky" or inconsistent with broker coverage.
+
+1. **`system.portfolio_equity.live_portfolio_value` must respect the same inclusion rules as the rest of the system.** It used to sum every object in `broker_manager.adapters` with no filter, so a venue could still add `NetLiquidation` after it was excluded from coverage (e.g. risk `disabled_brokers` after `coverage_sync_loop` or `POST /kill` with `brokers: ["ibkr"]`). The helper now:
+   - includes only names in `BrokerManager.report.included_names` (connected + balance_ready), and
+   - skips any name in `RiskEngine.disabled_brokers` (lowercased match).
+   Stubs that omit `report` keep the previous "all adapters" behaviour for unit tests.
+
+2. **`GET /pnl` headline `today.portfolio_value` no longer does `max(live, db, last_persisted, …)` when `live > 0`.** The `max` was added (D029) to avoid a drop to the `PORTFOLIO_VALUE` default while brokers reconnected, but it also pinned the UI to an old `daily_pnl` row that was written when an excluded broker still inflated the (pre-allowlist) live sum. If `live_value > 0` from the broker sum, that value is the display headline; `daily_pnl` is only used when `live_value` is still zero (first snapshot / cold path).
+
+**Reason:** Operators saw ~£1.05M "forever" or numbers that ignored kill/coverage, because the UI floor and the adapter dict could both ignore exclusion.
+
+**Status:** Implemented. `tests/test_live_portfolio_value.py` extended (allowlist + `disabled_brokers`); full suite green.
+
+---
+
 ## D030 — Hunter must hunt: mode-aware capital fraction + broker-truth reconciliation
 
 **Date:** 2026-04-22
