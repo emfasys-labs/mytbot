@@ -259,6 +259,42 @@ export type IntelligenceRegimeResponse = {
   }>;
 };
 
+/** GET /diagnostics/strategy-candidates — StrategyCandidateLog rollups (D033). */
+export type StrategyMixRow = {
+  name: string;
+  evaluated: number;
+  by_status: Record<string, number>;
+  counts: {
+    no_setup: number;
+    generated: number;
+    filtered_regime: number;
+    filtered_signal_engine: number;
+    filtered_meta: number;
+    lost_to_strategy: number;
+    selected_for_allocation: number;
+    risk_rejected: number;
+    executed: number;
+    skipped: number;
+    execution_incomplete?: number;
+  };
+  last_evaluated_at: string | null;
+  last_generated_at: string | null;
+  top_skip_reason: { reason: string; count: number } | null;
+  /** Aggregated from ``no_setup`` / ``skipped`` row metadata (near-miss). */
+  top_failed_conditions?: Array<{ key: string; count: number; label: string }>;
+  top_risk_rejection_reasons?: Array<{ reason: string; count: number }>;
+  top_execution_incomplete?: Array<{ reason: string; count: number }>;
+  /** One-line: prefer risk, then execution, then no-setup. */
+  blocker_hint?: string | null;
+  lifecycle: string;
+};
+
+export type StrategyCandidateMixResponse = {
+  since_hours: number;
+  strategies: StrategyMixRow[];
+  error?: string;
+};
+
 export type IntelligenceSignalsResponse = {
   signals?: Array<{
     id: string;
@@ -531,6 +567,8 @@ export const api = {
   getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
   getDashboardSnapshot: () => getJson<DashboardSnapshot>('/dashboard/snapshot'),
   getRoutingQuality: () => getJson<RoutingQualityResponse>('/diagnostics/routing-quality'),
+  getStrategyCandidateMix: (sinceHours = 24) =>
+    getJson<StrategyCandidateMixResponse>(`/diagnostics/strategy-candidates?since_hours=${sinceHours}`),
   getOrders: (limit = 40) => getJson<ApiOrdersResponse>(`/orders?limit=${limit}`),
 };
 

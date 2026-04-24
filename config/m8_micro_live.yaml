@@ -15,15 +15,33 @@ symbol_whitelist:
   - QQQ
 
 # Only these strategy names (must match Strategy.name)
+# For micro-live, start narrow; when promoting more sleeves, add:
+#   volume_flow, volatility_regime, event_driven_news, pairs_trading, regime_rotation
+# (and matching keys under strategy_sleeve_caps if you use per-strategy M8 caps).
 strategy_whitelist:
   - momentum_breakout
   - mean_reversion
+  - volume_flow
+  - volatility_regime
+  - event_driven_news
+  - pairs_trading
+  - regime_rotation
 
 # Per-strategy order cap as % of portfolio (M8 “sleeves” — separate allocation knobs).
 strategy_sleeve_caps:
   momentum_breakout:
     max_order_notional_pct_of_portfolio: 0.04
   mean_reversion:
+    max_order_notional_pct_of_portfolio: 0.04
+  volume_flow:
+    max_order_notional_pct_of_portfolio: 0.04
+  volatility_regime:
+    max_order_notional_pct_of_portfolio: 0.04
+  event_driven_news:
+    max_order_notional_pct_of_portfolio: 0.04
+  pairs_trading:
+    max_order_notional_pct_of_portfolio: 0.04
+  regime_rotation:
     max_order_notional_pct_of_portfolio: 0.04
 
 # Hard cap on order notional in USD (US equity). ~£100 ≈ 125 USD — adjust for FX.

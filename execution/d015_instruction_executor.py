@@ -18,6 +18,10 @@ def risk_signal_from_execution_instruction(
     price: Decimal,
     strategy: str = "d015_allocator",
 ) -> Signal:
+    md = instruction.metadata if isinstance(instruction.metadata, dict) else {}
+    strat = md.get("strategy_name")
+    if isinstance(strat, str) and strat.strip():
+        strategy = strat.strip()
     px = price if price > 0 else Decimal("1")
     qty = instruction.target_notional / px
     if instruction.action in ("close", "reduce"):

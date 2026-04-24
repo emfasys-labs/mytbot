@@ -12,9 +12,37 @@ from decimal import Decimal
 
 from config.loaders import load_allocation
 from config.models import AllocationConfig
-from core.models_runtime import AllocationDecision, ExecutionInstruction, ExecutionPlan, PortfolioState, clip_decimal
+from core.models_runtime import (
+    AllocationDecision,
+    AllocationTarget,
+    ExecutionInstruction,
+    ExecutionPlan,
+    PortfolioState,
+    clip_decimal,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _d015_instr_meta(
+    t: AllocationTarget | None = None,
+    *,
+    extra: dict[str, str | int | float | bool] | None = None,
+) -> dict[str, str | int | float | bool]:
+    out: dict[str, str | int | float | bool] = {"d015": True}
+    if t is not None:
+        sn = t.strategy_name
+        if not sn and isinstance(t.metadata, dict):
+            raw = t.metadata.get("strategy")
+            if raw is not None:
+                sn = str(raw).strip() or None
+        elif isinstance(sn, str):
+            sn = sn.strip() or None
+        if sn:
+            out["strategy_name"] = str(sn)
+    if extra:
+        out.update(extra)
+    return out
 
 
 def _pos_map(portfolio_state: PortfolioState) -> dict[str, Decimal]:
@@ -93,7 +121,7 @@ def build_execution_plan(
                     urgency_score=Decimal(str(urg.replacement_open))
                     * _demand_urgency_multiplier(decision=decision, action="open", side=tgt.side),
                     reason="replacement_open",
-                    metadata={"d015": True},
+                    metadata=_d015_instr_meta(tgt),
                 )
             )
 
@@ -132,7 +160,7 @@ def build_execution_plan(
                         * _demand_urgency_multiplier(decision=decision, action="reduce", side=t.side),
                         reduce_only=True,
                         reason="allocation_reduce",
-                        metadata={"d015": True},
+                        metadata=_d015_instr_meta(t),
                     )
                 )
             continue
@@ -153,7 +181,7 @@ def build_execution_plan(
                             side=t.side,
                         ),
                         reason="allocation_open_or_increase",
-                        metadata={"d015": True},
+                        metadata=_d015_instr_meta(t),
                     )
                 )
 

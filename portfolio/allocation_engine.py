@@ -165,6 +165,12 @@ def build_allocation_decision(
     for rank, (o, nw) in enumerate(zip(sorted_opps, norm_ws, strict=True), start=1):
         tw = clip_decimal(Decimal(str(nw)) * ge, Decimal("0"), max_w)
         tn = clip_decimal(portfolio_state.nav * tw, Decimal("0"), portfolio_state.nav * max_ge)
+        omd = dict(o.metadata) if isinstance(o.metadata, dict) else {}
+        sn = omd.get("strategy")
+        if sn is not None and not isinstance(sn, str):
+            sn = str(sn).strip() or None
+        elif isinstance(sn, str):
+            sn = sn.strip() or None
         targets.append(
             AllocationTarget(
                 symbol=o.symbol,
@@ -174,7 +180,8 @@ def build_allocation_decision(
                 side=o.side,
                 source_opportunity_score=o.opportunity_score,
                 priority_rank=rank,
-                metadata={"d015": True},
+                strategy_name=sn,
+                metadata={**omd, "d015": True},
             )
         )
         if o.symbol not in pos_set:

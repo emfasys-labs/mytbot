@@ -19,7 +19,7 @@ Config (from config/strategies.yaml):
     momentum_threshold: 0.002   # min price move above rolling high
 """
 
-from typing import Optional
+from typing import Any, Optional
 from decimal import Decimal, InvalidOperation
 import pandas as pd
 import logging
@@ -107,6 +107,66 @@ class MomentumBreakoutStrategy(Strategy):
         except Exception as e:
             logger.error(f"{self.name} error on {symbol}: {e}")
             return None
+
+    def no_setup_snapshot(self, symbol: str, df: pd.DataFrame) -> dict[str, Any]:
+        """When :meth:`generate_signal` would return None, log near-miss diagnostics (D043)."""
+        out: dict[str, Any] = {
+            "near_miss_kind": "momentum_breakout",
+        }
+        if not self.enabled:
+            out["near_miss_primary"] = "strategy_disabled"
+            return out
+        lookback = int(self.config.get("lookback_periods", 20))
+        if df is None or len(df) < lookback + 1:
+            out["near_miss_primary"] = "insufficient_rows"
+            out["rows_available"] = 0 if df is None or df.empty else len(df)
+            out["min_rows"] = lookback + 1
+            return out
+        try:
+            vol_mult = self.config.get("volume_multiplier", 1.5)
+            atr_min = self.config.get("atr_min", 0.005)
+            atr_max = self.config.get("atr_max", 0.05)
+            mom_thresh = self.config.get("momentum_threshold", 0.002)
+            latest = df.iloc[-1]
+            prev = df.iloc[:-1]
+            close = float(latest["close"])
+            volume = float(latest["volume"])
+            rolling_high = float(prev["high"].rolling(lookback).max().iloc[-1])
+            avg_volume = float(prev["volume"].rolling(lookback).mean().iloc[-1])
+            atr = self._calculate_atr(df, lookback)
+            atr_pct = float(atr / close) if close > 0 else 0.0
+            price_breakout = close > rolling_high * (1 + float(mom_thresh))
+            volume_confirms = volume > avg_volume * float(vol_mult)
+            volatility_ok = float(atr_min) <= atr_pct <= float(atr_max)
+            out["price_breakout"] = bool(price_breakout)
+            out["volume_confirms"] = bool(volume_confirms)
+            out["volatility_ok"] = bool(volatility_ok)
+            out["close"] = round(close, 8)
+            out["rolling_high"] = round(rolling_high, 8)
+            out["momentum_threshold"] = float(mom_thresh)
+            out["volume"] = round(volume, 4)
+            out["avg_volume"] = round(avg_volume, 4) if avg_volume == avg_volume else 0.0
+            out["volume_multiplier"] = float(vol_mult)
+            out["atr_pct"] = round(atr_pct, 8)
+            out["atr_min"] = float(atr_min)
+            out["atr_max"] = float(atr_max)
+            if not (price_breakout and volume_confirms and volatility_ok):
+                if not price_breakout:
+                    out["near_miss_primary"] = "price_breakout"
+                elif not volume_confirms:
+                    out["near_miss_primary"] = "volume_confirms"
+                elif not volatility_ok:
+                    if atr_pct < float(atr_min):
+                        out["near_miss_primary"] = "atr_below_min"
+                    elif atr_pct > float(atr_max):
+                        out["near_miss_primary"] = "atr_above_max"
+                    else:
+                        out["near_miss_primary"] = "volatility"
+                out["reason_detail"] = "triple_gate: breakout + volume + ATR band"
+        except Exception as exc:  # noqa: BLE001
+            out["near_miss_primary"] = "diagnostic_error"
+            out["reason_detail"] = str(exc)[:500]
+        return out
 
     def _evaluate(self, symbol: str, df: pd.DataFrame) -> Optional[RawSignal]:
 

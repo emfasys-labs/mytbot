@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -73,7 +74,7 @@ from run_m3 import (
     _upsert_daily_pnl,
 )
 from signals.accumulator import SignalAccumulator
-from signals.engine import SignalEngine
+from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, get_app_database, init_async_database
 from storage.discovery import persist_anomaly_log, persist_thesis_log
 from storage.models import AIOutputLog, FeatureSnapshot, OrderLog
@@ -98,16 +99,23 @@ from execution.venue_selector import VenueSelector
 from portfolio.global_edge_coordinator import (
     GlobalEdgeCoordinator,
     cross_exchange_dict_to_strategy_opportunity,
+    dedupe_opportunities_by_symbol,
     funding_arb_signal_to_strategy_opportunity,
     held_positions_from_portfolio,
     signal_candidate_to_strategy_opportunity,
 )
+from system.strategy_candidate_log import persist_rows as persist_strategy_candidate_rows
+from system.strategy_candidate_log import row as strategy_candidate_row
 from portfolio.treasury_manager import TreasuryManager, merge_treasury_into_portfolio_state
 from signals.arb_bridge import process_coordinator_action
 from signals.microstructure.liquidity_tracker import LiquidityTracker
 from strategies.arbitrage.cross_exchange import CrossExchangeArbitrageStrategy
 from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
 
+from system.trading_loop.candidate_collection import (
+    apply_regime_filter_with_logs,
+    collect_raw_signals_for_symbol,
+)
 from system.trading_loop.helpers import (
     apply_saved_mode_to_risk_cfg,
     asset_class_for_symbol,
@@ -495,7 +503,12 @@ class TradingLoop:
                 "FUTURES_EXECUTION_ENABLED", "0"
             ).strip().lower() in ("1", "true", "yes", "on")
 
-            async def _process_signal(signal, *, symbol_hint: str | None = None) -> bool:
+            async def _process_signal(
+                signal,
+                *,
+                symbol_hint: str | None = None,
+                sc_log_buffer: list[dict[str, Any]] | None = None,
+            ) -> bool:
                 routed = self.router.route(
                     signal.asset_class,
                     signal.symbol,
@@ -542,6 +555,31 @@ class TradingLoop:
                     session_factory, signal, portfolio_state,
                 )
                 if risk_decision.verdict != RiskVerdict.APPROVED:
+                    if sc_log_buffer is not None:
+                        _md0 = (
+                            "d015"
+                            if (
+                                isinstance(getattr(signal, "metadata", None), dict)
+                                and (signal.metadata or {}).get("d015_executor")
+                            )
+                            else "legacy"
+                        )
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(signal.symbol),
+                                strategy=str(getattr(signal, "strategy", "") or ""),
+                                side=str(getattr(signal, "side", "") or ""),
+                                confidence=float(getattr(signal, "confidence", 0) or 0),
+                                status="risk_rejected",
+                                reason=str(risk_decision.reason or risk_decision.verdict.value),
+                                loop_iteration=self.iterations,
+                                metadata={
+                                    "path": _md0,
+                                    "verdict": str(risk_decision.verdict.value),
+                                    "checks_failed": list(risk_decision.checks_failed or [])[:32],
+                                },
+                            )
+                        )
                     await _persist_signal(
                         session_factory, signal,
                         paper_mode=self.paper_mode,
@@ -559,6 +597,19 @@ class TradingLoop:
                     signal, risk_decision, session_factory=session_factory,
                 )
                 if result is None:
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(signal.symbol),
+                                strategy=str(getattr(signal, "strategy", "") or ""),
+                                side=str(getattr(signal, "side", "") or ""),
+                                confidence=float(getattr(signal, "confidence", 0) or 0),
+                                status="execution_incomplete",
+                                reason="execution_no_result",
+                                loop_iteration=self.iterations,
+                                metadata={"execution_stage": "no_order_from_engine"},
+                            )
+                        )
                     try:
                         turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                         liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -575,6 +626,19 @@ class TradingLoop:
                     return False
                 status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
                 if status_val != "filled":
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(signal.symbol),
+                                strategy=str(getattr(signal, "strategy", "") or ""),
+                                side=str(getattr(signal, "side", "") or ""),
+                                confidence=float(getattr(signal, "confidence", 0) or 0),
+                                status="execution_incomplete",
+                                reason=f"order_status_{status_val}",
+                                loop_iteration=self.iterations,
+                                metadata={"execution_stage": "non_filled", "order_status": status_val},
+                            )
+                        )
                     try:
                         turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                         liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -592,6 +656,19 @@ class TradingLoop:
                     return False
                 filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
                 if filled_qty <= 0:
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(signal.symbol),
+                                strategy=str(getattr(signal, "strategy", "") or ""),
+                                side=str(getattr(signal, "side", "") or ""),
+                                confidence=float(getattr(signal, "confidence", 0) or 0),
+                                status="execution_incomplete",
+                                reason="execution_zero_fill",
+                                loop_iteration=self.iterations,
+                                metadata={"execution_stage": "zero_filled_qty", "order_status": status_val},
+                            )
+                        )
                     try:
                         turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                         liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -641,6 +718,27 @@ class TradingLoop:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+                if sc_log_buffer is not None:
+                    _md1 = (
+                        "d015"
+                        if (
+                            isinstance(getattr(signal, "metadata", None), dict)
+                            and (signal.metadata or {}).get("d015_executor")
+                        )
+                        else "legacy"
+                    )
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=str(signal.symbol),
+                            strategy=str(getattr(signal, "strategy", "") or ""),
+                            side=str(getattr(signal, "side", "") or ""),
+                            confidence=float(getattr(signal, "confidence", 0) or 0),
+                            status="executed",
+                            reason="order_filled",
+                            loop_iteration=self.iterations,
+                            metadata={"path": _md1},
+                        )
+                    )
                 return True
 
             while not self._stop_event.is_set():
@@ -798,6 +896,7 @@ class TradingLoop:
                             }
                             demand_alert_history.append(dict(last_demand_alert))
                             demand_alert_history = demand_alert_history[-20:]
+                        sc_log_rows_legacy: list[dict[str, Any]] = []
                         for symbol in symbols:
                             if self._stop_event.is_set():
                                 break
@@ -812,48 +911,34 @@ class TradingLoop:
                                 continue
 
                             sym_ac = asset_class_for_symbol(symbol)
-                            raw_candidates = []
-                            if momentum.supports_asset_class(sym_ac):
-                                m_sig = momentum.generate_signal(symbol, df)
-                                if m_sig is not None:
-                                    raw_candidates.append(m_sig)
-                            if mean_rev.supports_asset_class(sym_ac):
-                                r_sig = mean_rev.generate_signal(symbol, df)
-                                if r_sig is not None:
-                                    raw_candidates.append(r_sig)
-                            if volume_flow.supports_asset_class(sym_ac):
-                                vf_sig = volume_flow.generate_signal(symbol, df)
-                                if vf_sig is not None:
-                                    raw_candidates.append(vf_sig)
-                            if volatility_regime.supports_asset_class(sym_ac):
-                                vol_sig = volatility_regime.generate_signal(symbol, df)
-                                if vol_sig is not None:
-                                    raw_candidates.append(vol_sig)
-                            if ai_result is not None:
-                                ev_sig = event_driven.generate_from_context(
-                                    symbol=symbol,
-                                    asset_class=sym_ac,
-                                    news_score=ai_result.news_scores.get(symbol),
-                                    news_detail=ai_result.news_details.get(symbol),
-                                    macro_regime=ai_result.macro_regime,
-                                    macro_confidence=ai_result.macro_confidence,
-                                )
-                                if ev_sig is not None:
-                                    raw_candidates.append(ev_sig)
-                            rr_sig = regime_rotation.generate_from_demand(
+                            raw_candidates, sym_sc = collect_raw_signals_for_symbol(
                                 symbol=symbol,
-                                asset_class=sym_ac,
+                                df=df,
+                                sym_ac=sym_ac,
+                                momentum=momentum,
+                                mean_rev=mean_rev,
+                                volume_flow=volume_flow,
+                                volatility_regime=volatility_regime,
+                                event_driven=event_driven,
+                                regime_rotation=regime_rotation,
+                                ai_result=ai_result,
                                 demand_score=demand_score,
                                 demand_trend=demand_trend,
                                 demand_confidence=demand_confidence,
+                                loop_iteration=self.iterations,
                             )
-                            if rr_sig is not None:
-                                raw_candidates.append(rr_sig)
+                            sc_log_rows_legacy.extend(sym_sc)
 
-                            if ai_result is not None and ai_pipeline is not None:
-                                allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                                filtered = filter_by_allowed_strategies(raw_candidates, allowed)
-                                raw_candidates = filtered
+                            raw_candidates = apply_regime_filter_with_logs(
+                                raw_candidates,
+                                symbol=symbol,
+                                ai_result=ai_result,
+                                ai_pipeline=ai_pipeline,
+                                sc_rows=sc_log_rows_legacy,
+                                loop_iteration=self.iterations,
+                            )
+
+                            pre_meta_r = list(raw_candidates)
                             if meta_enabled and raw_candidates:
                                 meta_cfg_eff = dict(meta_cfg)
                                 static_bias = dict(meta_cfg_eff.get("strategy_bias", {}) or {})
@@ -864,7 +949,8 @@ class TradingLoop:
                                         static_bias[k] = float(v)
                                 meta_cfg_eff["strategy_bias"] = static_bias
                                 raw_candidates = [
-                                    r for r in raw_candidates
+                                    r
+                                    for r in raw_candidates
                                     if meta_keep_raw_signal(
                                         r,
                                         demand_score=demand_score,
@@ -872,10 +958,40 @@ class TradingLoop:
                                         mode=mode_raw,
                                     )
                                 ]
+                                kept_meta_raw = {(r.symbol, r.strategy) for r in raw_candidates}
+                                for r in pre_meta_r:
+                                    if (r.symbol, r.strategy) in kept_meta_raw:
+                                        continue
+                                    sc_log_rows_legacy.append(
+                                        strategy_candidate_row(
+                                            symbol=symbol,
+                                            strategy=str(r.strategy),
+                                            side=str(r.side) if r.side else None,
+                                            confidence=r.confidence,
+                                            status="filtered_meta",
+                                            reason="meta_label_filter_raw",
+                                            loop_iteration=self.iterations,
+                                        )
+                                    )
 
                             raw = _pick_best_signal(raw_candidates)
                             if raw is None:
                                 continue
+                            for r in raw_candidates:
+                                if (r.symbol, r.strategy) == (raw.symbol, raw.strategy):
+                                    continue
+                                sc_log_rows_legacy.append(
+                                    strategy_candidate_row(
+                                        symbol=symbol,
+                                        strategy=str(r.strategy),
+                                        side=str(r.side) if r.side else None,
+                                        confidence=r.confidence,
+                                        status="lost_to_strategy",
+                                        reason="lower_confidence_vs_peer",
+                                        winner_strategy=str(raw.strategy),
+                                        loop_iteration=self.iterations,
+                                    )
+                                )
 
                             signal = self.sig_engine.process(
                                 raw,
@@ -927,6 +1043,9 @@ class TradingLoop:
                             if ok:
                                 executed += 1
 
+                        if sc_log_rows_legacy:
+                            await persist_strategy_candidate_rows(session_factory, sc_log_rows_legacy)
+
                         if discovery_pipeline is not None:
                             discovery_items = await discovery_pipeline.run_cycle_detailed(
                                 portfolio_value=Decimal(str(effective_value)),
@@ -966,6 +1085,7 @@ class TradingLoop:
                                     )
                     else:
                         batch_candidates.clear()
+                        sc_log_rows: list[dict[str, Any]] = []
                         feature_map: dict[str, Any] = {}
                         demand_ctx = demand_engine.compute(
                             ai_result=ai_result,
@@ -1013,69 +1133,76 @@ class TradingLoop:
                             feature_map[symbol.strip().upper()] = df
 
                             sym_ac = asset_class_for_symbol(symbol)
-                            raw_candidates = []
-                            if momentum.supports_asset_class(sym_ac):
-                                m_sig = momentum.generate_signal(symbol, df)
-                                if m_sig is not None:
-                                    raw_candidates.append(m_sig)
-                            if mean_rev.supports_asset_class(sym_ac):
-                                r_sig = mean_rev.generate_signal(symbol, df)
-                                if r_sig is not None:
-                                    raw_candidates.append(r_sig)
-                            if volume_flow.supports_asset_class(sym_ac):
-                                vf_sig = volume_flow.generate_signal(symbol, df)
-                                if vf_sig is not None:
-                                    raw_candidates.append(vf_sig)
-                            if volatility_regime.supports_asset_class(sym_ac):
-                                vol_sig = volatility_regime.generate_signal(symbol, df)
-                                if vol_sig is not None:
-                                    raw_candidates.append(vol_sig)
-                            if ai_result is not None:
-                                ev_sig = event_driven.generate_from_context(
-                                    symbol=symbol,
-                                    asset_class=sym_ac,
-                                    news_score=ai_result.news_scores.get(symbol),
-                                    news_detail=ai_result.news_details.get(symbol),
-                                    macro_regime=ai_result.macro_regime,
-                                    macro_confidence=ai_result.macro_confidence,
-                                )
-                                if ev_sig is not None:
-                                    raw_candidates.append(ev_sig)
-                            rr_sig = regime_rotation.generate_from_demand(
+                            raw_candidates, sym_sc = collect_raw_signals_for_symbol(
                                 symbol=symbol,
-                                asset_class=sym_ac,
+                                df=df,
+                                sym_ac=sym_ac,
+                                momentum=momentum,
+                                mean_rev=mean_rev,
+                                volume_flow=volume_flow,
+                                volatility_regime=volatility_regime,
+                                event_driven=event_driven,
+                                regime_rotation=regime_rotation,
+                                ai_result=ai_result,
                                 demand_score=demand_score,
                                 demand_trend=demand_trend,
                                 demand_confidence=demand_confidence,
+                                loop_iteration=self.iterations,
                             )
-                            if rr_sig is not None:
-                                raw_candidates.append(rr_sig)
+                            sc_log_rows.extend(sym_sc)
 
-                            if ai_result is not None and ai_pipeline is not None:
-                                allowed = ai_pipeline.allowed_strategy_names(ai_result.macro_regime)
-                                raw_candidates = filter_by_allowed_strategies(raw_candidates, allowed)
-
-                            raw = _pick_best_signal(raw_candidates)
-                            if raw is None:
-                                continue
-
-                            cand = self.sig_engine.raw_to_signal_candidate(
-                                raw,
-                                news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
+                            raw_candidates = apply_regime_filter_with_logs(
+                                raw_candidates,
+                                symbol=symbol,
+                                ai_result=ai_result,
+                                ai_pipeline=ai_pipeline,
+                                sc_rows=sc_log_rows,
+                                loop_iteration=self.iterations,
                             )
-                            if cand is None:
-                                continue
 
-                            resolved_ac = asset_class_for_symbol(symbol)
-                            if resolved_ac and str(cand.asset_class) != resolved_ac:
-                                cand.asset_class = cast(AssetClass, resolved_ac)
+                            for raw in raw_candidates:
+                                cand = self.sig_engine.raw_to_signal_candidate(
+                                    raw,
+                                    news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
+                                )
+                                if cand is None:
+                                    sc_log_rows.append(
+                                        strategy_candidate_row(
+                                            symbol=symbol,
+                                            strategy=str(raw.strategy),
+                                            side=str(raw.side) if raw.side else None,
+                                            confidence=raw.confidence,
+                                            status="filtered_signal_engine",
+                                            reason="news_veto_or_gate",
+                                            loop_iteration=self.iterations,
+                                        )
+                                    )
+                                    continue
 
-                            if ai_result is not None:
-                                cand.metadata["ai_macro_regime"] = ai_result.macro_regime
-                                cand.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+                                resolved_ac = asset_class_for_symbol(symbol)
+                                if resolved_ac and str(cand.asset_class) != resolved_ac:
+                                    cand.asset_class = cast(AssetClass, resolved_ac)
 
-                            enrich_candidate_volume_z(cand, df)
-                            batch_candidates.append(cand)
+                                if ai_result is not None:
+                                    if not isinstance(cand.metadata, dict):
+                                        cand.metadata = {}
+                                    cand.metadata["ai_macro_regime"] = ai_result.macro_regime
+                                    cand.metadata["ai_macro_confidence"] = ai_result.macro_confidence
+
+                                enrich_candidate_volume_z(cand, df)
+                                batch_candidates.append(cand)
+                                sc_log_rows.append(
+                                    strategy_candidate_row(
+                                        symbol=symbol,
+                                        strategy=str(cand.strategy_name),
+                                        side=str(cand.side),
+                                        confidence=float(cand.confidence),
+                                        adjusted_strength=cand.adjusted_signal_strength,
+                                        status="generated",
+                                        reason="raw_to_signal_candidate",
+                                        loop_iteration=self.iterations,
+                                    )
+                                )
 
                         # Cross-symbol relative-value opportunities (pairs) are
                         # generated once per cycle after all feature windows load.
@@ -1128,6 +1255,7 @@ class TradingLoop:
                             md["demand_trend"] = demand_trend
                             md["demand_confidence"] = round(demand_confidence, 6)
                             cand.metadata = md
+                        pre_meta_for_label = list(batch_candidates)
                         if meta_enabled and batch_candidates:
                             meta_cfg_eff = dict(meta_cfg)
                             static_bias = dict(meta_cfg_eff.get("strategy_bias", {}) or {})
@@ -1138,7 +1266,7 @@ class TradingLoop:
                                     static_bias[k] = float(v)
                             meta_cfg_eff["strategy_bias"] = static_bias
                             batch_candidates, mlr = meta_filter_candidates(
-                                batch_candidates,
+                                pre_meta_for_label,
                                 demand_score=demand_score,
                                 cfg=meta_cfg_eff,
                                 mode=mode_raw,
@@ -1149,6 +1277,22 @@ class TradingLoop:
                                     mlr.dropped,
                                     mlr.kept,
                                     demand_score,
+                                )
+                            kept_meta = {(c.symbol, c.strategy_name) for c in batch_candidates}
+                            for c in pre_meta_for_label:
+                                if (c.symbol, c.strategy_name) in kept_meta:
+                                    continue
+                                sc_log_rows.append(
+                                    strategy_candidate_row(
+                                        symbol=c.symbol,
+                                        strategy=str(c.strategy_name),
+                                        side=str(c.side) if c.side else None,
+                                        confidence=float(c.confidence),
+                                        adjusted_strength=c.adjusted_signal_strength,
+                                        status="filtered_meta",
+                                        reason="meta_label_below_threshold",
+                                        loop_iteration=self.iterations,
+                                    )
                                 )
 
                         if discovery_pipeline is not None:
@@ -1220,6 +1364,7 @@ class TradingLoop:
                                     total_equity=total_equity,
                                     resolve_price=_resolve_price_for_symbol,
                                     strat_cfg=strat_cfg,
+                                    sc_log_buffer=sc_log_rows,
                                 )
                                 if ge_dash_ok:
                                     dashboard_snapshot_published = True
@@ -1322,6 +1467,23 @@ class TradingLoop:
                                     routed = self.router.route(ac, instr.symbol, metadata={"profile_mode": mode_raw})
                                     if routed is None:
                                         continue
+                                    imd = instr.metadata if isinstance(instr.metadata, dict) else {}
+                                    st_plan = str(imd.get("strategy_name") or "d015_allocator").strip() or "d015_allocator"
+                                    sc_log_rows.append(
+                                        strategy_candidate_row(
+                                            symbol=str(instr.symbol),
+                                            strategy=st_plan,
+                                            side=str(instr.side) if instr.side else None,
+                                            status="selected_for_allocation",
+                                            reason="d015_plan_instruction",
+                                            loop_iteration=self.iterations,
+                                            metadata={
+                                                "action": str(instr.action),
+                                                "path": "d015",
+                                                "target_notional": str(instr.target_notional),
+                                            },
+                                        )
+                                    )
                                     rs = risk_signal_from_execution_instruction(
                                         instr,
                                         signal_id=str(uuid.uuid4()),
@@ -1329,9 +1491,24 @@ class TradingLoop:
                                         asset_class=ac,
                                         price=px,
                                     )
-                                    ok = await _process_signal(rs, symbol_hint=instr.symbol)
+                                    ok = await _process_signal(
+                                        rs,
+                                        symbol_hint=instr.symbol,
+                                        sc_log_buffer=sc_log_rows,
+                                    )
                                     if ok:
                                         executed += 1
+
+                        if not use_legacy and sc_log_rows:
+                            c_status = Counter(str(r.get("status", "")) for r in sc_log_rows)
+                            c_strat = Counter(str(r.get("strategy", "")) for r in sc_log_rows if r.get("status") == "generated")
+                            logger.info(
+                                "strategy_candidate_log | cycle | rows={} by_status={} generated_by_strategy_sample={}",
+                                len(sc_log_rows),
+                                dict(c_status),
+                                dict(c_strat.most_common(8)),
+                            )
+                            await persist_strategy_candidate_rows(session_factory, sc_log_rows)
 
                     if not dashboard_snapshot_published:
                         try:
@@ -1546,6 +1723,7 @@ class TradingLoop:
         total_equity: Decimal,
         resolve_price,
         strat_cfg: dict[str, Any],
+        sc_log_buffer: list[dict[str, Any]] | None = None,
     ) -> tuple[int, bool]:
         """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution.
 
@@ -1638,14 +1816,55 @@ class TradingLoop:
                 )
             new_opps = filtered_opps
 
+        new_opps_dedup, lost_to_winners = dedupe_opportunities_by_symbol(new_opps)
+        buf = sc_log_buffer
+        if buf is not None and lost_to_winners:
+            for loser, winner in lost_to_winners:
+                try:
+                    ls = getattr(loser, "priority_score", None)
+                    ws = getattr(winner, "priority_score", None)
+                    buf.append(
+                        strategy_candidate_row(
+                            symbol=str(loser.symbol),
+                            strategy=str(loser.strategy_name),
+                            side=str(getattr(loser, "side", "") or ""),
+                            confidence=float(getattr(loser, "confidence", 0) or 0),
+                            status="lost_to_strategy",
+                            reason="same_symbol_dedupe",
+                            winner_strategy=str(winner.strategy_name),
+                            loop_iteration=self.iterations,
+                            metadata={
+                                "loser_score": str(ls) if ls is not None else None,
+                                "winner_score": str(ws) if ws is not None else None,
+                            },
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
         coord = GlobalEdgeCoordinator(self._global_edge_cfg, logger=logger)
         repl_ctx = await load_replacement_context_from_bus(bus)
         actions = coord.propose_actions(
             held,
-            new_opps,
+            new_opps_dedup,
             active_mode=mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader",
             replacement_context=repl_ctx,
         )
+        if buf is not None and actions:
+            for act in actions:
+                try:
+                    buf.append(
+                        strategy_candidate_row(
+                            symbol=str(act.symbol),
+                            strategy=str(act.strategy_name),
+                            status="selected_for_allocation",
+                            reason="global_edge_coordinator",
+                            metadata={"priority_score": str(act.priority_score), "kind": str(act.kind)},
+                            loop_iteration=self.iterations,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         log_arb_event("rank", ranked=len(actions), opportunities=len(new_opps), held=len(held))
 
         dashboard_snapshot_written = False
@@ -1719,7 +1938,14 @@ class TradingLoop:
                         log_arb_event("reject", reason="planner_error", symbol=sig.symbol)
                         continue
 
-            ok = await self._process_signal_global(sig, session_factory, portfolio_dict, total_equity, tradable)
+            ok = await self._process_signal_global(
+                sig,
+                session_factory,
+                portfolio_dict,
+                total_equity,
+                tradable,
+                sc_log_buffer=sc_log_buffer,
+            )
             if ok:
                 executed += 1
                 log_arb_event("execute", symbol=sig.symbol, strategy=sig.strategy, side=sig.side)
@@ -1732,6 +1958,7 @@ class TradingLoop:
         portfolio_dict: dict[str, Any],
         total_equity: Decimal,
         tradable: Decimal,
+        sc_log_buffer: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Single-signal processing mirroring _process_signal for coordinator path."""
         if self.router is None or self.risk_engine is None or self.execution_engine is None:
@@ -1779,6 +2006,22 @@ class TradingLoop:
             portfolio_dict,
         )
         if risk_decision.verdict != RiskVerdict.APPROVED:
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(signal.symbol),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="risk_rejected",
+                        reason=str(risk_decision.reason or risk_decision.verdict.value),
+                        loop_iteration=self.iterations,
+                        metadata={
+                            "verdict": str(risk_decision.verdict.value),
+                            "checks_failed": list(risk_decision.checks_failed or [])[:32],
+                        },
+                    )
+                )
             await _persist_signal(
                 session_factory,
                 signal,
@@ -1800,6 +2043,19 @@ class TradingLoop:
             session_factory=session_factory,
         )
         if result is None:
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(signal.symbol),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="execution_incomplete",
+                        reason="execution_no_result",
+                        loop_iteration=self.iterations,
+                        metadata={"execution_stage": "no_order_from_engine"},
+                    )
+                )
             try:
                 turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                 liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -1816,6 +2072,19 @@ class TradingLoop:
             return False
         status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
         if status_val != "filled":
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(signal.symbol),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="execution_incomplete",
+                        reason=f"order_status_{status_val}",
+                        loop_iteration=self.iterations,
+                        metadata={"execution_stage": "non_filled", "order_status": status_val},
+                    )
+                )
             try:
                 turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                 liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -1832,6 +2101,19 @@ class TradingLoop:
             return False
         filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
         if filled_qty <= 0:
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(signal.symbol),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="execution_incomplete",
+                        reason="execution_zero_fill",
+                        loop_iteration=self.iterations,
+                        metadata={"execution_stage": "zero_filled_qty", "order_status": status_val},
+                    )
+                )
             try:
                 turnover_hint = float(signal.metadata.get("target_notional", 0.0)) if isinstance(signal.metadata, dict) else 0.0
                 liq_hint = float(signal.metadata.get("volume_z_score", 0.0)) if isinstance(signal.metadata, dict) else 0.0
@@ -1879,6 +2161,18 @@ class TradingLoop:
             )
         except Exception:  # noqa: BLE001
             pass
+        if sc_log_buffer is not None:
+            sc_log_buffer.append(
+                strategy_candidate_row(
+                    symbol=str(signal.symbol),
+                    strategy=str(getattr(signal, "strategy", "") or ""),
+                    side=str(getattr(signal, "side", "") or ""),
+                    confidence=float(getattr(signal, "confidence", 0) or 0),
+                    status="executed",
+                    reason="order_filled",
+                    loop_iteration=self.iterations,
+                )
+            )
         return True
 
     def _load_mode_cadence_map(self) -> dict[str, int]:

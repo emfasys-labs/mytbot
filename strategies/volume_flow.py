@@ -10,7 +10,7 @@ Captures short-horizon demand changes via:
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -40,6 +40,80 @@ class VolumeFlowStrategy(Strategy):
             "sizing_flow_scale": str(flow_scale.quantize(Decimal("0.0001"))),
             "sizing_intent_source": "volume_flow_confidence",
         }
+
+    def no_setup_snapshot(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
+        """When no RawSignal, emit volume / return / z diagnostics for strategy_candidate_log."""
+        out: dict[str, Any] = {"near_miss_kind": "volume_flow"}
+        if not self.enabled or features is None or features.empty:
+            out["near_miss_primary"] = "no_data"
+            return out
+        if "close" not in features.columns or "volume" not in features.columns:
+            out["near_miss_primary"] = "missing_ohlcv"
+            return out
+        n = len(features)
+        out["rows_available"] = n
+        lookback = int(self.config.get("volume_lookback", 20))
+        z_open = float(self.config.get("zscore_open_threshold", 1.8))
+        z_exhaust = float(self.config.get("zscore_exhaust_threshold", 3.4))
+        min_ret = float(self.config.get("min_bar_return", 0.0015))
+        out["zscore_open_threshold"] = z_open
+        out["zscore_exhaust_threshold"] = z_exhaust
+        out["min_bar_return"] = min_ret
+        if n < 25:
+            out["near_miss_primary"] = "insufficient_rows"
+            return out
+        latest = features.iloc[-1]
+        prev = features.iloc[:-1]
+        if len(prev) < lookback:
+            out["near_miss_primary"] = "insufficient_rows"
+            return out
+        try:
+            vol_hist = prev["volume"].tail(lookback)
+            std_v = float(vol_hist.std())
+            mean_v = float(vol_hist.mean())
+            if std_v <= 0:
+                std_v = max(mean_v * 0.05, 1.0)
+            latest_close = float(latest["close"])
+            prev_close = float(prev.iloc[-1]["close"])
+            if prev_close <= 0:
+                out["near_miss_primary"] = "invalid_price"
+                return out
+            bar_ret = (latest_close - prev_close) / prev_close
+            z = (float(latest["volume"]) - mean_v) / std_v
+            out["volume_z"] = round(z, 4)
+            out["bar_return_abs"] = round(abs(float(bar_ret)), 8)
+            ema_fast = float(features["close"].ewm(span=8, adjust=False).mean().iloc[-1])
+            ema_slow = float(features["close"].ewm(span=21, adjust=False).mean().iloc[-1])
+            trend_up = ema_fast > ema_slow
+            trend_dn = ema_fast < ema_slow
+            if ema_fast > ema_slow:
+                ema_align = "up"
+            elif ema_fast < ema_slow:
+                ema_align = "down"
+            else:
+                ema_align = "flat"
+            out["ema_alignment"] = ema_align
+            exhaust = bool(z >= z_exhaust and abs(float(bar_ret)) < min_ret * 0.8)
+            out["exhaustion_condition"] = exhaust
+            cont_ok = z >= z_open and abs(float(bar_ret)) >= min_ret
+            if not cont_ok and not exhaust and z < z_open:
+                out["near_miss_primary"] = "low_volume_z"
+            elif not cont_ok and not exhaust and abs(float(bar_ret)) < min_ret:
+                out["near_miss_primary"] = "bar_return_too_small"
+            elif cont_ok and not ((
+                (float(bar_ret) > 0 and (trend_up or float(bar_ret) >= min_ret * 2.0))
+                or (float(bar_ret) < 0 and (trend_dn or abs(float(bar_ret)) >= min_ret * 2.0))
+            )):
+                out["near_miss_primary"] = "trend_or_continuation"
+            elif z >= z_exhaust and not exhaust:
+                out["near_miss_primary"] = "exhaustion_not_faded"
+            else:
+                out["near_miss_primary"] = "not_triggered"
+            out["reason_detail"] = "open vs continuation + exhaustion"
+        except Exception as exc:  # noqa: BLE001
+            out["near_miss_primary"] = "diagnostic_error"
+            out["reason_detail"] = str(exc)[:500]
+        return out
 
     def generate_signal(self, symbol: str, features: pd.DataFrame) -> Optional[RawSignal]:
         if not self.enabled or features is None or features.empty or len(features) < 25:

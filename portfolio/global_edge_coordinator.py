@@ -5,6 +5,7 @@ Emits incremental actions only; does not bypass risk or execution.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,6 +13,17 @@ from typing import Any
 
 from portfolio.d015_replacement_context import ReplacementContext, churn_penalty_for_pair
 from portfolio.strategy_opportunity import StrategyOpportunity, compute_priority_score
+
+# Coordinator ranks across strategies; for the same *tradable* symbol, keep one
+# opportunity (highest :attr:`StrategyOpportunity.priority_score`) so we do not
+# emit duplicate opens. Arbitrage sleeves use distinct strategy_name values and
+# are not collapsed here.
+_OPPORTUNITY_DEDUPE_EXCLUDE: frozenset[str] = frozenset(
+    {
+        "funding_rate_arbitrage",
+        "cross_exchange_arbitrage",
+    }
+)
 
 DEFAULT_MODE = "trader"
 
@@ -461,6 +473,41 @@ class GlobalEdgeCoordinator:
             )
 
         return out
+
+
+def dedupe_opportunities_by_symbol(
+    opportunities: list[StrategyOpportunity],
+) -> tuple[list[StrategyOpportunity], list[tuple[StrategyOpportunity, StrategyOpportunity]]]:
+    """When multiple strategies propose the same symbol, keep the highest ``priority_score``.
+
+    Returns:
+        (deduplicated list for the coordinator, (loser, winner) pairs for logging
+        e.g. ``lost_to_strategy`` in ``strategy_candidate_log``).
+    """
+    if not opportunities:
+        return [], []
+    arbs: list[StrategyOpportunity] = []
+    by_sym: dict[str, list[StrategyOpportunity]] = defaultdict(list)
+    for o in opportunities:
+        name = (getattr(o, "strategy_name", None) or "").strip()
+        if name in _OPPORTUNITY_DEDUPE_EXCLUDE:
+            arbs.append(o)
+        else:
+            by_sym[str(getattr(o, "symbol", "")).strip().upper()].append(o)
+    out: list[StrategyOpportunity] = list(arbs)
+    lost_to_winner: list[tuple[StrategyOpportunity, StrategyOpportunity]] = []
+    for _sym, group in by_sym.items():
+        if not group:
+            continue
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        best = max(group, key=lambda x: x.priority_score)
+        out.append(best)
+        for o in group:
+            if o is not best:
+                lost_to_winner.append((o, best))
+    return out, lost_to_winner
 
 
 def held_positions_from_portfolio(

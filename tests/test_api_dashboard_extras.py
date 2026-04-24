@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.server import app
-from api.server import _command_bus
+from api.server import _command_bus, _session_factory
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 
 
@@ -218,6 +218,34 @@ def test_diagnostics_routing_quality(monkeypatch, client: TestClient):
         assert j["runtime_summary"]["symbols"] == 1
     finally:
         app.dependency_overrides.pop(_command_bus, None)
+
+
+def test_diagnostics_strategy_candidates_no_database(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
+
+    def override_no_db():
+        return None
+
+    app.dependency_overrides[_session_factory] = override_no_db
+    try:
+        r = client.get("/diagnostics/strategy-candidates?since_hours=24")
+        assert r.status_code == 200
+        j = r.json()
+        assert j.get("error") == "no_database"
+        assert j.get("strategies") == []
+        assert j.get("since_hours") in (24, 24.0)
+    finally:
+        app.dependency_overrides.pop(_session_factory, None)
+
+
+def test_meta_adaptation_does_not_use_strategy_candidate_log():
+    import inspect
+
+    import signals.meta_adaptation as ma
+
+    src = inspect.getsource(ma)
+    assert "StrategyCandidateLog" not in src
+    assert "strategy_candidate_log" not in src
 
 
 def test_pnl_includes_week_month_metrics(monkeypatch, client: TestClient):

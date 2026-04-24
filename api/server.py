@@ -1365,6 +1365,19 @@ async def system_status(bus: CommandBus = Depends(_command_bus)):
     return out
 
 
+@app.get("/diagnostics/strategy-candidates")
+async def diagnostics_strategy_candidates(
+    since_hours: float = Query(24, ge=0.5, le=168),
+    session_factory=Depends(_session_factory),
+):
+    """Strategy Mix metrics from :class:`~storage.models.StrategyCandidateLog` (D033)."""
+    if session_factory is None:
+        return {"since_hours": since_hours, "strategies": [], "error": "no_database"}
+    from system.strategy_candidate_log import fetch_strategy_mix_diagnostics
+
+    return await fetch_strategy_mix_diagnostics(session_factory, since_hours=since_hours)
+
+
 @app.get("/diagnostics/routing-quality")
 async def diagnostics_routing_quality(bus: CommandBus = Depends(_command_bus)):
     """Return persisted broker-symbol routing quality map/history."""

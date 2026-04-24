@@ -19,6 +19,7 @@ import {
   type DashboardSnapshot,
   type IntelligenceSignalsResponse,
   type RoutingQualityResponse,
+  type StrategyCandidateMixResponse,
   type SystemState as BackendSystemState,
   type TradingMode,
 } from '../lib/api';
@@ -169,6 +170,7 @@ export function useLiveSystem(): LiveData {
   const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
   const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
   const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
+  const [strategyMix, setStrategyMix] = useState<StrategyCandidateMixResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
     Array<{ name: string; enabled: boolean; kind?: string }>
   >([]);
@@ -216,6 +218,7 @@ export function useLiveSystem(): LiveData {
     setRuntimeDemand(null);
     setRuntimeMetaLabeling(null);
     setRoutingQuality(null);
+    setStrategyMix(null);
     setWsEvents([]);
     setOrderEvents([]);
     setPnl(null);
@@ -257,6 +260,7 @@ export function useLiveSystem(): LiveData {
         api.getDashboardSnapshot(),
         api.getOrders(50),
         api.getRoutingQuality(),
+        api.getStrategyCandidateMix(24),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -267,6 +271,7 @@ export function useLiveSystem(): LiveData {
       const snapRes = res[6].status === 'fulfilled' ? res[6].value : null;
       const ordRes = res[7].status === 'fulfilled' ? res[7].value : null;
       const routingRes = res[8].status === 'fulfilled' ? res[8].value : null;
+      const mixRes = res[9].status === 'fulfilled' ? res[9].value : null;
 
       if (sysRes) {
         const newState: BackendSystemState = sysRes.state ?? 'off';
@@ -347,6 +352,9 @@ export function useLiveSystem(): LiveData {
         setRuntimeMetaLabeling(null);
       }
       if (routingRes) setRoutingQuality(routingRes);
+      if (mixRes != null) {
+        setStrategyMix(mixRes);
+      }
 
       if (feedsLive) {
         if (pnlRes) {
@@ -607,8 +615,8 @@ export function useLiveSystem(): LiveData {
   const { approved, rejected } = useMemo(() => mapApprovedRejected(intelligence), [intelligence]);
   const executionRejections = useMemo(() => mapExecutionRejections(orders), [orders]);
   const strategies = useMemo(
-    () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence, loadedStrategies),
-    [snapshot, intelligence, loadedStrategies],
+    () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence, loadedStrategies, strategyMix),
+    [snapshot, intelligence, loadedStrategies, strategyMix],
   );
   const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
   const newsRows = useMemo(() => mapNews(news), [news]);

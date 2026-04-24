@@ -94,6 +94,35 @@ export interface Strategy {
   idle?: boolean;
   /** Whether the strategy is enabled in the trading loop registry. */
   enabled?: boolean;
+  /** D033 — pre-execution rollups from ``/diagnostics/strategy-candidates``. */
+  mix?: {
+    evaluated: number;
+    filtered: number;
+    counts: {
+      no_setup: number;
+      generated: number;
+      filtered_regime: number;
+      filtered_signal_engine: number;
+      filtered_meta: number;
+      lost_to_strategy: number;
+      selected_for_allocation: number;
+      risk_rejected: number;
+      executed: number;
+      skipped: number;
+      execution_incomplete?: number;
+    };
+    lastEvaluatedAt: string | null;
+    lastGeneratedAt: string | null;
+    topSkipReason: string | null;
+    topFailedConditions?: Array<{ key: string; count: number; label: string }>;
+    topRiskRejectionReasons?: Array<{ reason: string; count: number }>;
+    topExecutionIncomplete?: Array<{ reason: string; count: number }>;
+    blockerHint?: string | null;
+    /** Machine key, e.g. ``scanning``, ``trading`` */
+    lifecycle: string;
+    /** Human label for the lifecycle pill */
+    lifecycleDisplay: string;
+  };
   /** Recent signal confidences (chronological) for this strategy from `/intelligence/signals`. */
   sparkValues?: number[];
   /** Latest confidence from `sparkValues`, when available. */

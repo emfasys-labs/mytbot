@@ -438,6 +438,17 @@ Full suite still green (276 passed, 3 skipped).
 
 ---
 
+## D033 — Multi-strategy candidates, `strategy_candidate_log`, coordinator per-symbol dedupe
+
+**Date:** 2026-04-24
+**Decision:** The batch (D015 / global-edge) path no longer calls `_pick_best_signal` before building the candidate set. For each symbol, every enabled strategy that returns a raw (or a logged skip) is visible: rows go to table `strategy_candidate_log` via `system/strategy_candidate_log.py`, separate from execution-path `SignalLog` (no change to meta_adaptation joins). The global-edge coordinator receives all `StrategyOpportunity` rows, then `dedupe_opportunities_by_symbol` keeps the highest `priority_score` per symbol before `propose_actions` (arbitrage sleeve names are excluded from same-symbol collapse). Legacy per-symbol mode still executes one signal per symbol but logs `lost_to_strategy` for non-winners. `event_driven_news` logs `ai_result_unavailable` when the AI cycle did not produce a result. API: `GET /diagnostics/strategy-candidates?since_hours=24`.
+
+**Status:** Implemented. `tests/test_strategy_candidate_flow.py` covers dedupe.
+
+**D033b (2026-04-24):** The redesign **Strategy mix** card consumes `GET /diagnostics/strategy-candidates?since_hours=24` (see `fetch_strategy_mix_diagnostics` in `system/strategy_candidate_log.py`): per-strategy counts, `last_evaluated_at` / `last_generated_at`, `top_skip_reason`, and a `lifecycle` key mapped in the UI (Scanning / Finding setups / Competing / Selected / Trading / Blocked by risk / Idle). “Idle” in the UI means **zero evaluation rows in the window**, not “no trade.” D015 non-global (allocator primary) now logs `selected_for_allocation` for each `ExecutionPlan` instruction and reuses the shared `_process_signal` `sc_log_buffer` for `risk_rejected` and `executed` with `metadata.path=d015`. Same-symbol coordinator dedupe rows use `reason=same_symbol_dedupe` and `metadata` `{winner_score, loser_score}`.
+
+---
+
 ## D030 — Hunter must hunt: mode-aware capital fraction + broker-truth reconciliation
 
 **Date:** 2026-04-22

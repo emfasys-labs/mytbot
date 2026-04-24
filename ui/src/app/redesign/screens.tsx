@@ -778,7 +778,10 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
         >
           {rows.map((s) => {
             const trace = s.sparkValues && s.sparkValues.length >= 2 ? s.sparkValues : null;
-            const rosterIdle = !!s.idle || (s.weight === 0 && s.trades === 0);
+            const mix = s.mix;
+            const rosterIdle = mix
+              ? mix.evaluated === 0
+              : (!!s.idle || (s.weight === 0 && s.trades === 0));
             const isArb = s.kind === 'arbitrage';
             const showSpark = trace != null || !rosterIdle;
             const synthSpark =
@@ -787,6 +790,18 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                 : null;
             const confPct = (v: number) =>
               v >= 0 && v <= 1 ? `${(v * 100).toFixed(0)}%` : (Number.isFinite(v) ? v.toFixed(2) : '—');
+            const mixTime = (iso: string | null) => {
+              if (!iso) return '—';
+              const t = Date.parse(iso);
+              return Number.isFinite(t) ? formatRelativeTime(t) : '—';
+            };
+            const lifecycleTone = (() => {
+              if (!mix) return 'neutral' as const;
+              if (mix.lifecycle === 'trading') return 'profit' as const;
+              if (mix.lifecycle === 'blocked_by_risk') return 'danger' as const;
+              if (mix.lifecycle === 'competing' || mix.lifecycle === 'selected') return 'caution' as const;
+              return 'neutral' as const;
+            })();
             return (
               <Card key={s.name} style={rosterIdle ? { opacity: 0.78 } : undefined}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 8 }}>
@@ -798,13 +813,16 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}
                   >{strategyTitle(s.name)}</span>
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     {isArb && <Pill tone="neutral">arbitrage</Pill>}
                     {s.enabled === false && <Pill tone="loss">disabled</Pill>}
-                    {rosterIdle
-                      ? <Pill tone="neutral">idle</Pill>
-                      : <Pill tone="neutral">mix {(s.weight * 100).toFixed(0)}%</Pill>
-                    }
+                    {mix ? (
+                      <Pill tone={lifecycleTone}>{mix.lifecycleDisplay}</Pill>
+                    ) : rosterIdle ? (
+                      <Pill tone="neutral">idle</Pill>
+                    ) : (
+                      <Pill tone="neutral">mix {(s.weight * 100).toFixed(0)}%</Pill>
+                    )}
                   </div>
                 </div>
                 {showSpark ? (
@@ -824,7 +842,82 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                   }}>
                     {isArb
                       ? 'Awaiting spread / funding opportunity'
-                      : 'No recent signals in DB window · strategy registered'}
+                      : mix && mix.evaluated > 0
+                        ? 'Activity from strategy_candidate_log (see metrics below)'
+                        : 'No recent signals in DB window · strategy registered'}
+                  </div>
+                )}
+                {mix && (
+                  <div style={{
+                    marginTop: 10,
+                    padding: '10px 0 0 0',
+                    borderTop: `1px solid ${TOKENS.line}`,
+                    fontFamily: TOKENS.mono,
+                    fontSize: 10,
+                    color: TOKENS.ink2,
+                    lineHeight: 1.55,
+                  }}
+                  >
+                    <div style={{ marginBottom: 6, color: TOKENS.ink3, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                      24h observability
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '4px 12px' }}>
+                      <span>Evaluated</span><span style={{ color: TOKENS.ink0 }}>{mix.evaluated}</span>
+                      <span>Generated</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.generated}</span>
+                      <span>Filtered</span><span style={{ color: TOKENS.ink0 }}>{mix.filtered}</span>
+                      <span>Lost (peer)</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.lost_to_strategy}</span>
+                      <span>Selected</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.selected_for_allocation}</span>
+                      <span>Risk ↯</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.risk_rejected}</span>
+                      <span>Executed</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.executed}</span>
+                      <span>Exec gap</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.execution_incomplete ?? 0}</span>
+                      <span>Skipped</span><span style={{ color: TOKENS.ink0 }}>{mix.counts.skipped}</span>
+                    </div>
+                    <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '4px 12px' }}>
+                      <span>Last seen</span><span style={{ color: TOKENS.ink0 }}>{mixTime(mix.lastEvaluatedAt)}</span>
+                      <span>Last candidate</span><span style={{ color: TOKENS.ink0 }}>{mixTime(mix.lastGeneratedAt)}</span>
+                    </div>
+                    {mix.blockerHint && (
+                      <div style={{ marginTop: 8, color: TOKENS.ink0, lineHeight: 1.45 }}>
+                        <span style={{ color: TOKENS.ink3 }}>Focus · </span>
+                        {mix.blockerHint}
+                      </div>
+                    )}
+                    {mix.topFailedConditions && mix.topFailedConditions.length > 0 && (
+                      <div style={{ marginTop: 6, color: TOKENS.ink2, fontSize: 9, lineHeight: 1.45 }}>
+                        <span style={{ color: TOKENS.ink3 }}>No-setup signals · </span>
+                        {mix.topFailedConditions.slice(0, 2).map((f) => (
+                          <span key={f.key} style={{ display: 'block' }}>
+                            {f.label} ({f.count}×)
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {mix.topRiskRejectionReasons && mix.topRiskRejectionReasons.length > 0 && mix.counts.risk_rejected > 0 && (
+                      <div style={{ marginTop: 6, color: TOKENS.ink2, fontSize: 9, lineHeight: 1.45 }}>
+                        <span style={{ color: TOKENS.ink3 }}>Risk · </span>
+                        {mix.topRiskRejectionReasons.slice(0, 2).map((f) => (
+                          <span key={f.reason} style={{ display: 'block' }}>
+                            {f.reason} ({f.count}×)
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {mix.topExecutionIncomplete && mix.topExecutionIncomplete.length > 0 && (mix.counts.execution_incomplete ?? 0) > 0 && (
+                      <div style={{ marginTop: 6, color: TOKENS.ink2, fontSize: 9, lineHeight: 1.45 }}>
+                        <span style={{ color: TOKENS.ink3 }}>Post-risk exec · </span>
+                        {mix.topExecutionIncomplete.slice(0, 2).map((f) => (
+                          <span key={f.reason} style={{ display: 'block' }}>
+                            {f.reason} ({f.count}×)
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {mix.topSkipReason && (
+                      <div style={{ marginTop: 8 }}>
+                        <span style={{ color: TOKENS.ink3 }}>Top skip reason · </span>
+                        <span style={{ color: TOKENS.ink0 }}>{mix.topSkipReason}</span>
+                      </div>
+                    )}
                   </div>
                 )}
                 <div style={{

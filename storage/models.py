@@ -294,3 +294,30 @@ class ControlState(Base):
     key = Column(String(128), primary_key=True)
     value = Column(JSON, nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now(), onupdate=func.now())
+
+
+class StrategyCandidateLog(Base):
+    """Pre-execution strategy attempts: not the same as ``SignalLog`` (execution-bound).
+
+    One row per raw or skip event so operators can see regime/meta filters and
+    multi-strategy competition without polluting ``signals``/meta_adaptation joins.
+    """
+
+    __tablename__ = "strategy_candidate_log"
+
+    id = Column(String(40), primary_key=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    loop_iteration = Column(Integer, nullable=True, index=True)
+    symbol = Column(String(72), nullable=False, index=True)
+    strategy = Column(String(50), nullable=False, index=True)
+    side = Column(String(8), nullable=True)
+    confidence = Column(Numeric(12, 6), nullable=True)
+    adjusted_strength = Column(Numeric(20, 8), nullable=True)
+    status = Column(
+        String(40),
+        nullable=False,
+        index=True,
+    )  # batched | filtered_regime | filtered_meta | skipped_event_driven_no_ai | raw_to_candidate_failed
+    reason = Column(Text, nullable=True)
+    winner_strategy = Column(String(50), nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)

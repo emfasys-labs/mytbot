@@ -10,6 +10,8 @@ import type {
   ApiPositionsResponse,
   DashboardSnapshot,
   IntelligenceSignalsResponse,
+  StrategyCandidateMixResponse,
+  StrategyMixRow,
 } from '../lib/api';
 import { toNumber } from '../lib/api';
 import { parseAccumulatorScore } from '../lib/dashboardFallbacks';
@@ -590,10 +592,80 @@ export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
   return strategies.sort((a, b) => b.weight - a.weight);
 }
 
+function formatLifecycleDisplay(k: string): string {
+  switch (k) {
+    case 'scanning':
+      return 'Scanning';
+    case 'finding_setups':
+      return 'Finding setups';
+    case 'competing':
+      return 'Competing';
+    case 'selected':
+      return 'Selected';
+    case 'trading':
+      return 'Trading';
+    case 'blocked_by_risk':
+      return 'Blocked by risk';
+    case 'idle':
+      return 'Idle';
+    default:
+      return k.replace(/_/g, ' ');
+  }
+}
+
+function buildStrategyMixView(m: StrategyMixRow): NonNullable<Strategy['mix']> {
+  const c = m.counts;
+  const filtered = c.filtered_regime + c.filtered_signal_engine + c.filtered_meta;
+  return {
+    evaluated: m.evaluated,
+    filtered,
+    counts: { ...c, execution_incomplete: c.execution_incomplete ?? 0 },
+    lastEvaluatedAt: m.last_evaluated_at,
+    lastGeneratedAt: m.last_generated_at,
+    topSkipReason: m.top_skip_reason?.reason ?? null,
+    topFailedConditions: m.top_failed_conditions,
+    topRiskRejectionReasons: m.top_risk_rejection_reasons,
+    topExecutionIncomplete: m.top_execution_incomplete,
+    blockerHint: m.blocker_hint ?? null,
+    lifecycle: m.lifecycle,
+    lifecycleDisplay: formatLifecycleDisplay(m.lifecycle),
+  };
+}
+
+function emptyStrategyMixView(): NonNullable<Strategy['mix']> {
+  return {
+    evaluated: 0,
+    filtered: 0,
+    counts: {
+      no_setup: 0,
+      generated: 0,
+      filtered_regime: 0,
+      filtered_signal_engine: 0,
+      filtered_meta: 0,
+      lost_to_strategy: 0,
+      selected_for_allocation: 0,
+      risk_rejected: 0,
+      executed: 0,
+      skipped: 0,
+      execution_incomplete: 0,
+    },
+    lastEvaluatedAt: null,
+    lastGeneratedAt: null,
+    topSkipReason: null,
+    topFailedConditions: undefined,
+    topRiskRejectionReasons: undefined,
+    topExecutionIncomplete: undefined,
+    blockerHint: null,
+    lifecycle: 'idle',
+    lifecycleDisplay: 'Idle',
+  };
+}
+
 export function mergeStrategiesWithSignals(
   snapshotStrategies: Strategy[],
   sigs: IntelligenceSignalsResponse | null,
   loadedStrategies: Array<{ name: string; enabled: boolean; kind?: string }> = [],
+  mixResponse: StrategyCandidateMixResponse | null = null,
 ): Strategy[] {
   const out = new Map<string, Strategy>();
   for (const s of snapshotStrategies) out.set(s.name, s);
@@ -669,15 +741,37 @@ export function mergeStrategiesWithSignals(
 
   const kindRank = (k: string | undefined) => (String(k).toLowerCase() === 'arbitrage' ? 1 : 0);
 
+  const mixByName = new Map<string, StrategyMixRow>();
+  if (mixResponse?.strategies?.length) {
+    for (const row of mixResponse.strategies) {
+      const n = (row.name ?? '').trim();
+      if (n) mixByName.set(n, row);
+    }
+  }
+  const mixApiOk = !!(mixResponse && !mixResponse.error && Array.isArray(mixResponse.strategies));
+
   return [...out.values()]
     .map((s) => {
       const sp = intelligenceSparkForStrategy(s.name, sigs);
       const hasTrace = sp.values.length >= 2;
+      const row = mixByName.get(s.name);
+      let mix: Strategy['mix'] | undefined;
+      if (mixApiOk) {
+        mix = row ? buildStrategyMixView(row) : emptyStrategyMixView();
+      } else if (row) {
+        mix = buildStrategyMixView(row);
+      } else {
+        mix = undefined;
+      }
+      const idle =
+        mix != null ? mix.evaluated === 0 : !!s.idle;
       return {
         ...s,
         sparkValues: hasTrace ? sp.values : undefined,
         lastConfidence: hasTrace ? sp.last : null,
         sharpe: hasTrace && sp.last != null ? sp.last : s.sharpe,
+        mix,
+        idle,
       };
     })
     .sort((a, b) => {
