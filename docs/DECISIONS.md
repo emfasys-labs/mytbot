@@ -424,6 +424,8 @@ Full suite still green (276 passed, 3 skipped).
 
 **Follow-up (IBKR single-currency rows):** If IB returns only `currency=USD` rows (no `BASE` line), `system.portfolio_equity` cannot disambiguate cash vs NAV. `brokers/ibkr/adapter.py` must pick **NetLiquidation** before **TotalCashValue** / **CashBalance** when building each `Balance.total` from account-summary tags; otherwise a USD cash line (~884K) wins over NetLiq (~1,055K). See `brokers/ibkr/adapter._total_from_account_summary_tags` and `tests/test_ibkr_summary_tags.py`.
 
+**Follow-up (`run_m3._load_portfolio_state`):** The same `max(live, db)` anti-pattern lived in `run_m3._load_portfolio_state` (used by the NAV heartbeat and trading loop for `portfolio_state` / dashboard `nav`). It re-pinned stale `daily_pnl` into every snapshot and upsert, self-refreshing 884K. `run_m3._resolve_portfolio_value_for_state` now mirrors **GET /pnl**: when `fallback_portfolio_value` (live, post-allowlist) is **> 0**, it wins; DB is used only when live is still 0. See `tests/test_run_m3.py` (`test_resolve_portfolio_value_*`).
+
 ---
 
 ## D030 — Hunter must hunt: mode-aware capital fraction + broker-truth reconciliation

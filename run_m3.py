@@ -188,6 +188,27 @@ def _position_dict_notional(p: dict[str, Any]) -> Decimal:
     return qty * px
 
 
+def _resolve_portfolio_value_for_state(
+    fallback_portfolio_value: Decimal,
+    pv_from_db: Decimal,
+) -> Decimal:
+    """
+    Choose ``portfolio_value`` for M3 state, NAV heartbeat, and dashboard snapshots.
+
+    **Live** broker equity (``fallback_portfolio_value`` from
+    :func:`system.portfolio_equity.live_portfolio_value`, post-D031 allowlist) must
+    win when it is **> 0**. Taking ``max(live, db)`` with ``daily_pnl`` reintroduced
+    a self-perpetuating stale higher value (e.g. 884K) after IBKR was excluded while
+    live summed correctly to ~98K. Use the DB figure only when live is still
+    unavailable (0) but we have a positive persisted row.
+    """
+    if fallback_portfolio_value > 0:
+        return fallback_portfolio_value
+    if pv_from_db > 0:
+        return pv_from_db
+    return fallback_portfolio_value
+
+
 async def _load_portfolio_state(
     session_factory,
     *,
@@ -281,14 +302,7 @@ async def _load_portfolio_state(
         )
         trades_today = int(trades_q.scalar_one() or 0)
 
-    if fallback_portfolio_value > 0 and pv_from_db > 0:
-        portfolio_value = max(fallback_portfolio_value, pv_from_db)
-    elif fallback_portfolio_value > 0:
-        portfolio_value = fallback_portfolio_value
-    elif pv_from_db > 0:
-        portfolio_value = pv_from_db
-    else:
-        portfolio_value = fallback_portfolio_value
+    portfolio_value = _resolve_portfolio_value_for_state(fallback_portfolio_value, pv_from_db)
 
     if hwm_raw is not None:
         high_watermark_value = Decimal(str(hwm_raw))

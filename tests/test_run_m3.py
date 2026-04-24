@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pandas as pd
 
 from ai.regime import filter_by_allowed_strategies
-from run_m3 import _pick_best_signal, _rows_to_features_frame, main
+from run_m3 import (
+    _pick_best_signal,
+    _resolve_portfolio_value_for_state,
+    _rows_to_features_frame,
+    main,
+)
 from signals.engine import RawSignal
 
 
@@ -71,4 +76,21 @@ def test_main_parser_accepts_ai_config(monkeypatch):
         main()
     except SystemExit as exc:
         assert exc.code == 0
+
+
+def test_resolve_portfolio_value_live_wins_over_stale_db() -> None:
+    """D031: post-allowlist live (~98K) must not max() with stale daily_pnl (~884K)."""
+    assert _resolve_portfolio_value_for_state(Decimal("98000"), Decimal("884000")) == Decimal("98000")
+
+
+def test_resolve_portfolio_value_falls_back_to_db_when_live_zero() -> None:
+    assert _resolve_portfolio_value_for_state(Decimal("0"), Decimal("884000")) == Decimal("884000")
+
+
+def test_resolve_portfolio_value_both_zero() -> None:
+    assert _resolve_portfolio_value_for_state(Decimal("0"), Decimal("0")) == Decimal("0")
+
+
+def test_resolve_portfolio_value_live_positive_db_zero() -> None:
+    assert _resolve_portfolio_value_for_state(Decimal("1055000"), Decimal("0")) == Decimal("1055000")
 
