@@ -110,6 +110,28 @@ def test_allowed_strategy_names_from_regime_config():
     assert p.allowed_strategy_names("neutral") is None
 
 
+def test_ai_yaml_regime_gates_lists_core_signal_strategies() -> None:
+    """config/ai.yaml must list every per-symbol strategy the loop can emit (D032)."""
+    from pathlib import Path
+
+    import yaml
+
+    data = yaml.safe_load(Path("config/ai.yaml").read_text(encoding="utf-8"))
+    gates = (data.get("pipeline") or {}).get("regime_strategy_gates") or {}
+    required = {
+        "momentum_breakout",
+        "mean_reversion",
+        "volume_flow",
+        "event_driven_news",
+        "pairs_trading",
+        "volatility_regime",
+        "regime_rotation",
+    }
+    for regime, names in gates.items():
+        assert isinstance(names, list) and names, regime
+        assert required.issubset(set(names)), f"{regime} missing strategies: {required - set(names)}"
+
+
 def test_trend_label():
     from decimal import Decimal
 

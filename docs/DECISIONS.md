@@ -428,6 +428,16 @@ Full suite still green (276 passed, 3 skipped).
 
 ---
 
+## D032 — `regime_strategy_gates` must list every live signal strategy
+**Date:** 2026-04-24
+**Decision:** `config/ai.yaml` `pipeline.regime_strategy_gates` lists, per `macro_regime` label, which `RawSignal.strategy` values survive `ai.regime.filter_by_allowed_strategies` in `system/trading_loop/loop.py` **before** `_pick_best_signal`. The previous lists only included `momentum_breakout` and/or `mean_reversion`, so **volume_flow**, **event_driven_news**, **pairs_trading**, **volatility_regime**, and **regime_rotation** were **dropped every tick** whenever the AI returned a known regime key — they looked “off” in the Strategy mix even though the loop and `config/strategies.yaml` had them enabled.
+
+**Change:** All five regime keys use the same YAML anchor `default_signal_strategies` (seven names aligned with `strategies/*Strategy.name`). Operators who want a truly defensive sub-roster in `risk_off_stagflation` / `tightening` should **edit** that list rather than shipping an incomplete one by accident.
+
+**Status:** Implemented. `tests/test_ai_pipeline.test_ai_yaml_regime_gates_lists_core_signal_strategies` guards drift.
+
+---
+
 ## D030 — Hunter must hunt: mode-aware capital fraction + broker-truth reconciliation
 
 **Date:** 2026-04-22
