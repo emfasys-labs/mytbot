@@ -90,7 +90,42 @@ class ExecutionEngine:
         except (TypeError, ValueError):
             self.marketable_slip_bps = 10.0
         self.marketable_adjusted = 0  # observability counter
+        # Per-broker "balance exhausted" cooldown timestamps (set when a
+        # broker rejects with an insufficient-balance message; cleared by
+        # the next successful fill on that broker).
+        self._broker_balance_exhausted_until: dict[str, datetime] = {}
+        try:
+            self._broker_balance_cooldown_sec = float(
+                os.getenv("EXECUTION_BROKER_BALANCE_COOLDOWN_SEC", "1800") or "1800"
+            )
+        except (TypeError, ValueError):
+            self._broker_balance_cooldown_sec = 1800.0
         set_execution_engine(self)
+
+    def _is_broker_balance_exhausted(self, broker_name: str) -> bool:
+        until = self._broker_balance_exhausted_until.get(broker_name)
+        if until is None:
+            return False
+        if datetime.now(timezone.utc) >= until:
+            self._broker_balance_exhausted_until.pop(broker_name, None)
+            return False
+        return True
+
+    def _mark_broker_balance_exhausted(self, broker_name: str, reason: str) -> None:
+        if not broker_name:
+            return
+        until = datetime.now(timezone.utc) + timedelta(
+            seconds=max(60.0, self._broker_balance_cooldown_sec)
+        )
+        self._broker_balance_exhausted_until[broker_name] = until
+        logger.warning(
+            "BROKER BALANCE EXHAUSTED | broker=%s | cooldown_until=%s | reason=%s",
+            broker_name, until.isoformat(), reason,
+        )
+
+    def _clear_broker_balance_exhausted(self, broker_name: str) -> None:
+        if broker_name in self._broker_balance_exhausted_until:
+            self._broker_balance_exhausted_until.pop(broker_name, None)
 
     def add_allowed_broker(self, name: str) -> None:
         """Register a venue that became available after engine construction (e.g. late IBKR connect)."""
@@ -142,6 +177,33 @@ class ExecutionEngine:
                 return None
 
         order = self._build_order(signal)
+
+        # Paper-mode shortcut for venues without native paper-trading support.
+        # Kraken/Binance/Bybit adapters either reject paper orders outright or
+        # require a sandbox key path the user hasn't configured. Rather than
+        # spamming the order book with synthetic rejects (and burning the
+        # 7-day dedup window), simulate the fill locally — same path used
+        # when the broker is unreachable.
+        broker_name_l = (signal.broker or "").strip().lower()
+        if self.paper_mode and broker_name_l in {"kraken", "binance", "bybit"}:
+            broker_for_quote = await self._get_broker(signal.broker)
+            logger.info(
+                "PAPER FILL (no native paper on %s) | %s %s qty=%s",
+                broker_name_l, signal.symbol, signal.side, signal.suggested_quantity,
+            )
+            result = await self._simulate_fill(order, signal, broker=broker_for_quote)
+            await self._persist_result(session_factory, order, result, signal)
+            return result
+
+        # Auto-disable broker if a recent rejection signaled "insufficient
+        # balance" — keeps the allocator from looping rejects against an
+        # exhausted paper account. Cleared on next successful fill.
+        if self._is_broker_balance_exhausted(broker_name_l):
+            logger.warning(
+                "EXEC SKIP (broker balance exhausted) | %s %s broker=%s",
+                signal.symbol, signal.side, signal.broker,
+            )
+            return None
 
         broker = await self._get_broker(signal.broker)
         if broker is None:
@@ -255,6 +317,14 @@ class ExecutionEngine:
             result = tracked
             self._open_orders[order.client_order_id] = tracked
         self._ensure_rejection_metadata(order, result, signal, broker)
+
+        # Track balance-exhaustion across calls so the next signal can
+        # short-circuit before round-tripping the broker again.
+        bn = (signal.broker or "").strip().lower()
+        if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+            self._clear_broker_balance_exhausted(bn)
+        elif result.status == OrderStatus.REJECTED and self._reject_is_insufficient_balance(order):
+            self._mark_broker_balance_exhausted(bn, "insufficient_balance reject")
 
         logger.info("ORDER PLACED | %s | status=%s", result.broker_order_id, result.status)
         await self._persist_result(session_factory, order, result, signal)
@@ -671,24 +741,61 @@ class ExecutionEngine:
         if result.status not in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
             return
         meta = dict(order.instrument_metadata or {})
-        for key in ("error_message", "reject_reason", "reason"):
-            val = meta.get(key)
-            if isinstance(val, str) and val.strip():
-                order.instrument_metadata = meta
-                return
-
         broker_name = str(getattr(broker, "broker_name", "") or signal.broker or "").strip().lower()
-        if self.paper_mode and broker_name in {"kraken", "binance", "bybit"}:
-            reason = f"{broker_name} adapter has no native paper order placement; order was not sent"
-            code = "paper_mode_no_native_order"
-        else:
-            reason = "Broker returned rejected/cancelled without a structured reason; see backend log"
-            code = "broker_rejected_without_reason"
-        meta.setdefault("error_message", reason)
-        meta.setdefault("reject_reason", code)
+
+        # If the adapter populated an error_message, classify it (so balance
+        # exhaustion gets a structured reject_reason) but do not overwrite
+        # the human-readable message.
+        existing_msg = ""
+        for key in ("error_message", "reject_reason", "reason"):
+            v = meta.get(key)
+            if isinstance(v, str) and v.strip():
+                existing_msg = (existing_msg + " " + v).strip().lower()
+        already_populated = bool(existing_msg)
+
+        if not already_populated:
+            if self.paper_mode and broker_name in {"kraken", "binance", "bybit"}:
+                reason = f"{broker_name} adapter has no native paper order placement; order was not sent"
+                code = "paper_mode_no_native_order"
+            elif result.status == OrderStatus.CANCELLED:
+                reason = "Order cancelled without a structured reason; see backend log"
+                code = "broker_cancelled_without_reason"
+            else:
+                reason = "Broker returned rejected without a structured reason; see backend log"
+                code = "broker_rejected_without_reason"
+            meta["error_message"] = reason
+            meta["reject_reason"] = code
+
+        # Always tag who rejected, the terminal status, and a UTC timestamp
+        # so operators can audit without correlating to backend logs.
         if broker_name:
             meta.setdefault("rejected_by", broker_name)
+        meta.setdefault(
+            "terminal_status",
+            result.status.value if hasattr(result.status, "value") else str(result.status),
+        )
+        meta.setdefault("rejected_at", datetime.now(timezone.utc).isoformat())
+
+        # Refine reject_reason when the adapter's free-form error indicates a
+        # well-known cause — lets the auto-disable / dashboard logic key off
+        # codes instead of substring matching.
+        msg = existing_msg + " " + str(meta.get("error_message", "")).lower()
+        if "insufficient" in msg and ("balance" in msg or "fund" in msg or "buying power" in msg):
+            meta["reject_reason"] = "insufficient_balance"
+        elif "exceeds max notional" in msg or "max notional per order" in msg:
+            meta["reject_reason"] = "broker_max_notional_exceeded"
+        elif "minimum" in msg and ("notional" in msg or "size" in msg or "order" in msg):
+            meta["reject_reason"] = "broker_min_notional"
+
         order.instrument_metadata = meta
+
+    def _reject_is_insufficient_balance(self, order: Order) -> bool:
+        meta = order.instrument_metadata if isinstance(order.instrument_metadata, dict) else {}
+        code = str(meta.get("reject_reason", "")).strip().lower()
+        if code == "insufficient_balance":
+            return True
+        msg = str(meta.get("error_message", "")).strip().lower()
+        return ("insufficient" in msg) and ("balance" in msg or "fund" in msg or "buying power" in msg)
 
     async def _apply_marketable_limit(
         self,
@@ -915,10 +1022,48 @@ class ExecutionEngine:
         intended = _to_dec(md.get("sizing_final_capital_required")) or _to_dec(md.get("target_notional"))
         hard_cap = _to_dec(md.get("sizing_hard_cap_notional"))
 
+        # Reduce-only signals are exits — sizing-vs-intent doesn't apply, the
+        # quantity is bounded by the existing position. Skip the upstream-intent
+        # comparison but still apply absolute caps below.
+        is_reduce_only = bool(
+            md.get("reduce_only")
+            or str(md.get("coordinator_kind", "")).lower().startswith(("close", "flatten", "exit"))
+            or str(getattr(signal, "strategy", "") or "").lower() == "stop_loss_monitor"
+            or str(getattr(signal, "signal_id", "") or "").lower().startswith(("stoploss-", "stop_loss-"))
+        )
+
         px = order.limit_price if (order.limit_price is not None and order.limit_price > 0) else signal.suggested_price
         if px is None or px <= 0:
             return True
         actual_notional = abs(Decimal(str(order.quantity))) * Decimal(str(px))
+
+        # Absolute fallback cap when no upstream sizing audit is attached.
+        # Without this, the original guard was a no-op for any signal that
+        # bypassed the global-edge coordinator (legacy strategies, external
+        # signals, batch overrides). EXECUTION_MAX_ORDER_NOTIONAL_USD bounds
+        # the worst-case order notional regardless of metadata; default 50,000
+        # is well above normal sizing but catches the $130M-style runaways.
+        try:
+            absolute_cap = Decimal(os.getenv("EXECUTION_MAX_ORDER_NOTIONAL_USD", "50000") or "0")
+        except Exception:  # noqa: BLE001
+            absolute_cap = Decimal("50000")
+        if (
+            not is_reduce_only
+            and absolute_cap > 0
+            and actual_notional > absolute_cap
+        ):
+            logger.critical(
+                "SIZING GUARD REJECT (absolute cap) | signal_id=%s symbol=%s side=%s broker=%s | "
+                "actual_notional=%s > absolute_cap=%s | sizing_source=%s",
+                signal.signal_id,
+                signal.symbol,
+                signal.side,
+                signal.broker,
+                actual_notional,
+                absolute_cap,
+                md.get("sizing_source"),
+            )
+            return False
 
         tolerance = Decimal("1.25")
         if intended is not None and intended > 0 and actual_notional > intended * tolerance:

@@ -816,13 +816,35 @@ def test_d031c_boundary_guard_rejects_over_hard_cap() -> None:
     assert eng._passes_sizing_boundary_guard(order, sig) is False
 
 
-def test_d031c_boundary_guard_noop_when_no_sizing_metadata() -> None:
-    """Legacy signals without D031 audit metadata pass through (no fabrication)."""
+def test_d031c_boundary_guard_absolute_cap_when_no_sizing_metadata(monkeypatch) -> None:
+    """Without sizing audit metadata the guard falls back to an absolute cap.
+
+    The pre-fix guard was a no-op for legacy signals — that's what allowed
+    $130M-notional orders to slip through to Alpaca. With the fix, missing
+    audit metadata triggers ``EXECUTION_MAX_ORDER_NOTIONAL_USD`` (default
+    50,000) as a hard backstop.
+    """
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    # 10,000 × $355 = $3.55M — well above the 50,000 absolute cap → REJECT.
+    order = _sizing_order("COHR", Decimal("10000"), Decimal("355"))
+    sig = _sizing_signal({})
+    assert eng._passes_sizing_boundary_guard(order, sig) is False
+
+    # A small order with no audit metadata (e.g. legacy strategy) is still
+    # allowed when it stays under the absolute cap.
+    small_order = _sizing_order("COHR", Decimal("10"), Decimal("355"))  # 3,550
+    assert eng._passes_sizing_boundary_guard(small_order, sig) is True
+
+
+def test_d031c_boundary_guard_absolute_cap_skipped_for_reduce_only() -> None:
+    """Reduce-only / stop-loss closes are exempt from the absolute cap."""
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
     order = _sizing_order("COHR", Decimal("10000"), Decimal("355"))
-    sig = _sizing_signal({})
+    sig = _sizing_signal({"reduce_only": True})
     assert eng._passes_sizing_boundary_guard(order, sig) is True
 
 

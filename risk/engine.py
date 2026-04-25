@@ -137,6 +137,27 @@ class RiskEngine:
             }
             checks = [c for c in checks if c not in skip]
 
+        # Reduce-only signals (stop-loss closes, coordinator-driven flatten,
+        # explicit reduce_only metadata) must always be allowed to exit a
+        # losing position — otherwise drawdown gates trap the book in red ink
+        # with no way to release. We still enforce hard gates that apply to
+        # any operation regardless of direction (kill switch, broker
+        # disabled, options policy, minimum size sanity, arbitrage bundle).
+        if self._is_reduce_only_signal(signal):
+            keep = {
+                self._check_kill_switch,
+                self._check_broker_disabled,
+                self._check_options_trading_policy,
+                self._check_minimum_order_size,
+            }
+            checks = [c for c in checks if c in keep]
+            logger.info(
+                "RISK reduce_only_bypass | %s | %s | running %d gate(s) only",
+                signal.signal_id,
+                signal.symbol,
+                len(checks),
+            )
+
         for check in checks:
             result, label = check(signal, portfolio_state)
             if result:
@@ -262,6 +283,37 @@ class RiskEngine:
         if name and name in self._disabled_brokers:
             return False, "broker_disabled"
         return True, "broker_operational"
+
+    @staticmethod
+    def _is_reduce_only_signal(signal: Signal) -> bool:
+        """Detect close/exit/stop-loss intent so the engine can skip soft gates.
+
+        A *reduce-only* signal is one that, by construction, can only
+        decrease net exposure. We trust four sources of truth (in order):
+
+        1. ``signal.metadata.reduce_only`` (explicit operator/runtime flag)
+        2. ``signal.metadata.coordinator_kind`` starting with ``close`` /
+           ``flatten`` / ``exit`` (D015 global-edge coordinator emits these)
+        3. ``signal.strategy`` named ``stop_loss_monitor`` (D033 monitor)
+        4. ``signal.signal_id`` prefixed with ``stoploss-`` (legacy path)
+
+        Any of these implies the order is protective and must not be
+        blocked by drawdown / exposure / quality gates that exist to limit
+        *new* risk-taking.
+        """
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        if bool(meta.get("reduce_only")):
+            return True
+        ck = str(meta.get("coordinator_kind", "")).strip().lower()
+        if ck.startswith("close") or ck.startswith("flatten") or ck.startswith("exit"):
+            return True
+        strat = str(getattr(signal, "strategy", "") or "").strip().lower()
+        if strat == "stop_loss_monitor":
+            return True
+        sid = str(getattr(signal, "signal_id", "") or "").strip().lower()
+        if sid.startswith("stoploss-") or sid.startswith("stop_loss-"):
+            return True
+        return False
 
     @staticmethod
     def _is_option_signal(signal: Signal) -> bool:

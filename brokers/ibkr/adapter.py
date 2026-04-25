@@ -396,12 +396,21 @@ class IBKRAdapter(BrokerAdapter):
         if self._ib is None:
             return None
         for t in self._ib.trades():
-            if self._trade_broker_id(t) == broker_order_id:
-                return t
+            try:
+                if self._trade_broker_id(t) == broker_order_id:
+                    return t
+            except Exception:  # noqa: BLE001
+                # Defensive: stale Trades occasionally carry a non-Order object
+                # in t.order (e.g. a Stock contract) which raises on orderId
+                # access. Skip and keep scanning rather than aborting the loop.
+                continue
         # Caller may hold broker_order_id from before permId arrived (was orderId string).
         for t in self._ib.trades():
-            if str(t.order.orderId) == broker_order_id:
-                return t
+            try:
+                if str(t.order.orderId) == broker_order_id:
+                    return t
+            except Exception:  # noqa: BLE001
+                continue
         return None
 
     def _find_trade_by_client_order_id(self, client_order_id: str) -> Optional[Trade]:

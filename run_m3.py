@@ -469,6 +469,30 @@ async def _persist_position_snapshot(session_factory, portfolio_state: dict[str,
 async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
     d = now.date().isoformat()
+    # `fees_today_delta` is set by the trading loop when a fill produces fees;
+    # we accumulate into the existing row rather than overwriting, so we don't
+    # lose earlier fills' fees when later fills land on the same day.
+    try:
+        fee_delta = Decimal(str(portfolio_state.get("fees_today_delta", "0")))
+    except Exception:  # noqa: BLE001
+        fee_delta = Decimal("0")
+    # Compute today's unrealised pnl from the live position snapshot so
+    # operators have a real number, not a hard-coded 0.
+    try:
+        positions = portfolio_state.get("positions", {}) or {}
+        unreal = Decimal("0")
+        for _sym, p in positions.items():
+            try:
+                qty = Decimal(str(p.get("quantity", "0")))
+                avg = Decimal(str(p.get("avg_entry_price", "0")))
+                cur = Decimal(str(p.get("current_price", "0")))
+                if qty != 0 and avg > 0 and cur > 0:
+                    unreal += (cur - avg) * qty
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        unreal = Decimal("0")
+
     async with session_factory() as session:
         q = await session.execute(select(DailyPnL).where(DailyPnL.date == d).limit(1))
         row = q.scalars().first()
@@ -476,8 +500,8 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
             row = DailyPnL(
                 date=d,
                 realised_pnl=Decimal(str(portfolio_state.get("daily_realized_pnl", "0"))),
-                unrealised_pnl=Decimal("0"),
-                total_fees=Decimal("0"),
+                unrealised_pnl=unreal,
+                total_fees=fee_delta,
                 trade_count=int(portfolio_state.get("trades_today", 0)),
                 portfolio_value=Decimal(str(portfolio_state.get("portfolio_value", "0"))),
                 strategy_breakdown={
@@ -489,6 +513,13 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
             session.add(row)
         else:
             row.realised_pnl = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
+            row.unrealised_pnl = unreal
+            if fee_delta and fee_delta != Decimal("0"):
+                try:
+                    prev_fees = Decimal(str(row.total_fees or "0"))
+                except Exception:  # noqa: BLE001
+                    prev_fees = Decimal("0")
+                row.total_fees = prev_fees + fee_delta
             row.trade_count = int(portfolio_state.get("trades_today", 0))
             row.portfolio_value = Decimal(str(portfolio_state.get("portfolio_value", "0")))
             row.strategy_breakdown = {

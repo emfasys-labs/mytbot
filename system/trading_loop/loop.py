@@ -700,6 +700,43 @@ class TradingLoop:
                             signal.suggested_price = avg_fill_d
                     except Exception:  # noqa: BLE001
                         pass
+                # Realised PnL accumulation. Without this, _upsert_daily_pnl
+                # writes back whatever it just read (circular load), so the
+                # daily_pnl row stays at 0 forever even after closing trades.
+                # Only the *closing* portion of a fill realises PnL — adding
+                # to a position is just rebasing the average entry.
+                try:
+                    from run_m5 import _estimate_realized_pnl_from_fill as _est_realised
+                    realised_delta = _est_realised(post_trade_state, signal, result)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("trading_loop | realised pnl est failed: {}", exc)
+                    realised_delta = Decimal("0")
+                if realised_delta and realised_delta != Decimal("0"):
+                    try:
+                        prev = Decimal(str(post_trade_state.get("daily_realized_pnl", "0")))
+                    except Exception:  # noqa: BLE001
+                        prev = Decimal("0")
+                    post_trade_state["daily_realized_pnl"] = prev + realised_delta
+                    fee_dec = Decimal("0")
+                    fee_raw = getattr(result, "fee", None)
+                    if fee_raw is not None:
+                        try:
+                            fee_dec = Decimal(str(fee_raw))
+                        except Exception:  # noqa: BLE001
+                            fee_dec = Decimal("0")
+                    post_trade_state["fees_today_delta"] = fee_dec
+                    if realised_delta < 0:
+                        try:
+                            self.risk_engine.record_loss(abs(realised_delta))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    elif realised_delta > 0:
+                        try:
+                            self.risk_engine.record_win()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    post_trade_state.update(self.risk_engine.snapshot_runtime_state())
+
                 _apply_signal_to_portfolio_state(post_trade_state, signal)
                 await _persist_position_snapshot(session_factory, post_trade_state)
                 await _upsert_daily_pnl(session_factory, post_trade_state)

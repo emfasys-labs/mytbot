@@ -96,6 +96,7 @@ class Orchestrator:
         self._coverage_sync_task: asyncio.Task | None = None
         self._nav_heartbeat_task: asyncio.Task | None = None
         self._stop_loss_task: asyncio.Task | None = None
+        self._order_reconcile_task: asyncio.Task | None = None
         # Per-position close throttle to avoid re-emitting closes every monitor tick
         # while broker/order status is still settling.
         self._stop_loss_last_close_ts: dict[str, float] = {}
@@ -170,6 +171,7 @@ class Orchestrator:
                 self._start_coverage_sync_loop()
                 self._start_nav_heartbeat_loop()
                 self._start_stop_loss_loop()
+                self._start_order_reconcile_loop()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -299,6 +301,14 @@ class Orchestrator:
                     pass
                 self._stop_loss_task = None
             self._stop_loss_last_close_ts.clear()
+
+            if self._order_reconcile_task is not None and not self._order_reconcile_task.done():
+                self._order_reconcile_task.cancel()
+                try:
+                    await self._order_reconcile_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._order_reconcile_task = None
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
@@ -554,6 +564,201 @@ class Orchestrator:
         self._stop_loss_task = asyncio.create_task(
             self._stop_loss_loop(), name="stop-loss-monitor"
         )
+
+    def _start_order_reconcile_loop(self) -> None:
+        """Start the stuck-order reconciliation task.
+
+        ``execution.engine.ExecutionEngine._track_fill_status`` only polls for
+        ~10s after placement. Anything that doesn't reach FILLED / CANCELLED /
+        REJECTED inside that window is left in ``pending`` / ``open`` /
+        ``partially_filled`` forever, even though the broker may have moved
+        it on hours ago. Combined with the 7-day in-flight dedup window in
+        ``ExecutionEngine``, that one omission can completely halt new
+        trading on a symbol/broker pair.
+        """
+        if self._order_reconcile_task is not None and not self._order_reconcile_task.done():
+            return
+        self._order_reconcile_task = asyncio.create_task(
+            self._order_reconcile_loop(), name="order-reconcile"
+        )
+
+    async def _order_reconcile_loop(self) -> None:
+        try:
+            interval = max(15.0, float(os.getenv("ORDER_RECONCILE_INTERVAL_SEC", "60")))
+        except (TypeError, ValueError):
+            interval = 60.0
+        try:
+            min_age_sec = max(30.0, float(os.getenv("ORDER_RECONCILE_MIN_AGE_SEC", "120")))
+        except (TypeError, ValueError):
+            min_age_sec = 120.0
+        try:
+            max_age_sec = max(min_age_sec, float(os.getenv("ORDER_RECONCILE_MAX_AGE_SEC", "604800")))
+        except (TypeError, ValueError):
+            max_age_sec = 604800.0
+        try:
+            stale_cancel_sec = max(min_age_sec, float(os.getenv("ORDER_RECONCILE_STALE_CANCEL_SEC", "86400")))
+        except (TypeError, ValueError):
+            stale_cancel_sec = 86400.0
+        try:
+            batch_limit = max(10, int(os.getenv("ORDER_RECONCILE_BATCH_LIMIT", "100")))
+        except (TypeError, ValueError):
+            batch_limit = 100
+
+        while True:
+            try:
+                await self._run_order_reconcile_tick(
+                    min_age_sec=min_age_sec,
+                    max_age_sec=max_age_sec,
+                    stale_cancel_sec=stale_cancel_sec,
+                    batch_limit=batch_limit,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("orchestrator | order reconcile tick error (non-fatal): {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    async def _run_order_reconcile_tick(
+        self,
+        *,
+        min_age_sec: float,
+        max_age_sec: float,
+        stale_cancel_sec: float,
+        batch_limit: int,
+    ) -> None:
+        if self._broker_manager is None:
+            return
+
+        try:
+            from sqlalchemy import select, update
+            from storage.db import init_async_database, dispose_engine as _dispose
+            from storage.models import OrderLog
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | order reconcile imports unavailable: {}", exc)
+            return
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+
+            now = datetime.now(timezone.utc)
+            from datetime import timedelta as _td
+            min_cutoff = now - _td(seconds=min_age_sec)
+            max_cutoff = now - _td(seconds=max_age_sec)
+
+            async with sf() as session:
+                stmt = (
+                    select(OrderLog)
+                    .where(
+                        OrderLog.status.in_(("pending", "open", "partially_filled")),
+                        OrderLog.timestamp <= min_cutoff,
+                        OrderLog.timestamp >= max_cutoff,
+                    )
+                    .order_by(OrderLog.timestamp.asc())
+                    .limit(batch_limit)
+                )
+                rows = list((await session.execute(stmt)).scalars().all())
+
+            if not rows:
+                return
+
+            updated = 0
+            cancelled = 0
+            for row in rows:
+                bname = (row.broker or "").strip().lower()
+                bid = (row.broker_order_id or "").strip()
+                if not bname or not bid:
+                    continue
+                adapter = self._broker_manager.adapters.get(bname)
+                if adapter is None:
+                    continue
+
+                age_sec = (now - row.timestamp).total_seconds() if row.timestamp else 0.0
+
+                latest_status = None
+                latest_filled_qty = None
+                latest_avg_fill = None
+                latest_fee = None
+                try:
+                    latest = await adapter.get_order(bid)
+                    if latest is not None:
+                        s = getattr(latest, "status", None)
+                        latest_status = s.value if hasattr(s, "value") else (str(s) if s is not None else None)
+                        latest_filled_qty = getattr(latest, "filled_quantity", None)
+                        latest_avg_fill = getattr(latest, "avg_fill_price", None)
+                        latest_fee = getattr(latest, "fee", None)
+                except Exception as exc:  # noqa: BLE001
+                    # Broker may have purged stale orders; if old enough, mark cancelled locally
+                    # so dedup unblocks. Otherwise leave for next pass.
+                    logger.debug(
+                        "orchestrator | order reconcile | get_order failed | broker={} id={} | {}",
+                        bname, bid, exc,
+                    )
+                    if age_sec >= stale_cancel_sec:
+                        latest_status = "cancelled"
+
+                if latest_status is None:
+                    continue
+
+                ls = latest_status.strip().lower()
+                terminal = {"filled", "cancelled", "rejected"}
+                if ls not in terminal and ls != "partially_filled":
+                    # Not yet terminal at the broker either; skip.
+                    if age_sec >= stale_cancel_sec:
+                        # Aged past tolerance — try cancelling at the broker so
+                        # we don't carry the order forever. Best-effort.
+                        try:
+                            await adapter.cancel_order(bid)
+                            ls = "cancelled"
+                            cancelled += 1
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "orchestrator | order reconcile | cancel failed | broker={} id={} | {}",
+                                bname, bid, exc,
+                            )
+                            continue
+                    else:
+                        continue
+
+                values: dict[str, Any] = {"status": ls[:20]}
+                if latest_filled_qty is not None:
+                    try:
+                        values["filled_quantity"] = Decimal(str(latest_filled_qty))
+                    except Exception:  # noqa: BLE001
+                        pass
+                if latest_avg_fill is not None:
+                    try:
+                        values["avg_fill_price"] = Decimal(str(latest_avg_fill))
+                    except Exception:  # noqa: BLE001
+                        pass
+                if latest_fee is not None:
+                    try:
+                        values["fee"] = Decimal(str(latest_fee))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                async with sf() as session:
+                    await session.execute(
+                        update(OrderLog).where(OrderLog.id == row.id).values(**values)
+                    )
+                    await session.commit()
+                updated += 1
+
+            if updated or cancelled:
+                logger.info(
+                    "orchestrator | order reconcile | swept={} updated={} cancelled={}",
+                    len(rows), updated, cancelled,
+                )
+        finally:
+            if eng is not None:
+                try:
+                    from storage.db import dispose_engine as _dispose
+                    await _dispose(eng)
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _run_stop_loss_tick(self) -> None:
         """Evaluate live positions against `max_loss_per_trade_pct` and close when breached."""
