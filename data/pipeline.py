@@ -283,7 +283,8 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
         _fetch_marketaux(),
         return_exceptions=True,
     )
-    articles = []
+    # (pipeline_source, article) so rows persist ``ingest_provider`` for per-feed latest-headline age.
+    tagged: list[tuple[str, Any]] = []
     source_counts: dict[str, int] = {}
     for source, result in (
         ("newsapi", results[0]),
@@ -301,30 +302,33 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
                 pass
             continue
         source_counts[source] = len(result)
-        articles.extend(result)
+        for a in result:
+            tagged.append((source, a))
         n = len(result)
         if n > 0:
             try:
                 await record_provider_ingest(session_factory, source, ok=True, rows=n)
             except Exception:  # noqa: BLE001
                 pass
-    if not articles:
+    if not tagged:
         logger.warning("data | news | skipped | all enabled sources failed or empty")
         return
 
     now = datetime.now(timezone.utc)
-    rows = [
-        {
-            "content_hash": a.content_hash,
-            "url": a.url,
-            "title": a.title,
-            "description": a.description,
-            "source_name": a.source_name,
-            "published_at": a.published_at,
-            "fetched_at": now,
-        }
-        for a in articles
-    ]
+    rows = []
+    for source, a in tagged:
+        rows.append(
+            {
+                "content_hash": a.content_hash,
+                "url": a.url,
+                "title": a.title,
+                "description": a.description,
+                "source_name": a.source_name,
+                "ingest_provider": source,
+                "published_at": a.published_at,
+                "fetched_at": now,
+            }
+        )
     async with session_factory() as session:
         await insert_news_ignore_duplicates(session, rows)
         await session.commit()

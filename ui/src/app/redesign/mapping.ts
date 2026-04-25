@@ -278,15 +278,26 @@ export function mapPositions(
   pos: ApiPositionsResponse | null,
   totalNav: number,
 ): Position[] {
-  const rows = pos?.positions ?? [];
-  return rows.slice(0, 24).map<Position>((p) => {
+  const rows = (pos?.positions ?? []).slice(0, 24);
+  const notionals = rows.map((p) => {
     const avg = toNumber(p.avg_entry_price, 0);
     const last = toNumber(p.current_price, avg);
     const unreal = toNumber(p.unrealised_pnl, 0);
-    // Prefer the authoritative quantity from the backend. The legacy
-    // ``unreal / priceDelta`` heuristic silently collapses to zero when the
-    // price hasn't moved since entry (freshly opened positions) and mis-signs
-    // shorts — using PositionLog.quantity removes both failure modes.
+    const qtyRaw = toNumber(p.quantity, NaN);
+    let qty: number;
+    if (Number.isFinite(qtyRaw) && qtyRaw !== 0) {
+      qty = qtyRaw;
+    } else {
+      const priceDelta = last - avg;
+      qty = Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
+    }
+    return Math.abs(qty * last);
+  });
+  const sumNot = notionals.reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
+  return rows.map<Position>((p, i) => {
+    const avg = toNumber(p.avg_entry_price, 0);
+    const last = toNumber(p.current_price, avg);
+    const unreal = toNumber(p.unrealised_pnl, 0);
     const qtyRaw = toNumber(p.quantity, NaN);
     let qty: number;
     if (Number.isFinite(qtyRaw) && qtyRaw !== 0) {
@@ -296,7 +307,10 @@ export function mapPositions(
       qty = Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
     }
     const notional = Math.abs(qty * last);
-    const weight = totalNav > 0 ? notional / totalNav : 0;
+    // Share of **displayed** book: ``notional / sum(notional)``. ``notional / NAV`` mis-labels
+    // lines as 100% with margin/aggregates because weights are clamped in [0,1].
+    const wDenom = sumNot > 0 ? sumNot : totalNav;
+    const weight = wDenom > 0 ? notional / wDenom : 0;
     return {
       sym: (p.symbol ?? '').toUpperCase(),
       qty: Number.isFinite(qty) ? Math.round(qty * 100) / 100 : 0,
@@ -395,14 +409,103 @@ function ageSince(ts: string | null | undefined): string {
   return `${Math.round(secs / 86400)}d`;
 }
 
-export function mapPnlRollups(pnl: ApiPnlResponse | null): {
+/**
+ * Local calendar YYYY-MM-DD in the browser timezone.
+ */
+function ymdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Monday (local) of the current week, as YYYY-MM-DD. */
+function mondayLocalYmd(d: Date): string {
+  const c = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dow = c.getDay();
+  const delta = dow === 0 ? -6 : 1 - dow;
+  c.setDate(c.getDate() + delta);
+  return ymdLocal(c);
+}
+
+function firstOfMonthLocalYmd(d: Date): string {
+  return ymdLocal(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+function janFirstLocalYmd(d: Date): string {
+  return ymdLocal(new Date(d.getFullYear(), 0, 1));
+}
+
+/**
+ * Intraday baseline NAV: last persisted end-of-day ``portfolio_value`` before **today**; otherwise a coarse fallback.
+ * Used for the hero day-change and ``mapPnlRollups`` **d** (unused in the shell but kept consistent).
+ */
+export function navOpenFromHistory(
+  navNow: number,
+  pnl: ApiPnlResponse | null,
+  history: Array<{ date: string; value: number }>,
+): number {
+  const today = ymdLocal(new Date());
+  const sorted = [...(history ?? [])]
+    .filter((h): h is { date: string; value: number } =>
+      !!h && typeof h === 'object' && typeof h.date === 'string' && Number.isFinite(h.value) && h.value > 0,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const before = sorted.filter((h) => h.date < today);
+  if (before.length) {
+    const last = before[before.length - 1];
+    if (last && Number.isFinite(last.value)) return last.value;
+  }
+  const todayPnl = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
+  const open = navNow - todayPnl;
+  return Number.isFinite(open) && open > 0 ? open : navNow;
+}
+
+/**
+ * Change in ``navNow`` from the last persisted ``portfolio_value`` in ``history`` **before** ``periodStart`` (inclusive
+ * of prior close). Sums of daily ``unrealised`` from the API are not a reliable P&L (levels were aggregated).
+ * Falls back to API period sums if there is no usable history.
+ */
+function navChangeSincePeriodStart(
+  history: Array<{ date: string; value: number }>,
+  navNow: number,
+  periodStartYmd: string,
+  apiFallback: number,
+): number {
+  const sorted = [...(history ?? [])]
+    .filter((h): h is { date: string; value: number } =>
+      !!h && typeof h === 'object' && typeof h.date === 'string' && Number.isFinite(h.value) && h.value > 0,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (!Number.isFinite(navNow) || navNow <= 0) return 0;
+  if (!sorted.length) return apiFallback;
+  const before = sorted.filter((h) => h.date < periodStartYmd);
+  const pick = before.length > 0 ? before[before.length - 1] : sorted[0];
+  const anchor = pick && Number.isFinite(pick.value) ? pick.value : NaN;
+  if (!Number.isFinite(anchor) || anchor <= 0) return apiFallback;
+  return navNow - anchor;
+}
+
+export function mapPnlRollups(
+  pnl: ApiPnlResponse | null,
+  navNow: number,
+  history: Array<{ date: string; value: number }>,
+): {
   d: number; w: number; m: number; y: number;
 } {
-  const today = (toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0));
-  const week = (toNumber(pnl?.week?.realised, 0) + toNumber(pnl?.week?.unrealised, 0));
-  const month = (toNumber(pnl?.month?.realised, 0) + toNumber(pnl?.month?.unrealised, 0));
-  // Year rollup is not exposed; use month as a sensible, non-stale proxy.
-  return { d: today, w: week, m: month, y: month };
+  const wApi = toNumber(pnl?.week?.realised, 0) + toNumber(pnl?.week?.unrealised, 0);
+  const mApi = toNumber(pnl?.month?.realised, 0) + toNumber(pnl?.month?.unrealised, 0);
+  const now = new Date();
+  const weekStart = mondayLocalYmd(now);
+  const monthStart = firstOfMonthLocalYmd(now);
+  const ytdStart = janFirstLocalYmd(now);
+  const open = navOpenFromHistory(navNow, pnl, history);
+  return {
+    d: navNow - open,
+    w: navChangeSincePeriodStart(history, navNow, weekStart, wApi),
+    m: navChangeSincePeriodStart(history, navNow, monthStart, mApi),
+    y: navChangeSincePeriodStart(history, navNow, ytdStart, 0),
+  };
 }
 
 export function mapExposure(
@@ -786,13 +889,24 @@ export function mergeStrategiesWithSignals(
 export function estimateNavOpen(
   navNow: number,
   pnl: ApiPnlResponse | null,
+  history: Array<{ date: string; value: number }>,
 ): number {
-  const today = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
-  const open = navNow - today;
-  return Number.isFinite(open) && open > 0 ? open : navNow;
+  return navOpenFromHistory(navNow, pnl, history);
 }
 
 export function equityPeak(values: number[], navNow: number): number {
   if (!values.length) return Math.max(navNow, 0);
   return Math.max(navNow, ...values.filter((v) => Number.isFinite(v)));
+}
+
+/** Drop bad ``0`` / negative daily ``portfolio_value`` samples that cause V-shaped chart glitches. */
+export function forwardFillNavSeries(values: number[]): number[] {
+  let last = 0;
+  return values.map((v) => {
+    if (Number.isFinite(v) && v > 0) {
+      last = v;
+      return v;
+    }
+    return last;
+  });
 }

@@ -340,7 +340,12 @@ function ExposureRing({ gross, net, accent }: { gross: number; net: number; acce
 export function EquityCurve({
   values, accent, width = 900, height = 48,
 }: { values: number[]; accent: string; width?: number; height?: number }) {
-  const safeValues = values.length >= 2 ? values : values.length === 1 ? [values[0], values[0]] : [0, 0];
+  const finite = values.map((v) => (Number.isFinite(v) ? v : 0));
+  const safeValues = finite.length >= 2
+    ? finite
+    : finite.length === 1
+      ? [finite[0] ?? 0, finite[0] ?? 0]
+      : [0, 0];
   const min = Math.min(...safeValues);
   const max = Math.max(...safeValues);
   const rng = max - min || 1;

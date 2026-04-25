@@ -27,6 +27,7 @@ import { eventTimestamp, formatWsEventLine, getWsUrl, type WsTickEvent, type WsT
 import {
   estimateNavOpen,
   equityPeak,
+  forwardFillNavSeries,
   mapApprovedRejected,
   mapBrokers,
   mapConviction,
@@ -620,9 +621,15 @@ export function useLiveSystem(): LiveData {
     return Math.max(0, v);
   }, [pnl]);
 
-  // Long-term daily equity history (one point per calendar day).
+  // Long-term daily equity history (one point per calendar day). Forward-fill
+  // away zero/invalid ``portfolio_value`` rows so the sparkline does not dip to 0.
   const dailyEquityValues = useMemo(
-    () => equitySeries.map((x) => x.value).filter(Number.isFinite),
+    () => forwardFillNavSeries(
+      (equitySeries ?? []).map((x) => toNumber(
+        x != null && typeof x === 'object' && 'value' in x ? (x as { value: unknown }).value : undefined,
+        0,
+      )),
+    ),
     [equitySeries],
   );
   // What the hero chart renders: blend the long-term daily history (one
@@ -631,7 +638,9 @@ export function useLiveSystem(): LiveData {
   // moving — the backend NAV updates on every /pnl call thanks to live
   // broker prices feeding _compute_live_unrealised_mtm.
   const equityValues = useMemo(() => {
-    const live = liveNavSamples.map((s) => s.value).filter(Number.isFinite);
+    const live = liveNavSamples.map((s) => (s && typeof s === 'object' ? s.value : undefined)).filter(
+      (v): v is number => typeof v === 'number' && Number.isFinite(v),
+    );
     if (live.length === 0) return dailyEquityValues;
     if (dailyEquityValues.length <= 1) return live;
     // Drop the persisted "today" row so we don't double-plot the first
@@ -640,7 +649,10 @@ export function useLiveSystem(): LiveData {
     return [...historyTrunc, ...live];
   }, [liveNavSamples, dailyEquityValues]);
   const navPeak = useMemo(() => equityPeak(equityValues, nav), [equityValues, nav]);
-  const navOpen = useMemo(() => estimateNavOpen(nav, pnl), [nav, pnl]);
+  const navOpen = useMemo(
+    () => estimateNavOpen(nav, pnl, equitySeries),
+    [nav, pnl, equitySeries],
+  );
 
   const positions = useMemo(() => mapPositions(positionsRaw, nav), [positionsRaw, nav]);
   const conviction = useMemo(() => mapConviction(snapshot, positionChanges), [snapshot, positionChanges]);
@@ -652,7 +664,10 @@ export function useLiveSystem(): LiveData {
   );
   const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
   const newsRows = useMemo(() => mapNews(news), [news]);
-  const pnlRollups = useMemo(() => mapPnlRollups(pnl), [pnl]);
+  const pnlRollups = useMemo(
+    () => mapPnlRollups(pnl, nav, equitySeries),
+    [pnl, nav, equitySeries],
+  );
   // Derive coverage before brokers so mapBrokers can mark excluded wallets
   // for tooltip consumers (e.g. the NAV card footnote).
   const coverage = useMemo<Coverage>(() => {

@@ -1,7 +1,10 @@
 """
 Persist and read last-success timestamps for external news & macro data providers.
 
-Used by the dashboard "News & data providers" card (not per-article ``source_name``).
+Used by the dashboard "News & data providers" card. ``age_label`` / the status
+time prefer :attr:`~storage.models.NewsHeadline.published_at` of the **newest**
+row per :attr:`~storage.models.NewsHeadline.ingest_provider` (so a slow feed
+still shows the true story date, not the last batch ingest time).
 Keys live in ``ControlState`` under ``data.ingest.telemetry`` as a JSON object:
 ``{ "newsapi": {"last_at": "...", "ok": true, "rows": N} , ... }``.
 """
@@ -15,7 +18,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from storage.models import ControlState, MacroObservation
+from storage.models import ControlState, MacroObservation, NewsHeadline
 
 TELEMETRY_KEY = "data.ingest.telemetry"
 
@@ -133,6 +136,24 @@ async def _fred_latest_fetched_at(session: AsyncSession) -> datetime | None:
     return None
 
 
+def _as_utc_aware(z: datetime) -> datetime:
+    if z.tzinfo is None:
+        return z.replace(tzinfo=timezone.utc)
+    return z
+
+
+async def _max_published_for_ingest_provider(session: AsyncSession, provider: str) -> datetime | None:
+    r = await session.execute(
+        select(func.max(NewsHeadline.published_at)).where(NewsHeadline.ingest_provider == provider)
+    )
+    v = r.scalar()
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return _as_utc_aware(v)
+    return None
+
+
 def _best_iso(
     a: str | None,
     b: datetime | None,
@@ -192,27 +213,45 @@ async def build_news_data_provider_status(
 
     * ``off`` — API key not set
     * ``never`` — key set but no successful ingest recorded
-    * ``live`` / ``stale`` — from last ingest age (FRED also uses DB ``macro_observations``).
+    * ``age_label`` / ``last_ingest_at`` — newest ``published_at`` for that feed
+      (per ``ingest_provider``) when available; else telemetry / FRED as before
+    * ``live`` / ``stale`` — from that reference time (FRED: ``macro_observations``).
     """
     blob: dict[str, Any] = {}
+    max_published: dict[str, datetime | None] = {}
+    fred_max: datetime | None = None
     async with session_factory() as session:
         q = await session.execute(select(ControlState).where(ControlState.key == TELEMETRY_KEY).limit(1))
         r = q.scalars().first()
         if r and isinstance(r.value, dict):
             blob = dict(r.value)
         fred_max = await _fred_latest_fetched_at(session)
+        for pid, _, _ in NEWS_DATA_PROVIDERS:
+            if pid == "fred":
+                max_published[pid] = None
+            else:
+                max_published[pid] = await _max_published_for_ingest_provider(session, pid)
 
     out: list[dict[str, Any]] = []
     for pid, env_name, label in NEWS_DATA_PROVIDERS:
         configured = bool(_clean_api_key(os.getenv(env_name)))
         pr = blob.get(pid)
         raw: dict[str, Any] = pr if isinstance(pr, dict) else {}
-        last_iso: str | None = raw.get("last_at") if isinstance(raw.get("last_at"), str) else None
-        if last_iso and not str(last_iso).strip():
-            last_iso = None
+        telem_at: str | None = raw.get("last_at") if isinstance(raw.get("last_at"), str) else None
+        if telem_at and not str(telem_at).strip():
+            telem_at = None
         err: str | None = (str(raw.get("error"))[:2000] if raw.get("error") else None) or None
-        if pid == "fred" and fred_max is not None:
-            last_iso = _best_iso(last_iso, fred_max)
+
+        last_iso: str | None
+        if pid == "fred":
+            last_iso = _best_iso(telem_at, fred_max)
+        else:
+            am = max_published.get(pid)
+            if am is not None:
+                last_iso = _as_utc_aware(am).isoformat()
+            else:
+                # Rows ingested before ``ingest_provider`` existed, or no DB matches yet
+                last_iso = telem_at
         has_rows = last_iso is not None
         state = _state_from_last_at(last_iso, configured=configured, has_rows=has_rows)
         if configured and has_rows and raw and raw.get("ok") is False and err:

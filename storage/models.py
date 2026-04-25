@@ -174,6 +174,8 @@ class NewsHeadline(Base):
     title = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
     source_name = Column(String(120), nullable=False)
+    # Pipeline key (newsapi, finnhub, …) for per-feed “latest headline” age on the dashboard.
+    ingest_provider = Column(String(32), nullable=True, index=True)
     published_at = Column(DateTime(timezone=True), nullable=False, index=True)
     fetched_at = Column(DateTime(timezone=True), nullable=False)
 

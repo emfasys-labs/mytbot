@@ -252,6 +252,11 @@ def _session_factory():
     return sf
 
 
+def _optional_session_factory():
+    """DB session factory when present; None if app has no database (e.g. light tests)."""
+    return getattr(app.state, "db_session_factory", None)
+
+
 def _command_bus() -> CommandBus:
     bus = getattr(app.state, "command_bus", None)
     if bus is None:
@@ -1124,17 +1129,18 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     cap_pct = max(0.0, min(1.0, cap_pct))
     tradable_value = display_value * Decimal(str(cap_pct))
 
-    if today_row is not None:
-        db_today_u = Decimal(str(today_row.unrealised_pnl or 0))
-        for period_agg in (week_agg, month_agg):
-            u = Decimal(str(period_agg["unrealised"]))
-            period_agg["unrealised"] = str(
-                merge_live_today_unrealised_into_period(
-                    u,
-                    db_today_unrealised=db_today_u,
-                    live_today_unrealised=today_unrealised,
-                )
+    # Merge live MTM for today into week/month, even when today's ``DailyPnL`` row
+    # does not exist yet (``db_today`` = 0) — otherwise W/M stay 0 while "today" moves.
+    db_today_u = Decimal(str(today_row.unrealised_pnl or 0)) if today_row else Decimal(0)
+    for period_agg in (week_agg, month_agg):
+        u = Decimal(str(period_agg["unrealised"]))
+        period_agg["unrealised"] = str(
+            merge_live_today_unrealised_into_period(
+                u,
+                db_today_unrealised=db_today_u,
+                live_today_unrealised=today_unrealised,
             )
+        )
 
     return {
         "today": {
@@ -1332,7 +1338,7 @@ async def toggle_strategy(
 @app.get("/system/status")
 async def system_status(
     bus: CommandBus = Depends(_command_bus),
-    session_factory=Depends(_session_factory),
+    session_factory=Depends(_optional_session_factory),
 ):
     """Full system status including state, brokers, infrastructure, data providers."""
     from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
