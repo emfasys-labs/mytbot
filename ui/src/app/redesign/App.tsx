@@ -306,6 +306,10 @@ function NewsFooterTicker({
   const trackRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    setX(0);
+  }, [news]);
+
+  useEffect(() => {
     if (paused || news.length === 0) return;
     let raf = 0;
     let last = 0;
@@ -328,12 +332,12 @@ function NewsFooterTicker({
     return () => cancelAnimationFrame(raf);
   }, [news, paused]);
 
-  const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '—', s: 0 as const }];
+  const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '-', s: 0 as const }];
   const doubled = [...rows, ...rows];
 
   return (
     <div style={{ borderTop: `1px solid ${TOKENS.line}`, background: TOKENS.bg1 }}>
-      <div style={{ overflow: 'hidden', height: 28 }}>
+      <div style={{ overflow: 'hidden', height: 34, display: 'flex', alignItems: 'center' }}>
         <div
           ref={trackRef}
           style={{
@@ -343,10 +347,11 @@ function NewsFooterTicker({
             willChange: 'transform',
             height: '100%',
             whiteSpace: 'nowrap',
+            lineHeight: 1,
           }}
         >
           {doubled.map((n, i) => (
-            <span key={`${n.text}-${i}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '0 14px', fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink2 }}>
+            <span key={`${n.text}-${i}`} title={`${n.src} | ${n.text}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '0 18px', fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink2, lineHeight: '14px', flex: '0 0 auto' }}>
               <span style={{ width: 5, height: 5, borderRadius: 999, background: n.s > 0 ? TOKENS.profit : n.s < 0 ? TOKENS.loss : TOKENS.ink3 }} />
               <span style={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: 10, color: TOKENS.ink3 }}>{n.src}</span>
               <span style={{ color: TOKENS.ink1 }}>{n.text}</span>

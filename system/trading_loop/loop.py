@@ -795,6 +795,11 @@ class TradingLoop:
                     symbols_with_features = 0
                     symbols_feature_empty = 0
 
+                    now_ts = datetime.now(timezone.utc).timestamp()
+                    if now_ts >= next_reconcile_at:
+                        await self.execution_engine.reconcile_positions(session_factory=session_factory)
+                        next_reconcile_at = now_ts + self.reconcile_interval_sec
+
                     ai_result = None
                     if ai_pipeline is not None:
                         try:
@@ -1574,11 +1579,6 @@ class TradingLoop:
                             )
                         except Exception as hb_exc:  # noqa: BLE001
                             logger.warning("dashboard_publish | heartbeat_failed | {}", hb_exc)
-
-                    now_ts = datetime.now(timezone.utc).timestamp()
-                    if now_ts >= next_reconcile_at:
-                        await self.execution_engine.reconcile_positions(session_factory=session_factory)
-                        next_reconcile_at = now_ts + self.reconcile_interval_sec
 
                     hb_extra: dict[str, Any] = {"paper_mode": self.paper_mode}
                     hb_extra["demand"] = {

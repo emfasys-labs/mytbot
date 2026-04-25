@@ -265,7 +265,7 @@ export function useLiveSystem(): LiveData {
         api.getPositions(16),
         api.getStatus(),
         api.getSystemStatus(),
-        api.getNews(30, true),
+        api.getNews(30, false),
         api.getDashboardSnapshot(),
         api.getOrders(50),
         api.getRoutingQuality(),
@@ -422,19 +422,7 @@ export function useLiveSystem(): LiveData {
           setEquitySeries(series);
         }
         if (posRes) setPositionsRaw(posRes);
-        if (newsRes) {
-          const heads = newsRes.headlines ?? [];
-          if (heads.length > 0) {
-            setNews(newsRes);
-          } else {
-            try {
-              const fallback = await api.getNews(30, false);
-              setNews(fallback);
-            } catch {
-              setNews(newsRes);
-            }
-          }
-        }
+        if (newsRes) setNews(newsRes);
         if (ordRes) {
           const rows = (ordRes as { orders?: ApiOrderRow[] }).orders ?? [];
           setOrders(rows);

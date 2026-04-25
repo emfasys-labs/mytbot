@@ -29,6 +29,11 @@ export default defineConfig({
     __MYTBOT_BUILD_ID__: JSON.stringify(BUILD_ID),
   },
 
+  server: {
+    port: 5173,
+    strictPort: false,
+  },
+
   build: {
     rollupOptions: {
       output: {

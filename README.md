@@ -79,6 +79,16 @@ Dashboard lives in `ui/` (Vite + React). If you serve static `ui/dist` from the 
 cd ui && npm install && npm run build
 ```
 
+### UI (Vite dev — http://localhost:5173)
+
+For the normal hot-reload dashboard, keep the API on **:8000** (`python run.py` or uvicorn) and run:
+
+```bash
+cd ui && npm install && npm run dev
+```
+
+Open **http://localhost:5173/** — `ui/.env.development` sets `VITE_API_BASE=http://127.0.0.1:8000` so the browser talks to FastAPI, not the Vite server. Optional: copy `ui/.env.example` to `ui/.env.local` to override. Set `UI_AUTO_BUILD=0` when running `run.py` if you want to skip `npm run build` while iterating on the UI only.
+
 ### Tests & release gate
 
 ```bash
