@@ -262,7 +262,7 @@ export function useLiveSystem(): LiveData {
       const res = await Promise.allSettled([
         api.getPnl(),
         api.getPnlHistory(90),
-        api.getPositions(16),
+        api.getPositions(),
         api.getStatus(),
         api.getSystemStatus(),
         api.getNews(30, false),

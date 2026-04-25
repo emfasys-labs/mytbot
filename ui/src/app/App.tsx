@@ -198,7 +198,7 @@ function App() {
       const results = await Promise.allSettled([
         api.getPnl(),
         api.getPnlHistory(90),
-        api.getPositions(16),
+        api.getPositions(),
         api.getSignals(20),
         api.getStatus(),
         api.getSystemStatus(),

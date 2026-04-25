@@ -25,6 +25,12 @@ Usage:
     python -m scripts.flatten_ibkr_paper           # dry-run by default
     python -m scripts.flatten_ibkr_paper --apply   # actually submit closes
     python -m scripts.flatten_ibkr_paper --apply --symbols AXTA,CALX
+    python -m scripts.flatten_ibkr_paper --apply --tif DAY   # default; auto-cancel EOD vs GTC
+    python -m scripts.flatten_ibkr_paper --apply --force       # queue another exit even if one exists
+
+``GET /positions`` orders rows alphabetically; dashboard polling used ``limit=16``,
+which truncated the book and made weights/crypto look wrong — fixed in the UI
+(see ``POSITIONS_POLL_LIMIT`` in ``ui/src/app/lib/api.ts``).
 """
 from __future__ import annotations
 
@@ -52,6 +58,11 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("flatten_ibkr_paper")
+
+
+def _default_flatten_tif() -> str:
+    v = (os.getenv("IBKR_FLATTEN_TIF", "DAY") or "DAY").strip().upper()
+    return v if v in ("DAY", "GTC") else "DAY"
 
 
 def _refuse_if_live() -> None:
@@ -95,11 +106,37 @@ async def _cancel_all(adapter) -> int:
     return cancelled
 
 
+async def _has_active_exit_order(adapter, symbol: str, exit_side) -> bool:
+    """True if IBKR already has a working order on the exit side for *symbol*."""
+    from brokers.base import OrderStatus
+
+    sym_u = (symbol or "").strip().upper()
+    if not sym_u:
+        return False
+    terminal = {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
+    try:
+        opens = await adapter.get_open_orders()
+    except Exception:  # noqa: BLE001
+        return False
+    for o in opens:
+        if str(getattr(o, "symbol", "") or "").strip().upper() != sym_u:
+            continue
+        if getattr(o, "side", None) != exit_side:
+            continue
+        st = getattr(o, "status", None)
+        if st in terminal:
+            continue
+        return True
+    return False
+
+
 async def _flatten_positions(
     adapter,
     *,
     symbol_filter: Iterable[str] | None,
     apply: bool,
+    tif: str,
+    force_duplicate: bool,
 ) -> int:
     from brokers.base import Order, OrderSide, OrderType
 
@@ -136,6 +173,7 @@ async def _flatten_positions(
             quantity=close_qty,
             limit_price=None,
             client_order_id=str(uuid.uuid4()),
+            time_in_force=(tif or "DAY").strip().upper() or "DAY",
             instrument_metadata={
                 "reduce_only": True,
                 "flatten_paper": True,
@@ -143,10 +181,26 @@ async def _flatten_positions(
             },
         )
 
+        has_exit = await _has_active_exit_order(adapter, sym, side)
+        if has_exit and not force_duplicate:
+            if apply:
+                logger.info(
+                    "skip %s | already have active %s exit at IBKR | use --force to submit another",
+                    sym,
+                    side.value,
+                )
+            else:
+                logger.info(
+                    "[DRY-RUN] would skip %s | active %s exit already at IBKR | use --force to queue another",
+                    sym,
+                    side.value,
+                )
+            continue
+
         if not apply:
             logger.info(
-                "[DRY-RUN] would close %s | side=%s qty=%s (current qty=%s)",
-                sym, side.value, close_qty, qty,
+                "[DRY-RUN] would close %s | side=%s qty=%s (current qty=%s) tif=%s",
+                sym, side.value, close_qty, qty, order.time_in_force,
             )
             continue
 
@@ -176,7 +230,13 @@ async def _amain(args: argparse.Namespace) -> int:
         symbols = None
         if args.symbols:
             symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-        n = await _flatten_positions(adapter, symbol_filter=symbols, apply=args.apply)
+        n = await _flatten_positions(
+            adapter,
+            symbol_filter=symbols,
+            apply=args.apply,
+            tif=args.tif,
+            force_duplicate=args.force,
+        )
         logger.info("flatten complete | submitted=%d apply=%s", n, args.apply)
     finally:
         try:
@@ -193,6 +253,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="skip cancelling open orders before closing positions")
     p.add_argument("--symbols", type=str, default="",
                    help="comma-separated subset of symbols to flatten (default: all)")
+    p.add_argument(
+        "--tif",
+        choices=("DAY", "GTC"),
+        default=_default_flatten_tif(),
+        help="time in force for equity market closes (default DAY; override via IBKR_FLATTEN_TIF)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="submit a new exit even if an active exit order already exists for that symbol",
+    )
     p.set_defaults(cancel_open=True)
     return p.parse_args(argv)
 

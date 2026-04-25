@@ -1,5 +1,8 @@
 const CANDIDATE_PORTS = [8000, 8001, 8002, 8003, 8004];
 
+/** Default rows for `GET /positions` — must cover the full book; low limits slice alphabetically and skew weights. */
+export const POSITIONS_POLL_LIMIT = 200;
+
 /** Must be absolute `http(s)://host:port` — relative values break fetches (browser loads SPA HTML → JSON parse error). */
 function getSafeConfiguredBase(): string {
   const raw = (import.meta.env.VITE_API_BASE || '').trim();
@@ -592,7 +595,8 @@ export const api = {
   init: resolveApiBase,
   getPnl: () => getJson<ApiPnlResponse>('/pnl'),
   getPnlHistory: (limit = 90) => getJson<ApiPnlHistoryResponse>(`/pnl/history?limit=${limit}`),
-  getPositions: (limit = 20) => getJson<ApiPositionsResponse>(`/positions?limit=${limit}`),
+  getPositions: (limit = POSITIONS_POLL_LIMIT) =>
+    getJson<ApiPositionsResponse>(`/positions?limit=${limit}`),
   getSignals: (limit = 20) => getJson<ApiSignalsResponse>(`/signals?limit=${limit}`),
   getNews: (limit = 30, impactfulOnly = false) =>
     getJson<ApiNewsResponse>(`/news?limit=${limit}&impactful_only=${impactfulOnly ? 'true' : 'false'}`),

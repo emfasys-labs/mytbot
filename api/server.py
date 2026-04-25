@@ -580,7 +580,7 @@ async def get_status():
 
 
 @app.get("/positions")
-async def get_positions(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
+async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=Depends(_session_factory)):
     async with session_factory() as session:
         latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_ts = latest_ts_q.scalar_one_or_none()
