@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Explicit SEC form identifiers — strict patterns so these don't false-match
+# inside unrelated text. These catch filings that the institutional/holdings
+# heuristic below misses (e.g. "CFO files Form 4" with no holding-term).
+_FILING_FORM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b13[DFGdfg]\b"),
+    re.compile(r"\bschedule\s+13[DGdg]\b", re.IGNORECASE),
+    re.compile(r"\bform\s+4\b", re.IGNORECASE),
+)
 
 
 _INSTITUTIONAL_HOLDING_TERMS = (
@@ -23,6 +33,10 @@ _PASSIVE_FILING_TERMS = (
     "shares bought",
     "shares acquired",
     "shares sold",
+    "acquires shares",
+    "buys shares",
+    "sells shares",
+    "purchases shares",
     "cuts stake",
     "lowers stake",
     "raises stake",
@@ -48,6 +62,10 @@ def is_low_signal_institutional_filing(
     haystack = " ".join([title_s, desc_s, source_s, url_s]).lower()
     if "marketbeat.com/instant-alerts/filing" in haystack:
         return True
+    # Explicit SEC form identifiers anywhere in the headline → filing noise.
+    for pat in _FILING_FORM_PATTERNS:
+        if pat.search(haystack):
+            return True
     if "13f" in haystack and any(term in haystack for term in _PASSIVE_FILING_TERMS):
         return True
     return any(inst in haystack for inst in _INSTITUTIONAL_HOLDING_TERMS) and any(

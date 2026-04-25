@@ -22,6 +22,11 @@ from ai.schemas import ProviderResult
 # ── Ticker extraction ───────────────────────────────────────────────────────
 
 _DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
+# "(NASDAQ:PODD)", "(NYSE:GE)", "(NASDAQ: AAPL)" — common news convention
+# for stating the listing exchange and ticker. Without this, the rules
+# extractor produces no symbols for company headlines that don't include
+# a $TICKER form.
+_EXCHANGE_TICKER_RE = re.compile(r"\b(?:NASDAQ|NYSE|AMEX|LSE|TSX|HKEX|ASX)\s*:\s*([A-Z]{1,6})\b")
 
 _KNOWN_TICKERS: dict[str, str] = {
     "APPLE": "AAPL", "MICROSOFT": "MSFT", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
@@ -176,6 +181,8 @@ class RulesProvider(AIProvider):
         for m in _DOLLAR_TICKER_RE.finditer(text):
             found.add(m.group(1))
         upper = text.upper()
+        for m in _EXCHANGE_TICKER_RE.finditer(upper):
+            found.add(m.group(1))
         for name, ticker in _KNOWN_TICKERS.items():
             pattern = rf"(?<![A-Z0-9]){re.escape(name)}(?![A-Z0-9])"
             if re.search(pattern, upper):
