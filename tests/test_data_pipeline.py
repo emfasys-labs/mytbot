@@ -14,6 +14,7 @@ from data.finnhub_client import fetch_general_news
 from data.fred_client import fetch_series_observations
 from data.marketaux_client import fetch_all_news
 from data.newsapi_client import fetch_everything
+from data.news_quality import is_low_signal_institutional_filing
 from data import http_retry
 
 
@@ -102,6 +103,20 @@ def test_fetch_everything_parses_articles(monkeypatch) -> None:
     arts = fetch_everything("key", q="mkt")
     assert len(arts) == 1
     assert arts[0].title == "Hello"
+
+
+def test_news_quality_filters_routine_institutional_holdings() -> None:
+    assert is_low_signal_institutional_filing(
+        "Teacher Retirement System of Texas Reduces Stock Position in Insulet Corporation $PODD",
+        "The fund reduced its stake during Q4.",
+        source="MarketBeat",
+        url="https://www.marketbeat.com/instant-alerts/filing-x",
+    )
+    assert not is_low_signal_institutional_filing(
+        "Fed signals rate path shift after inflation surprise",
+        "Central bank officials discussed inflation and rates.",
+        source="Reuters",
+    )
 
 
 def test_fetch_series_observations_parses_rows(monkeypatch) -> None:

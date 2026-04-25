@@ -10,6 +10,7 @@ from loguru import logger
 from sqlalchemy import select, func
 
 from ai.news_classifier import NewsClassifier, NewsItem, NewsScore
+from data.news_quality import is_displayable_news_item
 from storage.models import AIOutputLog, MacroObservation, NewsHeadline
 
 
@@ -309,6 +310,7 @@ class AIPipeline:
         Pick up to max_news_items_per_cycle rows with source-aware balancing.
         Prevents one high-volume provider from starving others out of scoring.
         """
+        rows = [row for row in rows if is_displayable_news_item(row)]
         if not rows:
             return []
         by_source: dict[str, list[NewsHeadline]] = {}
@@ -404,6 +406,7 @@ class AIPipeline:
                 "sample_count": len(sym_scores),
                 "disagreement_ratio": disagree_ratio,
                 "provider": getattr(top, "provider", "unknown"),
+                "affected_symbols": sorted(set(top.affected_symbols)),
                 "latency_ms": getattr(top, "latency_ms", 0),
                 "cost_estimate_gbp": getattr(top, "cost_estimate_gbp", 0.0),
             }

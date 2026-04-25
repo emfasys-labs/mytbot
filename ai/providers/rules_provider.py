@@ -37,7 +37,8 @@ _KNOWN_TICKERS: dict[str, str] = {
     "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "RIPPLE": "XRP",
     "DOGECOIN": "DOGE", "CARDANO": "ADA", "POLKADOT": "DOT",
     "CHAINLINK": "LINK", "LITECOIN": "LTC", "AVALANCHE": "AVAX",
-    "S&P 500": "SPY", "S&P500": "SPY", "NASDAQ": "QQQ", "DOW JONES": "DIA",
+    "S&P 500": "SPY", "S&P500": "SPY", "NASDAQ 100": "QQQ", "NASDAQ-100": "QQQ",
+    "NASDAQ COMPOSITE": "QQQ", "DOW JONES": "DIA",
     "RUSSELL 2000": "IWM", "TREASURY": "TLT", "GOLD": "GLD", "CRUDE": "USO",
     "OIL": "USO", "DOLLAR": "DXY", "VIX": "VIX",
 }
@@ -176,7 +177,8 @@ class RulesProvider(AIProvider):
             found.add(m.group(1))
         upper = text.upper()
         for name, ticker in _KNOWN_TICKERS.items():
-            if name in upper:
+            pattern = rf"(?<![A-Z0-9]){re.escape(name)}(?![A-Z0-9])"
+            if re.search(pattern, upper):
                 found.add(ticker)
         words = re.findall(r"\b([A-Z]{2,5})\b", text)
         for w in words:

@@ -154,6 +154,32 @@ def test_airouter_runtime_ai_status_degraded_when_no_providers():
 
 
 @pytest.mark.asyncio
+async def test_rules_provider_does_not_treat_nasdaq_listing_as_qqq_news():
+    from ai.providers.rules_provider import RulesProvider
+
+    r = await RulesProvider().score_headline(
+        "Teacher Retirement System of Texas Reduces Stock Position in Insulet Corporation $PODD",
+        "Insulet (NASDAQ:PODD) was downgraded by an analyst.",
+        "MarketBeat",
+        "2026-04-25T11:39:18+01:00",
+    )
+    assert r.affected_symbols == ["PODD"]
+
+
+@pytest.mark.asyncio
+async def test_rules_provider_still_maps_nasdaq_100_to_qqq():
+    from ai.providers.rules_provider import RulesProvider
+
+    r = await RulesProvider().score_headline(
+        "Nasdaq 100 futures rally after earnings beats",
+        "",
+        "Reuters",
+        "2026-04-25T11:39:18+01:00",
+    )
+    assert "QQQ" in r.affected_symbols
+
+
+@pytest.mark.asyncio
 async def test_score_news_balances_rows_across_sources():
     clf = _FakeClassifier()
     p = AIPipeline({"max_news_items_per_cycle": 3}, classifier=clf)
@@ -170,3 +196,28 @@ async def test_score_news_balances_rows_across_sources():
     assert "newsapi" in used_sources
     assert "alphavantage" in used_sources
     assert "finnhub" in used_sources
+
+
+@pytest.mark.asyncio
+async def test_score_news_skips_low_signal_institutional_filing_rows():
+    clf = _FakeClassifier()
+    p = AIPipeline({"max_news_items_per_cycle": 3}, classifier=clf)
+    now = datetime.now(timezone.utc)
+    rows = [
+        SimpleNamespace(
+            title="Teacher Retirement System of Texas Reduces Stock Position in Insulet Corporation $PODD",
+            source_name="MarketBeat",
+            published_at=now,
+            description="The fund reduced its stake in Q4.",
+            url="https://www.marketbeat.com/instant-alerts/filing-x",
+        ),
+        SimpleNamespace(
+            title="Fed signals rate path shift after inflation surprise",
+            source_name="Reuters",
+            published_at=now,
+            description="Central bank officials discussed inflation and rates.",
+            url="https://example.test/fed",
+        ),
+    ]
+    await p._score_news(symbols=["SPY"], rows=rows)
+    assert [i.headline for i in clf.last_items] == ["Fed signals rate path shift after inflation surprise"]

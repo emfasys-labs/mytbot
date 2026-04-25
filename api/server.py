@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +36,7 @@ from api.pnl_periods import (
     win_rate_from_daily_rows,
 )
 from control.command_bus import CommandBus
+from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from system.portfolio_equity import live_portfolio_value
 from control.runtime import get_execution_engine, get_risk_engine
@@ -70,6 +72,8 @@ def _pick_strongest_news_log_per_symbol(news_rows: list[Any]) -> dict[str, Any]:
     for r in news_rows:
         s = (getattr(r, "symbol", None) or "").strip().upper()
         if not s:
+            continue
+        if not _news_row_matches_logged_symbol(r):
             continue
         try:
             sc = float(r.score) if r.score is not None else 0.0
@@ -111,6 +115,78 @@ def _signal_news_impact_source(signal_row: Any, attribution: list[dict[str, Any]
     if _float_or_zero(getattr(signal_row, "news_score", None)) != 0.0:
         return "signal"
     return "none"
+
+
+_EXPLICIT_TICKER_RE = re.compile(r"\$([A-Z]{1,8})\b")
+_BROAD_MARKET_TICKERS = frozenset(
+    {
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "TLT",
+        "GLD",
+        "SLV",
+        "USO",
+        "DXY",
+        "VIX",
+        "BTC",
+        "ETH",
+    }
+)
+_MARKET_WIDE_NEWS_EVENTS = frozenset({"macro", "geopolitical", "geopolitics", "crypto"})
+
+
+def _news_row_headline_text(row: Any) -> str:
+    payload = getattr(row, "payload", None)
+    if isinstance(payload, dict):
+        txt = payload.get("headline") or payload.get("title") or ""
+        if txt:
+            return str(txt)
+    return str(getattr(row, "rationale", "") or "")
+
+
+def _explicit_tickers_in_news_row(row: Any) -> set[str]:
+    return {m.group(1).upper() for m in _EXPLICIT_TICKER_RE.finditer(_news_row_headline_text(row))}
+
+
+def _candidate_news_rows_for_signal(symbol: str, rows: list[Any]) -> list[Any]:
+    allowed = set(_alias_symbols_for_signal(symbol))
+    allowed.add((symbol or "").strip().upper())
+    out: list[Any] = []
+    for row in rows:
+        explicit = _explicit_tickers_in_news_row(row)
+        if explicit and not (explicit & allowed):
+            continue
+        out.append(row)
+    return out
+
+
+def _news_row_matches_logged_symbol(row: Any) -> bool:
+    symbol = (getattr(row, "symbol", None) or "").strip().upper()
+    if not symbol:
+        return True
+    explicit = _explicit_tickers_in_news_row(row)
+    if not explicit:
+        return True
+    allowed = set(_alias_symbols_for_signal(symbol))
+    allowed.add(symbol)
+    return bool(explicit & allowed)
+
+
+def _is_market_wide_news_row(row: Any) -> bool:
+    explicit = _explicit_tickers_in_news_row(row)
+    if explicit and not explicit.issubset(_BROAD_MARKET_TICKERS):
+        return False
+    event_type = str(getattr(row, "event_type", "") or "").strip().lower()
+    if event_type in _MARKET_WIDE_NEWS_EVENTS:
+        return True
+    payload = getattr(row, "payload", None)
+    if isinstance(payload, dict):
+        payload_event = str(payload.get("event_type") or payload.get("category") or "").strip().lower()
+        if payload_event in _MARKET_WIDE_NEWS_EVENTS:
+            return True
+    return False
 
 
 def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, max_items: int = 2) -> list[dict[str, Any]]:
@@ -640,16 +716,16 @@ async def get_news(
             hq = await session.execute(
                 select(NewsHeadline)
                 .order_by(NewsHeadline.published_at.desc())
-                .limit(limit)
+                .limit(min(500, limit * 8))
             )
-            headlines = list(hq.scalars().all())
+            headlines = [h for h in hq.scalars().all() if is_displayable_news_item(h)][:limit]
             aq = await session.execute(
                 select(AIOutputLog)
                 .where(AIOutputLog.context_type == "news", AIOutputLog.symbol.isnot(None))
                 .order_by(AIOutputLog.timestamp.desc())
                 .limit(ai_limit)
             )
-            ai_rows = list(aq.scalars().all())
+            ai_rows = [r for r in aq.scalars().all() if _news_row_matches_logged_symbol(r)]
         else:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
             sq = await session.execute(
@@ -678,7 +754,7 @@ async def get_news(
                 .order_by(AIOutputLog.timestamp.desc())
                 .limit(ai_limit)
             )
-            ai_rows = list(aq.scalars().all())
+            ai_rows = [r for r in aq.scalars().all() if _news_row_matches_logged_symbol(r)]
             # Build ticker headlines from AI-linked rows to guarantee "had effect".
             # Keep first seen per (symbol, headline) in timestamp-desc order.
             seen: set[tuple[str, str]] = set()
@@ -962,12 +1038,14 @@ async def get_intelligence_signals(
                         if not sym:
                             continue
                         by_sym.setdefault(sym, []).append(r)
-                        market_rows.append(r)
+                        if _is_market_wide_news_row(r):
+                            market_rows.append(r)
                     for s in sigs:
                         sig_sym = (s.symbol or "").strip().upper()
                         if not sig_sym:
                             continue
-                        direct = _signal_news_attribution(s, by_sym.get(sig_sym, []), max_items=2)
+                        direct_rows = _candidate_news_rows_for_signal(sig_sym, by_sym.get(sig_sym, []))
+                        direct = _signal_news_attribution(s, direct_rows, max_items=2)
                         if direct:
                             for d in direct:
                                 d["match_mode"] = "direct"
@@ -976,6 +1054,7 @@ async def get_intelligence_signals(
                         aliased_rows: list[Any] = []
                         for a in _alias_symbols_for_signal(sig_sym):
                             aliased_rows.extend(by_sym.get(a, []))
+                        aliased_rows = _candidate_news_rows_for_signal(sig_sym, aliased_rows)
                         alias_attr = _signal_news_attribution(s, aliased_rows, max_items=2)
                         if alias_attr:
                             for d in alias_attr:
