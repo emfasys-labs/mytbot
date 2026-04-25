@@ -15,8 +15,28 @@ class _Permissive:
 def test_router_crypto_demand_bias_prefers_binance_in_risk_on() -> None:
     r = SmartOrderRouter(["kraken", "binance", "ibkr"])
     r.permissions = _Permissive()
-    b = r.route("crypto", "BTC-USD", metadata={"demand_score": 0.8})
+    b = r.route("crypto", "BTC-USDT", metadata={"demand_score": 0.8})
     assert b == "binance"
+
+
+def test_router_crypto_prefers_dedicated_venues_over_alpaca_by_default() -> None:
+    r = SmartOrderRouter(["alpaca", "binance", "kraken"])
+    r.permissions = _Permissive()
+    assert r.route("crypto", "BTC-USDT", metadata={"demand_score": 0.0}) == "binance"
+
+
+def test_router_crypto_usd_pairs_prefer_kraken() -> None:
+    r = SmartOrderRouter(["alpaca", "binance", "bybit", "kraken"])
+    r.permissions = _Permissive()
+    assert r.route("crypto", "BTC-USD", metadata={"demand_score": 0.8}) == "kraken"
+    assert (
+        r.route(
+            "crypto",
+            "BTC-USD",
+            metadata={"demand_score": 0.8, "allow_usd_stablecoin_conversion": "false"},
+        )
+        == "kraken"
+    )
 
 
 def test_router_equity_hunter_risk_on_can_prefer_alpaca() -> None:
@@ -30,14 +50,14 @@ def test_router_learned_quality_can_shift_choice() -> None:
     r = SmartOrderRouter(["kraken", "binance"])
     r.permissions = _Permissive()
     # Baseline risk-off would prefer kraken.
-    b0 = r.route("crypto", "BTC-USD", metadata={"demand_score": -0.2})
+    b0 = r.route("crypto", "BTC-USDT", metadata={"demand_score": -0.2})
     assert b0 in {"kraken", "binance"}
     # Learn that binance execution is better for BTC.
     for _ in range(8):
-        r.record_execution_feedback(broker="binance", symbol="BTC-USD", filled=True, slippage_bps=1.0)
+        r.record_execution_feedback(broker="binance", symbol="BTC-USDT", filled=True, slippage_bps=1.0)
     for _ in range(8):
-        r.record_execution_feedback(broker="kraken", symbol="BTC-USD", filled=False, slippage_bps=20.0)
-    b1 = r.route("crypto", "BTC-USD", metadata={"demand_score": -0.2})
+        r.record_execution_feedback(broker="kraken", symbol="BTC-USDT", filled=False, slippage_bps=20.0)
+    b1 = r.route("crypto", "BTC-USDT", metadata={"demand_score": -0.2})
     assert b1 == "binance"
 
 

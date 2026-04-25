@@ -110,6 +110,9 @@ def signal_candidate_to_strategy_opportunity(
     cand_ac = getattr(cand, "asset_class", None)
     if cand_ac and "asset_class" not in cand_meta:
         cand_meta["asset_class"] = str(cand_ac)
+    cand_meta.setdefault("close", str(price))
+    cand_meta.setdefault("price", str(price))
+    cand_meta.setdefault("side", str(getattr(cand, "side", "long")))
 
     # ------------------------------------------------------------------ D031A
     # Priority: risk_notional_override > target_notional > nav * position_pct
@@ -392,10 +395,7 @@ class GlobalEdgeCoordinator:
         replacement_context: ReplacementContext | None = None,
         max_actions: int | None = None,
     ) -> list[CoordinatorAction]:
-        """
-        Rank new opportunities vs weakest held edge; emit open actions that clear the bar.
-        Trim actions are not emitted in v1 (incremental unwind handled by D015 replacement separately).
-        """
+        """Rank new opportunities vs weakest held edge and emit replacement actions."""
         thresh = self._threshold(active_mode)
         cap_n = (
             max_actions
@@ -408,13 +408,22 @@ class GlobalEdgeCoordinator:
             weakest_edge = min(h.expected_remaining_edge for h in held)
 
         ranked = sorted(new_opportunities, key=lambda o: o.priority_score, reverse=True)
+        available_held = sorted(held, key=lambda h: h.expected_remaining_edge)
         out: list[CoordinatorAction] = []
+        emit_trim = bool(self._cfg.get("emit_trim_actions", True))
 
         for opp in ranked:
             if len(out) >= cap_n:
                 break
             if opp.expected_edge <= weakest_edge + thresh:
                 continue
+            trim_edge: HeldPositionEdge | None = None
+            if available_held:
+                for i, h in enumerate(available_held):
+                    if h.symbol.strip().upper() == opp.symbol.strip().upper():
+                        continue
+                    trim_edge = available_held.pop(i)
+                    break
             if replacement_context is not None and held:
                 skip_churn = False
                 for h in held:
@@ -439,6 +448,27 @@ class GlobalEdgeCoordinator:
                         break
                 if skip_churn:
                     continue
+            if emit_trim and trim_edge is not None and len(out) < cap_n:
+                trim_meta = dict(trim_edge.metadata or {})
+                trim_meta["coordinator_kind"] = "trim_symbol"
+                trim_meta["reduce_only"] = True
+                trim_meta["close_only"] = True
+                trim_meta["target_notional"] = str(trim_edge.notional)
+                trim_meta["risk_notional_override"] = str(trim_edge.notional)
+                if trim_edge.broker:
+                    trim_meta["broker"] = trim_edge.broker
+                out.append(
+                    CoordinatorAction(
+                        kind="trim_symbol",
+                        symbol=trim_edge.symbol,
+                        strategy_name="global_edge_trim",
+                        capital=trim_edge.notional,
+                        priority_score=opp.priority_score,
+                        metadata=trim_meta,
+                    )
+                )
+                if len(out) >= cap_n:
+                    break
 
             frac = self._notional_fraction_for_mode(active_mode)
             # Hunter ``frac == 1.0`` → deploy the strategy-requested amount in
@@ -554,7 +584,14 @@ def held_positions_from_portfolio(
             continue
         base_edge = Decimal("0.15")
         rem = max(Decimal("0"), base_edge * (Decimal("1") - decay))
-        meta: dict[str, Any] = {"source": "portfolio_snapshot"}
+        meta: dict[str, Any] = {
+            "source": "portfolio_snapshot",
+            "quantity": str(qty),
+            "close": str(px),
+            "price": str(px),
+            "side": str(row.get("side", "long") or "long"),
+            "asset_class": str(row.get("asset_class", "equity") or "equity"),
+        }
         if ceiling is not None and ceiling > 0:
             ratio = (n / ceiling).quantize(Decimal("0.0001"))
             meta["position_above_target_ratio"] = str(ratio)

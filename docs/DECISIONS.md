@@ -733,3 +733,14 @@ The backend's `cap_slider` gates `deploy = NAV × ge × cap_slider` in `portfoli
 Fix landed as a single shared helper `capitalAtWork(positions, orders)` in `ui/src/app/redesign/mapping.ts` (alongside `isPendingOrderStatus` / `pendingOrderNotional`). Both surfaces — the dashboard slider and the Book screen — consume this helper, so the two can never drift again. In the slider, the tick label changes from `deployed · N%` to `at work · N%`; `IdleInfo` now shows **At work** as the headline row with an optional `positions £X / pending £Y` sub-row when pending is materially non-zero. `computeTrim` also shifts its `mustRelease` baseline to `workingValue` so the over-commitment figure honestly includes pending-order notional — the close list remains positions-only (pending orders unwind via cancel / engine signals, not via this UI), and the existing shortage banner already narrates that gap.
 
 Duplicated `isPendingOrder` / `toFiniteNumber` in `screens.tsx` were removed in favour of the shared helpers. No backend changes.
+
+---
+
+## D045 — Trading-engine audit: sizing guards, crypto venue routing, and trim exits
+
+**Date:** 2026-04-25
+**Decision:** Fix the global-edge/D015 execution path so missing feature prices never fall back to `1`, and global-edge opportunities carry the resolved `close`/`price` and `side` metadata into `SignalEngine`. Route spot crypto to dedicated crypto venues ahead of Alpaca unless explicitly opted in with `allow_alpaca_crypto`; fiat `*-USD` pairs are pinned to Kraken unless explicitly opted into stablecoin conversion, while USDT/USDC-style symbols can use Binance/Bybit. Enable global-edge replacement exits by emitting reduce-only `trim_symbol` actions for displaced held positions; close/trim actions preserve the position's broker and still pass through the normal risk and execution engines.
+
+**Reason:** The audit found repeated broker rejections caused by target notional being interpreted as coin/share quantity (for example ~55k BTC/ETH/XRP units) when price metadata was missing. It also found Alpaca being selected for crypto because of the zero-fee prior despite no Alpaca USD buying power, and found the global-edge path ranking held positions without emitting any close/trim action, which left profitable or weak holdings unrealisable except by stop-loss/manual intervention.
+
+**Status:** Implemented in `system/trading_loop/loop.py`, `portfolio/global_edge_coordinator.py`, `signals/arb_bridge.py`, `execution/d015_instruction_executor.py`, `execution/router.py`, and `config/global_edge.yaml`, with regression coverage in `tests/test_global_edge_coordinator.py`, `tests/test_d015_instruction_executor.py`, and `tests/test_router_demand_bias.py`. Live verification after restart showed a normal-sized `AMTM` reduce-only sell trim and no new 55k-unit crypto orders; IBKR was excluded during verification because Gateway/TWS was in an API zombie state.

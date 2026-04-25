@@ -849,14 +849,14 @@ class TradingLoop:
                             lookback_bars=self.lookback_bars,
                         )
                         if df_p is None or not hasattr(df_p, "empty") or df_p.empty:
-                            return Decimal("1")
+                            return Decimal("0")
                         col = "close" if "close" in df_p.columns else None
                         if col is None:
-                            return Decimal("1")
+                            return Decimal("0")
                         try:
                             return Decimal(str(float(df_p[col].iloc[-1])))
                         except Exception:  # noqa: BLE001
-                            return Decimal("1")
+                            return Decimal("0")
 
                     def _asset_class_lookup(sym: str, cands: list) -> str:
                         for c in cands:
@@ -1759,7 +1759,7 @@ class TradingLoop:
             try:
                 px = await resolve_price(cand.symbol)
             except Exception:  # noqa: BLE001
-                px = Decimal("1")
+                px = Decimal("0")
             so = signal_candidate_to_strategy_opportunity(
                 cand,
                 nav=tradable,
@@ -1963,11 +1963,22 @@ class TradingLoop:
         """Single-signal processing mirroring _process_signal for coordinator path."""
         if self.router is None or self.risk_engine is None or self.execution_engine is None:
             return False
-        routed = self.router.route(
-            signal.asset_class,
-            signal.symbol,
-            metadata=getattr(signal, "metadata", None),
+        sig_md = getattr(signal, "metadata", None)
+        sig_md = sig_md if isinstance(sig_md, dict) else {}
+        is_reduce = bool(
+            sig_md.get("reduce_only")
+            or sig_md.get("close_only")
+            or str(sig_md.get("coordinator_kind", "")).lower() == "trim_symbol"
         )
+        preferred_broker = str(sig_md.get("broker") or getattr(signal, "broker", "") or "").strip().lower()
+        if is_reduce and preferred_broker and preferred_broker in self.available_brokers:
+            routed = preferred_broker
+        else:
+            routed = self.router.route(
+                signal.asset_class,
+                signal.symbol,
+                metadata=sig_md,
+            )
         if routed is None:
             return False
         signal.broker = routed

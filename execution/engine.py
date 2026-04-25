@@ -254,6 +254,7 @@ class ExecutionEngine:
         if tracked is not None:
             result = tracked
             self._open_orders[order.client_order_id] = tracked
+        self._ensure_rejection_metadata(order, result, signal, broker)
 
         logger.info("ORDER PLACED | %s | status=%s", result.broker_order_id, result.status)
         await self._persist_result(session_factory, order, result, signal)
@@ -652,6 +653,42 @@ class ExecutionEngine:
             client_order_id=str(uuid.uuid4()),  # idempotency key
             instrument_metadata=inst_meta,
         )
+
+    def _ensure_rejection_metadata(
+        self,
+        order: Order,
+        result: OrderResult,
+        signal: Signal,
+        broker: Any,
+    ) -> None:
+        """Guarantee persisted broker rejections have an operator-visible reason.
+
+        Some adapters can only return the frozen ``OrderResult`` shape, which has
+        no reason field. Since the UI reads reasons from ``Order.instrument_metadata``,
+        fill a conservative fallback before ``OrderLog`` persistence whenever the
+        broker returned a terminal reject/cancel without structured context.
+        """
+        if result.status not in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
+            return
+        meta = dict(order.instrument_metadata or {})
+        for key in ("error_message", "reject_reason", "reason"):
+            val = meta.get(key)
+            if isinstance(val, str) and val.strip():
+                order.instrument_metadata = meta
+                return
+
+        broker_name = str(getattr(broker, "broker_name", "") or signal.broker or "").strip().lower()
+        if self.paper_mode and broker_name in {"kraken", "binance", "bybit"}:
+            reason = f"{broker_name} adapter has no native paper order placement; order was not sent"
+            code = "paper_mode_no_native_order"
+        else:
+            reason = "Broker returned rejected/cancelled without a structured reason; see backend log"
+            code = "broker_rejected_without_reason"
+        meta.setdefault("error_message", reason)
+        meta.setdefault("reject_reason", code)
+        if broker_name:
+            meta.setdefault("rejected_by", broker_name)
+        order.instrument_metadata = meta
 
     async def _apply_marketable_limit(
         self,

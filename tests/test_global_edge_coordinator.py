@@ -54,7 +54,7 @@ def test_propose_skips_when_edge_below_weakest_plus_threshold() -> None:
     assert actions == []
 
 
-def test_propose_emits_open_only_incremental() -> None:
+def test_propose_emits_trim_then_open_incremental() -> None:
     cfg = {
         "edge_advantage": {"trader": "0.05"},
         "max_actions_per_tick": 3,
@@ -64,8 +64,12 @@ def test_propose_emits_open_only_incremental() -> None:
     held = [HeldPositionEdge(symbol="AAA", notional=Decimal("1000"), expected_remaining_edge=Decimal("0.10"))]
     new_opps = [_opp("BBB", "0.30")]
     actions = coord.propose_actions(held, new_opps, active_mode="trader")
-    assert len(actions) == 1
-    a = actions[0]
+    assert len(actions) == 2
+    trim, a = actions
+    assert isinstance(trim, CoordinatorAction)
+    assert trim.kind == "trim_symbol"
+    assert trim.symbol == "AAA"
+    assert trim.metadata["reduce_only"] is True
     assert isinstance(a, CoordinatorAction)
     assert a.kind == "open_strategy"
     assert a.symbol == "BBB"
@@ -124,7 +128,26 @@ def test_signal_candidate_metadata_asset_class_is_not_overwritten() -> None:
     assert opp.metadata.get("asset_class") == "crypto"
 
 
-def test_no_close_all_action_kind() -> None:
+def test_signal_candidate_preserves_price_for_signal_engine_sizing() -> None:
+    cand = _FakeSignalCandidate(
+        "BTC-USD",
+        asset_class="crypto",
+        metadata={"target_notional": "5000"},
+    )
+    opp = signal_candidate_to_strategy_opportunity(
+        cand,
+        nav=Decimal("100000"),
+        position_pct=Decimal("0.05"),
+        price=Decimal("100000"),
+    )
+
+    assert opp is not None
+    assert opp.metadata["close"] == "100000"
+    assert opp.metadata["price"] == "100000"
+    assert opp.metadata["side"] == "long"
+
+
+def test_replacement_emits_trim_symbol_not_close_all() -> None:
     cfg = {
         "edge_advantage": {"trader": "0.01"},
         "max_actions_per_tick": 5,
@@ -137,7 +160,9 @@ def test_no_close_all_action_kind() -> None:
     ]
     new_opps = [_opp("C", "0.5"), _opp("D", "0.4")]
     actions = coord.propose_actions(held, new_opps, active_mode="trader")
-    assert all(x.kind == "open_strategy" for x in actions)
+    assert any(x.kind == "trim_symbol" for x in actions)
+    assert all(x.kind in {"trim_symbol", "open_strategy"} for x in actions)
+    assert all(x.kind != "close_all" for x in actions)
 
 
 def test_max_actions_per_tick_scalar_is_mode_blind_backcompat() -> None:

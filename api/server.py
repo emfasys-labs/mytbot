@@ -624,6 +624,10 @@ def _order_log_to_dict(r: OrderLog) -> dict[str, Any]:
             if isinstance(v, str) and v.strip():
                 reason = v.strip()
                 break
+    if reason is None and bool(r.paper_mode):
+        broker = str(r.broker or "").strip().lower()
+        if broker in {"kraken", "binance", "bybit"} and str(r.status or "").lower() == "rejected":
+            reason = f"{broker} adapter has no native paper order placement; order was not sent"
     return {
         "id": r.id,
         "signal_id": r.signal_id,

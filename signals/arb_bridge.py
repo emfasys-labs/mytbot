@@ -56,6 +56,19 @@ def coordinator_action_to_raw_signal(action: CoordinatorAction, *, nav: Decimal)
     # actual order notional about to be placed.
     md.setdefault("sizing_final_capital_required", str(action.capital))
 
+    if action.kind == "trim_symbol":
+        md["reduce_only"] = True
+        md["close_only"] = True
+        return RawSignal(
+            strategy=action.strategy_name,
+            symbol=action.symbol,
+            side="sell" if md.get("side", "long") != "short" else "buy",
+            confidence=min(0.95, max(0.55, float(md.get("confidence", 0.85)))),
+            broker=str(md.get("broker", "ibkr")),
+            asset_class=str(md.get("asset_class", "equity")),
+            metadata=md,
+        )
+
     if action.strategy_name == "funding_rate_arbitrage":
         return RawSignal(
             strategy=action.strategy_name,

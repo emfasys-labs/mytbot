@@ -423,6 +423,11 @@ class KrakenAdapter(BrokerAdapter):
                 side,
                 order.quantity,
             )
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", "Kraken has no native paper order placement; order was not sent")
+            meta.setdefault("reject_reason", "paper_mode_no_native_order")
+            meta.setdefault("rejected_by", "kraken")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,
@@ -485,6 +490,11 @@ class KrakenAdapter(BrokerAdapter):
             return await self.get_order(txid)
         except Exception as exc:  # noqa: BLE001
             logger.exception("place_order | Kraken | error={}", exc)
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", str(exc)[:500])
+            meta.setdefault("reject_reason", str(exc)[:200])
+            meta.setdefault("rejected_by", "kraken")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,

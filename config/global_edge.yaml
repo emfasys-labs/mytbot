@@ -21,6 +21,10 @@ max_actions_per_tick:
   trader: 3
   defender: 1
 
+# When a new opportunity displaces a weak held edge, emit a reduce-only trim
+# for the old position before opening replacement capital.
+emit_trim_actions: true
+
 # Per-mode fraction applied to each opportunity's strategy-requested capital
 # (D030). Hunter deploys the full request (aggressive), trader scales to half,
 # defender trims to 15% (risk-off). A scalar value (legacy) is still honoured

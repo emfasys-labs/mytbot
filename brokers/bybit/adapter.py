@@ -399,6 +399,11 @@ class BybitAdapter(BrokerAdapter):
                 side,
                 order.quantity,
             )
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", "Bybit has no native paper order placement in this adapter; order was not sent")
+            meta.setdefault("reject_reason", "paper_mode_no_native_order")
+            meta.setdefault("rejected_by", "bybit")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,
@@ -456,6 +461,11 @@ class BybitAdapter(BrokerAdapter):
             if order.client_order_id and "duplicate" in msg.lower():
                 return await self.get_order_by_link(sym, order.client_order_id)
             logger.warning("place_order | Bybit | error={}", exc)
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", str(msg)[:500])
+            meta.setdefault("reject_reason", str(msg)[:200])
+            meta.setdefault("rejected_by", "bybit")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,
@@ -470,6 +480,11 @@ class BybitAdapter(BrokerAdapter):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("place_order | Bybit | error={}", exc)
+            meta = dict(order.instrument_metadata or {})
+            meta.setdefault("error_message", str(exc)[:500])
+            meta.setdefault("reject_reason", str(exc)[:200])
+            meta.setdefault("rejected_by", "bybit")
+            order.instrument_metadata = meta
             return OrderResult(
                 broker_order_id="",
                 client_order_id=order.client_order_id,
@@ -845,4 +860,3 @@ class BybitAdapter(BrokerAdapter):
             "bid": _d(bid) if bid is not None else Decimal("0"),
             "ask": _d(ask) if ask is not None else Decimal("0"),
         }
-

@@ -82,6 +82,16 @@ def _fee_prior_scores() -> dict[str, float]:
 FEE_PRIOR_SCORE = _fee_prior_scores()
 
 
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _slippage_percentiles_bps(samples: list[float]) -> tuple[float, float]:
     if not samples:
         return 0.0, 0.0
@@ -176,6 +186,24 @@ class SmartOrderRouter:
         # Demand-aware spot crypto preference:
         # risk-on -> lower-fee Binance, risk-off -> Kraken resilience.
         if asset_class == "crypto":
+            dedicated = [b for b in permitted if b in {"binance", "kraken", "bybit"}]
+            if dedicated and not _truthy(md.get("allow_alpaca_crypto")):
+                permitted = dedicated
+                permitted.sort(key=_rank_key)
+            fiat_usd_pair = sym_u.endswith("-USD") or sym_u.endswith("/USD")
+            if fiat_usd_pair and "kraken" in permitted and not _truthy(md.get("allow_usd_stablecoin_conversion")):
+                return "kraken"
+            if not _truthy(md.get("allow_bybit_spot_usd")):
+                if fiat_usd_pair:
+                    permitted = [b for b in permitted if b != "bybit"]
+                elif not (sym_u.endswith("-USDT") or sym_u.endswith("/USDT") or sym_u.endswith("-USDC") or sym_u.endswith("/USDC")):
+                    permitted = [b for b in permitted if b != "bybit"]
+            if not permitted:
+                logger.warning(
+                    "No crypto venue compatible with symbol=%s after quote filtering",
+                    symbol,
+                )
+                return None
             if demand_score >= 0.45 and "binance" in permitted:
                 return "binance"
             if demand_score <= -0.45 and "kraken" in permitted:

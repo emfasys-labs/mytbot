@@ -48,13 +48,16 @@ class _FakeBroker:
         wide_spread: bool = False,
         low_liquidity: bool = False,
         thin_book: bool = False,
+        place_status: OrderStatus = OrderStatus.OPEN,
         order_status_sequence: list[OrderStatus] | None = None,
     ):
+        self.broker_name = "ibkr"
         self.connect_ok = connect_ok
         self.fail_place = fail_place
         self.wide_spread = wide_spread
         self.low_liquidity = low_liquidity
         self.thin_book = thin_book
+        self.place_status = place_status
         self.place_calls = 0
         self.last_order = None
         self.get_order_calls = 0
@@ -76,7 +79,7 @@ class _FakeBroker:
         return OrderResult(
             broker_order_id="b-1",
             client_order_id=order.client_order_id,
-            status=OrderStatus.OPEN,
+            status=self.place_status,
             symbol=order.symbol,
             side=order.side,
             quantity=order.quantity,
@@ -225,6 +228,29 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     assert result is not None
     assert broker.place_calls == 1
     assert risk.killed is False
+
+
+@pytest.mark.asyncio
+async def test_rejected_order_without_broker_reason_gets_persistable_reason(monkeypatch) -> None:
+    risk = _FakeRiskEngine(
+        {
+            "max_spread_pct": Decimal("0.05"),
+            "min_liquidity_usd": Decimal("1000"),
+            "max_slippage_pct": Decimal("0.05"),
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+    broker = _FakeBroker(place_status=OrderStatus.REJECTED, order_status_sequence=[OrderStatus.REJECTED])
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
+    result = await engine.execute(_signal(), _approved_decision())
+
+    assert result is not None
+    assert result.status == OrderStatus.REJECTED
+    assert broker.last_order.instrument_metadata["reject_reason"] == "broker_rejected_without_reason"
+    assert broker.last_order.instrument_metadata["error_message"]
 
 
 @pytest.mark.asyncio
