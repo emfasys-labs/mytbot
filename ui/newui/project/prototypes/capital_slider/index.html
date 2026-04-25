@@ -1,0 +1,603 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Capital slider — hybrid model</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; width: 100%; height: 100%; background: #050505; color: rgba(255,255,255,0.92); font-family: 'Geist', sans-serif; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  button { font-family: inherit; cursor: pointer; }
+  @keyframes fadeIn { from {opacity:0} to {opacity:1} }
+  @keyframes slideUp { from {opacity:0; transform: translateY(8px)} to {opacity:1; transform: translateY(0)} }
+  @keyframes tickFlash { 0%{opacity:1; transform:translateX(-50%) scaleX(1)} 50%{opacity:1; transform:translateX(-50%) scaleX(1.6)} 100%{opacity:.5; transform:translateX(-50%) scaleX(1)} }
+  @keyframes dangerPulse { 0%,100% {box-shadow: 0 0 0 0 rgba(248,113,113,0.4)} 50% {box-shadow: 0 0 0 8px rgba(248,113,113,0)} }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ─── tokens ───────────────────────────────────────────────────
+const T = {
+  bg0: '#050505', bg1: '#0a0a0b', bg2: '#111113', bg3: '#17171a',
+  line: 'rgba(255,255,255,0.06)', lineStrong: 'rgba(255,255,255,0.12)',
+  ink0: '#ffffff', ink1: 'rgba(255,255,255,0.92)', ink2: 'rgba(255,255,255,0.62)', ink3: 'rgba(255,255,255,0.42)', ink4: 'rgba(255,255,255,0.22)',
+  accent: '#67e8f9', accentDim: 'rgba(103,232,249,0.15)', accentGlow: 'rgba(103,232,249,0.4)',
+  profit: '#5eead4', caution: '#fbbf24', cautionDim: 'rgba(251,191,36,0.14)', danger: '#f87171', dangerDim: 'rgba(248,113,113,0.12)',
+  sans: "'Geist', -apple-system, system-ui, sans-serif",
+  mono: "'Geist Mono', ui-monospace, monospace",
+  ease: 'cubic-bezier(0.22, 1, 0.36, 1)',
+};
+
+// ─── mock data: the book ──────────────────────────────────────
+const NAV = 84231;
+const POSITIONS = [
+  { sym: 'NVDA', qty: 18,   value: 15880, hold: 0.88, strat: 'momentum_breakout' },
+  { sym: 'AAPL', qty: 60,   value: 10946, hold: 0.79, strat: 'momentum_breakout' },
+  { sym: 'MSFT', qty: 18,   value: 7409,  hold: 0.71, strat: 'mean_reversion'    },
+  { sym: 'BTC',  qty: 0.08, value: 3457,  hold: 0.64, strat: 'trend_follow'      },
+  { sym: 'AMZN', qty: 12,   value: 2205,  hold: 0.51, strat: 'momentum_breakout' },
+  { sym: 'ETH',  qty: 0.9,  value: 2828,  hold: 0.42, strat: 'trend_follow'      },
+  { sym: 'META', qty: -8,   value: 4171,  hold: 0.28, strat: 'momentum_breakout' },
+];
+const DEPLOYED_VALUE = POSITIONS.reduce((s, p) => s + p.value, 0);
+const DEPLOYED_PCT = DEPLOYED_VALUE / NAV;  // ≈ 0.559
+
+// Compute which positions would be closed to reach a target pct.
+// Returns the sequence of closes, sorted weakest-first by hold score.
+function computeTrim(targetPct, protectedSyms = new Set()) {
+  const targetValue = NAV * targetPct;
+  const mustRelease = Math.max(0, DEPLOYED_VALUE - targetValue);
+  if (mustRelease <= 0) return { closes: [], released: 0, mustRelease: 0, remaining: DEPLOYED_VALUE };
+  const sorted = [...POSITIONS].sort((a, b) => a.hold - b.hold);
+  let released = 0;
+  const closes = [];
+  for (const p of sorted) {
+    if (protectedSyms.has(p.sym)) continue;
+    if (released >= mustRelease) break;
+    closes.push(p);
+    released += p.value;
+  }
+  return { closes, released, mustRelease, remaining: DEPLOYED_VALUE - released };
+}
+
+// ─── primitives ───────────────────────────────────────────────
+function Label({ children, style, tone }) {
+  return <div style={{ fontFamily: T.sans, fontSize: 10, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.14em', color: tone || T.ink3, ...style }}>{children}</div>;
+}
+function Card({ children, style, ...rest }) {
+  return <div style={{ borderRadius: 14, background: T.bg1, border: `1px solid ${T.line}`, padding: 18, ...style }} {...rest}>{children}</div>;
+}
+function Money({ v, size = 14, tone, bold, prefix = '£' }) {
+  return <span style={{ fontFamily: T.mono, fontSize: size, fontVariantNumeric: 'tabular-nums', color: tone || T.ink1, fontWeight: bold ? 500 : 400, letterSpacing: '-0.01em' }}>{prefix}{Math.round(v).toLocaleString()}</span>;
+}
+
+// ─── THE SLIDER ───────────────────────────────────────────────
+function CapitalSlider({ currentPct, setCurrentPct }) {
+  const trackRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const [dragPct, setDragPct] = useState(currentPct);   // visual position while dragging
+  const [stagedPct, setStagedPct] = useState(null);      // value pending confirmation
+  const [crossed, setCrossed] = useState(false);         // have we crossed the deployed line?
+  const [protectedSyms, setProtectedSyms] = useState(new Set());
+  const [reviewing, setReviewing] = useState(false);
+  const [flashTick, setFlashTick] = useState(false);
+
+  // The "live" visual pct: what the thumb shows.
+  const shownPct = dragging ? dragPct : (stagedPct ?? currentPct);
+
+  // When user drags past the deployed line, capture a tiny haptic + flash once.
+  useEffect(() => {
+    if (!dragging) return;
+    if (dragPct < DEPLOYED_PCT && !crossed) {
+      setCrossed(true);
+      setFlashTick(true);
+      setTimeout(() => setFlashTick(false), 400);
+    }
+    if (dragPct >= DEPLOYED_PCT && crossed) setCrossed(false);
+  }, [dragPct, dragging]);
+
+  function handlePointer(e) {
+    const rect = trackRef.current.getBoundingClientRect();
+    const y = e.clientY ?? e.touches?.[0]?.clientY;
+    const raw = 1 - (y - rect.top) / rect.height;
+    const clamped = Math.max(0, Math.min(1, raw));
+    // Snag near deployed line — 1% stickiness
+    const snag = Math.abs(clamped - DEPLOYED_PCT) < 0.015 ? DEPLOYED_PCT : clamped;
+    setDragPct(snag);
+  }
+  function startDrag(e) {
+    e.preventDefault();
+    setDragging(true);
+    setStagedPct(null);
+    setReviewing(false);
+    handlePointer(e);
+    const move = (ev) => handlePointer(ev);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      endDrag();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+  function endDrag() {
+    setDragging(false);
+    setDragPct(prev => {
+      if (prev >= DEPLOYED_PCT - 0.005) {
+        // Upward (or unchanged) — commit immediately.
+        setCurrentPct(prev);
+        setStagedPct(null);
+      } else {
+        // Downward below deployed — stage for confirmation.
+        setStagedPct(prev);
+      }
+      return prev;
+    });
+    setCrossed(false);
+  }
+
+  // Confirm the trim.
+  function confirmTrim() {
+    if (stagedPct === null) return;
+    setCurrentPct(stagedPct);
+    // In a real build we'd fire close orders. For the prototype, "positions" simply report updated.
+    setStagedPct(null);
+    setReviewing(false);
+    setProtectedSyms(new Set());
+  }
+  function cancelTrim() {
+    setStagedPct(null);
+    setDragPct(currentPct);
+    setReviewing(false);
+    setProtectedSyms(new Set());
+  }
+
+  // Trim preview.
+  const previewPct = stagedPct ?? (dragging ? dragPct : currentPct);
+  const previewBelow = previewPct < DEPLOYED_PCT - 0.005;
+  const trim = useMemo(
+    () => previewBelow ? computeTrim(previewPct, protectedSyms) : null,
+    [previewPct, previewBelow, protectedSyms]
+  );
+
+  const isFlatten = stagedPct !== null && stagedPct < 0.03;
+  const activeZoneColor = previewBelow ? (isFlatten ? T.danger : T.caution) : T.accent;
+
+  // Geometry
+  const height = 360;
+  const thumbY = (1 - shownPct) * height;
+  const deployedY = (1 - DEPLOYED_PCT) * height;
+
+  return (
+    <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
+
+      {/* ── SCALE LEFT ── */}
+      <div style={{ height, position: 'relative', width: 64, flexShrink: 0, fontFamily: T.mono, fontSize: 10 }}>
+        {[1, 0.75, 0.5, 0.25, 0].map(p => (
+          <div key={p} style={{
+            position: 'absolute', right: 0, top: (1 - p) * height - 6,
+            color: T.ink3, textAlign: 'right',
+          }}>{(p * 100).toFixed(0)}%</div>
+        ))}
+      </div>
+
+      {/* ── TRACK ── */}
+      <div style={{ position: 'relative', paddingRight: 180 }}>
+        <div
+          ref={trackRef}
+          onPointerDown={startDrag}
+          style={{
+            position: 'relative', width: 36, height,
+            borderRadius: 10,
+            background: T.bg2,
+            border: `1px solid ${T.line}`,
+            cursor: dragging ? 'grabbing' : 'grab',
+            touchAction: 'none',
+          }}
+        >
+          {/* 1. BASE — empty "available" zone */}
+          {/* nothing to draw, the track itself is the empty */}
+
+          {/* 2. Current deployed fill — greyed teal from bottom up to DEPLOYED */}
+          <div style={{
+            position: 'absolute', left: 0, right: 0, bottom: 0,
+            height: `${DEPLOYED_PCT * 100}%`,
+            background: `linear-gradient(to top, ${T.accentDim}, ${T.accentDim})`,
+            borderBottomLeftRadius: 10, borderBottomRightRadius: 10,
+          }}/>
+
+          {/* 3. The "ceiling" zone — if shownPct > deployed, fill above deployed to shownPct in accent */}
+          {shownPct > DEPLOYED_PCT && (
+            <div style={{
+              position: 'absolute', left: 0, right: 0,
+              bottom: `${DEPLOYED_PCT * 100}%`,
+              height: `${(shownPct - DEPLOYED_PCT) * 100}%`,
+              background: `linear-gradient(to top, ${T.accent}55, ${T.accent}22)`,
+              transition: dragging ? 'none' : `all 400ms ${T.ease}`,
+            }}/>
+          )}
+
+          {/* 4. The "release" zone — if shownPct < deployed, overlay amber/red from shownPct up to deployed */}
+          {shownPct < DEPLOYED_PCT && (
+            <div style={{
+              position: 'absolute', left: 0, right: 0,
+              bottom: `${shownPct * 100}%`,
+              height: `${(DEPLOYED_PCT - shownPct) * 100}%`,
+              background: `repeating-linear-gradient(135deg, ${isFlatten || shownPct < 0.03 ? T.dangerDim : T.cautionDim} 0 6px, transparent 6px 10px)`,
+              borderLeft: `1px solid ${isFlatten || shownPct < 0.03 ? T.danger : T.caution}66`,
+              borderRight: `1px solid ${isFlatten || shownPct < 0.03 ? T.danger : T.caution}66`,
+              transition: dragging ? 'none' : `all 400ms ${T.ease}`,
+            }}/>
+          )}
+
+          {/* 5. THE DEPLOYED LINE — always visible landmark */}
+          <div style={{
+            position: 'absolute', left: -6, right: -6, top: deployedY - 0.5,
+            height: 1, background: T.ink1,
+            pointerEvents: 'none',
+            animation: flashTick ? 'tickFlash 400ms ease' : 'none',
+          }}/>
+          {/* Deployed label to the right of track */}
+          <div style={{
+            position: 'absolute', left: 48, top: deployedY - 9,
+            fontFamily: T.mono, fontSize: 10, color: T.ink2,
+            whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <span style={{ width: 14, height: 1, background: T.ink2 }}/>
+            current deployed · {(DEPLOYED_PCT * 100).toFixed(1)}%
+          </div>
+
+          {/* 6. THUMB */}
+          <div style={{
+            position: 'absolute', left: -14, top: thumbY - 14,
+            width: 64, height: 28, borderRadius: 6,
+            background: T.ink0, color: T.bg0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: T.mono, fontSize: 12, fontWeight: 500,
+            boxShadow: `0 6px 14px rgba(0,0,0,0.5), 0 0 0 1px ${activeZoneColor}55`,
+            cursor: dragging ? 'grabbing' : 'grab',
+            transition: dragging ? 'none' : `top 300ms ${T.ease}, box-shadow 300ms ${T.ease}`,
+            animation: isFlatten ? 'dangerPulse 1.2s ease-in-out infinite' : 'none',
+            userSelect: 'none',
+          }}>
+            {(shownPct * 100).toFixed(0)}%
+          </div>
+
+          {/* 7. Staged indicator — dashed ghost bar at stagedPct when pending */}
+          {stagedPct !== null && (
+            <div style={{
+              position: 'absolute', left: -4, right: -4, top: (1 - stagedPct) * height - 0.5,
+              height: 2, background: activeZoneColor, borderRadius: 1,
+              pointerEvents: 'none',
+            }}/>
+          )}
+        </div>
+
+        {/* Flatten anchor label */}
+        <div style={{ position: 'absolute', left: 48, bottom: -2, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+          flatten all
+        </div>
+      </div>
+
+      {/* ── INFO / ACTIONS PANEL ── */}
+      <div style={{ flex: 1, minWidth: 340 }}>
+        {stagedPct === null ? (
+          <SliderIdleInfo currentPct={currentPct} shownPct={shownPct} dragging={dragging}/>
+        ) : isFlatten ? (
+          <FlattenConfirm stagedPct={stagedPct} onConfirm={confirmTrim} onCancel={cancelTrim}/>
+        ) : (
+          <TrimPreview
+            stagedPct={stagedPct}
+            trim={trim}
+            reviewing={reviewing}
+            setReviewing={setReviewing}
+            protectedSyms={protectedSyms}
+            setProtectedSyms={setProtectedSyms}
+            onConfirm={confirmTrim}
+            onCancel={cancelTrim}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── info panels ──────────────────────────────────────────────
+function SliderIdleInfo({ currentPct, shownPct, dragging }) {
+  const targetValue = NAV * shownPct;
+  const delta = shownPct - currentPct;
+  const movingUp = delta > 0.005;
+  const movingDown = delta < -0.005;
+  return (
+    <Card style={{ padding: 18, minHeight: 200, animation: `fadeIn 200ms ${T.ease}` }}>
+      <Label>{dragging ? (movingUp ? 'Raising ceiling' : movingDown ? 'Preparing release' : 'Capital allocation') : 'Capital allocation'}</Label>
+      <div style={{ marginTop: 12, display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <div style={{ fontFamily: T.sans, fontSize: 38, fontWeight: 300, letterSpacing: '-0.03em', color: T.ink0 }}>
+          {(shownPct * 100).toFixed(0)}<span style={{ fontSize: 20, color: T.ink3 }}>%</span>
+        </div>
+        <div style={{ fontFamily: T.mono, fontSize: 12, color: T.ink3 }}>
+          <Money v={targetValue} size={12} tone={T.ink2}/> of <Money v={NAV} size={12} tone={T.ink3}/>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${T.line}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <InfoRow label="Deployed now" value={<Money v={DEPLOYED_VALUE} size={12} tone={T.ink1}/>}/>
+        <InfoRow label="Available to deploy" value={<Money v={Math.max(0, targetValue - DEPLOYED_VALUE)} size={12} tone={movingUp ? T.accent : T.ink2}/>}/>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${T.line}`, fontFamily: T.sans, fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>
+        {dragging && movingUp && (
+          <>Raising the ceiling. Releases on drop — system may deploy new positions up to <Money v={targetValue} size={12} tone={T.accent} bold/>.</>
+        )}
+        {dragging && movingDown && shownPct >= DEPLOYED_PCT - 0.005 && (
+          <>Ceiling is at or above current deployment. No exits required.</>
+        )}
+        {dragging && movingDown && shownPct < DEPLOYED_PCT - 0.005 && (
+          <span style={{ color: T.caution }}>
+            Below current deployed line. Drop to see which positions would close and confirm.
+          </span>
+        )}
+        {!dragging && (
+          <>Drag the slider to change allocation. Up raises the ceiling for new positions. Down below the deployed line prompts a guided release.</>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function InfoRow({ label, value }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+      <span style={{ fontFamily: T.sans, fontSize: 11, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</span>
+      {value}
+    </div>
+  );
+}
+
+function TrimPreview({ stagedPct, trim, reviewing, setReviewing, protectedSyms, setProtectedSyms, onConfirm, onCancel }) {
+  const sorted = [...POSITIONS].sort((a, b) => a.hold - b.hold);
+  const willClose = new Set(trim.closes.map(c => c.sym));
+  const shortage = Math.max(0, trim.mustRelease - trim.released);
+
+  return (
+    <Card style={{ padding: 18, borderColor: `${T.caution}66`, animation: `slideUp 260ms ${T.ease}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Label tone={T.caution}>Reduce to target</Label>
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>preview · not executed</span>
+      </div>
+
+      <div style={{ marginTop: 12, display: 'flex', alignItems: 'baseline', gap: 14 }}>
+        <div style={{ fontFamily: T.sans, fontSize: 30, fontWeight: 300, letterSpacing: '-0.03em', color: T.ink0 }}>
+          {(DEPLOYED_PCT * 100).toFixed(0)}<span style={{ fontSize: 16, color: T.ink3 }}>%</span>
+          <span style={{ color: T.ink3, margin: '0 10px', fontWeight: 200 }}>→</span>
+          <span style={{ color: T.caution }}>{(stagedPct * 100).toFixed(0)}%</span>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${T.line}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <InfoRow label="Must release" value={<Money v={trim.mustRelease} size={12} tone={T.caution} bold/>}/>
+        <InfoRow label="By closing" value={<span style={{ fontFamily: T.sans, fontSize: 12, color: T.ink1 }}>{trim.closes.length} {trim.closes.length === 1 ? 'position' : 'positions'}</span>}/>
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <Label>Weakest first · by hold score</Label>
+          <button onClick={() => setReviewing(r => !r)} style={{
+            padding: '3px 8px', background: 'transparent', border: `1px solid ${T.line}`,
+            borderRadius: 4, color: T.ink2, fontFamily: T.sans, fontSize: 10,
+            textTransform: 'uppercase', letterSpacing: '0.08em',
+          }}>{reviewing ? 'done' : 'review'}</button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 180, overflowY: 'auto' }}>
+          {(reviewing ? sorted : trim.closes).map(p => {
+            const willGo = willClose.has(p.sym) && !protectedSyms.has(p.sym);
+            const isProtected = protectedSyms.has(p.sym);
+            return (
+              <div key={p.sym} style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '8px 10px',
+                borderRadius: 6,
+                background: willGo ? T.cautionDim : 'transparent',
+                border: `1px solid ${willGo ? `${T.caution}44` : T.line}`,
+                opacity: reviewing && !willGo && !isProtected ? 0.4 : 1,
+              }}>
+                {reviewing && (
+                  <input
+                    type="checkbox"
+                    checked={!isProtected}
+                    onChange={() => {
+                      setProtectedSyms(prev => {
+                        const next = new Set(prev);
+                        if (next.has(p.sym)) next.delete(p.sym); else next.add(p.sym);
+                        return next;
+                      });
+                    }}
+                    style={{ accentColor: T.caution, cursor: 'pointer' }}
+                  />
+                )}
+                <span style={{ fontFamily: T.sans, fontSize: 13, fontWeight: 500, color: T.ink0, width: 48 }}>{p.sym}</span>
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, flex: 1 }}>{p.strat}</span>
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>hold {p.hold.toFixed(2)}</span>
+                <Money v={p.value} size={11} tone={willGo ? T.caution : T.ink2}/>
+              </div>
+            );
+          })}
+        </div>
+
+        {shortage > 0.5 && (
+          <div style={{ marginTop: 10, padding: 10, background: T.dangerDim, border: `1px solid ${T.danger}44`, borderRadius: 6, fontFamily: T.sans, fontSize: 11, color: T.danger, lineHeight: 1.4 }}>
+            Protecting positions leaves a <Money v={shortage} size={11} tone={T.danger} bold/> shortfall. Uncheck more or accept the shortfall (target won't be reached fully).
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${T.line}`, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} style={{
+          padding: '8px 14px', background: 'transparent', border: `1px solid ${T.line}`,
+          borderRadius: 6, color: T.ink2, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+        }}>Cancel</button>
+        <button onClick={onConfirm} style={{
+          padding: '8px 14px', background: T.caution, border: 'none',
+          borderRadius: 6, color: T.bg0, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+          letterSpacing: '-0.01em',
+        }}>
+          Release {trim.closes.length} · <Money v={trim.released} size={12} tone={T.bg0} bold prefix="£"/>
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+function FlattenConfirm({ stagedPct, onConfirm, onCancel }) {
+  const [holdProgress, setHoldProgress] = useState(0);
+  const holdingRef = useRef(false);
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+  const HOLD_MS = 1200;
+
+  function down() {
+    holdingRef.current = true;
+    startRef.current = performance.now();
+    const tick = () => {
+      if (!holdingRef.current) return;
+      const p = Math.min(1, (performance.now() - startRef.current) / HOLD_MS);
+      setHoldProgress(p);
+      if (p < 1) rafRef.current = requestAnimationFrame(tick);
+      else {
+        holdingRef.current = false;
+        onConfirm();
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }
+  function up() {
+    holdingRef.current = false;
+    cancelAnimationFrame(rafRef.current);
+    setHoldProgress(0);
+  }
+
+  return (
+    <Card style={{ padding: 18, borderColor: `${T.danger}88`, background: 'linear-gradient(180deg, rgba(248,113,113,0.05), rgba(10,10,11,1))', animation: `slideUp 260ms ${T.ease}` }}>
+      <Label tone={T.danger}>Flatten book</Label>
+      <div style={{ marginTop: 14, fontFamily: T.sans, fontSize: 22, fontWeight: 400, color: T.ink0, letterSpacing: '-0.02em' }}>
+        Close all {POSITIONS.length} positions
+      </div>
+      <div style={{ marginTop: 4, fontFamily: T.mono, fontSize: 12, color: T.ink2 }}>
+        Releasing <Money v={DEPLOYED_VALUE} size={12} tone={T.ink1} bold/> · 0% capital deployed
+      </div>
+
+      <div style={{ marginTop: 14, padding: 12, background: T.bg2, border: `1px solid ${T.line}`, borderRadius: 8, fontFamily: T.sans, fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>
+        This is destructive. Every open position — including profitable ones — will be market-closed across all venues.
+        The bot can still run; use the Kill Switch to stop the engine separately.
+      </div>
+
+      <div style={{ marginTop: 16, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} style={{
+          padding: '8px 14px', background: 'transparent', border: `1px solid ${T.line}`,
+          borderRadius: 6, color: T.ink2, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+        }}>Cancel</button>
+        <button
+          onPointerDown={down}
+          onPointerUp={up}
+          onPointerLeave={up}
+          style={{
+            position: 'relative', padding: '10px 18px', background: T.bg1, border: `1px solid ${T.danger}`,
+            borderRadius: 6, color: T.danger, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+            textTransform: 'uppercase', letterSpacing: '0.1em', overflow: 'hidden',
+          }}>
+          <div style={{ position: 'absolute', inset: 0, background: T.danger, opacity: holdProgress, transition: 'opacity 40ms linear' }}/>
+          <span style={{ position: 'relative', color: holdProgress > 0.5 ? T.ink0 : T.danger, transition: 'color 200ms' }}>
+            {holdProgress > 0 ? 'Holding…' : 'Hold to flatten'}
+          </span>
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+// ─── page chrome ──────────────────────────────────────────────
+function App() {
+  const [currentPct, setCurrentPct] = useState(0.70);
+
+  return (
+    <div style={{ minHeight: '100vh', padding: '40px 40px 80px', background: `radial-gradient(ellipse at top left, rgba(103,232,249,0.04), transparent 60%), ${T.bg0}` }}>
+      {/* Header */}
+      <div style={{ maxWidth: 980, margin: '0 auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: T.accent, boxShadow: `0 0 10px ${T.accentGlow}` }}/>
+          <Label>mytbot · interaction study</Label>
+        </div>
+        <h1 style={{ fontFamily: T.sans, fontSize: 34, fontWeight: 300, color: T.ink0, letterSpacing: '-0.03em', margin: '4px 0 8px' }}>
+          Capital allocation — hybrid slider
+        </h1>
+        <p style={{ fontFamily: T.sans, fontSize: 14, color: T.ink2, maxWidth: 620, lineHeight: 1.5, margin: 0 }}>
+          One control. Visible deployed line. Upward commits on release; downward below the line stages a reduction with a preview and explicit confirm; 0% demands a hold-to-flatten.
+        </p>
+
+        <div style={{ marginTop: 30, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 36, alignItems: 'start' }}>
+          <div>
+            <CapitalSlider currentPct={currentPct} setCurrentPct={setCurrentPct}/>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Card style={{ padding: 14 }}>
+              <Label>Account</Label>
+              <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                <div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>NAV</div>
+                  <Money v={NAV} size={18} tone={T.ink0} bold/>
+                </div>
+                <div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Ceiling</div>
+                  <Money v={NAV * currentPct} size={18} tone={T.accent} bold/>
+                </div>
+                <div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Deployed</div>
+                  <Money v={DEPLOYED_VALUE} size={14} tone={T.ink1}/>
+                </div>
+                <div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Free</div>
+                  <Money v={Math.max(0, NAV * currentPct - DEPLOYED_VALUE)} size={14} tone={T.ink1}/>
+                </div>
+              </div>
+            </Card>
+
+            <Card style={{ padding: 14 }}>
+              <Label>Scenarios to try</Label>
+              <ul style={{ fontFamily: T.sans, fontSize: 12, color: T.ink2, lineHeight: 1.6, margin: '10px 0 0 16px', padding: 0 }}>
+                <li>Drag <b style={{ color: T.accent }}>up</b> to 85% → commits instantly on release (new ceiling)</li>
+                <li>Drag <b style={{ color: T.caution }}>down</b> to ~40% → stages a trim with weakest-first list</li>
+                <li>Tap <b style={{ color: T.ink1 }}>Review</b> to protect specific positions</li>
+                <li>Drag all the way to <b style={{ color: T.danger }}>0%</b> → hard hold-to-flatten confirm</li>
+                <li>Approach the deployed line slowly → small snag + tick flash</li>
+              </ul>
+            </Card>
+
+            <Card style={{ padding: 14 }}>
+              <Label>Separate from this control</Label>
+              <div style={{ marginTop: 8, fontFamily: T.sans, fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>
+                The <b style={{ color: T.ink0 }}>Kill Switch</b> is a distinct control in the top bar. Flattening capital is not the same as stopping the engine — this slider only moves money.
+              </div>
+            </Card>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

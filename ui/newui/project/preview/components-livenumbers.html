@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 16px 20px; }
+  .strip { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.10); margin-bottom: 12px; }
+  .metric { display: flex; flex-direction: column; gap: 2px; }
+  .mlabel { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: #71717a; }
+  .mval { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+  .div { width: 1px; height: 16px; background: rgba(255,255,255,0.10); }
+</style>
+</head><body>
+
+<!-- LiveStrip replica -->
+<div class="strip">
+  <div class="metric">
+    <span class="mlabel">NAV</span>
+    <span class="mval" style="font-size:18px;font-weight:300;color:#fff">£84,231</span>
+  </div>
+  <div class="div"></div>
+  <div style="display:flex;gap:12px">
+    <span style="font-size:11px;color:#71717a">Today <span style="color:#6ee7b7;font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums">+£1,240</span></span>
+    <span style="font-size:11px;color:#71717a">Week <span style="color:rgba(110,231,183,0.90);font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums">+£3,810</span></span>
+    <span style="font-size:11px;color:#71717a">Month <span style="color:rgba(110,231,183,0.90);font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums">+£11,240</span></span>
+  </div>
+  <div class="div"></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span style="font-size:11px;color:#71717a">System</span>
+    <span style="font-size:11px;color:#34d399">running</span>
+    <span style="font-size:11px;color:#52525b">·</span>
+    <span style="font-size:11px;color:#71717a">path D015</span>
+    <span style="font-size:11px;color:#52525b">#47</span>
+  </div>
+</div>
+
+<!-- Drawdown/profit scenario -->
+<div class="strip" style="border-color:rgba(255,255,255,0.05)">
+  <div class="metric">
+    <span class="mlabel">NAV</span>
+    <span class="mval" style="font-size:18px;font-weight:300;color:#fff">£81,660</span>
+  </div>
+  <div class="div"></div>
+  <div style="display:flex;gap:12px">
+    <span style="font-size:11px;color:#71717a">Today <span style="color:#fda4af;font-family:'JetBrains Mono',monospace">−£340</span></span>
+    <span style="font-size:11px;color:#71717a">Week <span style="color:rgba(253,164,175,0.90);font-family:'JetBrains Mono',monospace">−£1,220</span></span>
+    <span style="font-size:11px;color:#71717a">Month <span style="color:rgba(110,231,183,0.90);font-family:'JetBrains Mono',monospace">+£2,100</span></span>
+  </div>
+  <div class="div"></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span style="font-size:11px;color:#71717a">System</span>
+    <span style="font-size:11px;color:#fb7185">error</span>
+    <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(251,191,36,0.80)">snapshot stale</span>
+  </div>
+</div>
+
+<!-- Heartbeat -->
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+  <div style="display:flex;align-items:center;gap:6px">
+    <div style="width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 8px rgba(52,211,153,0.6);animation:pulse 2s ease-in-out infinite"></div>
+    <span style="font-size:11px;color:#71717a">12 trades today · last 4m</span>
+  </div>
+  <span style="font-size:11px;color:#52525b">·</span>
+  <span style="font-size:11px;color:#71717a;font-family:'JetBrains Mono',monospace">Tradable £68,900 · 82%</span>
+</div>
+
+<style>@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.9)} }</style>
+</body></html>

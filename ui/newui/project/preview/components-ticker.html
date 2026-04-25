@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; }
+  .ticker { overflow: hidden; border-bottom: 1px solid rgba(255,255,255,0.04); background: rgba(255,255,255,0.015); padding: 10px 0; }
+  .track { display: flex; white-space: nowrap; animation: scroll 28s linear infinite; }
+  .item { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 0 12px; }
+  .dot { width: 5px; height: 5px; border-radius: 50%; opacity: 0.6; }
+  .src { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.30); }
+  .txt { font-size: 11px; font-weight: 300; color: rgba(212,212,216,0.90); }
+  .age { font-size: 9px; color: #52525b; font-family: 'JetBrains Mono', monospace; }
+  .sep { color: rgba(82,82,91,0.40); margin: 0 4px; }
+  @keyframes scroll { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
+</style>
+</head><body>
+
+<div class="ticker">
+  <div class="track" id="track"></div>
+</div>
+
+<div style="padding:10px 16px;border-top:1px solid rgba(255,255,255,0.04);background:rgba(255,255,255,0.01)">
+  <div style="display:flex;gap:12px;overflow:hidden;white-space:nowrap">
+    <!-- Opportunity ticker bottom -->
+    <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#52525b;flex-shrink:0">Opportunities</span>
+    <span style="font-size:11px;color:#71717a;flex-shrink:0;font-family:'JetBrains Mono',monospace">NVDA <span style="color:#34d399">0.84</span> HIGH ↑</span>
+    <span style="color:rgba(82,82,91,0.4)">·</span>
+    <span style="font-size:11px;color:#71717a;flex-shrink:0;font-family:'JetBrains Mono',monospace">AAPL <span style="color:#6ee7b7">0.71</span> MED →</span>
+    <span style="color:rgba(82,82,91,0.4)">·</span>
+    <span style="font-size:11px;color:#71717a;flex-shrink:0;font-family:'JetBrains Mono',monospace">BTC <span style="color:#fbbf24">0.55</span> MED ↑</span>
+    <span style="color:rgba(82,82,91,0.4)">·</span>
+    <span style="font-size:11px;color:#71717a;flex-shrink:0;font-family:'JetBrains Mono',monospace">MSFT <span style="color:#6ee7b7">0.63</span> MED ↑</span>
+  </div>
+</div>
+
+<script>
+const items = [
+  {text:"Fed holds rates — dot plot signals 2 cuts by year-end", src:"Reuters", age:"4m", s:"neutral"},
+  {text:"NVDA beats Q4 estimates, revenue up 122% YoY", src:"BBG", age:"12m", s:"positive"},
+  {text:"Crypto market slides 3.2% on regulatory concern", src:"CoinDesk", age:"18m", s:"negative"},
+  {text:"AAPL supply chain disruption reported in Taiwan", src:"FT", age:"31m", s:"negative"},
+  {text:"MSFT Azure growth accelerates to 31% in latest quarter", src:"CNBC", age:"42m", s:"positive"},
+  {text:"UK GDP beats expectations at 0.4% monthly growth", src:"ONS", age:"1h", s:"neutral"},
+];
+const colors = {positive:'#34d399',negative:'#fb7185',neutral:'#6b7280'};
+const doubled = [...items,...items];
+const track = document.getElementById('track');
+doubled.forEach(i => {
+  track.innerHTML += `<span class="item"><span class="dot" style="background:${colors[i.s]}"></span><span class="src">${i.src}</span><span class="txt">${i.text}</span><span class="age">${i.age}</span><span class="sep">·</span></span>`;
+});
+</script>
+</body></html>

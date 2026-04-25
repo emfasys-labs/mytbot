@@ -22,6 +22,24 @@ def test_fused_score_matches_fee_prior_with_zero_observations() -> None:
     assert abs(fused - prior) < 1e-9
 
 
+def test_fused_score_can_beat_static_fee_ordering() -> None:
+    r = SmartOrderRouter(["kraken", "binance"])
+    r.permissions = _Permissive()
+    for _ in range(80):
+        r.record_execution_feedback(
+            broker="kraken", symbol="BTC-USD", filled=True, slippage_bps=0.1
+        )
+    for _ in range(80):
+        r.record_execution_feedback(
+            broker="binance", symbol="BTC-USD", filled=False, slippage_bps=100.0
+        )
+
+    assert r.fused_routing_score("kraken", "BTC-USD") > r.fused_routing_score(
+        "binance", "BTC-USD"
+    )
+    assert r.route("crypto", "BTC-USD", metadata={"demand_score": 0.0}) == "kraken"
+
+
 def test_slippage_percentiles_and_fill_rate_in_export() -> None:
     r = SmartOrderRouter(["binance", "kraken"])
     r.permissions = _Permissive()

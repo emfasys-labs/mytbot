@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 20px; }
+  .label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: #52525b; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+  .name { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: #52525b; width: 64px; }
+</style>
+</head><body>
+
+<div class="label">Border Radius Scale</div>
+<div class="row">
+  <span class="name">sm 6px</span>
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:6px;width:40px;height:24px"></div>
+  <span class="name">md 8px</span>
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;width:40px;height:24px"></div>
+  <span class="name">lg 12px</span>
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:12px;width:56px;height:32px"></div>
+  <span class="name">xl 16px</span>
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:16px;width:44px;height:44px"></div>
+  <span class="name">full</span>
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:9999px;padding:4px 12px;font-size:9px;color:#71717a">chip</div>
+</div>
+
+<div class="label">Spacing Scale</div>
+<div class="row" style="align-items:flex-end;gap:8px">
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:4px;height:4px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">4</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:8px;height:8px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">8</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:10px;height:10px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">10</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:12px;height:12px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">12</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:16px;height:16px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">16</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:20px;height:20px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">20</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="background:#34d399;width:24px;height:24px;border-radius:1px"></div>
+    <span style="font-size:9px;color:#52525b">24</span>
+  </div>
+</div>
+
+<div class="label" style="margin-top:8px">Glow System</div>
+<div class="row">
+  <div style="border-radius:12px;border:1px solid rgba(52,211,153,0.30);background:rgba(52,211,153,0.07);padding:10px 14px;box-shadow:0 0 24px rgba(74,222,128,0.12)">
+    <span style="font-size:10px;color:#34d399">active glow</span>
+  </div>
+  <div style="border-radius:12px;border:1px solid rgba(251,191,36,0.30);background:rgba(251,191,36,0.07);padding:10px 14px;box-shadow:0 0 24px rgba(251,191,36,0.08)">
+    <span style="font-size:10px;color:#fbbf24">caution glow</span>
+  </div>
+  <div style="border-radius:12px;border:1px solid rgba(251,113,133,0.30);background:rgba(251,113,133,0.07);padding:10px 14px;box-shadow:0 0 24px rgba(248,113,113,0.10)">
+    <span style="font-size:10px;color:#fb7185">danger glow</span>
+  </div>
+</div>
+
+</body></html>

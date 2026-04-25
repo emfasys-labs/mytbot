@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from api.server import _alias_symbols_for_signal, _signal_news_attribution
+from api.server import (
+    _alias_symbols_for_signal,
+    _news_lookup_symbols_for_signals,
+    _signal_news_attribution,
+    _signal_news_impact_source,
+)
 
 
 def test_signal_news_attribution_picks_nearest_nonzero_rows() -> None:
@@ -44,4 +49,22 @@ def test_alias_symbols_for_signal_futures_and_fx() -> None:
     assert "QQQ" in _alias_symbols_for_signal("NQ")
     assert "GLD" in _alias_symbols_for_signal("GC")
     assert "USD" in _alias_symbols_for_signal("USDJPY")
+
+
+def test_news_lookup_symbols_include_aliases() -> None:
+    syms = _news_lookup_symbols_for_signals(["ES", "BTC-USD"])
+    assert "ES" in syms
+    assert "SPY" in syms
+    assert "BTC-USD" in syms
+
+
+def test_signal_news_impact_source_distinguishes_accumulator_from_headline() -> None:
+    sig = SimpleNamespace(metadata_={"ai_news_score": 0.0, "accumulator_score": 0.47}, news_score=0.47)
+    assert _signal_news_impact_source(sig, []) == "accumulator"
+    assert _signal_news_impact_source(sig, [{"headline": "Fed hints easing"}]) == "headline"
+
+
+def test_signal_news_impact_source_uses_direct_ai_news_score() -> None:
+    sig = SimpleNamespace(metadata_={"ai_news_score": -0.2, "accumulator_score": 0.0}, news_score=-0.2)
+    assert _signal_news_impact_source(sig, []) == "ai_news"
 

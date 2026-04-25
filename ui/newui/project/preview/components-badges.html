@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 20px; }
+  .label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: #52525b; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+  .chip { border-radius: 9999px; padding: 2px 10px; font-size: 9px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; }
+</style>
+</head><body>
+
+<div class="label">State Badges — Broker / System</div>
+<div class="row">
+  <span class="chip" style="background:rgba(52,211,153,0.10);color:rgba(52,211,153,0.70)">ibkr</span>
+  <span class="chip" style="background:rgba(52,211,153,0.10);color:rgba(52,211,153,0.70)">kraken</span>
+  <span class="chip" style="background:rgba(52,211,153,0.10);color:rgba(52,211,153,0.70)">binance</span>
+  <span class="chip" style="background:rgba(251,191,36,0.10);color:rgba(251,191,36,0.70)">alpaca</span>
+  <span class="chip" style="background:rgba(52,52,63,0.40);color:#52525b">bybit</span>
+</div>
+
+<div class="label">Signal Verdict</div>
+<div class="row">
+  <span class="chip" style="background:rgba(52,211,153,0.10);color:rgba(52,211,153,0.85)">approved</span>
+  <span class="chip" style="background:rgba(251,113,133,0.10);color:rgba(251,113,133,0.85)">rejected</span>
+  <span class="chip" style="background:rgba(251,191,36,0.10);color:rgba(251,191,36,0.80)">stale</span>
+  <span class="chip" style="background:rgba(96,165,250,0.10);color:rgba(96,165,250,0.80)">loading</span>
+</div>
+
+<div class="label">Position Chips (change %)</div>
+<div class="row">
+  <div style="display:flex;gap:6px;flex-wrap:wrap">
+    <span style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9999px;padding:3px 10px;font-size:11px;color:rgba(255,255,255,0.90);font-family:'JetBrains Mono',monospace">AAPL <span style="color:#6ee7b7">+1.2%</span></span>
+    <span style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9999px;padding:3px 10px;font-size:11px;color:rgba(255,255,255,0.90);font-family:'JetBrains Mono',monospace">NVDA <span style="color:#6ee7b7">+3.4%</span></span>
+    <span style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9999px;padding:3px 10px;font-size:11px;color:rgba(255,255,255,0.90);font-family:'JetBrains Mono',monospace">TSLA <span style="color:#fda4af">-0.8%</span></span>
+    <span style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9999px;padding:3px 10px;font-size:11px;color:rgba(255,255,255,0.90);font-family:'JetBrains Mono',monospace">BTC <span style="color:#fda4af">-2.1%</span></span>
+    <span style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9999px;padding:3px 10px;font-size:11px;color:rgba(255,255,255,0.90);font-family:'JetBrains Mono',monospace">MSFT <span style="color:#6ee7b7">+0.4%</span></span>
+  </div>
+</div>
+
+<div class="label">Urgency Labels</div>
+<div class="row">
+  <span style="font-size:10px;color:#34d399;font-family:'JetBrains Mono',monospace;text-transform:uppercase">HIGH</span>
+  <span style="font-size:10px;color:#fbbf24;font-family:'JetBrains Mono',monospace;text-transform:uppercase">MEDIUM</span>
+  <span style="font-size:10px;color:#71717a;font-family:'JetBrains Mono',monospace;text-transform:uppercase">LOW</span>
+</div>
+
+</body></html>

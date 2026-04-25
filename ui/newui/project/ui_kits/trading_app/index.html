@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mytbot — Trading Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  background: #0a0a0a;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+}
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes glow-pulse { 0%,100%{opacity:0.22} 50%{opacity:0.48} }
+@keyframes ticker { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
+@keyframes fadein { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ─── Design tokens ───────────────────────────────────────────
+const C = {
+  bg: '#0a0a0a',
+  surface: 'rgba(255,255,255,0.02)',
+  surfaceRaised: 'rgba(255,255,255,0.04)',
+  borderSubtle: 'rgba(255,255,255,0.05)',
+  borderMedium: 'rgba(255,255,255,0.10)',
+  textPrimary: '#ffffff',
+  textHigh: 'rgba(255,255,255,0.90)',
+  textSecondary: '#d4d4d8',
+  textMuted: '#71717a',
+  textDim: '#52525b',
+  active: '#34d399',
+  activeDim: 'rgba(52,211,153,0.70)',
+  activeBg: 'rgba(52,211,153,0.10)',
+  activeGlow: 'rgba(74,222,128,0.22)',
+  caution: '#fbbf24',
+  cautionDim: 'rgba(251,191,36,0.85)',
+  cautionBg: 'rgba(251,191,36,0.10)',
+  danger: '#fb7185',
+  dangerDim: 'rgba(251,113,133,0.90)',
+  dangerBg: 'rgba(251,113,133,0.10)',
+  dangerGlow: 'rgba(248,113,113,0.22)',
+  info: '#60a5fa',
+  infoBg: 'rgba(96,165,250,0.10)',
+  profit: '#6ee7b7',
+  loss: '#fda4af',
+  pause: '#fde68a',
+  pauseBg: 'rgba(253,230,138,0.10)',
+  off: '#9ca3af',
+  offBg: 'rgba(156,163,175,0.10)',
+};
+
+const mono = "'JetBrains Mono', monospace";
+
+// ─── Fake data ───────────────────────────────────────────────
+const FAKE = {
+  systemState: 'running',
+  nav: 84231,
+  bookNav: 84108,
+  dailyPnL: 1240,
+  weekPnL: 3810,
+  monthPnL: 11240,
+  path: 'D015',
+  loopIt: 47,
+  brokers: {
+    ibkr: { connected: true, balance_ready: true },
+    kraken: { connected: true, balance_ready: true },
+    binance: { connected: true, balance_ready: false },
+    alpaca: { connected: false, configured: true },
+  },
+  mode: 'trader',
+  bullish: [
+    { symbol: 'NVDA', score: 0.84, dir: '↑' },
+    { symbol: 'AAPL', score: 0.71, dir: '↑' },
+    { symbol: 'MSFT', score: 0.63, dir: '→' },
+    { symbol: 'AMZN', score: 0.58, dir: '↑' },
+  ],
+  bearish: [
+    { symbol: 'META', score: 0.18, dir: '↓' },
+    { symbol: 'TSLA', score: 0.09, dir: '↓' },
+  ],
+  events: [
+    'signal · NVDA long 0.84 → risk approved',
+    'fill · NVDA 12 @ 882.40 ibkr',
+    'signal · MSFT long 0.63 → risk approved',
+    'tick · loop #47 · allocator D015',
+    'signal · META short 0.18 → risk rejected: asset_class_limit',
+  ],
+  opportunities: [
+    { symbol: 'NVDA', score: 0.84, tags: 'momentum · tech', urgency: 'HIGH' },
+    { symbol: 'AAPL', score: 0.71, tags: 'momentum · tech', urgency: 'MEDIUM' },
+    { symbol: 'MSFT', score: 0.63, tags: 'momentum', urgency: 'MEDIUM' },
+    { symbol: 'BTC', score: 0.55, tags: 'breakout', urgency: 'MEDIUM' },
+    { symbol: 'AMZN', score: 0.48, tags: 'momentum', urgency: 'LOW' },
+    { symbol: 'SPY', score: 0.42, tags: 'regime', urgency: 'LOW' },
+  ],
+  weakest: [
+    { symbol: 'META', hold: 0.22, exit: 0.61 },
+    { symbol: 'TSLA', hold: 0.18, exit: 0.74 },
+    { symbol: 'NFLX', hold: 0.31, exit: 0.44 },
+  ],
+  instructions: [
+    { action: 'BUY', symbol: 'NVDA', side: 'long', capital: '£8,400', strategy: 'momentum_breakout' },
+    { action: 'HOLD', symbol: 'AAPL', side: 'long', capital: '£6,200', strategy: 'momentum_breakout' },
+  ],
+  positions: [
+    { symbol: 'NVDA', change: 1.8 },
+    { symbol: 'AAPL', change: 0.4 },
+    { symbol: 'MSFT', change: 0.9 },
+    { symbol: 'BTC', change: -1.2 },
+    { symbol: 'ETH', change: -0.3 },
+  ],
+  news: [
+    { text: 'Fed holds rates — dot plot signals 2 cuts by year-end', src: 'Reuters', age: '4m', s: 'neutral' },
+    { text: 'NVDA beats Q4 estimates, revenue up 122% YoY', src: 'BBG', age: '12m', s: 'positive' },
+    { text: 'Crypto market slides 3.2% on regulatory concern', src: 'CoinDesk', age: '18m', s: 'negative' },
+    { text: 'AAPL supply chain disruption reported in Taiwan', src: 'FT', age: '31m', s: 'negative' },
+    { text: 'MSFT Azure growth accelerates to 31% in latest quarter', src: 'CNBC', age: '42m', s: 'positive' },
+    { text: 'UK GDP beats expectations at 0.4% monthly growth', src: 'ONS', age: '1h', s: 'neutral' },
+  ],
+  approved: [{ symbol: 'NVDA', side: 'long', conf: 84.2, q: 0.81 }],
+  rejected: [{ symbol: 'META', side: 'short', reason: 'asset_class_limit', explain: 'Asset-class bucket at configured cap' }],
+  equity: [80000,80400,81200,80800,82100,83000,82600,83800,84231],
+};
+
+// ─── Helpers ─────────────────────────────────────────────────
+function fmt(n) { return n >= 0 ? `+£${n.toLocaleString()}` : `-£${Math.abs(n).toLocaleString()}`; }
+function fmtNav(n) { return `£${n.toLocaleString()}`; }
+function scoreColor(s) { return s >= 0.7 ? C.active : s >= 0.5 ? C.profit : s >= 0.3 ? C.textSecondary : s >= 0.15 ? C.cautionDim : C.dangerDim; }
+
+// ─── NewsTicker ──────────────────────────────────────────────
+function NewsTicker({ paused }) {
+  const dotColor = { positive: C.active, negative: C.danger, neutral: '#6b7280' };
+  const doubled = [...FAKE.news, ...FAKE.news];
+  return (
+    <div style={{ overflow: 'hidden', borderBottom: `1px solid rgba(255,255,255,0.04)`, background: 'rgba(255,255,255,0.015)', padding: '10px 0', flexShrink: 0 }}>
+      {paused ? (
+        <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 300, color: 'rgba(107,114,128,0.60)', letterSpacing: '0.04em' }}>
+          Awaiting market intelligence...
+        </div>
+      ) : (
+        <div style={{ display: 'flex', whiteSpace: 'nowrap', animation: 'ticker 30s linear infinite' }}>
+          {doubled.map((item, i) => (
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0, padding: '0 16px' }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: dotColor[item.s], opacity: 0.6, display: 'inline-block' }} />
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(255,255,255,0.30)' }}>{item.src}</span>
+              <span style={{ fontSize: 11, fontWeight: 300, color: 'rgba(212,212,216,0.90)' }}>{item.text}</span>
+              <span style={{ fontSize: 9, color: C.textDim, fontFamily: mono }}>{item.age}</span>
+              <span style={{ color: 'rgba(82,82,91,0.40)', margin: '0 4px' }}>·</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MasterControl ───────────────────────────────────────────
+function MasterControl({ state, systemState, onState }) {
+  const [hint, setHint] = useState(null);
+  const [armed, setArmed] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const holdTimer = useRef(null);
+
+  const isOff = systemState === 'off';
+  const isRunning = systemState === 'running';
+  const isBusy = systemState === 'starting' || systemState === 'stopping';
+
+  const colors = useMemo(() => {
+    if (isBusy) return { bg: C.infoBg, border: 'rgba(96,165,250,0.30)', text: C.info, glow: 'rgba(96,165,250,0.22)' };
+    if (isOff) return { bg: C.offBg, border: 'rgba(156,163,175,0.30)', text: C.off, glow: 'rgba(156,163,175,0.12)' };
+    if (armed) return { bg: C.dangerBg, border: 'rgba(251,113,133,0.30)', text: C.danger, glow: C.dangerGlow };
+    if (state === 'live') return { bg: C.activeBg, border: 'rgba(52,211,153,0.30)', text: C.active, glow: C.activeGlow };
+    if (state === 'pause') return { bg: C.pauseBg, border: 'rgba(253,230,138,0.30)', text: C.pause, glow: 'rgba(251,191,36,0.20)' };
+    return { bg: C.dangerBg, border: 'rgba(251,113,133,0.30)', text: C.danger, glow: C.dangerGlow };
+  }, [state, systemState, armed, isBusy, isOff]);
+
+  function flash(msg) { setHint(msg); setTimeout(() => setHint(null), 2000); }
+
+  function handleDown(e) {
+    e.preventDefault();
+    holdTimer.current = setTimeout(() => {
+      if (isOff) { flash('Starting...'); onState('live', 'starting'); }
+      else if (isRunning) setArmed(true);
+    }, 800);
+  }
+
+  function handleUp() {
+    clearTimeout(holdTimer.current);
+    if (armed) return;
+    if (isOff) { flash('Starting...'); onState('live', 'starting'); return; }
+    if (isRunning) {
+      if (state === 'live') { onState('pause', 'running'); flash('Paused'); }
+      else { onState('live', 'running'); flash('Live'); }
+    }
+  }
+
+  function handleArmClick() {
+    if (armed) { setArmed(false); setProgress(0); flash('Cancelled'); }
+  }
+
+  const PowerIcon = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={isBusy ? C.info : colors.text}
+      strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"
+      style={isBusy ? { animation: 'spin 1s linear infinite' } : {}}>
+      {isBusy
+        ? <><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></>
+        : <><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></>}
+    </svg>
+  );
+
+  return (
+    <div style={{ position: 'relative', width: 44 }} onMouseUp={handleArmClick}>
+      <div
+        onMouseDown={handleDown} onMouseUp={handleUp} onMouseLeave={() => clearTimeout(holdTimer.current)}
+        style={{
+          width: 44, height: armed ? 44 + 96 : 44,
+          borderRadius: 16, border: `1px solid ${colors.border}`,
+          background: colors.bg, cursor: 'pointer', position: 'relative', overflow: 'hidden',
+          transition: 'height 0.25s cubic-bezier(0.34,1.56,0.64,1)',
+          userSelect: 'none',
+        }}
+      >
+        <div style={{
+          position: 'absolute', inset: 0, borderRadius: 16,
+          background: colors.glow, filter: 'blur(16px)',
+          animation: isRunning && state === 'live' ? 'glow-pulse 2.4s ease-in-out infinite' : 'none',
+        }} />
+        {armed && <div style={{ position: 'absolute', inset: '0 0 0 0', bottom: 0, background: 'rgba(251,113,133,0.20)', borderRadius: '0 0 16px 16px', height: `${progress * 100}%`, top: 'auto', transition: 'height 0.05s linear' }} />}
+        <div style={{ position: 'relative', zIndex: 1, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <PowerIcon />
+        </div>
+        {armed && (
+          <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, color: 'rgba(251,113,133,0.6)' }}>
+            <svg width="12" height="8" viewBox="0 0 12 8" fill="none"><path d="M1 1L6 6L11 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            <span style={{ fontSize: 7, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.15em' }}>stop</span>
+          </div>
+        )}
+      </div>
+      {hint && (
+        <div style={{
+          position: 'absolute', top: 52, right: 0, whiteSpace: 'nowrap',
+          background: 'rgba(0,0,0,0.55)', border: `1px solid rgba(255,255,255,0.10)`,
+          borderRadius: 8, padding: '4px 10px', fontSize: 11, color: '#d4d4d8',
+          backdropFilter: 'blur(12px)', zIndex: 50,
+        }}>{hint}</div>
+      )}
+    </div>
+  );
+}
+
+// ─── ModeSelector ────────────────────────────────────────────
+function ModeSelector({ mode, onMode, disabled }) {
+  const modes = ['trader', 'hunter', 'sentinel'];
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {modes.map(m => (
+        <button key={m} onClick={() => !disabled && onMode(m)} style={{
+          padding: '4px 10px', borderRadius: 6, border: `1px solid ${m === mode ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.05)'}`,
+          background: m === mode ? 'rgba(255,255,255,0.06)' : 'transparent',
+          color: m === mode ? 'rgba(255,255,255,0.90)' : C.textDim,
+          fontSize: 10, cursor: disabled ? 'default' : 'pointer',
+          fontFamily: "'Inter', sans-serif", letterSpacing: '0.02em',
+          transition: 'all 0.15s ease',
+        }}>{m}</button>
+      ))}
+    </div>
+  );
+}
+
+// ─── LiveStrip ───────────────────────────────────────────────
+function LiveStrip({ controlState, systemState, onControlState, onSystemState, mode, onMode, isFlattened }) {
+  const brokers = FAKE.brokers;
+  return (
+    <div style={{ flexShrink: 0, borderBottom: `1px solid ${C.borderMedium}`, background: 'rgba(0,0,0,0.40)', padding: '8px 12px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px 16px', fontSize: 11, color: '#d4d4d8' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
+          <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted }}>NAV</span>
+          <span style={{ fontSize: 18, fontWeight: 300, color: C.textPrimary, fontFamily: mono, fontVariantNumeric: 'tabular-nums' }}>
+            {isFlattened ? '—' : fmtNav(FAKE.nav)}
+          </span>
+        </div>
+        <div style={{ width: 1, height: 16, background: C.borderMedium }} />
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {[['Today', FAKE.dailyPnL], ['Week', FAKE.weekPnL], ['Month', FAKE.monthPnL]].map(([label, val]) => (
+            <span key={label}>
+              <span style={{ color: C.textMuted }}>{label} </span>
+              <span style={{ color: isFlattened ? C.textMuted : val >= 0 ? C.profit : C.loss, fontFamily: mono, fontVariantNumeric: 'tabular-nums' }}>
+                {isFlattened ? '—' : fmt(val)}
+              </span>
+            </span>
+          ))}
+        </div>
+        <div style={{ width: 1, height: 16, background: C.borderMedium }} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ color: C.textMuted }}>System</span>
+          <span style={{ color: systemState === 'running' ? C.active : systemState === 'error' ? C.danger : '#9ca3af' }}>{systemState}</span>
+          <span style={{ color: C.textDim }}>·</span>
+          <span style={{ color: C.textMuted }}>path {FAKE.path}</span>
+          <span style={{ color: C.textDim }}>#{FAKE.loopIt}</span>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <MasterControl state={controlState} systemState={systemState} onState={(s, sys) => { onControlState(s); onSystemState(sys || systemState); }} />
+          <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: C.textDim }}>Risk mode</span>
+          <ModeSelector mode={mode} onMode={onMode} disabled={systemState === 'off'} />
+        </div>
+      </div>
+      <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {Object.entries(brokers).map(([name, v]) => {
+          const cls = !v.configured && !v.connected
+            ? { bg: 'rgba(52,52,63,0.40)', color: C.textDim }
+            : !v.connected
+              ? { bg: C.cautionBg, color: 'rgba(251,191,36,0.65)' }
+              : v.balance_ready === false
+                ? { bg: C.cautionBg, color: 'rgba(251,191,36,0.65)' }
+                : { bg: C.activeBg, color: C.activeDim };
+          return (
+            <span key={name} style={{
+              borderRadius: 9999, padding: '2px 8px', fontSize: 9,
+              fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.1em',
+              background: cls.bg, color: cls.color,
+            }}>{name}</span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── SignalBrain ──────────────────────────────────────────────
+function SignalBrain({ dormant }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Signal Brain</div>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(52,211,153,0.70)', marginBottom: 4 }}>Top conviction</div>
+      <div style={{ fontFamily: mono, fontSize: 11, borderBottom: `1px solid ${C.borderSubtle}`, paddingBottom: 8, marginBottom: 8 }}>
+        {dormant
+          ? <div style={{ color: C.textDim }}>System off — no live memory</div>
+          : FAKE.bullish.map((r, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 2, animation: `fadein 0.3s ease ${i * 0.03}s both` }}>
+              <span style={{ color: 'rgba(255,255,255,0.90)' }}>{r.symbol}</span>
+              <span style={{ color: scoreColor(r.score), fontVariantNumeric: 'tabular-nums' }}>{r.score.toFixed(2)} {r.dir}</span>
+            </div>
+          ))}
+      </div>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(251,113,133,0.70)', marginBottom: 4 }}>Weakest</div>
+      <div style={{ fontFamily: mono, fontSize: 11, borderBottom: `1px solid ${C.borderSubtle}`, paddingBottom: 8, marginBottom: 8 }}>
+        {dormant
+          ? <div style={{ color: C.textDim }}>—</div>
+          : FAKE.bearish.map((r, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 2 }}>
+              <span style={{ color: 'rgba(255,255,255,0.90)' }}>{r.symbol}</span>
+              <span style={{ color: C.dangerDim, fontVariantNumeric: 'tabular-nums' }}>{r.score.toFixed(2)} {r.dir}</span>
+            </div>
+          ))}
+      </div>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: C.textDim, marginBottom: 6 }}>Live flow</div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderRadius: 6, border: `1px solid ${C.borderSubtle}`, background: 'rgba(0,0,0,0.20)', padding: 8 }}>
+        {dormant
+          ? <div style={{ fontSize: 10, color: C.textDim, fontFamily: mono }}>Quiet — system not running.</div>
+          : FAKE.events.map((ev, i) => (
+            <div key={i} style={{ fontSize: 10, fontFamily: mono, color: '#a1a1aa', borderBottom: `1px solid ${C.borderSubtle}`, paddingBottom: 4, marginBottom: 4, lineHeight: 1.4 }}>{ev}</div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── AllocationCenter ─────────────────────────────────────────
+function AllocationCenter({ dormant }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, width: '100%' }}>
+      {/* Capital */}
+      <div style={{ borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Capital & Targets</div>
+        {dormant
+          ? <div style={{ fontSize: 12, color: C.textDim }}>Start the system to load allocator data.</div>
+          : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', fontSize: 11 }}>
+              <div>
+                <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Exposure (book)</div>
+                <div style={{ fontFamily: mono, color: C.textSecondary, lineHeight: 1.8 }}>
+                  <div>gross <span style={{ color: 'rgba(255,255,255,0.9)', fontVariantNumeric: 'tabular-nums' }}>0.72</span></div>
+                  <div>net <span style={{ color: 'rgba(255,255,255,0.9)', fontVariantNumeric: 'tabular-nums' }}>0.61</span></div>
+                  <div>nav <span style={{ color: 'rgba(255,255,255,0.9)', fontVariantNumeric: 'tabular-nums' }}>{fmtNav(FAKE.nav)}</span></div>
+                </div>
+              </div>
+              <div style={{ borderLeft: `1px solid ${C.borderSubtle}`, paddingLeft: 16 }}>
+                <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Weights (top)</div>
+                {[['NVDA','0.24'],['AAPL','0.18'],['MSFT','0.15']].map(([sym,w]) => (
+                  <div key={sym} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 10, lineHeight: 1.8 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.90)' }}>{sym}</span>
+                    <span style={{ color: 'rgba(110,231,183,0.80)', fontVariantNumeric: 'tabular-nums' }}>{w}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        {/* Opportunities */}
+        <div style={{ borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10, minHeight: 0 }}>
+          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Top Opportunities</div>
+          {dormant
+            ? <div style={{ fontSize: 11, color: C.textDim }}>System off</div>
+            : (
+              <table style={{ width: '100%', fontFamily: mono, fontSize: 11, borderCollapse: 'collapse' }}>
+                <thead><tr style={{ fontSize: 10, color: C.textMuted }}>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Sym</th>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Score</th>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Tags</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 4, fontWeight: 400 }}>Urgency</th>
+                </tr></thead>
+                <tbody>
+                  {FAKE.opportunities.map((o, i) => (
+                    <tr key={i} style={{ borderTop: `1px solid ${C.borderSubtle}`, background: i === 0 ? 'rgba(16,185,129,0.07)' : 'transparent' }}>
+                      <td style={{ padding: '3px 0', color: 'rgba(255,255,255,0.90)', fontWeight: i === 0 ? 500 : 400 }}>{o.symbol}</td>
+                      <td style={{ padding: '3px 0', color: scoreColor(o.score), fontVariantNumeric: 'tabular-nums' }}>{o.score.toFixed(2)} ↑</td>
+                      <td style={{ padding: '3px 0', color: C.textMuted, fontSize: 10, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{o.tags}</td>
+                      <td style={{ padding: '3px 0', color: o.urgency === 'HIGH' ? C.active : o.urgency === 'MEDIUM' ? C.caution : C.textDim, fontSize: 10, textAlign: 'right' }}>{o.urgency}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+        </div>
+        {/* Hold pressure */}
+        <div style={{ borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Hold Pressure</div>
+          {dormant
+            ? <div style={{ fontSize: 11, color: C.textDim }}>System off</div>
+            : (
+              <table style={{ width: '100%', fontFamily: mono, fontSize: 11, borderCollapse: 'collapse' }}>
+                <thead><tr style={{ fontSize: 10, color: C.textMuted }}>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Sym</th>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Hold</th>
+                  <th style={{ textAlign: 'left', paddingBottom: 4, fontWeight: 400 }}>Exit</th>
+                </tr></thead>
+                <tbody>
+                  {FAKE.weakest.map((w, i) => (
+                    <tr key={i} style={{ borderTop: `1px solid ${C.borderSubtle}` }}>
+                      <td style={{ padding: '4px 0', color: 'rgba(255,255,255,0.90)' }}>{w.symbol}</td>
+                      <td style={{ padding: '4px 0', color: C.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{w.hold.toFixed(2)}</td>
+                      <td style={{ padding: '4px 0', color: 'rgba(251,191,36,0.80)', fontVariantNumeric: 'tabular-nums' }}>{w.exit.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+        </div>
+      </div>
+
+      {/* Next actions */}
+      <div style={{ borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Next Actions (allocator)</div>
+        {dormant
+          ? <div style={{ fontSize: 11, color: C.textDim }}>System off — no instructions.</div>
+          : FAKE.instructions.map((x, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontFamily: mono, fontSize: 11, borderBottom: `1px solid ${C.borderSubtle}`, padding: '4px 0' }}>
+              <span style={{ color: x.action === 'BUY' ? C.active : x.action === 'SELL' ? C.danger : C.textMuted }}>{x.action}</span>
+              <span style={{ color: 'rgba(255,255,255,0.90)' }}>{x.symbol}</span>
+              <span style={{ color: C.textDim }}>{x.side}</span>
+              <span style={{ color: 'rgba(110,231,183,0.80)', fontVariantNumeric: 'tabular-nums' }}>{x.capital}</span>
+              <span style={{ color: C.textDim, fontSize: 10 }}>{x.strategy}</span>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── PerformancePanel ─────────────────────────────────────────
+function PerformancePanel({ dormant }) {
+  const equity = FAKE.equity;
+  const w = 300, h = 60, pad = 4;
+  const min = Math.min(...equity), max = Math.max(...equity);
+  const pts = equity.map((v, i) => {
+    const x = pad + (i / (equity.length - 1)) * (w - pad * 2);
+    const y = pad + (h - pad * 2) - ((v - min) / (max - min || 1)) * (h - pad * 2);
+    return `${x},${y}`;
+  }).join(' ');
+
+  return (
+    <div style={{ borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted }}>Performance</div>
+        <div style={{ display: 'flex', gap: 12, fontSize: 11 }}>
+          {[['D', FAKE.dailyPnL], ['W', FAKE.weekPnL], ['M', FAKE.monthPnL]].map(([l, v]) => (
+            <span key={l} style={{ fontFamily: mono, fontVariantNumeric: 'tabular-nums' }}>
+              <span style={{ color: C.textDim }}>{l} </span>
+              <span style={{ color: v >= 0 ? C.profit : C.loss }}>{fmt(v)}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        <polyline fill="none" stroke={dormant ? C.textDim : '#6aa6ff'} strokeWidth="1.5" points={pts} />
+      </svg>
+    </div>
+  );
+}
+
+// ─── RiskGate ─────────────────────────────────────────────────
+function RiskGate({ dormant }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, borderRadius: 12, border: `1px solid ${C.borderSubtle}`, background: C.surface, padding: 10 }}>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: C.textMuted, marginBottom: 8 }}>Risk Gate</div>
+      {dormant
+        ? <div style={{ fontSize: 12, color: C.textDim }}>System off</div>
+        : (
+          <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(52,211,153,0.70)', marginBottom: 6 }}>Approved</div>
+            {FAKE.approved.map((s, i) => (
+              <div key={i} style={{ fontSize: 11, borderBottom: `1px solid ${C.borderSubtle}`, paddingBottom: 8, marginBottom: 8 }}>
+                <div style={{ color: 'rgba(255,255,255,0.90)' }}>{s.symbol} <span style={{ color: C.textMuted }}>{s.side}</span></div>
+                <div style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>conf {s.conf.toFixed(2)}% · q {s.q.toFixed(2)}</div>
+              </div>
+            ))}
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(251,113,133,0.70)', marginBottom: 6 }}>Rejected / blocked</div>
+            {FAKE.rejected.map((s, i) => (
+              <div key={i} style={{ fontSize: 11, borderBottom: `1px solid ${C.borderSubtle}`, paddingBottom: 8 }}>
+                <div style={{ color: 'rgba(255,255,255,0.90)' }}>
+                  <span style={{ color: 'rgba(253,164,175,0.90)' }}>Rejected:</span> <span style={{ textTransform: 'uppercase' }}>{s.side}</span> {s.symbol}
+                </div>
+                <div style={{ fontSize: 10, color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>{s.explain}</div>
+                <div style={{ fontFamily: mono, fontSize: 10, color: 'rgba(251,113,133,0.60)' }}>{s.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
+// ─── OpportunityTicker ────────────────────────────────────────
+function OpportunityTicker({ dormant }) {
+  const items = FAKE.opportunities;
+  return (
+    <div style={{ flexShrink: 0, borderTop: `1px solid ${C.borderSubtle}`, background: 'rgba(255,255,255,0.01)', padding: '8px 12px', display: 'flex', gap: 12, alignItems: 'center', overflowX: 'auto' }}>
+      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', color: C.textDim, flexShrink: 0 }}>Opportunities</span>
+      {dormant
+        ? <span style={{ fontSize: 11, color: C.textDim }}>—</span>
+        : items.map((o, i) => (
+          <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {i > 0 && <span style={{ color: 'rgba(82,82,91,0.4)' }}>·</span>}
+            <span style={{ fontFamily: mono, fontSize: 11, color: C.textMuted }}>{o.symbol} <span style={{ color: scoreColor(o.score) }}>{o.score.toFixed(2)}</span> <span style={{ fontSize: 10, color: o.urgency === 'HIGH' ? C.active : o.urgency === 'MEDIUM' ? C.caution : C.textDim }}>{o.urgency}</span></span>
+          </span>
+        ))}
+    </div>
+  );
+}
+
+// ─── PositionChips ────────────────────────────────────────────
+function PositionChips({ dormant }) {
+  const positions = FAKE.positions;
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      {dormant
+        ? null
+        : positions.map((p, i) => (
+          <span key={i} style={{
+            background: 'rgba(255,255,255,0.04)', border: `1px solid rgba(255,255,255,0.08)`,
+            borderRadius: 9999, padding: '3px 10px', fontSize: 11,
+            color: 'rgba(255,255,255,0.90)', fontFamily: mono,
+          }}>
+            {p.symbol} <span style={{ color: p.change >= 0 ? C.profit : C.loss }}>{p.change >= 0 ? '+' : ''}{p.change.toFixed(1)}%</span>
+          </span>
+        ))}
+    </div>
+  );
+}
+
+// ─── Heartbeat ────────────────────────────────────────────────
+function SystemHeartbeat({ isActive }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{
+        width: 6, height: 6, borderRadius: '50%',
+        background: isActive ? C.active : C.textDim,
+        boxShadow: isActive ? `0 0 8px ${C.activeGlow}` : 'none',
+        animation: isActive ? 'pulse 2s ease-in-out infinite' : 'none',
+      }} />
+      <span style={{ fontSize: 11, color: C.textMuted, fontFamily: mono }}>
+        {isActive ? '12 trades · last 4m' : 'idle'}
+      </span>
+    </div>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────
+function App() {
+  const [controlState, setControlState] = useState('live');
+  const [systemState, setSystemState] = useState('running');
+  const [mode, setMode] = useState('trader');
+
+  const isFlattened = controlState === 'flatten' || systemState === 'off' || systemState === 'stopping';
+  const dormant = systemState !== 'running';
+  const isActive = controlState === 'live' && systemState === 'running';
+
+  // Simulate starting after a moment
+  useEffect(() => {
+    if (systemState === 'starting') {
+      const t = setTimeout(() => setSystemState('running'), 1800);
+      return () => clearTimeout(t);
+    }
+    if (systemState === 'stopping') {
+      const t = setTimeout(() => { setSystemState('off'); setControlState('flatten'); }, 1500);
+      return () => clearTimeout(t);
+    }
+  }, [systemState]);
+
+  return (
+    <div style={{ height: '100vh', overflow: 'hidden', background: C.bg, color: C.textPrimary, display: 'flex', flexDirection: 'column' }}>
+      <NewsTicker paused={isFlattened} />
+
+      <LiveStrip
+        controlState={controlState} systemState={systemState}
+        onControlState={setControlState} onSystemState={setSystemState}
+        mode={mode} onMode={setMode} isFlattened={isFlattened}
+      />
+
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 8, padding: 8, overflow: 'hidden' }}>
+          {/* Left: SignalBrain */}
+          <div style={{ width: 220, flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <SignalBrain dormant={dormant} />
+          </div>
+
+          {/* Center: AllocationCenter + Performance + Chips */}
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
+            <AllocationCenter dormant={dormant} />
+            <PerformancePanel dormant={dormant} />
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', borderTop: `1px solid rgba(255,255,255,0.05)`, paddingTop: 8 }}>
+              <PositionChips dormant={dormant} />
+              <SystemHeartbeat isActive={isActive} />
+              {!dormant && <span style={{ fontSize: 11, color: C.textDim, fontFamily: mono }}>Tradable £68,900 · 82%</span>}
+            </div>
+          </div>
+
+          {/* Right: RiskGate */}
+          <div style={{ width: 200, flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <RiskGate dormant={dormant} />
+          </div>
+        </div>
+      </div>
+
+      <OpportunityTicker dormant={dormant} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

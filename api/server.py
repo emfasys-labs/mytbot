@@ -89,6 +89,30 @@ def _float_or_zero(v: Any) -> float:
         return 0.0
 
 
+def _metadata_float(metadata: dict[str, Any] | None, key: str) -> float | None:
+    if not metadata or key not in metadata:
+        return None
+    try:
+        return float(metadata[key])
+    except (TypeError, ValueError):
+        return None
+
+
+def _signal_news_impact_source(signal_row: Any, attribution: list[dict[str, Any]]) -> str:
+    if attribution:
+        return "headline"
+    metadata = getattr(signal_row, "metadata_", None) or {}
+    ai_news_score = _metadata_float(metadata, "ai_news_score")
+    if ai_news_score is not None and ai_news_score != 0.0:
+        return "ai_news"
+    accumulator_score = _metadata_float(metadata, "accumulator_score")
+    if accumulator_score is not None and accumulator_score != 0.0:
+        return "accumulator"
+    if _float_or_zero(getattr(signal_row, "news_score", None)) != 0.0:
+        return "signal"
+    return "none"
+
+
 def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, max_items: int = 2) -> list[dict[str, Any]]:
     """
     Build per-signal explainability rows from nearby AI news logs.
@@ -118,8 +142,18 @@ def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, ma
     out: list[dict[str, Any]] = []
     for _, _, r in picked[:max_items]:
         payload = r.payload if isinstance(getattr(r, "payload", None), dict) else {}
-        headline = str(payload.get("headline") or "").strip()
-        source = str(payload.get("provider") or getattr(r, "source", None) or "").strip()
+        headline = str(
+            payload.get("headline")
+            or payload.get("title")
+            or payload.get("rationale")
+            or ""
+        ).strip()
+        source = str(
+            payload.get("provider")
+            or payload.get("source")
+            or getattr(r, "source", None)
+            or ""
+        ).strip()
         out.append(
             {
                 "headline": headline,
@@ -151,6 +185,21 @@ def _alias_symbols_for_signal(symbol: str) -> list[str]:
     if s.endswith("=F"):
         s = s[:-2]
     return alias_map.get(s, [s])
+
+
+def _news_lookup_symbols_for_signals(symbols: list[str]) -> list[str]:
+    """Expand signal symbols to the direct + alias symbols used by AI news logs."""
+    out: dict[str, None] = {}
+    for sym in symbols:
+        s = (sym or "").strip().upper()
+        if not s:
+            continue
+        out[s] = None
+        for a in _alias_symbols_for_signal(s):
+            aa = (a or "").strip().upper()
+            if aa:
+                out[aa] = None
+    return list(out.keys())
 
 
 def _is_public_spa_get(path: str, method: str) -> bool:
@@ -887,7 +936,8 @@ async def get_intelligence_signals(
                     }
             # News attribution: map each signal to nearby AI "news" logs for same symbol.
             sig_symbols = sorted({(s.symbol or "").strip().upper() for s in sigs if (s.symbol or "").strip()})
-            if sig_symbols:
+            lookup_symbols = _news_lookup_symbols_for_signals(sig_symbols)
+            if lookup_symbols:
                 min_ts = min((s.timestamp for s in sigs if s.timestamp is not None), default=None)
                 max_ts = max((s.timestamp for s in sigs if s.timestamp is not None), default=None)
                 if min_ts is not None and max_ts is not None:
@@ -897,7 +947,7 @@ async def get_intelligence_signals(
                         select(AIOutputLog)
                         .where(
                             AIOutputLog.context_type == "news",
-                            AIOutputLog.symbol.in_(sig_symbols),
+                            AIOutputLog.symbol.in_(lookup_symbols),
                             AIOutputLog.timestamp >= min_cutoff,
                             AIOutputLog.timestamp <= max_cutoff,
                         )
@@ -966,12 +1016,15 @@ async def get_intelligence_signals(
                 "confidence": float(s.confidence) if s.confidence else 0.0,
                 "asset_class": s.asset_class,
                 "news_score": float(s.news_score) if s.news_score is not None else None,
+                "ai_news_score": _metadata_float(s.metadata_, "ai_news_score"),
+                "accumulator_score": _metadata_float(s.metadata_, "accumulator_score"),
                 "quality_score": (float(s.metadata_["trade_quality_score"]) if s.metadata_ and "trade_quality_score" in s.metadata_ else None),
                 "volume_z": (float(s.metadata_["volume_z_score"]) if s.metadata_ and "volume_z_score" in s.metadata_ else None),
                 "verdict": verdicts.get(s.id, {}).get("verdict", "unknown"),
                 "risk_reason": verdicts.get(s.id, {}).get("reason", ""),
                 "checks_failed": verdicts.get(s.id, {}).get("checks_failed", []),
                 "news_attribution": attribution_by_signal.get(s.id, []),
+                "news_impact_source": _signal_news_impact_source(s, attribution_by_signal.get(s.id, [])),
             }
             for s in sigs_deduped
         ]
@@ -1423,7 +1476,7 @@ async def diagnostics_routing_quality(bus: CommandBus = Depends(_command_bus)):
 
 
 @app.post("/system/start")
-async def system_start():
+async def system_start(_: None = Depends(_require_mutation_token)):
     """Start the entire trading system (one-button ON)."""
     orch = _get_orchestrator()
     if orch is None:
@@ -1433,7 +1486,7 @@ async def system_start():
 
 
 @app.post("/system/stop")
-async def system_stop():
+async def system_stop(_: None = Depends(_require_mutation_token)):
     """Stop the entire trading system (one-button OFF)."""
     orch = _get_orchestrator()
     if orch is None:
@@ -1443,7 +1496,10 @@ async def system_stop():
 
 
 @app.put("/system/capital-allocation")
-async def set_capital_allocation(body: dict):
+async def set_capital_allocation(
+    body: dict,
+    _: None = Depends(_require_mutation_token),
+):
     """Set the fraction of total equity used for order sizing and sleeve risk limits (0.0–1.0)."""
     orch = _get_orchestrator()
     if orch is None:
@@ -1639,7 +1695,10 @@ class _ModeBody(BaseModel):
 
 
 @app.post("/system/mode")
-async def set_system_mode(body: _ModeBody):
+async def set_system_mode(
+    body: _ModeBody,
+    _: None = Depends(_require_mutation_token),
+):
     mode = body.mode.lower().strip()
     if mode not in _VALID_MODES:
         raise HTTPException(status_code=400, detail=f"mode must be one of: {sorted(_VALID_MODES)}")

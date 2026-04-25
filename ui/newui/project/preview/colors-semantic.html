@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+  .card { border-radius: 10px; padding: 12px 14px; }
+  .label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 6px; }
+  .name { font-size: 12px; font-weight: 500; }
+  .hex { font-family: 'JetBrains Mono', monospace; font-size: 9px; margin-top: 3px; opacity: 0.55; }
+  .usage { font-size: 9px; margin-top: 5px; opacity: 0.65; }
+</style>
+</head><body>
+<div class="grid">
+  <div class="card" style="background:rgba(52,211,153,0.10);border:1px solid rgba(52,211,153,0.25)">
+    <div class="label" style="color:#34d399">Active</div>
+    <div class="name" style="color:#34d399">emerald-400</div>
+    <div class="hex" style="color:#34d399">#34d399</div>
+    <div class="usage" style="color:#6ee7b7">Running · profit · approved · safe</div>
+  </div>
+  <div class="card" style="background:rgba(251,191,36,0.10);border:1px solid rgba(251,191,36,0.25)">
+    <div class="label" style="color:#fbbf24">Caution</div>
+    <div class="name" style="color:#fbbf24">amber-400</div>
+    <div class="hex" style="color:#fbbf24">#fbbf24</div>
+    <div class="usage" style="color:#fde68a">Stale · paused · connecting</div>
+  </div>
+  <div class="card" style="background:rgba(251,113,133,0.10);border:1px solid rgba(251,113,133,0.25)">
+    <div class="label" style="color:#fb7185">Danger</div>
+    <div class="name" style="color:#fb7185">rose-400</div>
+    <div class="hex" style="color:#fb7185">#fb7185</div>
+    <div class="usage" style="color:#fda4af">Kill · loss · rejected · flatten</div>
+  </div>
+  <div class="card" style="background:rgba(96,165,250,0.10);border:1px solid rgba(96,165,250,0.25)">
+    <div class="label" style="color:#60a5fa">Info</div>
+    <div class="name" style="color:#60a5fa">blue-400</div>
+    <div class="hex" style="color:#60a5fa">#60a5fa</div>
+    <div class="usage" style="color:#93c5fd">Starting · loading · transitions</div>
+  </div>
+</div>
+<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+  <div style="background:rgba(52,211,153,0.10);border-radius:9999px;padding:3px 10px;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(52,211,153,0.85);font-weight:500">running</div>
+  <div style="background:rgba(251,191,36,0.10);border-radius:9999px;padding:3px 10px;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(251,191,36,0.85);font-weight:500">paused</div>
+  <div style="background:rgba(251,113,133,0.10);border-radius:9999px;padding:3px 10px;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(251,113,133,0.85);font-weight:500">flatten</div>
+  <div style="background:rgba(96,165,250,0.10);border-radius:9999px;padding:3px 10px;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(96,165,250,0.80);font-weight:500">starting</div>
+  <div style="background:rgba(156,163,175,0.10);border-radius:9999px;padding:3px 10px;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(156,163,175,0.70);font-weight:500">off</div>
+</div>
+<div style="margin-top:14px;display:flex;gap:16px">
+  <div>
+    <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:#71717a;margin-bottom:4px">P&L colors</div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#6ee7b7">+£1,240.00</div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#fda4af;margin-top:2px">−£340.00</div>
+  </div>
+  <div>
+    <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:#71717a;margin-bottom:4px">Chart lines</div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:10px;color:#71717a">
+      <div style="width:32px;height:2px;background:#6aa6ff;border-radius:2px"></div> equity
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:10px;color:#71717a;margin-top:4px">
+      <div style="width:32px;height:2px;background:#ff6666;border-radius:2px"></div> drawdown
+    </div>
+  </div>
+</div>
+</body></html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 20px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .panel { border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.02); padding: 10px; min-width: 180px; }
+  .plabel { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: #71717a; margin-bottom: 8px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.04); gap: 8px; }
+  .row:last-child { border-bottom: none; }
+  .sym { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.90); }
+  .score { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+</style>
+</head><body>
+
+<div class="panel">
+  <div class="plabel">Signal Brain</div>
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(52,211,153,0.7);margin-bottom:4px">Top conviction</div>
+  <div class="row"><span class="sym">NVDA</span><span class="score" style="color:#34d399">0.84 ↑</span></div>
+  <div class="row"><span class="sym">AAPL</span><span class="score" style="color:#6ee7b7">0.71 ↑</span></div>
+  <div class="row"><span class="sym">MSFT</span><span class="score" style="color:#6ee7b7">0.63 →</span></div>
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(251,113,133,0.70);margin:8px 0 4px">Weakest</div>
+  <div class="row"><span class="sym">META</span><span class="score" style="color:#fda4af">0.18 ↓</span></div>
+  <div class="row"><span class="sym">TSLA</span><span class="score" style="color:#fb7185">0.09 ↓</span></div>
+</div>
+
+<div class="panel">
+  <div class="plabel">Risk Gate</div>
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(52,211,153,0.7);margin-bottom:4px">Approved</div>
+  <div class="row">
+    <div>
+      <div class="sym">NVDA <span style="color:#71717a">long</span></div>
+      <div style="font-size:10px;color:#71717a;font-family:'JetBrains Mono',monospace">conf 84.20% · q 0.81</div>
+    </div>
+  </div>
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(251,113,133,0.70);margin:8px 0 4px">Rejected</div>
+  <div class="row">
+    <div>
+      <div class="sym"><span style="color:#fda4af">Rejected:</span> LONG TSLA</div>
+      <div style="font-size:10px;color:#d4d4d8;margin-top:2px">Asset-class bucket at cap</div>
+      <div style="font-size:10px;color:rgba(251,113,133,0.60);font-family:'JetBrains Mono',monospace">asset_class_limit</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="min-width:200px">
+  <div class="plabel">Capital & Targets</div>
+  <div style="font-size:10px;color:#71717a;margin-bottom:4px">Exposure (book)</div>
+  <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#d4d4d8;line-height:1.7">
+    <div>gross <span style="color:rgba(255,255,255,0.9)">0.72</span></div>
+    <div>net <span style="color:rgba(255,255,255,0.9)">0.61</span></div>
+    <div>nav <span style="color:rgba(255,255,255,0.9)">£84,231</span></div>
+  </div>
+  <div style="border-top:1px solid rgba(255,255,255,0.05);margin:8px 0 6px"></div>
+  <div style="font-size:10px;color:#71717a;margin-bottom:4px">Weights (top)</div>
+  <div class="row"><span class="sym">NVDA</span><span class="score" style="color:rgba(110,231,183,0.80)">0.24</span></div>
+  <div class="row"><span class="sym">AAPL</span><span class="score" style="color:rgba(110,231,183,0.80)">0.18</span></div>
+  <div class="row"><span class="sym">MSFT</span><span class="score" style="color:rgba(110,231,183,0.80)">0.15</span></div>
+</div>
+
+</body></html>

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'JetBrains Mono', monospace; padding: 20px; }
+  .label { font-family: 'Inter', sans-serif; font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: #52525b; margin-bottom: 8px; }
+  .row { display: flex; align-items: baseline; gap: 16px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .key { font-size: 10px; color: #52525b; width: 64px; }
+</style>
+</head><body>
+
+<div class="label">JetBrains Mono — data, scores, prices</div>
+
+<div class="row">
+  <span class="key">score</span>
+  <span style="font-size:11px;color:rgba(255,255,255,0.9);font-variant-numeric:tabular-nums">0.82 ↑</span>
+  <span style="font-size:11px;color:#34d399;font-variant-numeric:tabular-nums">0.61 →</span>
+  <span style="font-size:11px;color:#fb7185;font-variant-numeric:tabular-nums">0.12 ↓</span>
+</div>
+<div class="row">
+  <span class="key">pnl</span>
+  <span style="font-size:13px;color:#6ee7b7;font-variant-numeric:tabular-nums">+£1,240.50</span>
+  <span style="font-size:13px;color:#fda4af;font-variant-numeric:tabular-nums">−£340.00</span>
+</div>
+<div class="row">
+  <span class="key">price</span>
+  <span style="font-size:11px;color:rgba(255,255,255,0.9);font-variant-numeric:tabular-nums">182.44</span>
+  <span style="font-size:11px;color:#71717a">AAPL</span>
+  <span style="font-size:11px;color:rgba(255,255,255,0.9);font-variant-numeric:tabular-nums">43,211.90</span>
+  <span style="font-size:11px;color:#71717a">BTC/USD</span>
+</div>
+<div class="row">
+  <span class="key">event</span>
+  <span style="font-size:10px;color:#71717a">signal · TSLA long 0.74 → risk approved</span>
+</div>
+<div class="row">
+  <span class="key">error</span>
+  <span style="font-size:10px;color:#fda4af">Last start: connection refused 127.0.0.1:7497</span>
+</div>
+<div class="row" style="border:none">
+  <span class="key">meta</span>
+  <span style="font-size:10px;color:#52525b">Tradable £8,200 · 82%</span>
+  <span style="font-size:10px;color:#52525b">· #loop 47 · 4m ago</span>
+</div>
+
+</body></html>

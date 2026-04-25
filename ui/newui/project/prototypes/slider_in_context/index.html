@@ -1,0 +1,707 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Dashboard · slider in context</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; width: 100%; min-height: 100%; background: #050505; color: rgba(255,255,255,0.92); font-family: 'Geist', sans-serif; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+  button { font-family: inherit; cursor: pointer; }
+  @keyframes fadeIn { from {opacity:0} to {opacity:1} }
+  @keyframes slideUp { from {opacity:0; transform: translateY(8px)} to {opacity:1; transform: translateY(0)} }
+  @keyframes tickFlash { 0%{opacity:1; transform:scaleX(1)} 50%{opacity:1; transform:scaleX(1.6)} 100%{opacity:.5; transform:scaleX(1)} }
+  @keyframes dangerPulse { 0%,100% {box-shadow: 0 0 0 0 rgba(248,113,113,0.4)} 50% {box-shadow: 0 0 0 8px rgba(248,113,113,0)} }
+  @keyframes pulseDot { 0%,100% {opacity:.8; transform:scale(1)} 50% {opacity:1; transform:scale(1.15)} }
+  @keyframes modalIn { from {opacity:0; transform:scale(0.98)} to {opacity:1; transform:scale(1)} }
+  @keyframes backdropIn { from {opacity:0} to {opacity:1} }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+const T = {
+  bg0: '#050505', bg1: '#0a0a0b', bg2: '#111113', bg3: '#17171a',
+  line: 'rgba(255,255,255,0.06)', lineStrong: 'rgba(255,255,255,0.12)',
+  ink0: '#ffffff', ink1: 'rgba(255,255,255,0.92)', ink2: 'rgba(255,255,255,0.62)', ink3: 'rgba(255,255,255,0.42)', ink4: 'rgba(255,255,255,0.22)',
+  accent: '#67e8f9', accentDim: 'rgba(103,232,249,0.15)', accentGlow: 'rgba(103,232,249,0.4)',
+  profit: '#5eead4', loss: '#fda4af', caution: '#fbbf24', cautionDim: 'rgba(251,191,36,0.14)', danger: '#f87171', dangerDim: 'rgba(248,113,113,0.12)',
+  sans: "'Geist', -apple-system, system-ui, sans-serif",
+  mono: "'Geist Mono', ui-monospace, monospace",
+  ease: 'cubic-bezier(0.22, 1, 0.36, 1)',
+};
+
+const NAV = 84231;
+const POSITIONS = [
+  { sym: 'NVDA', value: 15880, hold: 0.88, pnl: 529.92,  strat: 'momentum_breakout' },
+  { sym: 'AAPL', value: 10946, hold: 0.79, pnl: 508.80,  strat: 'momentum_breakout' },
+  { sym: 'MSFT', value: 7409,  hold: 0.71, pnl: 147.00,  strat: 'mean_reversion'    },
+  { sym: 'BTC',  value: 3457,  hold: 0.64, pnl: 133.32,  strat: 'trend_follow'      },
+  { sym: 'AMZN', value: 2205,  hold: 0.51, pnl: 42.10,   strat: 'momentum_breakout' },
+  { sym: 'ETH',  value: 2828,  hold: 0.42, pnl: -14.40,  strat: 'trend_follow'      },
+  { sym: 'META', value: 4171,  hold: 0.28, pnl: -188.00, strat: 'momentum_breakout' },
+];
+const DEPLOYED_VALUE = POSITIONS.reduce((s, p) => s + p.value, 0);
+const DEPLOYED_PCT = DEPLOYED_VALUE / NAV;
+
+function computeTrim(targetPct, protectedSyms = new Set()) {
+  const targetValue = NAV * targetPct;
+  const mustRelease = Math.max(0, DEPLOYED_VALUE - targetValue);
+  if (mustRelease <= 0) return { closes: [], released: 0, mustRelease: 0 };
+  const sorted = [...POSITIONS].sort((a, b) => a.hold - b.hold);
+  let released = 0; const closes = [];
+  for (const p of sorted) {
+    if (protectedSyms.has(p.sym)) continue;
+    if (released >= mustRelease) break;
+    closes.push(p); released += p.value;
+  }
+  return { closes, released, mustRelease };
+}
+
+function Label({ children, tone, style }) {
+  return <div style={{ fontFamily: T.sans, fontSize: 10, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.14em', color: tone || T.ink3, ...style }}>{children}</div>;
+}
+function Money({ v, size = 14, tone, bold, prefix = '£' }) {
+  return <span style={{ fontFamily: T.mono, fontSize: size, fontVariantNumeric: 'tabular-nums', color: tone || T.ink1, fontWeight: bold ? 500 : 400, letterSpacing: '-0.01em' }}>{prefix}{Math.round(v).toLocaleString()}</span>;
+}
+function Card({ children, style, ...rest }) {
+  return <div style={{ borderRadius: 12, background: T.bg1, border: `1px solid ${T.line}`, padding: 16, ...style }} {...rest}>{children}</div>;
+}
+
+// ─── MINI TOP-BAR SLIDER ────────────────────────────────────────
+function TopBarMiniSlider({ currentPct, onExpand }) {
+  // Horizontal thin strip, read-only, click expands.
+  const trackW = 220;
+  const deployedX = DEPLOYED_PCT * trackW;
+  const currentX = currentPct * trackW;
+  return (
+    <button
+      onClick={onExpand}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '8px 14px', background: T.bg2,
+        border: `1px solid ${T.line}`, borderRadius: 10,
+        color: T.ink1, transition: `all 200ms ${T.ease}`,
+      }}
+      onMouseEnter={(e) => e.currentTarget.style.borderColor = T.lineStrong}
+      onMouseLeave={(e) => e.currentTarget.style.borderColor = T.line}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+        <span style={{ fontFamily: T.sans, fontSize: 9, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.12em', color: T.ink3 }}>Capital</span>
+        <span style={{ fontFamily: T.mono, fontSize: 13, color: T.ink0, letterSpacing: '-0.01em' }}>
+          {(currentPct * 100).toFixed(0)}<span style={{ color: T.ink3 }}>%</span>
+        </span>
+      </div>
+
+      <div style={{ position: 'relative', width: trackW, height: 18, display: 'flex', alignItems: 'center' }}>
+        <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 4, marginTop: -2, background: T.bg3, borderRadius: 2 }}/>
+        {/* deployed fill */}
+        <div style={{ position: 'absolute', left: 0, top: '50%', height: 4, marginTop: -2, width: DEPLOYED_PCT * trackW, background: T.accentDim, borderRadius: 2 }}/>
+        {/* ceiling extension if current > deployed */}
+        {currentPct > DEPLOYED_PCT && (
+          <div style={{ position: 'absolute', left: deployedX, top: '50%', height: 4, marginTop: -2, width: (currentPct - DEPLOYED_PCT) * trackW, background: T.accent, borderRadius: 2 }}/>
+        )}
+        {/* deployed tick */}
+        <div style={{ position: 'absolute', left: deployedX, top: 0, bottom: 0, width: 2, marginLeft: -1, background: T.ink1 }}/>
+        {/* current thumb */}
+        <div style={{ position: 'absolute', left: currentX, top: '50%', width: 12, height: 12, marginLeft: -6, marginTop: -6, background: T.ink0, borderRadius: 3, boxShadow: `0 0 0 1px ${T.accent}66` }}/>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+        <span style={{ fontFamily: T.sans, fontSize: 9, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.12em', color: T.ink3 }}>Deployed</span>
+        <Money v={DEPLOYED_VALUE} size={13} tone={T.accent}/>
+      </div>
+    </button>
+  );
+}
+
+// ─── VERTICAL RAIL SLIDER (primary on Dashboard) ────────────────
+function RailSlider({ currentPct, setCurrentPct, onStageTrim, onStageFlatten }) {
+  const trackRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const [dragPct, setDragPct] = useState(currentPct);
+  const [crossed, setCrossed] = useState(false);
+  const [flashTick, setFlashTick] = useState(false);
+
+  const shownPct = dragging ? dragPct : currentPct;
+
+  useEffect(() => {
+    if (!dragging) return;
+    if (dragPct < DEPLOYED_PCT && !crossed) {
+      setCrossed(true); setFlashTick(true); setTimeout(() => setFlashTick(false), 400);
+    }
+    if (dragPct >= DEPLOYED_PCT && crossed) setCrossed(false);
+  }, [dragPct, dragging]);
+
+  function handlePointer(e) {
+    const rect = trackRef.current.getBoundingClientRect();
+    const y = e.clientY ?? e.touches?.[0]?.clientY;
+    const raw = 1 - (y - rect.top) / rect.height;
+    const clamped = Math.max(0, Math.min(1, raw));
+    const snag = Math.abs(clamped - DEPLOYED_PCT) < 0.015 ? DEPLOYED_PCT : clamped;
+    setDragPct(snag);
+  }
+  function startDrag(e) {
+    e.preventDefault();
+    setDragging(true);
+    handlePointer(e);
+    const move = (ev) => handlePointer(ev);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      endDrag();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+  function endDrag() {
+    setDragging(false);
+    setDragPct(prev => {
+      if (prev >= DEPLOYED_PCT - 0.005) {
+        setCurrentPct(prev);
+      } else if (prev < 0.03) {
+        onStageFlatten(prev);
+        setTimeout(() => setDragPct(currentPct), 10);
+      } else {
+        onStageTrim(prev);
+        setTimeout(() => setDragPct(currentPct), 10);
+      }
+      return prev;
+    });
+    setCrossed(false);
+  }
+
+  const height = 280;
+  const thumbY = (1 - shownPct) * height;
+  const deployedY = (1 - DEPLOYED_PCT) * height;
+  const belowLine = shownPct < DEPLOYED_PCT - 0.005;
+  const isFlatten = belowLine && shownPct < 0.03;
+  const activeColor = isFlatten ? T.danger : belowLine ? T.caution : T.accent;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <Label>Capital allocation</Label>
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>ceiling</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        {/* scale */}
+        <div style={{ height, position: 'relative', width: 26, flexShrink: 0, fontFamily: T.mono, fontSize: 9 }}>
+          {[1, 0.75, 0.5, 0.25, 0].map(p => (
+            <div key={p} style={{ position: 'absolute', right: 0, top: (1 - p) * height - 5, color: T.ink4, textAlign: 'right' }}>
+              {(p * 100).toFixed(0)}
+            </div>
+          ))}
+        </div>
+
+        {/* track */}
+        <div
+          ref={trackRef}
+          onPointerDown={startDrag}
+          style={{
+            position: 'relative', width: 30, height,
+            borderRadius: 8, background: T.bg2,
+            border: `1px solid ${T.line}`,
+            cursor: dragging ? 'grabbing' : 'grab', touchAction: 'none',
+          }}
+        >
+          {/* deployed fill */}
+          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: `${DEPLOYED_PCT * 100}%`, background: T.accentDim, borderBottomLeftRadius: 8, borderBottomRightRadius: 8 }}/>
+          {/* ceiling extension */}
+          {shownPct > DEPLOYED_PCT && (
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: `${DEPLOYED_PCT * 100}%`, height: `${(shownPct - DEPLOYED_PCT) * 100}%`, background: `linear-gradient(to top, ${T.accent}55, ${T.accent}22)`, transition: dragging ? 'none' : `all 400ms ${T.ease}` }}/>
+          )}
+          {/* release zone */}
+          {shownPct < DEPLOYED_PCT && (
+            <div style={{
+              position: 'absolute', left: 0, right: 0, bottom: `${shownPct * 100}%`,
+              height: `${(DEPLOYED_PCT - shownPct) * 100}%`,
+              background: `repeating-linear-gradient(135deg, ${isFlatten ? T.dangerDim : T.cautionDim} 0 5px, transparent 5px 9px)`,
+              borderLeft: `1px solid ${isFlatten ? T.danger : T.caution}66`,
+              borderRight: `1px solid ${isFlatten ? T.danger : T.caution}66`,
+              transition: dragging ? 'none' : `all 400ms ${T.ease}`,
+            }}/>
+          )}
+          {/* deployed line */}
+          <div style={{ position: 'absolute', left: -5, right: -5, top: deployedY - 0.5, height: 1, background: T.ink1, pointerEvents: 'none', animation: flashTick ? 'tickFlash 400ms ease' : 'none', transformOrigin: 'center' }}/>
+          {/* thumb */}
+          <div style={{
+            position: 'absolute', left: -13, top: thumbY - 11, width: 56, height: 22, borderRadius: 5,
+            background: T.ink0, color: T.bg0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: T.mono, fontSize: 11, fontWeight: 500,
+            boxShadow: `0 4px 10px rgba(0,0,0,0.5), 0 0 0 1px ${activeColor}66`,
+            cursor: dragging ? 'grabbing' : 'grab',
+            transition: dragging ? 'none' : `top 300ms ${T.ease}`,
+            userSelect: 'none',
+          }}>{(shownPct * 100).toFixed(0)}%</div>
+        </div>
+
+        {/* legend */}
+        <div style={{ flex: 1, position: 'relative', height, paddingLeft: 10 }}>
+          <div style={{ position: 'absolute', left: 10, top: deployedY - 8, display: 'flex', alignItems: 'center', gap: 6, pointerEvents: 'none' }}>
+            <div style={{ width: 14, height: 1, background: T.ink2 }}/>
+            <div>
+              <div style={{ fontFamily: T.sans, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.1em' }}>deployed</div>
+              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.ink1 }}>{(DEPLOYED_PCT * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* hints under */}
+      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.line}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+          <span style={{ fontFamily: T.sans, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Ceiling</span>
+          <Money v={NAV * currentPct} size={13} tone={T.accent} bold/>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+          <span style={{ fontFamily: T.sans, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Deployed</span>
+          <Money v={DEPLOYED_VALUE} size={13} tone={T.ink1}/>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <span style={{ fontFamily: T.sans, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Headroom</span>
+          <Money v={Math.max(0, NAV * currentPct - DEPLOYED_VALUE)} size={13} tone={T.ink2}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MODAL OVERLAY ────────────────────────────────────────────
+function SliderModal({ stagedPct, mode, onConfirm, onCancel, protectedSyms, setProtectedSyms, reviewing, setReviewing }) {
+  if (!stagedPct && stagedPct !== 0) return null;
+  const isFlatten = mode === 'flatten';
+  const trim = !isFlatten ? computeTrim(stagedPct, protectedSyms) : null;
+  const sorted = [...POSITIONS].sort((a, b) => a.hold - b.hold);
+  const willClose = new Set(trim?.closes.map(c => c.sym) ?? []);
+
+  const [holdProgress, setHoldProgress] = useState(0);
+  const holdingRef = useRef(false); const rafRef = useRef(null); const startRef = useRef(0);
+  const HOLD_MS = 1200;
+  function flattenDown() {
+    holdingRef.current = true; startRef.current = performance.now();
+    const tick = () => {
+      if (!holdingRef.current) return;
+      const p = Math.min(1, (performance.now() - startRef.current) / HOLD_MS);
+      setHoldProgress(p);
+      if (p < 1) rafRef.current = requestAnimationFrame(tick);
+      else { holdingRef.current = false; onConfirm(); }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }
+  function flattenUp() { holdingRef.current = false; cancelAnimationFrame(rafRef.current); setHoldProgress(0); }
+
+  const accent = isFlatten ? T.danger : T.caution;
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(8px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+      animation: `backdropIn 200ms ${T.ease}`,
+    }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 560, maxWidth: '90vw', background: T.bg1, border: `1px solid ${accent}66`,
+        borderRadius: 14, padding: 24, animation: `modalIn 260ms ${T.ease}`,
+        boxShadow: `0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px ${accent}22`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <Label tone={accent}>{isFlatten ? 'Flatten book' : 'Reduce to target'}</Label>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>preview · not executed</span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 20 }}>
+          <span style={{ fontFamily: T.sans, fontSize: 38, fontWeight: 300, letterSpacing: '-0.03em', color: T.ink0 }}>
+            {(DEPLOYED_PCT * 100).toFixed(0)}<span style={{ fontSize: 22, color: T.ink3 }}>%</span>
+          </span>
+          <span style={{ color: T.ink3, fontSize: 22, fontWeight: 200 }}>→</span>
+          <span style={{ fontFamily: T.sans, fontSize: 38, fontWeight: 300, letterSpacing: '-0.03em', color: accent }}>
+            {(stagedPct * 100).toFixed(0)}<span style={{ fontSize: 22, color: T.ink3 }}>%</span>
+          </span>
+          <div style={{ marginLeft: 'auto', fontFamily: T.mono, fontSize: 11, color: T.ink3, textAlign: 'right' }}>
+            releasing<br/>
+            <Money v={isFlatten ? DEPLOYED_VALUE : trim.mustRelease} size={14} tone={accent} bold/>
+          </div>
+        </div>
+
+        {isFlatten ? (
+          <div style={{ padding: 14, background: T.bg2, border: `1px solid ${T.line}`, borderRadius: 8, fontFamily: T.sans, fontSize: 13, color: T.ink2, lineHeight: 1.55 }}>
+            This closes <b style={{ color: T.ink0 }}>every open position</b>, including profitable ones, across all venues. The engine will keep running — use the <b style={{ color: T.ink0 }}>Kill Switch</b> to stop trading entirely.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <Label>Weakest first · by hold score</Label>
+              <button onClick={() => setReviewing(r => !r)} style={{
+                padding: '3px 10px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4,
+                color: T.ink2, fontFamily: T.sans, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+              }}>{reviewing ? 'done' : 'review & protect'}</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              {(reviewing ? sorted : trim.closes).map(p => {
+                const isProtected = protectedSyms.has(p.sym);
+                const willGo = willClose.has(p.sym) && !isProtected;
+                return (
+                  <div key={p.sym} style={{
+                    display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', borderRadius: 6,
+                    background: willGo ? T.cautionDim : 'transparent',
+                    border: `1px solid ${willGo ? `${T.caution}44` : T.line}`,
+                    opacity: reviewing && !willGo && !isProtected ? 0.4 : 1,
+                  }}>
+                    {reviewing && (
+                      <input type="checkbox" checked={!isProtected} onChange={() => {
+                        setProtectedSyms(prev => {
+                          const next = new Set(prev);
+                          if (next.has(p.sym)) next.delete(p.sym); else next.add(p.sym);
+                          return next;
+                        });
+                      }} style={{ accentColor: T.caution, cursor: 'pointer' }}/>
+                    )}
+                    <span style={{ fontFamily: T.sans, fontSize: 13, fontWeight: 500, color: T.ink0, width: 52 }}>{p.sym}</span>
+                    <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, flex: 1 }}>{p.strat}</span>
+                    <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>hold {p.hold.toFixed(2)}</span>
+                    <span style={{ fontFamily: T.mono, fontSize: 10, color: p.pnl >= 0 ? T.profit : T.loss, width: 50, textAlign: 'right' }}>
+                      {p.pnl >= 0 ? '+' : ''}{p.pnl.toFixed(0)}
+                    </span>
+                    <Money v={p.value} size={11} tone={willGo ? T.caution : T.ink2}/>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${T.line}`, display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={{
+            padding: '10px 16px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 6,
+            color: T.ink2, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+          }}>Cancel</button>
+          {isFlatten ? (
+            <button
+              onPointerDown={flattenDown} onPointerUp={flattenUp} onPointerLeave={flattenUp}
+              style={{
+                position: 'relative', padding: '10px 20px', background: T.bg1, border: `1px solid ${T.danger}`,
+                borderRadius: 6, color: T.danger, fontFamily: T.sans, fontSize: 12, fontWeight: 500,
+                textTransform: 'uppercase', letterSpacing: '0.1em', overflow: 'hidden', minWidth: 180,
+              }}>
+              <div style={{ position: 'absolute', inset: 0, background: T.danger, opacity: holdProgress }}/>
+              <span style={{ position: 'relative', color: holdProgress > 0.5 ? T.ink0 : T.danger }}>
+                {holdProgress > 0 ? 'Holding…' : 'Hold to flatten'}
+              </span>
+            </button>
+          ) : (
+            <button onClick={onConfirm} style={{
+              padding: '10px 18px', background: T.caution, border: 'none', borderRadius: 6,
+              color: T.bg0, fontFamily: T.sans, fontSize: 12, fontWeight: 500, letterSpacing: '-0.01em',
+            }}>
+              Release {trim.closes.length} · <Money v={trim.released} size={12} tone={T.bg0} bold/>
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── DASHBOARD SHELL (cockpit mockup) ─────────────────────────
+function Icon({ d, size = 16 }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
+}
+const icons = {
+  dashboard: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
+  signals: <><path d="M3 20V10m4 10V4m4 16v-8m4 8V7m4 13v-4"/></>,
+  positions: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></>,
+  risk: <><path d="M12 2l9 4v6c0 5-4 9-9 10-5-1-9-5-9-10V6l9-4z"/></>,
+  log: <><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></>,
+  settings: <><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></>,
+  power: <><path d="M12 2v10M18.36 6.64a9 9 0 11-12.72 0"/></>,
+  bell: <><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></>,
+  search: <><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></>,
+};
+
+function Sidebar({ active }) {
+  const items = ['dashboard', 'signals', 'positions', 'risk', 'log', 'settings'];
+  return (
+    <nav style={{ width: 56, background: T.bg1, borderRight: `1px solid ${T.line}`, padding: '18px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+      <div style={{ width: 32, height: 32, borderRadius: 8, background: `linear-gradient(135deg, ${T.accent}, ${T.profit})`, marginBottom: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: T.sans, fontWeight: 600, color: T.bg0, fontSize: 14 }}>m</div>
+      {items.map(k => (
+        <button key={k} style={{
+          width: 40, height: 40, borderRadius: 8, background: k === active ? T.bg3 : 'transparent',
+          border: 'none', color: k === active ? T.ink0 : T.ink3,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', transition: `all 160ms`,
+        }}>
+          <Icon d={icons[k]}/>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function ModePill({ label, icon, color, active }) {
+  return (
+    <button style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      padding: '7px 12px', borderRadius: 8,
+      background: active ? `${color}14` : 'transparent',
+      border: `1px solid ${active ? `${color}66` : T.line}`,
+      color: active ? color : T.ink3,
+      fontFamily: T.sans, fontSize: 11, fontWeight: 500,
+      textTransform: 'uppercase', letterSpacing: '0.12em',
+      boxShadow: active ? `0 0 0 1px ${color}22, 0 0 16px ${color}22` : 'none',
+      transition: `all 200ms ${T.ease}`,
+    }}>
+      <span style={{ display: 'inline-flex' }}>{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+function TopBar({ mode, setMode }) {
+  const shieldIcon = <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 2l9 4v6c0 5-4 9-9 10-5-1-9-5-9-10V6l9-4z"/></svg>;
+  const scaleIcon  = <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 3v18M5 8l-3 6h6zM19 8l-3 6h6z"/></svg>;
+  const zapIcon    = <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></svg>;
+
+  return (
+    <header style={{ height: 58, borderBottom: `1px solid ${T.line}`, background: T.bg1, padding: '0 22px', display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
+      <span style={{ fontFamily: T.sans, fontSize: 14, fontWeight: 500, color: T.ink0 }}>Dashboard</span>
+
+      <span style={{ width: 4, height: 4, borderRadius: 999, background: T.ink4, margin: '0 2px' }}/>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ width: 7, height: 7, borderRadius: 999, background: T.profit, boxShadow: `0 0 8px ${T.profit}`, animation: 'pulseDot 2s ease-in-out infinite' }}/>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.profit }}>running</span>
+      </div>
+      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink3 }}>· loop #47 · global_edge · ws</span>
+
+      <div style={{ flex: 1 }}/>
+
+      {/* Risk modes */}
+      <div style={{ display: 'flex', gap: 6 }} onClick={() => {}}>
+        <div onClick={() => setMode('defender')}><ModePill label="Defender" icon={shieldIcon} color={T.info || '#93c5fd'} active={mode === 'defender'}/></div>
+        <div onClick={() => setMode('trader')}><ModePill label="Trader" icon={scaleIcon} color={T.ink0} active={mode === 'trader'}/></div>
+        <div onClick={() => setMode('hunter')}><ModePill label="Hunter" icon={zapIcon} color={T.caution} active={mode === 'hunter'}/></div>
+      </div>
+
+      <button style={{
+        padding: '7px 12px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 8,
+        color: T.ink2, fontFamily: T.sans, fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
+      }}>
+        <Icon d={icons.search} size={13}/>
+        Search, jump, command
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, padding: '1px 5px', border: `1px solid ${T.line}`, borderRadius: 3 }}>⌘K</span>
+      </button>
+
+      <button style={{
+        padding: '7px 12px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 8,
+        color: T.ink2, fontFamily: T.sans, fontSize: 11,
+      }}>Tweaks</button>
+
+      <button style={{
+        padding: '7px 14px', background: `${T.profit}14`, border: `1px solid ${T.profit}66`, borderRadius: 8,
+        color: T.profit, fontFamily: T.sans, fontSize: 11, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.12em',
+        display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        <Icon d={icons.power} size={13}/> Live
+      </button>
+    </header>
+  );
+}
+
+function Dashboard({ currentPct, setCurrentPct, onStageTrim, onStageFlatten }) {
+  return (
+    <div style={{ padding: 22, display: 'grid', gridTemplateColumns: '300px 1fr 340px', gap: 18, minHeight: 'calc(100vh - 62px)' }}>
+
+      {/* LEFT RAIL — Capital slider as primary control */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card style={{ padding: 20 }}>
+          <RailSlider
+            currentPct={currentPct}
+            setCurrentPct={setCurrentPct}
+            onStageTrim={onStageTrim}
+            onStageFlatten={onStageFlatten}
+          />
+        </Card>
+
+        <Card style={{ padding: 14 }}>
+          <Label>Exposure</Label>
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {[
+              ['gross', 0.72, T.ink1],
+              ['net',   0.61, T.accent],
+              ['cash',  0.39, T.profit],
+            ].map(([k, v, c]) => (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.08em', width: 40 }}>{k}</span>
+                <div style={{ flex: 1, height: 4, background: T.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${v * 100}%`, background: c }}/>
+                </div>
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2, width: 36, textAlign: 'right' }}>{(v * 100).toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      {/* CENTER — Main cockpit (placeholders) */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card style={{ padding: 22 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 8 }}>
+            <div>
+              <Label>NAV</Label>
+              <div style={{ fontFamily: T.sans, fontSize: 36, fontWeight: 300, letterSpacing: '-0.03em', color: T.ink0, marginTop: 4 }}>
+                <Money v={NAV} size={36} tone={T.ink0} bold={false}/>
+              </div>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 28 }}>
+              {[
+                ['today', 1240.42, T.profit],
+                ['week',  3810.12, T.profit],
+                ['month', 11240, T.profit],
+              ].map(([k, v, c]) => (
+                <div key={k}>
+                  <div style={{ fontFamily: T.sans, fontSize: 10, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{k}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 15, color: c, marginTop: 2 }}>+£{v.toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Sparkline */}
+          <div style={{ marginTop: 14, height: 120, position: 'relative', borderTop: `1px solid ${T.line}`, paddingTop: 10 }}>
+            <svg viewBox="0 0 400 110" preserveAspectRatio="none" width="100%" height="110" style={{ display: 'block' }}>
+              <defs>
+                <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={T.accent} stopOpacity="0.35"/>
+                  <stop offset="100%" stopColor={T.accent} stopOpacity="0"/>
+                </linearGradient>
+              </defs>
+              <path d="M0,80 C30,78 45,70 70,60 S100,40 130,48 160,72 190,58 230,25 260,30 300,55 330,42 370,18 400,22 L400,110 L0,110 Z" fill="url(#g1)"/>
+              <path d="M0,80 C30,78 45,70 70,60 S100,40 130,48 160,72 190,58 230,25 260,30 300,55 330,42 370,18 400,22" stroke={T.accent} strokeWidth="1.5" fill="none"/>
+            </svg>
+          </div>
+        </Card>
+
+        <Card style={{ padding: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <Label>Open positions · {POSITIONS.length}</Label>
+            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>ranked by hold score</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {[...POSITIONS].sort((a, b) => b.hold - a.hold).map(p => (
+              <div key={p.sym} style={{ display: 'grid', gridTemplateColumns: '60px 1fr 80px 80px 90px', gap: 12, alignItems: 'center', padding: '8px 4px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 11 }}>
+                <span style={{ color: T.ink0, fontFamily: T.sans, fontSize: 12, fontWeight: 500 }}>{p.sym}</span>
+                <span style={{ color: T.ink3, fontSize: 10 }}>{p.strat}</span>
+                <span style={{ color: T.ink2, textAlign: 'right' }}>hold {p.hold.toFixed(2)}</span>
+                <span style={{ color: p.pnl >= 0 ? T.profit : T.loss, textAlign: 'right' }}>{p.pnl >= 0 ? '+' : ''}{p.pnl.toFixed(0)}</span>
+                <span style={{ color: T.ink1, textAlign: 'right' }}>£{p.value.toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      {/* RIGHT RAIL — Intelligence */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card>
+          <Label>Top conviction</Label>
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[
+              { sym: 'NVDA', s: 0.84, u: 'HIGH' },
+              { sym: 'AAPL', s: 0.71, u: 'MED' },
+              { sym: 'MSFT', s: 0.63, u: 'MED' },
+              { sym: 'BTC',  s: 0.58, u: 'MED' },
+            ].map(o => (
+              <div key={o.sym} style={{ padding: '8px 10px', background: T.bg2, borderRadius: 6, border: `1px solid ${T.line}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontFamily: T.sans, fontSize: 13, fontWeight: 500, color: T.ink0 }}>{o.sym}</span>
+                  <span style={{ fontFamily: T.mono, fontSize: 11, color: T.accent }}>{o.s.toFixed(2)}</span>
+                  <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{o.u}</span>
+                </div>
+                <div style={{ marginTop: 6, height: 3, background: T.bg3, borderRadius: 1 }}>
+                  <div style={{ height: '100%', width: `${o.s * 100}%`, background: T.accent, borderRadius: 1 }}/>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <Label>About to execute</Label>
+          <div style={{ marginTop: 10, fontFamily: T.mono, fontSize: 11, color: T.ink2, lineHeight: 1.7 }}>
+            <div>BUY NVDA · <span style={{ color: T.accent }}>£2,400</span></div>
+            <div>TRIM META · <span style={{ color: T.caution }}>£800</span></div>
+            <div style={{ color: T.ink3, fontSize: 10, marginTop: 6 }}>waiting on risk gate…</div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ──────────────────────────────────────────────────────
+function App() {
+  const [currentPct, setCurrentPct] = useState(0.70);
+  const [mode, setMode] = useState('hunter');
+  const [stagedPct, setStagedPct] = useState(null);
+  const [stageMode, setStageMode] = useState(null); // 'trim' | 'flatten' | null
+  const [reviewing, setReviewing] = useState(false);
+  const [protectedSyms, setProtectedSyms] = useState(new Set());
+
+  function stageTrim(pct) { setStagedPct(pct); setStageMode('trim'); setReviewing(false); setProtectedSyms(new Set()); }
+  function stageFlatten(pct) { setStagedPct(pct); setStageMode('flatten'); }
+  function confirm() {
+    if (stageMode === 'flatten') setCurrentPct(0);
+    else if (stageMode === 'trim') setCurrentPct(stagedPct);
+    setStagedPct(null); setStageMode(null); setReviewing(false); setProtectedSyms(new Set());
+  }
+  function cancel() {
+    setStagedPct(null); setStageMode(null); setReviewing(false); setProtectedSyms(new Set());
+  }
+
+  return (
+    <div style={{ minHeight: '100vh', background: T.bg0, display: 'flex' }}>
+      <Sidebar active="dashboard"/>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <TopBar mode={mode} setMode={setMode}/>
+        <Dashboard
+          currentPct={currentPct}
+          setCurrentPct={setCurrentPct}
+          onStageTrim={stageTrim}
+          onStageFlatten={stageFlatten}
+        />
+      </div>
+      <SliderModal
+        stagedPct={stagedPct}
+        mode={stageMode}
+        onConfirm={confirm}
+        onCancel={cancel}
+        protectedSyms={protectedSyms}
+        setProtectedSyms={setProtectedSyms}
+        reviewing={reviewing}
+        setReviewing={setReviewing}
+      />
+
+      {/* Hint banner */}
+      <div style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 20, background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 14px', borderRadius: 999, fontFamily: T.sans, fontSize: 11, color: T.ink2, display: 'flex', alignItems: 'center', gap: 14, boxShadow: `0 10px 30px rgba(0,0,0,0.4)` }}>
+        <span><b style={{ color: T.ink0 }}>Try:</b> drag the left rail slider up (commits), below the deployed line (opens trim modal), or all the way to 0% (flatten confirm).</span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

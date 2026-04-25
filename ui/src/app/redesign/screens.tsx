@@ -25,10 +25,28 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
       const age = ts > 0 ? minutesAgo(ts) : '—';
       const attr = Array.isArray(s.news_attribution) ? s.news_attribution : [];
       const top = attr[0];
-      const impact = typeof top?.score === 'number' && Number.isFinite(top.score) ? top.score : null;
+      const attributionImpact =
+        typeof top?.score === 'number' && Number.isFinite(top.score) ? top.score : null;
+      const source = String(s.news_impact_source ?? '').toLowerCase();
+      const aiImpact =
+        typeof s.ai_news_score === 'number' && Number.isFinite(s.ai_news_score) ? s.ai_news_score : null;
+      const accumulatorImpact =
+        typeof s.accumulator_score === 'number' && Number.isFinite(s.accumulator_score) ? s.accumulator_score : null;
+      const signalImpact =
+        typeof s.news_score === 'number' && Number.isFinite(s.news_score) ? s.news_score : null;
+      const fallbackImpact =
+        source === 'ai_news'
+          ? aiImpact ?? signalImpact
+          : source === 'accumulator'
+            ? accumulatorImpact ?? signalImpact
+            : source === 'signal'
+              ? signalImpact
+              : null;
+      const impact = attributionImpact ?? fallbackImpact;
       const mode = top?.match_mode ? String(top.match_mode).toLowerCase() : '';
       const evt = top?.event_type ? String(top.event_type).toLowerCase() : '';
       const headline = top?.headline ? String(top.headline) : '';
+      const impactMode = attributionImpact != null ? mode : source;
       const conciseTopic = evt
         ? evt.replace(/_/g, ' ')
         : headline
@@ -49,8 +67,18 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
         newsHeadline: top?.headline ? String(top.headline) : '',
         newsSource: top?.source ? String(top.source) : '',
         newsImpact: impact,
-        newsMatchMode: mode,
-        newsTopic: conciseTopic,
+        newsMatchMode: impactMode,
+        newsTopic: conciseTopic || (source === 'accumulator' ? 'accumulated conviction' : source === 'ai_news' ? 'AI news score' : source === 'signal' ? 'signal score' : ''),
+        newsTitle: top?.headline
+          ? String(top.headline)
+          : source === 'accumulator'
+            ? 'No linked headline; this value is accumulated conviction from the signal accumulator.'
+            : source === 'ai_news'
+              ? 'AI news score is present, but no source headline was linked for this signal.'
+              : source === 'signal'
+                ? 'Signal-level news score is present, but no linked headline was found.'
+                : 'No linked news attribution',
+        hasNewsImpact: impact != null,
       };
     });
   }, [live.intelligence]);
@@ -110,20 +138,30 @@ export function SignalsScreen({ accent, live }: { accent: AccentName; live: Live
             <Pill size="sm" tone={r.urg === 'high' ? 'caution' : 'neutral'}>{r.urg}</Pill>
             <Pill size="sm" tone={r.verdict === 'blocked' ? 'danger' : 'profit'}>{r.verdict}</Pill>
             <span
-              title={r.newsHeadline || 'No linked news attribution'}
+              title={r.newsTitle}
               style={{
                 fontFamily: TOKENS.mono,
                 fontSize: 10,
-                color: r.newsHeadline ? TOKENS.ink2 : TOKENS.ink3,
+                color: r.hasNewsImpact ? TOKENS.ink2 : TOKENS.ink3,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}
             >
-              {r.newsHeadline ? (
+              {r.hasNewsImpact ? (
                 <>
                   <span style={{ color: TOKENS.ink3 }}>
-                    {r.newsMatchMode === 'direct' ? 'D' : r.newsMatchMode === 'alias' ? 'A' : 'M'}
+                    {r.newsMatchMode === 'direct'
+                      ? 'D'
+                      : r.newsMatchMode === 'alias'
+                        ? 'A'
+                        : r.newsMatchMode === 'market'
+                          ? 'M'
+                          : r.newsMatchMode === 'ai_news'
+                            ? 'AI'
+                            : r.newsMatchMode === 'accumulator'
+                              ? 'C'
+                              : 'S'}
                   </span>
                   {' · '}
                   <span style={{ color: r.newsImpact != null && r.newsImpact >= 0 ? TOKENS.profit : TOKENS.loss }}>

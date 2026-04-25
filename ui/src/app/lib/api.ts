@@ -33,6 +33,7 @@ async function parseJsonBody<T>(r: Response, path: string): Promise<T> {
 
 /** Same token source as `ws.ts` — required when API sets `DASHBOARD_READ_TOKEN`. */
 const DASHBOARD_TOKEN_LS_KEY = 'dashboardReadToken';
+const CONTROL_TOKEN_LS_KEY = 'apiControlToken';
 
 /** Prefer localStorage so the banner paste wins over a baked-in VITE_DASHBOARD_READ_TOKEN. */
 function readDashboardToken(): string | undefined {
@@ -52,6 +53,23 @@ function dashboardReadHeaders(): Record<string, string> {
   return headers;
 }
 
+function readControlToken(): string | undefined {
+  if (typeof localStorage !== 'undefined') {
+    const ls = localStorage.getItem(CONTROL_TOKEN_LS_KEY);
+    if (ls?.trim()) return ls.trim();
+  }
+  const env = import.meta.env.VITE_API_CONTROL_TOKEN;
+  if (typeof env === 'string' && env.trim()) return env.trim();
+  return undefined;
+}
+
+function mutationHeaders(): Record<string, string> {
+  const headers = dashboardReadHeaders();
+  const tok = readControlToken();
+  if (tok) headers['X-Control-Token'] = tok;
+  return headers;
+}
+
 /** Persist read token (same value as server `DASHBOARD_READ_TOKEN`) and clear API base cache so the next probe uses the header. */
 export function setDashboardReadToken(token: string | null): void {
   try {
@@ -64,6 +82,18 @@ export function setDashboardReadToken(token: string | null): void {
     /* ignore */
   }
   resetApiBaseCache();
+}
+
+export function setApiControlToken(token: string | null): void {
+  try {
+    if (token?.trim()) {
+      localStorage.setItem(CONTROL_TOKEN_LS_KEY, token.trim());
+    } else {
+      localStorage.removeItem(CONTROL_TOKEN_LS_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 export function resetApiBaseCache(): void {
@@ -305,6 +335,9 @@ export type IntelligenceSignalsResponse = {
     confidence: number;
     asset_class: string;
     news_score: number | null;
+    ai_news_score?: number | null;
+    accumulator_score?: number | null;
+    news_impact_source?: 'headline' | 'ai_news' | 'accumulator' | 'signal' | 'none' | string | null;
     quality_score: number | null;
     volume_z: number | null;
     verdict: string;
@@ -524,7 +557,7 @@ async function postJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, {
     method: 'POST',
-    headers: dashboardReadHeaders(),
+    headers: mutationHeaders(),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
   return parseJsonBody<T>(r, path);
@@ -534,7 +567,7 @@ async function postJsonBody<T>(path: string, body: unknown): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...dashboardReadHeaders() },
+    headers: { 'Content-Type': 'application/json', ...mutationHeaders() },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);
@@ -545,7 +578,7 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...dashboardReadHeaders() },
+    headers: { 'Content-Type': 'application/json', ...mutationHeaders() },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} failed (${r.status})`);

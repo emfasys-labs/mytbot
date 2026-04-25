@@ -123,6 +123,49 @@ async def _try_create_price_hypertable(conn: AsyncConnection) -> None:
         )
 
 
+async def _ensure_additive_schema_patches(conn: AsyncConnection) -> None:
+    """
+    Apply tiny additive schema repairs that ``Base.metadata.create_all`` cannot do.
+
+    The app historically uses ``create_all`` at startup rather than invoking the
+    Alembic CLI. That creates new tables but leaves existing tables untouched, so
+    newly added nullable columns can be missing on a long-lived local database.
+    Keep this limited to backwards-compatible additions only.
+    """
+    try:
+        has_news = await conn.scalar(
+            text("SELECT to_regclass('public.news_headlines') IS NOT NULL")
+        )
+        if not has_news:
+            return
+        has_ingest_provider = await conn.scalar(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'news_headlines'
+                      AND column_name = 'ingest_provider'
+                )
+                """
+            )
+        )
+        if not has_ingest_provider:
+            await conn.execute(
+                text("ALTER TABLE news_headlines ADD COLUMN ingest_provider VARCHAR(32)")
+            )
+            logger.info("storage | schema patch | added news_headlines.ingest_provider")
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_news_headlines_ingest_provider "
+                "ON news_headlines (ingest_provider)"
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("storage | additive schema patch failed | {}", exc)
+
+
 async def init_async_database() -> tuple[AsyncEngine | None, async_sessionmaker[AsyncSession] | None]:
     """
     Create engine, tables, and best-effort Timescale hypertable on price_history.
@@ -137,6 +180,7 @@ async def init_async_database() -> tuple[AsyncEngine | None, async_sessionmaker[
         engine = create_async_engine(url, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await _ensure_additive_schema_patches(conn)
             await _try_create_price_hypertable(conn)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         logger.info(

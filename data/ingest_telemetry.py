@@ -171,7 +171,7 @@ def _best_iso(
     if b is not None:
         dtb = b if b.tzinfo else b.replace(tzinfo=timezone.utc)
     if dta and dtb:
-        return dta if dta >= dtb else dtb.isoformat()
+        return (dta if dta >= dtb else dtb).isoformat()
     if dta:
         return dta.isoformat()
     if dtb:

@@ -144,11 +144,14 @@ class SmartOrderRouter:
             return None
 
         sym_u = (symbol or "").strip().upper()
-        # Sort by fee, then by fused routing score (fee prior + online evidence).
+        # Sort by fused routing score first (fee prior + online evidence), then fee.
+        # The fused score already contains the static fee prior; keeping raw fee as
+        # the primary key would prevent learned fill/slippage quality from shifting
+        # orders away from a cheap but poorly performing venue.
         def _rank_key(b: str) -> tuple[Decimal, float]:
             fee = BROKER_FEE_MAP.get(b, Decimal("0.01"))
             q = self.fused_routing_score(b, sym_u)
-            return fee, -q
+            return Decimal(str(-q)), fee
 
         permitted.sort(key=_rank_key)
 

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; font-family: 'Inter', sans-serif; padding: 20px; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: #52525b; margin-bottom: 8px; }
+  .group { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .btn {
+    width: 44px; height: 44px; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; border: 1px solid; position: relative; overflow: hidden;
+  }
+  .glow { position: absolute; inset: 0; border-radius: 16px; filter: blur(16px); pointer-events: none; }
+  svg { position: relative; z-index: 1; }
+</style>
+</head><body>
+
+<div class="group">
+  <div class="label">OFF</div>
+  <div class="btn" style="background:rgba(156,163,175,0.10);border-color:rgba(156,163,175,0.30)">
+    <div class="glow" style="background:rgba(156,163,175,0.12)"></div>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+    </svg>
+  </div>
+  <span style="font-size:10px;color:#52525b">off</span>
+</div>
+
+<div class="group">
+  <div class="label">LIVE</div>
+  <div class="btn" style="background:rgba(52,211,153,0.10);border-color:rgba(52,211,153,0.30)">
+    <div class="glow" style="background:rgba(74,222,128,0.22)"></div>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+    </svg>
+  </div>
+  <span style="font-size:10px;color:#34d399">live</span>
+</div>
+
+<div class="group">
+  <div class="label">PAUSE</div>
+  <div class="btn" style="background:rgba(253,230,138,0.10);border-color:rgba(253,230,138,0.30)">
+    <div class="glow" style="background:rgba(251,191,36,0.20)"></div>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fde68a" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+    </svg>
+  </div>
+  <span style="font-size:10px;color:#fde68a">paused</span>
+</div>
+
+<div class="group">
+  <div class="label">FLATTEN</div>
+  <div class="btn" style="background:rgba(251,113,133,0.10);border-color:rgba(251,113,133,0.30)">
+    <div class="glow" style="background:rgba(248,113,113,0.22)"></div>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fb7185" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+    </svg>
+  </div>
+  <span style="font-size:10px;color:#fb7185">flatten</span>
+</div>
+
+<div class="group">
+  <div class="label">LOADING</div>
+  <div class="btn" style="background:rgba(96,165,250,0.10);border-color:rgba(96,165,250,0.30)">
+    <div class="glow" style="background:rgba(96,165,250,0.22)"></div>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite">
+      <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
+      <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+      <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
+      <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
+    </svg>
+  </div>
+  <span style="font-size:10px;color:#60a5fa">starting</span>
+</div>
+
+<div style="margin-top:4px;margin-left:8px">
+  <div class="label">Risk mode selector</div>
+  <div style="display:flex;gap:4px;margin-top:4px">
+    <div style="padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.06);font-size:10px;color:rgba(255,255,255,0.9)">trader</div>
+    <div style="padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);font-size:10px;color:#52525b">hunter</div>
+    <div style="padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);font-size:10px;color:#52525b">sentinel</div>
+  </div>
+</div>
+
+<style>@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }</style>
+</body></html>
