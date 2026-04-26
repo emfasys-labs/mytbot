@@ -201,7 +201,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
     live.positions,
     live.orders,
   );
-  const capitalAtWorkPct = nav > 0 ? Math.max(0, Math.min(1, capitalAtWorkValue / nav)) : 0;
+  const capitalAtWorkPct = nav > 0 ? Math.max(0, capitalAtWorkValue / nav) : 0;
 
   return (
     <div style={{

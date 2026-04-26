@@ -130,6 +130,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
     () => capitalAtWork(live.positions, live.orders),
     [live.positions, live.orders],
   );
+  const workingRatio = nav > 0 ? Math.max(0, workingValue / nav) : 0;
   const workingPct = nav > 0 ? Math.min(1, workingValue / nav) : 0;
 
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -403,7 +404,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               }}
             >
               <span style={{ width: 14, height: 1, background: TOKENS.ink2 }} />
-              at work · {(workingPct * 100).toFixed(1)}%
+              at work · {(workingRatio * 100).toFixed(1)}%
             </div>
 
             {/* thumb */}
