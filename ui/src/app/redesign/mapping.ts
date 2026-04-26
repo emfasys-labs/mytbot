@@ -452,11 +452,20 @@ export function navOpenFromHistory(
     )
     .sort((a, b) => a.date.localeCompare(b.date));
   const before = sorted.filter((h) => h.date < today);
+  const todayPnl = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
   if (before.length) {
     const last = before[before.length - 1];
-    if (last && Number.isFinite(last.value)) return last.value;
+    if (last && Number.isFinite(last.value)) {
+      const delta = navNow - last.value;
+      // Broker/history NAV can be flat across a restart even while live MTM
+      // moved. In that case use the API live P&L as the intraday baseline.
+      if (Math.abs(delta) < 0.01 && Math.abs(todayPnl) > 0.01) {
+        const open = navNow - todayPnl;
+        return Number.isFinite(open) && open > 0 ? open : last.value;
+      }
+      return last.value;
+    }
   }
-  const todayPnl = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
   const open = navNow - todayPnl;
   return Number.isFinite(open) && open > 0 ? open : navNow;
 }
@@ -483,7 +492,9 @@ function navChangeSincePeriodStart(
   const pick = before.length > 0 ? before[before.length - 1] : sorted[0];
   const anchor = pick && Number.isFinite(pick.value) ? pick.value : NaN;
   if (!Number.isFinite(anchor) || anchor <= 0) return apiFallback;
-  return navNow - anchor;
+  const delta = navNow - anchor;
+  if (Math.abs(delta) < 0.01 && Math.abs(apiFallback) > 0.01) return apiFallback;
+  return delta;
 }
 
 export function mapPnlRollups(
@@ -495,6 +506,7 @@ export function mapPnlRollups(
 } {
   const wApi = toNumber(pnl?.week?.realised, 0) + toNumber(pnl?.week?.unrealised, 0);
   const mApi = toNumber(pnl?.month?.realised, 0) + toNumber(pnl?.month?.unrealised, 0);
+  const yApi = toNumber(pnl?.all_time?.realised, 0) + toNumber(pnl?.all_time?.unrealised, 0);
   const now = new Date();
   const weekStart = mondayLocalYmd(now);
   const monthStart = firstOfMonthLocalYmd(now);
@@ -504,7 +516,7 @@ export function mapPnlRollups(
     d: navNow - open,
     w: navChangeSincePeriodStart(history, navNow, weekStart, wApi),
     m: navChangeSincePeriodStart(history, navNow, monthStart, mApi),
-    y: navChangeSincePeriodStart(history, navNow, ytdStart, 0),
+    y: navChangeSincePeriodStart(history, navNow, ytdStart, yApi),
   };
 }
 
