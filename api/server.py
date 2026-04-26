@@ -549,6 +549,17 @@ async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
     return rows[:limit]
 
 
+async def _live_broker_unrealised_total() -> Decimal:
+    rows = await _live_broker_positions(500)
+    total = Decimal(0)
+    for row in rows:
+        try:
+            total += Decimal(str(row.get("unrealised_pnl", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            continue
+    return total
+
+
 async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
     """Mark latest position snapshot to the freshest price available.
 
@@ -558,6 +569,10 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
       3. PositionLog.current_price (last persisted snapshot)
       4. Average entry price (no movement — effectively zero unrealised)
     """
+    live_total = await _live_broker_unrealised_total()
+    if live_total != 0:
+        return live_total
+
     async with session_factory() as session:
         latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_ts = latest_ts_q.scalar_one_or_none()
@@ -1312,11 +1327,12 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     # `daily_pnl` or older persisted rows that were written while an excluded/buggy
     # broker was still in the pre-allowlist live sum (D031). The DB is used only
     # when `live_value` is still zero (e.g. slow first snapshot post-restart).
-    if live_value > 0:
+    live_value_used = live_value > 0
+    if live_value_used:
         display_value = live_value
     else:
         display_value = max(live_value, db_value, last_persisted_value, configured_nav)
-    if APP_ENV != "live":
+    if APP_ENV != "live" and not live_value_used:
         display_value = max(Decimal(0), display_value + today_unrealised)
 
     orch = _get_orchestrator()
@@ -1373,7 +1389,46 @@ async def get_dashboard_snapshot(bus: CommandBus = Depends(_command_bus)):
     raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
     if not isinstance(raw, dict):
         return {}
-    return raw
+    out = dict(raw)
+    live_positions = await _live_broker_positions(500)
+    if live_positions:
+        nav = await _live_portfolio_value()
+        gross = Decimal(0)
+        net = Decimal(0)
+        total_unrealised = Decimal(0)
+        sample: list[dict[str, Any]] = []
+        for p in live_positions:
+            try:
+                qty = Decimal(str(p.get("quantity", "0") or "0"))
+                px = Decimal(str(p.get("current_price", "0") or "0"))
+                pnl = Decimal(str(p.get("unrealised_pnl", "0") or "0"))
+            except Exception:  # noqa: BLE001
+                continue
+            mv = qty * px
+            gross += abs(mv)
+            net += mv
+            total_unrealised += pnl
+            sample.append(
+                {
+                    "symbol": p.get("symbol"),
+                    "asset_class": p.get("asset_class"),
+                    "side": "short" if qty < 0 else "long",
+                    "market_value": _decimal_str(abs(mv)),
+                    "unrealised_pnl": _decimal_str(pnl),
+                    "broker": p.get("broker"),
+                    "tags": [],
+                }
+            )
+        portfolio = dict(out.get("portfolio") or {})
+        if nav > 0:
+            portfolio["nav"] = _decimal_str(nav)
+        portfolio["gross_exposure"] = _decimal_str(gross)
+        portfolio["net_exposure"] = _decimal_str(net)
+        portfolio["positions_sample"] = sample[:24]
+        portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
+        portfolio["source"] = "live_broker"
+        out["portfolio"] = portfolio
+    return out
 
 
 @app.get("/pnl/history")
