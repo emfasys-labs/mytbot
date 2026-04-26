@@ -4,7 +4,7 @@
  */
 
 import { CSSProperties, ReactElement, ReactNode, SVGProps, useEffect, useState } from 'react';
-import { TOKENS, SystemState } from './tokens';
+import { CURRENCY_SYMBOL, TOKENS, SystemState } from './tokens';
 
 export type PillTone = 'neutral' | 'accent' | 'profit' | 'loss' | 'caution' | 'danger' | 'info';
 export type PillSize = 'sm' | 'md' | 'lg';
@@ -89,7 +89,7 @@ export function Wordmark({
 
 // ─── NavNumber — hero NAV with digit color-flash on change ─────
 export function NavNumber({
-  value, size = 80, currency = '£',
+  value, size = 80, currency = CURRENCY_SYMBOL,
 }: { value: number; accent?: string; size?: number; currency?: string }) {
   const [display, setDisplay] = useState(value);
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
@@ -204,7 +204,7 @@ export function Pill({
 
 // ─── Signed — +/- coloured number ──────────────────────────────
 export function Signed({
-  value, prefix = '£', size = 14, muted,
+  value, prefix = CURRENCY_SYMBOL, size = 14, muted,
 }: { value: number; prefix?: string; size?: number; muted?: boolean }) {
   const pos = value >= 0;
   return (

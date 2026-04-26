@@ -667,7 +667,7 @@ function App() {
                 />
                 {tradableCapital != null && totalCapital > 0 && capitalPct < 0.999 ? (
                   <span className="text-[11px] text-zinc-500">
-                    Tradable £{Math.round(tradableCapital).toLocaleString()} · {Math.round(capitalPct * 100)}%
+                    Tradable ${Math.round(tradableCapital).toLocaleString()} · {Math.round(capitalPct * 100)}%
                   </span>
                 ) : null}
               </div>

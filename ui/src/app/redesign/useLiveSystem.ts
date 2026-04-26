@@ -97,7 +97,13 @@ export interface LiveData {
   tradableCapital: number | null;
   capitalPct: number;
 
-  exposure: { gross: number; net: number; cash: number };
+  exposure: {
+    gross: number;
+    net: number;
+    cash: number;
+    navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none';
+    navDivergencePct: number | null;
+  };
   equity: number[];
   equitySeries: Array<{ date: string; value: number }>;
 
@@ -650,7 +656,7 @@ export function useLiveSystem(): LiveData {
     () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence, loadedStrategies, strategyMix),
     [snapshot, intelligence, loadedStrategies, strategyMix],
   );
-  const exposure = useMemo(() => mapExposure(snapshot), [snapshot]);
+  const exposure = useMemo(() => mapExposure(snapshot, pnl), [snapshot, pnl]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(
     () => mapPnlRollups(pnl, nav, equitySeries),

@@ -8,7 +8,7 @@ import { CapitalPanel } from './capital';
 import { Conviction, Coverage, LiveEvent, Position } from './data';
 import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
-import { ACCENTS, AccentName, Density, SystemState, TOKENS } from './tokens';
+import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 
 export function DashboardScreen({
@@ -119,7 +119,7 @@ export function DashboardScreen({
                     color: dayChange >= 0 ? TOKENS.profit : TOKENS.loss,
                     fontVariantNumeric: 'tabular-nums',
                   }}>
-                    {dayChange >= 0 ? '+' : '−'}£{Math.abs(dayChange).toFixed(2)}
+                    {dayChange >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(dayChange).toFixed(2)}
                   </span>
                   <span style={{
                     fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3,
@@ -140,7 +140,13 @@ export function DashboardScreen({
 
               <div style={{ width: 1, height: 48, background: TOKENS.line }} />
 
-              <ExposureRing gross={live.exposure.gross} net={live.exposure.net} accent={accentColor} />
+              <ExposureRing
+                gross={live.exposure.gross}
+                net={live.exposure.net}
+                accent={accentColor}
+                navBasis={live.exposure.navBasis}
+                navDivergencePct={live.exposure.navDivergencePct}
+              />
             </div>
 
             <div style={{ marginTop: 18 }}>
@@ -152,7 +158,7 @@ export function DashboardScreen({
                 marginTop: 10, display: 'flex', gap: 12, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
                 flexWrap: 'wrap',
               }}>
-                <span>Tradable £{Math.round(tradable).toLocaleString()}</span>
+                <span>Tradable {CURRENCY_SYMBOL}{Math.round(tradable).toLocaleString()}</span>
                 <span>·</span>
                 <span>Allocation {Math.round(live.capitalPct * 100)}%</span>
                 {state !== 'running' && (
@@ -237,7 +243,7 @@ function BookFooter({ live }: { live: LiveData }) {
         <>
           {' · '}
           <span style={{ color: totalPnl >= 0 ? TOKENS.profit : TOKENS.loss }}>
-            {totalPnl >= 0 ? '+' : '−'}£{Math.abs(totalPnl).toFixed(0)}
+            {totalPnl >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(totalPnl).toFixed(0)}
           </span>
         </>
       )}
@@ -301,37 +307,106 @@ function MiniStat({ label, value }: { label: string; value: number }) {
         color: pos ? TOKENS.profit : TOKENS.loss,
         fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em',
       }}>
-        {pos ? '+' : '−'}£{Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+        {pos ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}
       </div>
     </div>
   );
 }
 
-function ExposureRing({ gross, net, accent }: { gross: number; net: number; accent: string }) {
+function ExposureRing({
+  gross,
+  net,
+  accent,
+  navBasis,
+  navDivergencePct,
+}: {
+  gross: number;
+  net: number;
+  accent: string;
+  navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none';
+  navDivergencePct: number | null;
+}) {
+  // ``gross``/``net`` are *true* ratios (gross_notional / NAV). Margined
+  // paper books regularly run >1.0; the ring used to clamp those to 100%
+  // and silently hide the over-leverage. We now:
+  //   - cap the visual arc at one full revolution (it can't go further);
+  //   - display the real percentage (e.g. "221%");
+  //   - flip the colour to ``danger`` and pulse when ratio > 1.0 so an
+  //     over-leveraged book cannot be missed at a glance.
   const r = 22;
   const c = 2 * Math.PI * r;
+  const grossArc = Math.max(0, Math.min(1, gross));   // visual cap only
+  const overLev = gross > 1.0;
+  const ringColor = overLev ? TOKENS.danger : accent;
+  const numColor = overLev ? TOKENS.danger : TOKENS.ink1;
+  const grossPct = (gross * 100).toFixed(0);
+  const netPct = (net * 100).toFixed(0);
+  const fallback = navBasis === 'pnl_today_portfolio_value';
+  const navMismatch = navDivergencePct != null && navDivergencePct > 0.15;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+    <div
+      style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+      title={overLev
+        ? `Over-leveraged: gross ${grossPct}% of NAV. Positions exceed equity via margin.`
+        : `Gross ${grossPct}% · Net ${netPct}% of NAV`}
+    >
       <svg width="60" height="60" viewBox="0 0 60 60">
         <circle cx="30" cy="30" r={r} fill="none" stroke={TOKENS.line} strokeWidth="3" />
         <circle
-          cx="30" cy="30" r={r} fill="none" stroke={accent} strokeWidth="3"
-          strokeDasharray={`${c * gross} ${c}`} strokeLinecap="round"
+          cx="30" cy="30" r={r} fill="none" stroke={ringColor} strokeWidth="3"
+          strokeDasharray={`${c * grossArc} ${c}`} strokeLinecap="round"
           transform="rotate(-90 30 30)"
-          style={{ transition: `stroke-dasharray 600ms ${TOKENS.ease}` }}
+          style={{ transition: `stroke-dasharray 600ms ${TOKENS.ease}, stroke 300ms ${TOKENS.ease}` }}
         />
-        <text x="30" y="33" textAnchor="middle" fontSize="11" fontFamily="Geist Mono" fill={TOKENS.ink0} fontWeight="400">
-          {(gross * 100).toFixed(0)}
+        {overLev && (
+          // Inner accent stroke as a "second lap" marker so it visually
+          // reads as "more than full" rather than being indistinguishable
+          // from a healthy 100%.
+          <circle
+            cx="30" cy="30" r={r - 5} fill="none" stroke={ringColor} strokeWidth="1.5"
+            strokeDasharray={`${(2 * Math.PI * (r - 5)) * Math.min(1, gross - 1)} ${2 * Math.PI * (r - 5)}`}
+            strokeLinecap="round" transform="rotate(-90 30 30)" opacity="0.6"
+          />
+        )}
+        <text x="30" y="33" textAnchor="middle" fontSize="11" fontFamily="Geist Mono"
+              fill={numColor} fontWeight="400">
+          {grossPct}
         </text>
       </svg>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <Label>Gross</Label>
-        <span style={{ fontFamily: TOKENS.mono, fontSize: 12, color: TOKENS.ink1, fontVariantNumeric: 'tabular-nums' }}>
-          {(gross * 100).toFixed(0)}%
+        <Label accent={overLev ? TOKENS.danger : undefined}>
+          {overLev ? 'Gross · over-lev' : 'Gross'}
+        </Label>
+        <span style={{
+          fontFamily: TOKENS.mono, fontSize: 12, color: numColor,
+          fontVariantNumeric: 'tabular-nums', fontWeight: overLev ? 500 : 400,
+        }}>
+          {grossPct}%
         </span>
-        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, fontVariantNumeric: 'tabular-nums' }}>
-          net {(net * 100).toFixed(0)}%
+        <span style={{
+          fontFamily: TOKENS.mono, fontSize: 10,
+          color: overLev ? TOKENS.danger : TOKENS.ink3,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          net {netPct}%
         </span>
+        {(fallback || navMismatch) && (
+          <span
+            style={{
+              fontFamily: TOKENS.mono,
+              fontSize: 9,
+              color: TOKENS.caution,
+              letterSpacing: '0.02em',
+            }}
+            title={
+              fallback
+                ? 'Exposure uses /pnl NAV fallback because snapshot NAV looked stale/invalid.'
+                : 'Snapshot NAV and /pnl NAV differ materially; exposure may be temporarily noisy.'
+            }
+          >
+            {fallback ? 'nav source: pnl' : 'nav mismatch'}
+          </span>
+        )}
       </div>
     </div>
   );

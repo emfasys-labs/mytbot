@@ -22,8 +22,12 @@ export function fmtDashNum(value: unknown): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 }
 
-/** Signed currency for PnL / NAV (no leading +; minus uses −). */
-export function fmtDashMoneySigned(n: number, currency = '£'): string {
+/** Signed currency for PnL / NAV (no leading +; minus uses −).
+ *
+ * Default currency is now ``$`` — the backend has no FX layer, so labelling
+ * raw broker totals (USD) with ``£`` was actively misleading. Callers that
+ * already know the right symbol can pass it explicitly. */
+export function fmtDashMoneySigned(n: number, currency = '$'): string {
   if (!Number.isFinite(n)) return '—';
   const sign = n < 0 ? '−' : '';
   const abs = Math.abs(n);

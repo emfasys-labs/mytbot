@@ -53,7 +53,7 @@ export function CapitalSlider({ totalCapital, pct, onPctChange, onHaptic, dorman
           >
             <div className="text-xs text-gray-400 mb-0.5">Tradable</div>
             <div className="text-xl font-medium text-amber-400">
-              £{Math.round(activeCapital).toLocaleString()}
+              ${Math.round(activeCapital).toLocaleString()}
             </div>
             <div className="text-xs text-gray-500 mt-0.5">
               {Math.round(pct * 100)}% of capital

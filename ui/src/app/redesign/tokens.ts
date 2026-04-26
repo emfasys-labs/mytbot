@@ -32,6 +32,19 @@ export const TOKENS = {
   slow: 600,
 } as const;
 
+/**
+ * Display currency symbol. Brokers in this build (Alpaca / IBKR / Binance /
+ * Bybit / Kraken) settle predominantly in USD and the backend has no FX
+ * conversion layer, so labelling the dashboard in £ was actively
+ * misleading — every figure was the raw USD-or-other-currency total with a
+ * GBP glyph stuck in front.
+ *
+ * Until a real FX layer lands, the dashboard uses ``$`` as a single source
+ * of truth so swapping it later (or making it broker-aware) is a one-line
+ * change.
+ */
+export const CURRENCY_SYMBOL = '$';
+
 export type AccentName = 'cyan' | 'amber' | 'emerald' | 'violet' | 'coral' | 'white';
 
 export interface Accent {

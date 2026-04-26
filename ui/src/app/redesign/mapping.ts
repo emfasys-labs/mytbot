@@ -510,33 +510,60 @@ export function mapPnlRollups(
 
 export function mapExposure(
   snapshot: DashboardSnapshot | null,
-): { gross: number; net: number; cash: number } {
+  pnl: ApiPnlResponse | null = null,
+): {
+  gross: number;
+  net: number;
+  cash: number;
+  navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none';
+  navDivergencePct: number | null;
+} {
   const portfolio = (snapshot?.portfolio ?? {}) as Record<string, unknown>;
-  const nav = toNumber(portfolio.nav, 0);
+  const navSnapshot = toNumber(portfolio.nav, 0);
+  const navPnl = toNumber(pnl?.today?.portfolio_value, 0);
+  const hasSnapshot = Number.isFinite(navSnapshot) && navSnapshot > 0;
+  const hasPnl = Number.isFinite(navPnl) && navPnl > 0;
+  const navDivergencePct =
+    hasSnapshot && hasPnl
+      ? Math.abs(navSnapshot - navPnl) / Math.max(navSnapshot, navPnl)
+      : null;
+
+  // If snapshot NAV diverges heavily from `/pnl` NAV, exposure percentages
+  // can spike to absurd values (e.g. 2500%+) despite a normal live equity.
+  // Prefer `/pnl` as denominator in that case while still surfacing a warning
+  // in the UI that the two feeds disagree.
+  const usePnlFallback = hasPnl && (!hasSnapshot || (navDivergencePct ?? 0) > 0.5);
+  const nav = usePnlFallback ? navPnl : navSnapshot;
+  const navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none' =
+    nav > 0 ? (usePnlFallback ? 'pnl_today_portfolio_value' : 'snapshot') : 'none';
+
   const gross = normalizeExposure(portfolio.gross_exposure, nav);
   // Net can legitimately be negative (short bias); clamp to [0,1] for display
   // by taking absolute value — the sign is conveyed via P&L + position sides.
   const net = normalizeExposure(portfolio.net_exposure, nav);
   const cash = Math.max(0, 1 - gross);
-  return { gross, net, cash };
+  return { gross, net, cash, navBasis, navDivergencePct };
 }
 
 /** Exposure figures from the backend arrive in three shapes depending on the
  *  snapshot writer:
  *   1. Ratio in [0,1]  (e.g. ``0.54``)
  *   2. Percent 0–100   (e.g. ``54``)
- *   3. Absolute £ notional when ``PortfolioState`` serializes market value
- *      directly (e.g. ``57919.88`` with ``nav=1055095.72``).
- *  Auto-detect by magnitude so the Exposure / Capital-at-work panels never
- *  collapse to ``100%`` just because the writer shipped absolutes. */
+ *   3. Absolute notional when ``PortfolioState`` serializes market value
+ *      directly (e.g. ``2440782`` with ``nav=1102438``).
+ *  Auto-detect by magnitude. The result is **not clamped** at 1.0 — a
+ *  margined paper account legitimately runs 2–3× gross/NAV, and clamping
+ *  to 1.0 hid that fact behind a friendly "100%" lie. The ring caps the
+ *  visual arc at one full revolution but the displayed number is the
+ *  true ratio. */
 function normalizeExposure(raw: unknown, nav: number): number {
   if (raw == null || raw === '') return 0;
   const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
   if (!Number.isFinite(n)) return 0;
   const a = Math.abs(n);
-  if (a <= 1) return Math.max(0, Math.min(1, a));
-  if (a <= 100) return Math.max(0, Math.min(1, a / 100));
-  if (nav > 0) return Math.max(0, Math.min(1, a / nav));
+  if (a <= 1) return Math.max(0, a);
+  if (a <= 100) return Math.max(0, a / 100);
+  if (nav > 0) return Math.max(0, a / nav);
   return 0;
 }
 

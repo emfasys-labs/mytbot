@@ -45,7 +45,7 @@ import {
   useState,
 } from 'react';
 import { Card, Label } from './primitives';
-import { TOKENS } from './tokens';
+import { CURRENCY_SYMBOL, TOKENS } from './tokens';
 import { capitalAtWork } from './mapping';
 import type { LiveData } from './useLiveSystem';
 import type { Position } from './data';
@@ -68,7 +68,7 @@ function money(v: number, size = 14, tone?: string, bold?: boolean): ReactNode {
         letterSpacing: '-0.01em',
       }}
     >
-      £{Math.round(v).toLocaleString()}
+      {CURRENCY_SYMBOL}{Math.round(v).toLocaleString()}
     </span>
   );
 }
@@ -813,7 +813,7 @@ function TrimPreview({
                       flex: 1,
                     }}
                   >
-                    pnl {(p.pnl ?? 0) >= 0 ? '+' : '−'}£{Math.abs(p.pnl ?? 0).toFixed(0)}
+                    pnl {(p.pnl ?? 0) >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(p.pnl ?? 0).toFixed(0)}
                   </span>
                   {money(posValue, 11, willGo ? TOKENS.caution : TOKENS.ink2)}
                 </div>

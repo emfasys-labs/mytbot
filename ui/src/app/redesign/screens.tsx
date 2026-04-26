@@ -5,7 +5,7 @@
 
 import { useMemo } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
-import { ACCENTS, AccentName, TOKENS } from './tokens';
+import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 import type { RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
@@ -281,7 +281,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 color: totalPnl >= 0 ? TOKENS.profit : TOKENS.loss,
                 letterSpacing: '-0.02em',
               }}>
-                {totalPnl >= 0 ? '+' : '−'}£{Math.abs(totalPnl).toFixed(2)}
+                {totalPnl >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(totalPnl).toFixed(2)}
               </div>
             </div>
             <div style={{ borderTop: `1px solid ${TOKENS.line}`, paddingTop: 10 }}>
@@ -309,14 +309,14 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 padding: '3px 0', fontFamily: TOKENS.mono, fontSize: 11,
               }}>
                 <span style={{ color: TOKENS.ink3 }}>deployed</span>
-                <span style={{ color: TOKENS.ink1 }}>£{deployedCapital.toFixed(2)}</span>
+                <span style={{ color: TOKENS.ink1 }}>{CURRENCY_SYMBOL}{deployedCapital.toFixed(2)}</span>
               </div>
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
                 padding: '3px 0', fontFamily: TOKENS.mono, fontSize: 11,
               }}>
                 <span style={{ color: TOKENS.ink3 }}>pending orders</span>
-                <span style={{ color: TOKENS.ink1 }}>£{pendingCapital.toFixed(2)}</span>
+                <span style={{ color: TOKENS.ink1 }}>{CURRENCY_SYMBOL}{pendingCapital.toFixed(2)}</span>
               </div>
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
@@ -324,7 +324,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <span style={{ color: TOKENS.ink3 }}>total working</span>
                 <span style={{ color: TOKENS.ink1 }}>
-                  £{capitalAtWorkValue.toFixed(2)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
+                  {CURRENCY_SYMBOL}{capitalAtWorkValue.toFixed(2)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
                 </span>
               </div>
             </div>
@@ -431,14 +431,14 @@ function fmtPrice(v: number): string {
 }
 
 /** Compact account-currency formatter for position notionals. Uses ``k`` /
- *  ``M`` suffixes above £1k / £1M so the Book row stays one line on narrow
- *  cards while still exposing exact pence for small positions. */
+ *  ``M`` suffixes above 1k / 1M so the Book row stays one line on narrow
+ *  cards while still exposing exact cents for small positions. */
 function fmtNotional(v: number): string {
   if (!Number.isFinite(v) || v <= 0) return '—';
-  if (v >= 1_000_000) return `£${(v / 1_000_000).toFixed(2)}M`;
-  if (v >= 10_000) return `£${(v / 1_000).toFixed(1)}k`;
-  if (v >= 1_000) return `£${(v / 1_000).toFixed(2)}k`;
-  return `£${v.toFixed(2)}`;
+  if (v >= 1_000_000) return `${CURRENCY_SYMBOL}${(v / 1_000_000).toFixed(2)}M`;
+  if (v >= 10_000) return `${CURRENCY_SYMBOL}${(v / 1_000).toFixed(1)}k`;
+  if (v >= 1_000) return `${CURRENCY_SYMBOL}${(v / 1_000).toFixed(2)}k`;
+  return `${CURRENCY_SYMBOL}${v.toFixed(2)}`;
 }
 
 export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveData }) {

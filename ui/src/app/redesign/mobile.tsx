@@ -7,7 +7,7 @@ import { EquityCurve, LiveFeed } from './dashboard';
 import { prettySymbol } from './mapping';
 import { Card, I, Label, NavNumber, Signed, Wordmark } from './primitives';
 import { MasterButton } from './shell';
-import { ACCENTS, AccentName, SystemState, TOKENS } from './tokens';
+import { ACCENTS, AccentName, CURRENCY_SYMBOL, SystemState, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 
 type MobileTab = 'home' | 'book' | 'feed';
@@ -60,7 +60,7 @@ export function MobileApp({
                 fontFamily: TOKENS.mono, fontSize: 12,
                 color: dayChange >= 0 ? TOKENS.profit : TOKENS.loss,
               }}>
-                {dayChange >= 0 ? '+' : '−'}£{Math.abs(dayChange).toFixed(0)} today
+                {dayChange >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(dayChange).toFixed(0)} today
               </span>
             </div>
 
