@@ -1914,6 +1914,38 @@ class TradingLoop:
                         new_opps.append(cross_exchange_dict_to_strategy_opportunity(d, capital=notional, edge_boost=boost_x))
                         log_arb_event("detect", strategy="cross_exchange_arbitrage", symbol=sym)
 
+        held_direction: dict[str, str] = {}
+        for h in held:
+            md = getattr(h, "metadata", None)
+            qty = Decimal("0")
+            if isinstance(md, dict):
+                try:
+                    qty = Decimal(str(md.get("quantity", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    qty = Decimal("0")
+            sym_key = str(getattr(h, "symbol", "") or "").strip().upper()
+            if sym_key and qty != 0:
+                held_direction[sym_key] = "long" if qty > 0 else "short"
+
+        if held_direction:
+            filtered_existing: list[Any] = []
+            skipped_existing: list[str] = []
+            for opp in new_opps:
+                sym_key = str(getattr(opp, "symbol", "") or "").strip().upper()
+                side_raw = str(getattr(opp, "side", "") or "").strip().lower()
+                opp_dir = "long" if side_raw in {"long", "buy"} else "short" if side_raw in {"short", "sell"} else ""
+                if sym_key and opp_dir and held_direction.get(sym_key) == opp_dir:
+                    skipped_existing.append(sym_key)
+                    continue
+                filtered_existing.append(opp)
+            if skipped_existing:
+                logger.info(
+                    "trading_loop | coord | skipped {} opportunities already held same direction | sample={}",
+                    len(skipped_existing),
+                    skipped_existing[:8],
+                )
+            new_opps = filtered_existing
+
         working_keys = await _load_working_order_keys(session_factory)
         if working_keys:
             filtered_opps: list[Any] = []

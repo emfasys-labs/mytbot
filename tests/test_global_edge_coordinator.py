@@ -17,6 +17,8 @@ def _opp(
     symbol: str,
     edge: str,
     cap: str = "10000",
+    *,
+    side: str = "long",
 ) -> StrategyOpportunity:
     e = Decimal(edge)
     conf = Decimal("0.9")
@@ -27,7 +29,7 @@ def _opp(
     return StrategyOpportunity(
         strategy_name="momentum_breakout",
         symbol=symbol,
-        side="long",
+        side=side,
         created_at=datetime.now(timezone.utc),
         expected_edge=e,
         confidence=conf,
@@ -76,6 +78,46 @@ def test_propose_emits_trim_then_open_incremental() -> None:
     assert a.symbol == "BBB"
     # Incremental: cap = 10000 * 0.5 = 5000
     assert a.capital == Decimal("5000")
+
+
+def test_propose_skips_open_when_same_symbol_and_side_already_held() -> None:
+    cfg = {
+        "edge_advantage": {"trader": "0.05"},
+        "max_actions_per_tick": 3,
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="ETH-USD",
+            notional=Decimal("5000"),
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long"},
+        )
+    ]
+    new_opps = [_opp("ETH-USD", "0.50")]
+    actions = coord.propose_actions(held, new_opps, active_mode="trader")
+    assert actions == []
+
+
+def test_propose_allows_open_when_same_symbol_opposite_side_held() -> None:
+    cfg = {
+        "edge_advantage": {"trader": "0.05"},
+        "max_actions_per_tick": 3,
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="ETH-USD",
+            notional=Decimal("5000"),
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long"},
+        )
+    ]
+    new_opps = [_opp("ETH-USD", "0.50", side="short")]
+    actions = coord.propose_actions(held, new_opps, active_mode="trader")
+    assert any(a.kind == "open_strategy" and a.symbol == "ETH-USD" for a in actions)
 
 
 class _FakeSignalCandidate:

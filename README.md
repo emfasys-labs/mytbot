@@ -89,6 +89,24 @@ cd ui && npm install && npm run dev
 
 Open **http://localhost:5173/** — `ui/.env.development` sets `VITE_API_BASE=http://127.0.0.1:8000` so the browser talks to FastAPI, not the Vite server. Optional: copy `ui/.env.example` to `ui/.env.local` to override. Set `UI_AUTO_BUILD=0` when running `run.py` if you want to skip `npm run build` while iterating on the UI only.
 
+### Windows desktop launcher (server + UI)
+
+Use the included scripts to launch the API/trading server and Vite UI in two separate PowerShell windows:
+
+```powershell
+.\scripts\create_desktop_launcher.ps1
+```
+
+This creates a desktop shortcut named **`mytbot`**. Double-click it to run:
+- `python run.py` from repo root (uses `.venv\Scripts\python.exe` if present)
+- `npm run dev` in `ui/`
+
+If UI dependencies are missing, run once manually:
+
+```powershell
+.\scripts\start_mytbot_full_stack.ps1 -InstallUiDeps
+```
+
 ### Tests & release gate
 
 ```bash

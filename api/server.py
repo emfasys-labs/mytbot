@@ -35,6 +35,7 @@ from api.pnl_periods import (
     week_to_date_range,
     win_rate_from_daily_rows,
 )
+from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from control.command_bus import CommandBus
 from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
@@ -549,6 +550,79 @@ async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
     return rows[:limit]
 
 
+async def _merge_synthetic_paper_positions_from_log(
+    session_factory,
+    live_rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Append simulated legs for venues without native paper ``get_positions()``."""
+
+    keys_seen: set[tuple[str, str]] = set()
+    for r in live_rows:
+        try:
+            b = str(r.get("broker", "")).strip().lower()
+            s = str(r.get("symbol", "")).strip().upper()
+            if b and s:
+                keys_seen.add((b, s))
+        except Exception:  # noqa: BLE001
+            continue
+
+    async with session_factory() as session:
+        latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
+        latest_ts = latest_ts_q.scalar_one_or_none()
+        if latest_ts is None:
+            return live_rows
+        brokers_t = tuple(sorted(NO_NATIVE_PAPER_POSITION_BROKERS))
+        q = await session.execute(
+            select(PositionLog)
+            .where(PositionLog.timestamp == latest_ts, PositionLog.broker.in_(brokers_t))
+            .order_by(PositionLog.symbol.asc())
+        )
+        pl_rows = list(q.scalars().all())
+        sym_list = [str(r.symbol).strip().upper() for r in pl_rows if r.symbol]
+        prices = await _latest_feature_prices(session, sym_list)
+    live_px = await _live_broker_prices(pl_rows)
+
+    ts = datetime.now(timezone.utc).isoformat()
+    extra: list[dict[str, Any]] = []
+    for r in pl_rows:
+        b = str(r.broker).strip().lower()
+        sym = str(r.symbol).strip().upper()
+        if not b or not sym:
+            continue
+        if (b, sym) in keys_seen:
+            continue
+        try:
+            qty = Decimal(str(r.quantity or 0))
+            avg = Decimal(str(r.avg_entry_price or 0))
+        except Exception:  # noqa: BLE001
+            continue
+        if qty == 0:
+            continue
+        px = live_px.get(sym) or prices.get(sym) or Decimal(str(r.current_price or 0))
+        if px <= 0 and avg > 0:
+            px = avg
+        pnl = (px - avg) * qty if avg > 0 else Decimal(0)
+        ac = str(r.asset_class or "crypto").strip().lower()
+        extra.append(
+            {
+                "timestamp": ts,
+                "symbol": sym,
+                "broker": b,
+                "quantity": _decimal_str(qty),
+                "avg_entry_price": _decimal_str(avg),
+                "current_price": _decimal_str(px),
+                "unrealised_pnl": _decimal_str(pnl),
+                "asset_class": ac,
+            }
+        )
+
+    merged = live_rows + extra
+    merged.sort(key=lambda row: (row.get("symbol") or "", row.get("broker") or ""))
+    return merged[:limit]
+
+
 async def _live_broker_unrealised_total() -> Decimal:
     rows = await _live_broker_positions(500)
     total = Decimal(0)
@@ -657,14 +731,19 @@ async def get_status():
 @app.get("/positions")
 async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=Depends(_session_factory)):
     live_rows = await _live_broker_positions(limit)
+    if APP_ENV != "live" and live_rows:
+        live_rows = await _merge_synthetic_paper_positions_from_log(
+            session_factory, live_rows, limit=limit
+        )
     if live_rows:
-        return {"positions": live_rows, "source": "live_broker"}
+        src = "live_broker" if APP_ENV == "live" else "live_broker+synthetic_paper_log"
+        return {"positions": live_rows, "source": src}
 
     async with session_factory() as session:
         latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_ts = latest_ts_q.scalar_one_or_none()
         if latest_ts is None:
-            return {"positions": []}
+            return {"positions": [], "source": "position_log"}
         q = await session.execute(
             select(PositionLog)
             .where(PositionLog.timestamp == latest_ts)
@@ -690,7 +769,8 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
                 prices.get(r.symbol, Decimal(str(r.current_price or 0))),
             )
             for r in rows
-        ]
+        ],
+        "source": "position_log",
     }
 
 

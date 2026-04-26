@@ -744,3 +744,14 @@ Duplicated `isPendingOrder` / `toFiniteNumber` in `screens.tsx` were removed in 
 **Reason:** The audit found repeated broker rejections caused by target notional being interpreted as coin/share quantity (for example ~55k BTC/ETH/XRP units) when price metadata was missing. It also found Alpaca being selected for crypto because of the zero-fee prior despite no Alpaca USD buying power, and found the global-edge path ranking held positions without emitting any close/trim action, which left profitable or weak holdings unrealisable except by stop-loss/manual intervention.
 
 **Status:** Implemented in `system/trading_loop/loop.py`, `portfolio/global_edge_coordinator.py`, `signals/arb_bridge.py`, `execution/d015_instruction_executor.py`, `execution/router.py`, and `config/global_edge.yaml`, with regression coverage in `tests/test_global_edge_coordinator.py`, `tests/test_d015_instruction_executor.py`, and `tests/test_router_demand_bias.py`. Live verification after restart showed a normal-sized `AMTM` reduce-only sell trim and no new 55k-unit crypto orders; IBKR was excluded during verification because Gateway/TWS was in an API zombie state.
+
+---
+
+## D046 — Kraken/Binance/Bybit paper book + global-edge churn guard
+
+**Date:** 2026-04-26
+**Decision:** (1) **Position reconciliation** — adapters in `_NO_NATIVE_PAPER_POSITION_BROKERS` (`kraken`, `binance`, `bybit`) do not host exchange-native paper positions. In `paper_mode`, reconciliation must treat the latest synthetic `PositionLog` snapshot for that broker as authoritative instead of replacing it with the live account’s empty spot book (which made the allocator think the book was flat after every fill). When merging per-broker latest rows into the local quantity map, skip double-counting rows already included in the global latest-timestamp snapshot (`b_ts == latest_ts`). (2) **Global-edge coordinator** — skip emitting `open_strategy` when an opportunity’s symbol and **side** already match a held position (instant paper fills made “open same leg every loop” too easy). Opposite-side opportunities are not blocked so trims/flips can still flow through risk and execution.
+
+**Reason:** Operators saw repetitive Telegram `PAPER OPEN FILLED` lines with identical size/price: real synthetic orders were logged, but reconciliation cleared paper crypto legs while strategies kept re-proposing the same edge; the coordinator could also add the same-direction leg again because trim selection skips same-symbol displacement.
+
+**Status:** Implemented in `execution/engine.py`, `core/broker_paper.py` (shared broker set), `portfolio/global_edge_coordinator.py`, and `GET /positions` now merges the latest `PositionLog` rows for `kraken` / `binance` / `bybit` whenever `APP_ENV` is not `live` and live adapters returned at least one row (`source=live_broker+synthetic_paper_log`), so the Book matches the persisted synthetic crypto leg. Tests in `tests/test_global_edge_coordinator.py`.

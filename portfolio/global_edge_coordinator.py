@@ -67,6 +67,16 @@ def _decimal_or_none(v: Any) -> Decimal | None:
     return d
 
 
+def _canonical_position_side(raw: Any) -> str:
+    """Normalise long/short labels for coordinator guards (buy/sell tolerant)."""
+    s = str(raw or "long").strip().lower()
+    if s in ("buy", "long", "b"):
+        return "long"
+    if s in ("sell", "short", "s"):
+        return "short"
+    return s
+
+
 def signal_candidate_to_strategy_opportunity(
     cand: Any,
     *,
@@ -417,6 +427,16 @@ class GlobalEdgeCoordinator:
                 break
             if opp.expected_edge <= weakest_edge + thresh:
                 continue
+            opp_side = _canonical_position_side(getattr(opp, "side", None))
+            if any(
+                h.symbol.strip().upper() == opp.symbol.strip().upper()
+                and _canonical_position_side((h.metadata or {}).get("side")) == opp_side
+                for h in held
+            ):
+                # Already deployed this directional exposure; avoid re-opening the same
+                # leg every loop (especially when paper fills are instant). Opposite-side
+                # opportunities still flow through for trims / flips via risk+execution.
+                continue
             trim_edge: HeldPositionEdge | None = None
             if available_held:
                 for i, h in enumerate(available_held):
@@ -589,7 +609,7 @@ def held_positions_from_portfolio(
             "quantity": str(qty),
             "close": str(px),
             "price": str(px),
-            "side": str(row.get("side", "long") or "long"),
+            "side": str(row.get("side") or ("short" if qty < 0 else "long")),
             "asset_class": str(row.get("asset_class", "equity") or "equity"),
         }
         if ceiling is not None and ceiling > 0:

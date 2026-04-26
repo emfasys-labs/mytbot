@@ -28,7 +28,8 @@ import asyncio
 import httpx
 from brokers.registry import get_broker
 from control.runtime import get_risk_engine, set_execution_engine
-from brokers.base import Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
+from brokers.base import AssetClass, Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
+from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from core.instruments import parse_option_contract_from_metadata
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
@@ -1354,6 +1355,7 @@ class ExecutionEngine:
             return True
         try:
             local: dict[tuple[str, str], Decimal] = {}
+            paper_position_rows: dict[str, list[Any]] = {}
             async with sf() as session:
                 latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
                 latest_ts = latest_ts_q.scalar_one_or_none()
@@ -1365,6 +1367,35 @@ class ExecutionEngine:
                     for row in rows:
                         key = (str(row.broker).strip().lower(), str(row.symbol).strip().upper())
                         local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
+                if self.paper_mode:
+                    for broker_name in NO_NATIVE_PAPER_POSITION_BROKERS:
+                        b_ts_q = await session.execute(
+                            select(func.max(PositionLog.timestamp)).where(PositionLog.broker == broker_name)
+                        )
+                        b_ts = b_ts_q.scalar_one_or_none()
+                        if b_ts is None:
+                            continue
+                        b_rows_q = await session.execute(
+                            select(PositionLog).where(
+                                PositionLog.broker == broker_name,
+                                PositionLog.timestamp == b_ts,
+                            )
+                        )
+                        b_rows = list(b_rows_q.scalars().all())
+                        b_rows = [
+                            row for row in b_rows
+                            if str(getattr(row, "broker", "")).strip().lower() == broker_name
+                        ]
+                        if not b_rows:
+                            continue
+                        paper_position_rows[broker_name] = b_rows
+                        # When ``b_ts == latest_ts``, kraken/binance/bybit rows were already
+                        # folded into ``local`` by the global snapshot pass — do not add twice
+                        # or reconciliation sees a phantom 2× local qty vs synthetic remote.
+                        if b_ts != latest_ts:
+                            for row in b_rows:
+                                key = (broker_name, str(row.symbol).strip().upper())
+                                local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
 
             # Ensure we attempt broker reconciliation even before any order execution.
             # Use the union of the construction-time allow-list, configured
@@ -1389,6 +1420,32 @@ class ExecutionEngine:
             remote: dict[tuple[str, str], Decimal] = {}
             remote_snapshots: list[tuple[str, Position]] = []
             for broker_name, broker in self._brokers.items():
+                bname = broker_name.strip().lower()
+                if self.paper_mode and bname in NO_NATIVE_PAPER_POSITION_BROKERS:
+                    # These adapters do not maintain exchange-native paper positions.
+                    # Their simulated fills are the authoritative paper book, so
+                    # reconciliation must preserve the latest synthetic snapshot
+                    # instead of overwriting it with the real account's empty book.
+                    for row in paper_position_rows.get(bname, []):
+                        asset_raw = str(row.asset_class or "equity").strip().lower()
+                        try:
+                            asset = AssetClass(asset_raw)
+                        except Exception:  # noqa: BLE001
+                            asset = AssetClass.EQUITY
+                        p = Position(
+                            symbol=str(row.symbol).strip().upper(),
+                            asset_class=asset,
+                            quantity=Decimal(str(row.quantity)),
+                            avg_entry_price=Decimal(str(row.avg_entry_price)),
+                            current_price=Decimal(str(row.current_price)),
+                            unrealised_pnl=Decimal(str(row.unrealised_pnl)),
+                            broker=bname,
+                            instrument_metadata=row.instrument_metadata if isinstance(row.instrument_metadata, dict) else None,
+                        )
+                        key = (bname, p.symbol)
+                        remote[key] = remote.get(key, Decimal("0")) + Decimal(str(p.quantity))
+                        remote_snapshots.append((bname, p))
+                    continue
                 try:
                     positions: list[Position] = await broker.get_positions()
                 except Exception as exc:  # noqa: BLE001

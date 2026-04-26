@@ -499,8 +499,21 @@ function navChangeSincePeriodStart(
   if (!Number.isFinite(navNow) || navNow <= 0) return 0;
   if (!sorted.length) return apiFallback;
   const before = sorted.filter((h) => h.date < periodStartYmd);
-  const pick = before.length > 0 ? before[before.length - 1] : sorted[0];
-  const anchor = pick && Number.isFinite(pick.value) ? pick.value : NaN;
+  let anchor: number;
+  if (before.length > 0) {
+    // True period-open: previous close immediately before the period start.
+    anchor = before[before.length - 1].value;
+  } else {
+    // History does not reach back to the period start. Use the first row
+    // on/after the period start as a best-effort period-open NAV (we joined
+    // mid-period). Without that, defer to the API-side rollup so each
+    // period does not silently collapse onto the same earliest history row.
+    const onOrAfter = sorted.find((h) => h.date >= periodStartYmd);
+    if (!onOrAfter || !Number.isFinite(onOrAfter.value) || onOrAfter.value <= 0) {
+      return apiFallback;
+    }
+    anchor = onOrAfter.value;
+  }
   if (!Number.isFinite(anchor) || anchor <= 0) return apiFallback;
   const delta = navNow - anchor;
   if (Math.abs(delta) < 0.01 && Math.abs(apiFallback) > 0.01) return apiFallback;
