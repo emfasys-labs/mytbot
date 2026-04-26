@@ -228,13 +228,17 @@ function _orderFinite(v: unknown): number {
 }
 
 /**
- * Notional reserved by unfilled orders: ``|qty × (limit_price or avg_fill)|``
- * across every order whose status is still "open-ish". Shared by the Book
- * screen's Capital-at-work card and the dashboard's capital-allocation
- * slider so the two surfaces can never drift apart.
+ * Notional reserved by unfilled exposure-increasing orders.
+ *
+ * Closing/reduce orders do not consume new capital: a sell against an existing
+ * long position releases exposure, so counting it here makes capital-at-work
+ * look roughly doubled while trims are waiting for the broker session.
  */
-export function pendingOrderNotional(orders: ApiOrderRow[]): number {
+export function pendingOrderNotional(orders: ApiOrderRow[], positions: Position[] = []): number {
   if (!Array.isArray(orders)) return 0;
+  const positionBySymbol = new Map(
+    (positions ?? []).map((p) => [String(p.sym ?? '').toUpperCase(), p]),
+  );
   let sum = 0;
   for (const o of orders) {
     if (!isPendingOrderStatus(o.status)) continue;
@@ -245,6 +249,12 @@ export function pendingOrderNotional(orders: ApiOrderRow[]): number {
     const qty = _orderFinite(extras.quantity);
     const px = _orderFinite(extras.limit_price ?? o.avg_fill_price);
     if (qty <= 0 || px <= 0) continue;
+    const side = String(o.side ?? '').toLowerCase();
+    const sym = String(o.symbol ?? '').toUpperCase();
+    const pos = positionBySymbol.get(sym);
+    const posQty = pos?.qty ?? 0;
+    if (side === 'sell' && posQty > 0) continue;
+    if (side === 'buy' && posQty < 0) continue;
     sum += qty * px;
   }
   return sum;
@@ -262,7 +272,7 @@ export function pendingOrderNotional(orders: ApiOrderRow[]): number {
  * the wrong place. This helper is the single source of truth.
  *
  * ``deployed`` — filled-position notional (canonical ``p.notional``).
- * ``pending``  — notional of still-open orders.
+ * ``pending``  — notional of still-open exposure-increasing orders.
  * ``working``  — ``deployed + pending`` (the figure the ceiling gates).
  */
 export function capitalAtWork(
@@ -270,7 +280,7 @@ export function capitalAtWork(
   orders: ApiOrderRow[],
 ): { deployed: number; pending: number; working: number } {
   const deployed = (positions ?? []).reduce((s, p) => s + (p.notional || 0), 0);
-  const pending = pendingOrderNotional(orders);
+  const pending = pendingOrderNotional(orders, positions);
   return { deployed, pending, working: deployed + pending };
 }
 
