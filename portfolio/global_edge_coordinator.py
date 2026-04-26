@@ -597,6 +597,9 @@ def held_positions_from_portfolio(
             meta["position_above_target_ratio"] = str(ratio)
             meta["sizing_hard_cap_notional"] = str(ceiling)
             meta["oversized_position_flag"] = ratio > oversize_flag_ratio
+            if ratio > Decimal("1"):
+                oversize_penalty = min(base_edge, (ratio - Decimal("1")) * Decimal("0.05"))
+                rem = max(Decimal("0"), rem - oversize_penalty)
         out.append(
             HeldPositionEdge(
                 symbol=str(sym),

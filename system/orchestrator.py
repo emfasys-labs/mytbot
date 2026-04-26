@@ -667,10 +667,42 @@ class Orchestrator:
 
             updated = 0
             cancelled = 0
+            open_order_cache: dict[str, list[Any] | None] = {}
+
+            async def _broker_open_orders(adapter: Any, broker_name: str) -> list[Any] | None:
+                if broker_name in open_order_cache:
+                    return open_order_cache[broker_name]
+                try:
+                    orders = list(await adapter.get_open_orders())
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "orchestrator | order reconcile | open orders fetch failed | broker={} | {}",
+                        broker_name,
+                        exc,
+                    )
+                    open_order_cache[broker_name] = None
+                    return None
+                open_order_cache[broker_name] = orders
+                return orders
+
+            def _matches_stored_order(open_order: Any, stored: Any) -> bool:
+                osym = str(getattr(open_order, "symbol", "") or "").strip().upper()
+                ssym = str(getattr(stored, "symbol", "") or "").strip().upper()
+                if osym != ssym:
+                    return False
+                oside_raw = getattr(open_order, "side", "")
+                oside = str(getattr(oside_raw, "value", oside_raw) or "").strip().lower()
+                sside = str(getattr(stored, "side", "") or "").strip().lower()
+                if oside != sside:
+                    return False
+                status_raw = getattr(open_order, "status", "")
+                status = str(getattr(status_raw, "value", status_raw) or "").strip().lower()
+                return status in {"pending", "open", "partially_filled"}
+
             for row in rows:
                 bname = (row.broker or "").strip().lower()
                 bid = (row.broker_order_id or "").strip()
-                if not bname or not bid:
+                if not bname:
                     continue
                 adapter = self._broker_manager.adapters.get(bname)
                 if adapter is None:
@@ -682,22 +714,34 @@ class Orchestrator:
                 latest_filled_qty = None
                 latest_avg_fill = None
                 latest_fee = None
-                try:
-                    latest = await adapter.get_order(bid)
-                    if latest is not None:
-                        s = getattr(latest, "status", None)
-                        latest_status = s.value if hasattr(s, "value") else (str(s) if s is not None else None)
-                        latest_filled_qty = getattr(latest, "filled_quantity", None)
-                        latest_avg_fill = getattr(latest, "avg_fill_price", None)
-                        latest_fee = getattr(latest, "fee", None)
-                except Exception as exc:  # noqa: BLE001
-                    # Broker may have purged stale orders; if old enough, mark cancelled locally
-                    # so dedup unblocks. Otherwise leave for next pass.
-                    logger.debug(
-                        "orchestrator | order reconcile | get_order failed | broker={} id={} | {}",
-                        bname, bid, exc,
-                    )
-                    if age_sec >= stale_cancel_sec:
+                if bid:
+                    try:
+                        latest = await adapter.get_order(bid)
+                        if latest is not None:
+                            s = getattr(latest, "status", None)
+                            latest_status = s.value if hasattr(s, "value") else (str(s) if s is not None else None)
+                            latest_filled_qty = getattr(latest, "filled_quantity", None)
+                            latest_avg_fill = getattr(latest, "avg_fill_price", None)
+                            latest_fee = getattr(latest, "fee", None)
+                    except Exception as exc:  # noqa: BLE001
+                        # Broker may have purged stale orders; if old enough, mark cancelled locally
+                        # so dedup unblocks. Otherwise leave for next pass.
+                        logger.debug(
+                            "orchestrator | order reconcile | get_order failed | broker={} id={} | {}",
+                            bname, bid, exc,
+                        )
+                        open_orders = await _broker_open_orders(adapter, bname)
+                        if open_orders is not None and not any(_matches_stored_order(o, row) for o in open_orders):
+                            latest_status = "cancelled"
+                        elif age_sec >= stale_cancel_sec:
+                            latest_status = "cancelled"
+                else:
+                    # Older adapter paths can persist a working row before IBKR
+                    # has assigned a broker id. Reconcile those rows against the
+                    # broker's actual open-order book; if no matching active
+                    # order exists, the DB row is stale and must not block dedup.
+                    open_orders = await _broker_open_orders(adapter, bname)
+                    if open_orders is not None and not any(_matches_stored_order(o, row) for o in open_orders):
                         latest_status = "cancelled"
 
                 if latest_status is None:

@@ -7,6 +7,7 @@ from portfolio.global_edge_coordinator import (
     CoordinatorAction,
     GlobalEdgeCoordinator,
     HeldPositionEdge,
+    held_positions_from_portfolio,
     signal_candidate_to_strategy_opportunity,
 )
 from portfolio.strategy_opportunity import StrategyOpportunity, compute_priority_score
@@ -502,6 +503,28 @@ def test_d031_held_position_oversized_flag_when_above_ceiling() -> None:
     assert by_sym["COHR"].metadata.get("oversized_position_flag") is True
     assert Decimal(by_sym["COHR"].metadata["position_above_target_ratio"]) > Decimal("1.25")
     assert by_sym["TINY"].metadata.get("oversized_position_flag") is False
+    assert by_sym["COHR"].expected_remaining_edge < by_sym["TINY"].expected_remaining_edge
+
+
+def test_oversized_held_position_is_trimmed_before_small_position() -> None:
+    """Replacement ranking should not keep oversized IBKR holdings behind small first-loaded rows."""
+    portfolio = {
+        "positions": {
+            "SMALL": {"quantity": "10", "current_price": "20", "broker": "alpaca"},
+            "AXTA": {"quantity": "54861", "current_price": "29.67", "broker": "ibkr"},
+        }
+    }
+    held = held_positions_from_portfolio(
+        portfolio,
+        nav=Decimal("1100000"),
+        max_position_pct=Decimal("0.10"),
+    )
+    opp = _opp("BAMB", "0.65", "6500")
+    coord = GlobalEdgeCoordinator({"replacement_threshold": {"hunter": "0.01"}, "max_actions": {"hunter": 2}})
+    actions = coord.propose_actions(held, [opp], active_mode="hunter")
+    assert actions
+    assert actions[0].kind == "trim_symbol"
+    assert actions[0].symbol == "AXTA"
 
 
 def test_d031_arbitrage_path_capital_unchanged() -> None:

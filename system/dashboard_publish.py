@@ -90,6 +90,13 @@ def _d(x: Decimal | None) -> str:
     return str(x)
 
 
+def _dec(x: Any) -> Decimal:
+    try:
+        return Decimal(str(x))
+    except Exception:  # noqa: BLE001
+        return Decimal("0")
+
+
 def serialize_opportunity(o: Opportunity, *, rank: int = 0) -> dict[str, Any]:
     comp = o.components.as_dict()
     vol = o.volume_flow
@@ -269,7 +276,15 @@ def serialize_strategy_opportunity(o: StrategyOpportunity) -> dict[str, Any]:
 
 def serialize_held_edges(edges: list[Any], *, limit: int = 12) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for e in edges[:limit]:
+    ranked = sorted(
+        edges,
+        key=lambda e: (
+            _dec(getattr(e, "expected_remaining_edge", None)),
+            -_dec(getattr(e, "notional", None)),
+            str(getattr(e, "symbol", "")),
+        ),
+    )
+    for e in ranked[:limit]:
         out.append(
             {
                 "symbol": getattr(e, "symbol", ""),
@@ -390,6 +405,7 @@ async def publish_dashboard_snapshot_global_edge(
         "global_edge": {
             "held_edges": serialize_held_edges(held, limit=12),
             "ranked_new_edges": [serialize_strategy_opportunity(o) for o in ranked],
+            "coordinator_actions": serialize_coordinator_actions(coordinator_actions, limit=25),
         },
         "demand": demand or {},
     }

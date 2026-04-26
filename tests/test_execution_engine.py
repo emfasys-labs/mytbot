@@ -805,7 +805,7 @@ def test_d031c_boundary_guard_rejects_gross_over_sizing() -> None:
 
 
 def test_d031c_boundary_guard_rejects_over_hard_cap() -> None:
-    """Exceeding the hard cap is always rejected even without intended size."""
+    """Opening above the hard cap is rejected even without intended size."""
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
@@ -839,12 +839,15 @@ def test_d031c_boundary_guard_absolute_cap_when_no_sizing_metadata(monkeypatch) 
 
 
 def test_d031c_boundary_guard_absolute_cap_skipped_for_reduce_only() -> None:
-    """Reduce-only / stop-loss closes are exempt from the absolute cap."""
+    """Reduce-only / stop-loss closes are exempt from absolute and position caps."""
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
     order = _sizing_order("COHR", Decimal("10000"), Decimal("355"))
-    sig = _sizing_signal({"reduce_only": True})
+    sig = _sizing_signal({
+        "reduce_only": True,
+        "sizing_hard_cap_notional": "100000",
+    })
     assert eng._passes_sizing_boundary_guard(order, sig) is True
 
 

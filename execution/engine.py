@@ -1081,7 +1081,12 @@ class ExecutionEngine:
             )
             return False
 
-        if hard_cap is not None and hard_cap > 0 and actual_notional > hard_cap:
+        if (
+            not is_reduce_only
+            and hard_cap is not None
+            and hard_cap > 0
+            and actual_notional > hard_cap
+        ):
             logger.critical(
                 "SIZING GUARD REJECT (hard cap) | signal_id=%s symbol=%s | "
                 "actual_notional=%s > hard_cap=%s",
@@ -1362,7 +1367,18 @@ class ExecutionEngine:
                         local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
 
             # Ensure we attempt broker reconciliation even before any order execution.
-            preload_names = self.allowed_brokers if self.allowed_brokers else list(self.broker_configs.keys())
+            # Use the union of the construction-time allow-list, configured
+            # brokers, and currently connected BrokerManager adapters. Late
+            # joiners (notably IBKR after Gateway handshake lag) must be part
+            # of the authoritative position snapshot even if they were absent
+            # from the initial allow-list.
+            preload_names = list(self.allowed_brokers)
+            preload_names.extend(str(k).strip().lower() for k in self.broker_configs.keys())
+            bm = getattr(self, "_broker_manager", None)
+            adapters = getattr(bm, "adapters", None) if bm is not None else None
+            if isinstance(adapters, dict):
+                preload_names.extend(str(k).strip().lower() for k in adapters.keys())
+            preload_names = list(dict.fromkeys(n for n in preload_names if n))
             for broker_name in preload_names:
                 if broker_name in self._brokers:
                     continue

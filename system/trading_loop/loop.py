@@ -161,6 +161,83 @@ async def _load_working_order_keys(session_factory: Any) -> set[tuple[str, str]]
     return out
 
 
+async def _merge_live_broker_positions_into_portfolio_state(
+    portfolio_state: dict[str, Any],
+    broker_manager: Any,
+) -> None:
+    """Overlay broker-authoritative positions onto a DB-derived portfolio state."""
+    adapters = getattr(broker_manager, "adapters", None)
+    if not isinstance(adapters, dict):
+        return
+    positions = dict(portfolio_state.get("positions") or {})
+    for broker_name, adapter in list(adapters.items()):
+        bname = str(broker_name or "").strip().lower()
+        if not bname:
+            continue
+        try:
+            live_positions = await adapter.get_positions()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "trading_loop | live position overlay skipped | broker={} | {}",
+                bname,
+                exc,
+            )
+            continue
+        positions = {
+            sym: row
+            for sym, row in positions.items()
+            if str((row or {}).get("broker", "")).strip().lower() != bname
+        }
+        for p in live_positions or []:
+            symbol = str(getattr(p, "symbol", "") or "").strip().upper()
+            if not symbol:
+                continue
+            try:
+                qty = Decimal(str(getattr(p, "quantity", "0") or "0"))
+                px = Decimal(str(getattr(p, "current_price", "0") or "0"))
+                avg = Decimal(str(getattr(p, "avg_entry_price", px) or px))
+            except Exception:  # noqa: BLE001
+                continue
+            if qty == 0 or px <= 0:
+                continue
+            asset_raw = getattr(p, "asset_class", "equity")
+            asset = str(getattr(asset_raw, "value", asset_raw) or "equity").strip().lower()
+            entry: dict[str, Any] = {
+                "quantity": qty,
+                "avg_entry_price": avg,
+                "current_price": px,
+                "asset_class": asset,
+                "broker": bname,
+            }
+            im = getattr(p, "instrument_metadata", None)
+            if isinstance(im, dict):
+                entry["instrument_metadata"] = im
+            positions[symbol] = entry
+
+    gross = Decimal("0")
+    symbol_exposure: dict[str, Decimal] = {}
+    asset_class_exposure: dict[str, Decimal] = {}
+    for sym, row in positions.items():
+        try:
+            qty = Decimal(str(row.get("quantity", "0") or "0"))
+            px = Decimal(str(row.get("current_price", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            continue
+        notional = abs(qty) * px
+        if notional <= 0:
+            continue
+        symbol_exposure[str(sym)] = symbol_exposure.get(str(sym), Decimal("0")) + notional
+        asset = str(row.get("asset_class", "") or "").strip().lower()
+        if asset:
+            asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+        gross += notional
+
+    portfolio_state["positions"] = positions
+    portfolio_state["current_gross_exposure"] = gross
+    portfolio_state["symbol_exposure"] = symbol_exposure
+    portfolio_state["asset_class_exposure"] = asset_class_exposure
+
+
 class TradingLoop:
     """
     A controllable trading loop that can be started/stopped by the orchestrator.
@@ -1774,6 +1851,11 @@ class TradingLoop:
         if self._broker_manager:
             await self._treasury.refresh(self._broker_manager)
         merge_treasury_into_portfolio_state(portfolio_dict, self._treasury)
+        if self._broker_manager:
+            await _merge_live_broker_positions_into_portfolio_state(
+                portfolio_dict,
+                self._broker_manager,
+            )
 
         # D031: the hard per-position ceiling is ``nav * max_position_pct``
         # (default 10 % from ``config/risk_limits.yaml``). Strategy-requested
