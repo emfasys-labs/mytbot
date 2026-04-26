@@ -38,10 +38,19 @@ def test_equity_max_drawdown_short_series_returns_none():
 
 
 def test_merge_live_today_unrealised_into_period():
-    period = Decimal("100")  # includes DB today unrealised 40
+    period = Decimal("100")
     out = merge_live_today_unrealised_into_period(
         period,
         db_today_unrealised=Decimal("40"),
         live_today_unrealised=Decimal("291"),
     )
-    assert out == Decimal("351")
+    assert out == Decimal("291")
+
+
+def test_merge_live_today_unrealised_keeps_period_when_live_missing():
+    out = merge_live_today_unrealised_into_period(
+        Decimal("100"),
+        db_today_unrealised=Decimal("40"),
+        live_today_unrealised=Decimal("0"),
+    )
+    assert out == Decimal("100")

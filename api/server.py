@@ -1289,12 +1289,15 @@ async def get_pnl(session_factory=Depends(_session_factory)):
         agg_q = await session.execute(
             select(
                 func.coalesce(func.sum(DailyPnL.realised_pnl), 0).label("realised"),
-                func.coalesce(func.sum(DailyPnL.unrealised_pnl), 0).label("unrealised"),
                 func.coalesce(func.sum(DailyPnL.total_fees), 0).label("fees"),
                 func.coalesce(func.sum(DailyPnL.trade_count), 0).label("trades"),
             )
         )
         agg = tuple(agg_q.one())
+        latest_unrealised_q = await session.execute(
+            select(DailyPnL.unrealised_pnl).order_by(DailyPnL.date.desc()).limit(1)
+        )
+        latest_unrealised_db = Decimal(str(latest_unrealised_q.scalar_one_or_none() or 0))
         ws, we = week_to_date_range(today_d)
         ms, me = month_to_date_range(today_d)
         week_agg = await aggregate_daily_pnl_range(session, ws, we)
@@ -1370,9 +1373,9 @@ async def get_pnl(session_factory=Depends(_session_factory)):
         },
         "all_time": {
             "realised": _decimal_str(agg[0]),
-            "unrealised": _decimal_str(agg[1]),
-            "fees": _decimal_str(agg[2]),
-            "trades": int(agg[3] or 0),
+            "unrealised": _decimal_str(today_unrealised if today_unrealised != 0 else latest_unrealised_db),
+            "fees": _decimal_str(agg[1]),
+            "trades": int(agg[2] or 0),
         },
         "week": week_agg,
         "month": month_agg,

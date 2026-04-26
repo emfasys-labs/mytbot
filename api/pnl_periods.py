@@ -29,11 +29,13 @@ def merge_live_today_unrealised_into_period(
     live_today_unrealised: Decimal,
 ) -> Decimal:
     """
-    ``aggregate_daily_pnl_range`` sums stored ``DailyPnL.unrealised`` per day.
-    The live GET /pnl \"today\" block uses MTM for today instead of the DB row.
-    Replace today's contribution so week/month unrealised matches that semantics.
+    Unrealised P&L is a point-in-time mark, not an additive daily flow.
+
+    Keep the helper signature for existing callers/tests, but treat the live
+    mark as authoritative when present. ``db_today_unrealised`` is intentionally
+    ignored; subtracting/summing daily unrealised values double-counts open P&L.
     """
-    return period_unrealised - db_today_unrealised + live_today_unrealised
+    return live_today_unrealised if live_today_unrealised != 0 else period_unrealised
 
 
 async def aggregate_daily_pnl_range(session: Any, start: date, end: date) -> dict[str, Any]:
@@ -42,17 +44,23 @@ async def aggregate_daily_pnl_range(session: Any, start: date, end: date) -> dic
     q = await session.execute(
         select(
             func.coalesce(func.sum(DailyPnL.realised_pnl), 0),
-            func.coalesce(func.sum(DailyPnL.unrealised_pnl), 0),
             func.coalesce(func.sum(DailyPnL.total_fees), 0),
             func.coalesce(func.sum(DailyPnL.trade_count), 0),
         ).where(and_(DailyPnL.date >= start_s, DailyPnL.date <= end_s))
     )
     row = q.one()
+    latest_u_q = await session.execute(
+        select(DailyPnL.unrealised_pnl)
+        .where(and_(DailyPnL.date >= start_s, DailyPnL.date <= end_s))
+        .order_by(DailyPnL.date.desc())
+        .limit(1)
+    )
+    latest_u = latest_u_q.scalar_one_or_none()
     return {
         "realised": str(Decimal(str(row[0] or 0))),
-        "unrealised": str(Decimal(str(row[1] or 0))),
-        "fees": str(Decimal(str(row[2] or 0))),
-        "trades": int(row[3] or 0),
+        "unrealised": str(Decimal(str(latest_u or 0))),
+        "fees": str(Decimal(str(row[1] or 0))),
+        "trades": int(row[2] or 0),
         "period_start": start_s,
         "period_end": end_s,
     }
