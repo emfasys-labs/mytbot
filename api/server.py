@@ -489,6 +489,66 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     return out
 
 
+async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
+    """Return current positions directly from connected broker adapters.
+
+    ``PositionLog`` is an audit/cache table; the broker is the authoritative
+    source for what is actually open. A partial latest DB snapshot can otherwise
+    hide still-open positions from another broker.
+    """
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch is not None else None
+    adapters = list(getattr(bm, "adapters", {}).items()) if bm is not None else []
+    if not adapters:
+        return []
+
+    async def _one(broker_name: str, adapter: Any) -> list[dict[str, Any]]:
+        try:
+            positions = await asyncio.wait_for(adapter.get_positions(), timeout=8.0)
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[dict[str, Any]] = []
+        ts = datetime.now(timezone.utc).isoformat()
+        for p in positions or []:
+            try:
+                qty = Decimal(str(getattr(p, "quantity", 0) or 0))
+                avg = Decimal(str(getattr(p, "avg_entry_price", 0) or 0))
+                current = Decimal(str(getattr(p, "current_price", 0) or 0))
+                pnl_raw = getattr(p, "unrealised_pnl", None)
+                pnl = Decimal(str(pnl_raw)) if pnl_raw is not None else (current - avg) * qty
+            except Exception:  # noqa: BLE001
+                continue
+            if qty == 0:
+                continue
+            asset_class = getattr(p, "asset_class", "")
+            if hasattr(asset_class, "value"):
+                asset_class = asset_class.value
+            out.append(
+                {
+                    "timestamp": ts,
+                    "symbol": str(getattr(p, "symbol", "") or "").strip().upper(),
+                    "broker": str(getattr(p, "broker", broker_name) or broker_name).strip().lower(),
+                    "quantity": _decimal_str(qty),
+                    "avg_entry_price": _decimal_str(avg),
+                    "current_price": _decimal_str(current),
+                    "unrealised_pnl": _decimal_str(pnl),
+                    "asset_class": str(asset_class or "").strip().lower(),
+                }
+            )
+        return out
+
+    results = await asyncio.gather(
+        *(_one(name, adapter) for name, adapter in adapters),
+        return_exceptions=True,
+    )
+    rows: list[dict[str, Any]] = []
+    for res in results:
+        if isinstance(res, list):
+            rows.extend(res)
+    rows.sort(key=lambda r: (r.get("symbol") or "", r.get("broker") or ""))
+    return rows[:limit]
+
+
 async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
     """Mark latest position snapshot to the freshest price available.
 
@@ -581,6 +641,10 @@ async def get_status():
 
 @app.get("/positions")
 async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=Depends(_session_factory)):
+    live_rows = await _live_broker_positions(limit)
+    if live_rows:
+        return {"positions": live_rows, "source": "live_broker"}
+
     async with session_factory() as session:
         latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
         latest_ts = latest_ts_q.scalar_one_or_none()
