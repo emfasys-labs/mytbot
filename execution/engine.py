@@ -101,7 +101,29 @@ class ExecutionEngine:
             )
         except (TypeError, ValueError):
             self._broker_balance_cooldown_sec = 1800.0
+        # Wave 9 — cost-aware pre-flight gate. Auto-loaded once at construction
+        # so each `execute()` doesn't re-parse YAML. Disabled by default.
+        try:
+            from execution.wave9_runtime import Wave9RuntimeConfig
+
+            self._wave9_cfg = Wave9RuntimeConfig.load()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("execution_engine | wave9 config load failed: %s", exc)
+            self._wave9_cfg = None
+        # Counters for ops visibility on the Wave 13 dashboard.
+        self.wave9_gate_blocked = 0
+        self.wave9_gate_passed = 0
         set_execution_engine(self)
+
+    def reload_wave9_config(self) -> None:
+        """Test/operator helper — re-read config/execution_models.yaml."""
+        try:
+            from execution.wave9_runtime import Wave9RuntimeConfig
+
+            self._wave9_cfg = Wave9RuntimeConfig.load()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("execution_engine | wave9 reload failed: %s", exc)
+            self._wave9_cfg = None
 
     def _is_broker_balance_exhausted(self, broker_name: str) -> bool:
         until = self._broker_balance_exhausted_until.get(broker_name)
@@ -177,7 +199,65 @@ class ExecutionEngine:
                 )
                 return None
 
+        # Wave 9 — pre-flight cost-aware gate. When enabled, computes the
+        # all-in expected cost (impact + fee + spread + slippage prior),
+        # consults the urgency policy, and short-circuits with a logged
+        # "DO_NOT_TRADE" if cost dwarfs the edge or exceeds the operator's
+        # ceiling. Disabled by default — module returns ``allow=True,
+        # used=False`` and the engine proceeds unmodified.
+        wave9_metadata: dict = {}
+        if self._wave9_cfg is not None and getattr(self._wave9_cfg, "enabled", False):
+            from execution.wave9_runtime import pre_flight_cost_gate
+            from brokers.base import AssetClass as _AssetClass
+
+            try:
+                ac_str = (
+                    signal.asset_class.value
+                    if isinstance(signal.asset_class, _AssetClass)
+                    else str(signal.asset_class or "other")
+                )
+            except Exception:  # noqa: BLE001
+                ac_str = "other"
+            try:
+                qty_f = float(signal.suggested_quantity or 0)
+            except (TypeError, ValueError):
+                qty_f = 0.0
+            gate = pre_flight_cost_gate(
+                config=self._wave9_cfg,
+                broker=str(signal.broker or ""),
+                symbol=str(signal.symbol or ""),
+                asset_class=ac_str,
+                quantity=qty_f,
+                signal_metadata=signal.metadata or {},
+            )
+            if gate.used:
+                wave9_metadata = dict(gate.metadata or {})
+            if gate.used and not gate.allow:
+                self.wave9_gate_blocked += 1
+                logger.info(
+                    "WAVE9 GATE BLOCKED | %s %s broker=%s reason=%s cost=%.2fbps",
+                    signal.symbol,
+                    signal.side,
+                    signal.broker,
+                    gate.reason,
+                    gate.expected_cost_bps,
+                )
+                return None
+            if gate.used and gate.allow:
+                self.wave9_gate_passed += 1
+
         order = self._build_order(signal)
+        if wave9_metadata:
+            # Stamp diagnostic metadata on the order so the dashboard funnel
+            # (Wave 13) can render expected vs realised cost. Never overrides
+            # caller-provided metadata; only fills missing keys.
+            md = dict(order.instrument_metadata or {}) if hasattr(order, "instrument_metadata") else {}
+            for k, v in wave9_metadata.items():
+                md.setdefault(k, v)
+            try:
+                order.instrument_metadata = md
+            except Exception:  # noqa: BLE001
+                pass
 
         # Paper-mode shortcut for venues without native paper-trading support.
         # Kraken/Binance/Bybit adapters either reject paper orders outright or

@@ -1,0 +1,43 @@
+# config/multimodal_fusion.yaml
+# ===============================
+# Wave 7 — multimodal fusion runtime configuration.
+#
+# Default state: DISABLED. The ``MultimodalFusion`` layer is an
+# importable building block; activation is the Wave-7 wiring follow-up.
+#
+# Sources combined (per-symbol):
+#   structured_forecast  — Wave 6 ForecastDecision (expected return / vol / confidence)
+#   news                 — short-term sentiment + materiality
+#   macro                — regime label + market state score (Wave 4)
+#   graph                — upstream-trigger propagation strength (graph/engine.py)
+#   accumulator          — signals/accumulator NetSignal score
+#   execution            — recent slippage feedback (Wave 9)
+#   portfolio            — current position context (filtering only; weight=0 by default)
+#
+# The fusion layer NEVER calls an LLM. ``trigger_llm_ensemble: true`` on
+# a FusionScore is a *recommendation* the existing escalation chain in
+# ``ai/router.py`` may act on per ``config/ai.yaml``.
+
+multimodal_fusion:
+  enabled: false
+
+  # Per-source weights. The fusion sum normalises by the total weight,
+  # so absolute values matter less than relative ratios.
+  weights:
+    structured_forecast: 1.0
+    news:                0.7
+    macro:               0.4
+    graph:               0.5
+    accumulator:         0.6
+    execution:           0.2
+    portfolio:           0.0
+
+  # When fewer than this many sources contribute, confidence is scaled
+  # down linearly (a lone signal is never high-confidence).
+  min_sources_for_high_confidence: 2
+
+  # News materiality at or above this threshold flags
+  # ``trigger_llm_ensemble: true`` on the FusionScore — the Wave-7
+  # wiring step will route those into the local LLM ensemble defined
+  # in ``config/ai.yaml`` (NEVER paid by default).
+  materiality_llm_threshold: 0.7

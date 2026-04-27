@@ -1,0 +1,49 @@
+# config/forecast_models.yaml
+# ============================
+# Wave 6 — forecast-native ML runtime config.
+#
+# Default state: DISABLED. Activation steps:
+#   1. Train one or more (target, horizon) artefacts via
+#      `python scripts/train_forecasts.py`.
+#   2. Add matching entries to `config/model_registry.yaml` with
+#      `approval_status: paper`.
+#   3. Insert matching `model_versions` rows.
+#   4. Set `forecast_bridge.enabled: true` here AND list the members.
+#   5. Soak in paper for 2-4 weeks before promoting to micro_live.
+#   6. Inspect dashboard funnel — every Opportunity will surface
+#      `forecast_*` metadata when forecasts contribute.
+
+forecast_bridge:
+  enabled: false
+  write_predictions: true
+
+  # Each member is one trained (target, horizon) artefact registered
+  # in config/model_registry.yaml. Weights are operator-controlled.
+  # See models/forecasts/ensemble.py for blending semantics.
+  members: []
+  # Example (uncomment + fill once trained):
+  # members:
+  #   - name: forecast_return_1h
+  #     version: "0.1.0"
+  #     target_kind: forward_return
+  #     horizon: 1
+  #     weight: 1.0
+  #     artifact_path: artefacts/forecasts/forecast_return_1h-0.1.0.pkl
+  #   - name: forecast_return_4h
+  #     version: "0.1.0"
+  #     target_kind: forward_return
+  #     horizon: 4
+  #     weight: 0.7
+  #     artifact_path: artefacts/forecasts/forecast_return_4h-0.1.0.pkl
+  #   - name: forecast_breakout_1h
+  #     version: "0.1.0"
+  #     target_kind: breakout_continuation
+  #     horizon: 1
+  #     weight: 0.5
+  #     artifact_path: artefacts/forecasts/forecast_breakout_1h-0.1.0.pkl
+  #   - name: forecast_drawdown_1d
+  #     version: "0.1.0"
+  #     target_kind: drawdown_probability
+  #     horizon: 24
+  #     weight: 0.6
+  #     artifact_path: artefacts/forecasts/forecast_drawdown_1d-0.1.0.pkl

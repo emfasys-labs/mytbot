@@ -1,0 +1,44 @@
+# config/deep_sequence.yaml
+# ===========================
+# Wave 11 — deep sequence models, strictly gated.
+#
+# Default state: DISABLED. The Wave-11 governance rules (encoded in
+# models/deep_sequence/evaluate.compare_against_baseline) enforce that
+# a deep model must beat the ``RidgeSequenceBaseline`` on:
+#
+#   1. mse_ratio   <= mse_ratio_threshold      (deep MSE / baseline MSE)
+#   2. hit_rate    >= baseline + hit_rate_margin
+#   3. net_pnl     >  baseline (after round-trip cost)
+#
+# A failing comparison sets ``promote_eligible=False`` and the operator
+# MUST NOT register the deep model with ``approval_status >= paper``.
+#
+# Activation steps:
+#   1. Install PyTorch and replace the stubs in
+#      ``models/deep_sequence/{tcn,tft}.py`` with real implementations.
+#   2. Run ``scripts/train_deep_sequence.py`` — the harness will
+#      compare against the baseline and emit a verdict.
+#   3. Only if ``promote_eligible=True``, register the artefact in
+#      ``config/model_registry.yaml`` with ``approval_status: paper``.
+
+deep_sequence:
+  enabled: false
+
+  # "none" | "tcn" | "tft" — torch is required for tcn/tft.
+  architecture: none
+
+  # Always-trained baseline.
+  baseline_alpha: 1.0
+
+  # Comparison thresholds (the gate).
+  mse_ratio_threshold: 0.95   # deep MSE must be <= 95% of baseline MSE
+  hit_rate_margin: 0.01       # deep hit-rate must beat baseline by >= 1%
+  round_trip_cost_bps: 5.0    # used for net P&L comparison
+
+  # Even when comparison wins, never auto-promote — the operator
+  # registers manually after a paper soak.
+  require_manual_promotion: true
+
+  # Window / horizon defaults — the operator overrides per-symbol.
+  window: 64
+  horizon: 1

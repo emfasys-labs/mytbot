@@ -1,0 +1,60 @@
+# config/regime_models.yaml
+# ===========================
+# Wave 4 — regime / volatility / covariance configuration.
+#
+# Default state: DISABLED for the live path. The new modules
+# (risk/regime_models.py, risk/volatility_models.py, portfolio/covariance.py,
+# portfolio/correlation_monitor.py) ship as importable building blocks
+# and research scripts; the existing heuristic in risk/regime_state.py
+# remains the live regime computer until an operator activates the
+# upgraded path here.
+
+regime_models:
+  enabled: false
+
+  # ── volatility ───────────────────────────────────────────────────────
+  volatility:
+    # "ewma" (RiskMetrics), "garch" (GARCH(1,1)), or "gjr" (GJR-GARCH).
+    # ewma is conservative and the recommended starting point.
+    model: ewma
+    lambda: 0.94
+    annualise: true
+    periods_per_year: 252
+
+  # ── covariance ───────────────────────────────────────────────────────
+  covariance:
+    # "sample" or "ledoit_wolf". Ledoit-Wolf is preferred when N <~ P.
+    estimator: ledoit_wolf
+    drop_na_rows: true
+
+  # ── correlation monitor ─────────────────────────────────────────────
+  correlation_monitor:
+    enabled: false
+    threshold_frobenius: 0.25   # alert when ||rho_t - rho_{t-1}||_F > thr
+    min_samples: 30
+    history_limit: 32
+
+  # ── HMM regime classifier ───────────────────────────────────────────
+  classifier:
+    enabled: false
+    n_states: 4
+    seed: 7
+    min_samples: 60
+    refit_every_bars: 5040       # ~1 year of hourly bars
+    feature_names:
+      - mean_return
+      - volatility
+      - breadth
+      - news_dispersion
+    artifact_path: null          # path to a saved HMMRegimeClassifier pickle
+
+  # ── label vocabulary (frozen for governance) ────────────────────────
+  # See risk/regime_models.REGIME_LABELS — operator must NOT rename
+  # without updating downstream consumers.
+  labels:
+    - risk_on
+    - risk_off
+    - trend
+    - range
+    - volatile
+    - crash

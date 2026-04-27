@@ -75,6 +75,132 @@ def _f(x) -> float:
         return 0.0
 
 
+_FORECAST_BRIDGE_CFG_UNLOADED = object()
+_FORECAST_BRIDGE_CFG_CACHE: object = _FORECAST_BRIDGE_CFG_UNLOADED
+
+
+def _get_default_forecast_bridge_config():
+    """Lazy loader for ``config/forecast_models.yaml``. Cached after first load."""
+    global _FORECAST_BRIDGE_CFG_CACHE
+    if _FORECAST_BRIDGE_CFG_CACHE is not _FORECAST_BRIDGE_CFG_UNLOADED:
+        return _FORECAST_BRIDGE_CFG_CACHE
+    try:
+        from signals.forecast_bridge import ForecastBridgeConfig
+
+        _FORECAST_BRIDGE_CFG_CACHE = ForecastBridgeConfig.load()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("opportunity_engine | forecast_bridge config load failed: %s", exc)
+        _FORECAST_BRIDGE_CFG_CACHE = None
+    return _FORECAST_BRIDGE_CFG_CACHE
+
+
+def reset_forecast_bridge_cache() -> None:
+    """Test helper — clear cached ForecastBridgeConfig."""
+    global _FORECAST_BRIDGE_CFG_CACHE
+    _FORECAST_BRIDGE_CFG_CACHE = _FORECAST_BRIDGE_CFG_UNLOADED
+
+
+def _apply_forecast_bridge_to_opportunity(
+    opp: Opportunity,
+    *,
+    signal: SignalCandidate,
+    config,
+) -> None:
+    """
+    Wave 6 — populate ``Opportunity.expected_return`` /
+    ``Opportunity.volatility`` and modulate ``confidence`` from the
+    forecast ensemble. Metadata ``forecast_*`` keys are attached for
+    the dashboard funnel regardless of outcome.
+
+    Defensive — exceptions are caught and logged so the bridge never
+    crashes the opportunity pipeline.
+    """
+    from signals.forecast_bridge import evaluate_features as _bridge_evaluate
+    from models.schemas import Mode
+
+    side_sign = 1.0 if _map_side(signal.side) == "long" else -1.0
+    features: dict[str, float] = {
+        "strategy_confidence": _f(signal.confidence),
+        "raw_confidence": _f(signal.raw_signal_strength),
+        "side_sign": side_sign,
+        "opportunity_score": _f(opp.opportunity_score),
+        "urgency_score": _f(opp.urgency_score),
+        "momentum": _f(opp.components.momentum),
+        "volume_anomaly": _f(opp.components.volume_anomaly),
+        "news_impact": _f(opp.components.news_impact),
+        "regime_alignment": _f(opp.components.regime_alignment),
+        "liquidity_quality": _f(opp.components.liquidity_quality),
+        "structure_quality": _f(opp.components.structure_quality),
+        "relative_strength": _f(opp.components.relative_strength),
+    }
+    for k, v in (signal.metadata or {}).items():
+        if k in features:
+            continue
+        try:
+            features[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        decision = _bridge_evaluate(
+            features=features,
+            mode=Mode.PAPER,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("opportunity_engine | forecast_bridge eval failed: %s", exc)
+        opp.metadata["forecast_used"] = False
+        opp.metadata["forecast_error"] = str(exc)
+        return
+
+    opp.metadata["forecast_used"] = bool(decision.used)
+    opp.metadata["forecast_reason"] = decision.reason
+    if decision.horizons_used:
+        opp.metadata["forecast_horizons"] = list(decision.horizons_used)
+    if decision.members_used:
+        opp.metadata["forecast_members_used"] = list(decision.members_used)
+    if decision.contributions:
+        opp.metadata["forecast_contributions"] = dict(decision.contributions)
+
+    if not decision.used:
+        return
+
+    # Populate expected_return / volatility on the dataclass so the
+    # allocator can consume them directly.
+    if decision.expected_return is not None:
+        # Sign-align the forecast against the candidate side. The ensemble
+        # outputs a directional return (positive = up); for short
+        # candidates we flip the sign so "expected_return > 0" always
+        # means "good for this trade".
+        signed = float(decision.expected_return) * side_sign
+        opp.expected_return = clip_decimal(
+            Decimal(str(signed)), Decimal("-1"), Decimal("1")
+        )
+        opp.metadata["forecast_expected_return"] = signed
+
+    if decision.expected_volatility is not None and decision.expected_volatility > 0:
+        opp.volatility = clip_decimal(
+            Decimal(str(float(decision.expected_volatility))), Decimal("0"), Decimal("10")
+        )
+        opp.metadata["forecast_expected_volatility"] = float(decision.expected_volatility)
+
+    if decision.confidence is not None:
+        # Modulate via geometric mean — keeps the existing confidence as
+        # a floor when forecasts are weak and lifts it when forecasts
+        # are strong, without doubling-down or replacing.
+        import math
+
+        existing = float(opp.confidence)
+        forecast_p = max(0.0, min(1.0, float(decision.confidence)))
+        if existing > 0 and forecast_p > 0:
+            blended = math.sqrt(existing * forecast_p)
+        else:
+            blended = max(existing, forecast_p)
+        opp.confidence = clip_decimal(Decimal(str(blended)), Decimal("0"), Decimal("1"))
+        opp.metadata["forecast_confidence"] = forecast_p
+        opp.metadata["forecast_confidence_blended"] = blended
+
+
 def _apply_trained_meta_label_to_opportunity(
     opp: Opportunity,
     *,
@@ -162,6 +288,7 @@ def build_opportunities(
     feature_json_by_symbol: dict[str, dict] | None = None,
     now: datetime | None = None,
     trained_meta_labeler_config=None,
+    forecast_bridge_config=None,
 ) -> list[Opportunity]:
     """
     Full weighted opportunity score from ``allocation.yaml`` components.
@@ -289,6 +416,15 @@ def build_opportunities(
                 "demand_alignment": round(demand_alignment, 6),
             },
         )
+        # Wave 6 — forecast-native ML. Populate expected_return / volatility
+        # and modulate confidence BEFORE the trained meta-labeller runs, so
+        # the labeller sees the forecast-adjusted state.
+        fcst_cfg = forecast_bridge_config
+        if fcst_cfg is None:
+            fcst_cfg = _get_default_forecast_bridge_config()
+        if fcst_cfg is not None and getattr(fcst_cfg, "enabled", False):
+            _apply_forecast_bridge_to_opportunity(opp, signal=c, config=fcst_cfg)
+
         if trained_meta_labeler_config is not None and getattr(
             trained_meta_labeler_config, "enabled", False
         ):
@@ -361,6 +497,7 @@ async def build_opportunities_async(
     feature_json_by_symbol: dict[str, dict] | None = None,
     now: datetime | None = None,
     trained_meta_labeler_config=None,
+    forecast_bridge_config=None,
     factor_sleeve_config=None,
     factor_sleeve_universe: list[str] | None = None,
     factor_sleeve_lookback_bars: int = 300,
@@ -431,4 +568,5 @@ async def build_opportunities_async(
         feature_json_by_symbol=merged,
         now=now,
         trained_meta_labeler_config=trained_meta_labeler_config,
+        forecast_bridge_config=forecast_bridge_config,
     )

@@ -1,0 +1,93 @@
+# config/execution_models.yaml
+# ==============================
+# Wave 9 — execution cost / impact / scheduling.
+#
+# Default state: DISABLED. The existing router (execution/router.py)
+# remains the live order-routing decider until an operator wires the
+# scheduler / slicer in (a deeper follow-up). The modules ship as
+# importable building blocks + research-grade evaluation surface.
+#
+# Activation steps:
+#   1. Tune `impact.coefficients` per asset class from observed fills.
+#   2. Populate `venue_priors.fees` and `venue_priors.spreads` with
+#      the operator's actual broker fee schedules.
+#   3. Calibrate `urgency_policy` ceilings against the strategy edge
+#      distribution (run scripts/evaluate_execution_quality.py).
+#   4. Set `execution_models.enabled: true` and wire the policy into
+#      execution/router.py + execution/engine.py.
+
+execution_models:
+  enabled: false
+
+  # ── Square-root impact coefficients (Almgren / Kissell) ──────────────
+  impact:
+    coefficients:
+      equity:  0.10
+      etf:     0.08
+      bond:    0.05
+      forex:   0.06
+      crypto:  0.05
+      future:  0.10
+      option:  0.20
+      other:   0.10
+
+  # ── Order slicing ────────────────────────────────────────────────────
+  slicer:
+    participation_rate_cap: 0.10     # max % of daily volume per child
+    rejection_participation: 0.30    # reject parent if size > 30% ADV
+    schedule_window_seconds: 0       # 0 ⇒ fire all children immediately
+
+  # ── Almgren-Chriss-lite urgency policy ────────────────────────────────
+  urgency_policy:
+    market_cost_ceiling: 8.0
+    limit_cost_ceiling: 25.0
+    passive_cost_ceiling: 60.0
+    do_not_trade_ceiling: 150.0
+    edge_to_cost_safety: 1.0
+    high_urgency_multiplier: 1.5
+    high_urgency_threshold: 0.8
+
+  # ── Slippage prior (online EWMA) ──────────────────────────────────────
+  slippage:
+    decay_specific: 0.10             # (broker, symbol) tier
+    decay_group: 0.04                # (broker, asset_class) tier
+    decay_global: 0.01               # all-broker tier
+    default_bps: 5.0
+    min_samples_specific: 10
+
+  # ── Venue priors ─────────────────────────────────────────────────────
+  # Override per broker as needed. Defaults are conservative.
+  venue_priors:
+    fees:
+      ibkr:
+        taker_bps: 1.0
+        maker_bps: 0.0
+      kraken:
+        taker_bps: 26.0
+        maker_bps: 16.0
+      binance:
+        taker_bps: 10.0
+        maker_bps: 10.0
+      bybit:
+        taker_bps: 10.0
+        maker_bps: 1.0
+      alpaca:
+        taker_bps: 0.0
+        maker_bps: 0.0
+    spreads:
+      ibkr:
+        equity: 1.0
+        etf:    1.0
+        bond:   4.0
+        forex:  0.5
+        future: 1.0
+        option: 20.0
+      kraken:
+        crypto: 8.0
+      binance:
+        crypto: 4.0
+      bybit:
+        crypto: 4.0
+      alpaca:
+        equity: 1.0
+        etf:    1.0

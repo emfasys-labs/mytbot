@@ -38,6 +38,104 @@ from signals.d015_weights import (
 logger = logging.getLogger(__name__)
 
 
+# ── Wave 8 wiring: vol-targeting + drawdown overlay (gated off) ────────────
+
+
+_PORTFOLIO_OPT_CFG_UNLOADED = object()
+_PORTFOLIO_OPT_CFG_CACHE: object = _PORTFOLIO_OPT_CFG_UNLOADED
+
+
+def _get_default_portfolio_optimisation_config():
+    """Lazy loader for ``config/portfolio_optimisation.yaml``. Cached."""
+    global _PORTFOLIO_OPT_CFG_CACHE
+    if _PORTFOLIO_OPT_CFG_CACHE is not _PORTFOLIO_OPT_CFG_UNLOADED:
+        return _PORTFOLIO_OPT_CFG_CACHE
+    try:
+        from portfolio.optimizers import PortfolioOptimisationConfig
+
+        _PORTFOLIO_OPT_CFG_CACHE = PortfolioOptimisationConfig.load()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("allocation_engine | portfolio_optimisation load failed: %s", exc)
+        _PORTFOLIO_OPT_CFG_CACHE = None
+    return _PORTFOLIO_OPT_CFG_CACHE
+
+
+def reset_portfolio_optimisation_cache() -> None:
+    """Test helper — clears the cached PortfolioOptimisationConfig."""
+    global _PORTFOLIO_OPT_CFG_CACHE
+    _PORTFOLIO_OPT_CFG_CACHE = _PORTFOLIO_OPT_CFG_UNLOADED
+
+
+def _apply_wave8_vol_targeting_overlay(
+    *,
+    ge: Decimal,
+    regime_state: RegimeState,
+    portfolio_state: PortfolioState,
+    cfg,  # PortfolioOptimisationConfig
+) -> tuple[Decimal, dict[str, float | bool]]:
+    """
+    Multiply the gross-exposure target by ``combined_scale`` from
+    ``portfolio.vol_targeting`` when the overlay is enabled.
+
+    Inputs:
+      - target_vol from config
+      - realised_vol from ``regime_state.metadata['market_volatility']``
+        (set by the demand engine in Wave 3)
+      - drawdown from ``portfolio_state.drawdown_from_hwm_pct``
+
+    Defensive: any failure returns ``ge`` unchanged with diagnostic
+    metadata explaining why.
+    """
+    overlay = getattr(cfg, "vol_targeting_overlay", None)
+    if overlay is None or not getattr(overlay, "enabled", False):
+        return ge, {"wave8_vol_overlay_used": False}
+
+    try:
+        from portfolio.vol_targeting import combined_scale
+
+        rv_raw = (regime_state.metadata or {}).get("market_volatility")
+        try:
+            realised_vol = float(rv_raw) if rv_raw is not None else None
+        except (TypeError, ValueError):
+            realised_vol = None
+        try:
+            drawdown = float(portfolio_state.drawdown_from_hwm_pct or 0.0)
+        except (TypeError, ValueError):
+            drawdown = 0.0
+
+        result = combined_scale(
+            target_vol=overlay.target_vol,
+            realised_vol=realised_vol,
+            drawdown=drawdown,
+            soft_drawdown=overlay.soft_drawdown,
+            hard_drawdown=overlay.hard_drawdown,
+            floor=overlay.drawdown_floor,
+            min_scale=overlay.min_scale,
+            max_scale=overlay.max_scale,
+        )
+        scale = float(result.scale)
+        if not (scale > 0):
+            return ge, {
+                "wave8_vol_overlay_used": False,
+                "wave8_vol_overlay_reason": "non_positive_scale",
+            }
+        new_ge = ge * Decimal(str(scale))
+        meta: dict[str, float | bool] = {
+            "wave8_vol_overlay_used": True,
+            "wave8_vol_overlay_scale": scale,
+        }
+        if result.vol_component is not None:
+            meta["wave8_vol_overlay_vol_component"] = float(result.vol_component)
+        if result.drawdown_component is not None:
+            meta["wave8_vol_overlay_drawdown_component"] = float(result.drawdown_component)
+        meta["wave8_vol_overlay_realised_vol"] = float(realised_vol) if realised_vol is not None else 0.0
+        meta["wave8_vol_overlay_drawdown"] = float(drawdown)
+        return new_ge, meta
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("allocation_engine | wave8 vol overlay failed: %s", exc)
+        return ge, {"wave8_vol_overlay_used": False, "wave8_vol_overlay_error": str(exc)}
+
+
 def _resolve_mode(portfolio_state: PortfolioState, profile_cfg: ProfileModesConfig) -> ProfileMode:
     m = portfolio_state.mode
     if m in profile_cfg.modes:
@@ -134,6 +232,16 @@ def build_allocation_decision(
     ge = cap_slider * agg * ge_shape * regime_state.execution_quality * regime_state.drawdown_throttle
     vol_overlay, vol_meta = _volatility_overlay(regime_state)
     ge = ge * vol_overlay
+    # Wave 8 — optional vol-targeting + drawdown overlay (gated off by default).
+    wave8_cfg = _get_default_portfolio_optimisation_config()
+    wave8_meta: dict[str, float | bool] = {"wave8_vol_overlay_used": False}
+    if wave8_cfg is not None:
+        ge, wave8_meta = _apply_wave8_vol_targeting_overlay(
+            ge=ge,
+            regime_state=regime_state,
+            portfolio_state=portfolio_state,
+            cfg=wave8_cfg,
+        )
     try:
         demand_score = float((regime_state.metadata or {}).get("demand_score", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -267,6 +375,7 @@ def build_allocation_decision(
             "opportunity_count": len(opportunities),
             "position_count": len(portfolio_state.positions),
             **vol_meta,
+            **wave8_meta,
             "demand_score": demand_score,
             "demand_trend": demand_trend,
             "demand_confidence": demand_confidence,

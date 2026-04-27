@@ -1,0 +1,37 @@
+# config/microstructure.yaml
+# ===========================
+# Wave 10 — order-book microstructure forecasting.
+#
+# Default state: DISABLED. The module ships as importable building
+# blocks; activation requires:
+#   1. A reliable order-book feed for the asset class (start with crypto
+#      venues — IBKR / Alpaca rarely give the depth the model needs).
+#   2. A trained artefact via `scripts/evaluate_microstructure.py`.
+#   3. Operator inspection of OOS metrics; LOB models must clear a
+#      Brier-vs-base-rate threshold before flipping enabled.
+#
+# Per the plan: "No live trading dependency on immature LOB models."
+
+microstructure:
+  enabled: false
+
+  # Asset-class allow-list — model is only consulted for these classes.
+  # Crypto first; equities require deeper book quality than IBKR
+  # provides over its standard data feed.
+  asset_classes:
+    - crypto
+
+  # Default depth used by data/orderbook_features.py.
+  depth: 5
+
+  # Freshness gate — snapshots older than this are skipped.
+  max_staleness_seconds: 5.0
+
+  # Path to a saved TrainedLOBForecaster pickle. Null ⇒ no artefact and
+  # `score_orderbook` returns reason="missing_artefact" (caller falls
+  # back to the existing scheduler behaviour).
+  artifact_path: null
+
+  # Minimum well-formed snapshots required before the forecaster is
+  # consulted (prevents low-data startup garbage).
+  min_well_formed_history: 200

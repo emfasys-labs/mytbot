@@ -1,0 +1,65 @@
+# config/pairs_trading.yaml
+# ===========================
+# Wave 5 — research-grade statistical-arbitrage pairs strategy.
+#
+# Default state: DISABLED. The existing heuristic in
+# strategies/pairs_trading.py remains the live pairs path until the
+# operator validates the Wave 5 module via scripts/discover_pairs.py
+# and scripts/evaluate_pairs.py.
+#
+# Activation steps:
+#   1. Run `scripts/discover_pairs.py` over the operator's universe
+#      and inspect the top-N candidates.
+#   2. Calibrate `round_trip_cost_bps` against actual fill telemetry.
+#   3. Run `scripts/evaluate_pairs.py` to estimate IS / OOS half-lives
+#      and net P&L after costs.
+#   4. Set `stat_arb_pairs.enabled: true` and let it emit
+#      ``LinkedOpportunity`` candidates.
+
+stat_arb_pairs:
+  enabled: false
+
+  # Hedge ratio: Kalman (time-varying) vs OLS (static).
+  # Kalman is recommended for non-stationary regimes (FX, crypto).
+  use_kalman: true
+
+  # Spread z-score window (in bars).
+  z_window: 60
+
+  # Correlation guard — abandon the pair when rolling correlation
+  # falls below floor over correlation_window bars.
+  correlation_window: 60
+  correlation_floor: 0.5
+
+  # Spread-break detection — if |z| > z_threshold_break AND the OU
+  # half-life is None / above the ceiling, the pair is declared
+  # broken and the strategy emits nothing.
+  z_threshold_break: 4.0
+  half_life_ceiling_bars: 200.0
+
+  # Cost-aware entry threshold:
+  #   entry_z * spread_sigma >= safety_multiplier * round_trip_cost / 10_000
+  # Tune `round_trip_cost_bps` against real fills.
+  round_trip_cost_bps: 10.0
+  min_entry_z: 1.5
+  safety_multiplier: 1.2
+
+  # How execution should handle partial fills on one leg:
+  #   cancel_sibling   (default; safest)
+  #   hedge_with_index (advanced; needs an index proxy)
+  #   flatten_both     (refuse the trade; close any partial)
+  linkage_policy: cancel_sibling
+
+  strategy_name: stat_arb_pairs
+  preferred_broker: ibkr
+
+  # Confidence squash bounds.
+  confidence_floor: 0.10
+  confidence_ceiling: 0.85
+
+# Universe-discovery defaults (used by scripts/discover_pairs.py).
+universe_discovery:
+  min_correlation: 0.6
+  max_p_value: 0.05
+  max_half_life_bars: 200.0
+  top_n: 20

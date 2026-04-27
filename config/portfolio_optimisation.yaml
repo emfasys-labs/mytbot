@@ -1,0 +1,53 @@
+# config/portfolio_optimisation.yaml
+# ====================================
+# Wave 8 — robust portfolio-optimisation entry.
+#
+# Default state: DISABLED. The legacy D015 softmax allocator in
+# portfolio/allocation_engine.py remains the live target-weight
+# computation. When `portfolio_optimisation.enabled: true`, the operator
+# can switch the allocator to HRP / CVaR / inverse-variance / equal /
+# Kelly via this config.
+#
+# The optimiser ALWAYS returns a feasible (sum-to-1, bounded) weight
+# vector. Any solver failure falls back to `fallback_method`.
+
+portfolio_optimisation:
+  enabled: false
+  # "equal" | "inverse_variance" | "hrp" | "cvar" | "kelly"
+  method: hrp
+
+  # Used by HRP / inverse_variance / kelly when a returns matrix is
+  # supplied. "ledoit_wolf" shrinkage is recommended on small N or wide P.
+  cov_estimator: ledoit_wolf  # "sample" | "ledoit_wolf"
+
+  # Hard bounds enforced by CVaR's projection step (HRP / kelly clip
+  # internally).
+  min_weight: 0.0
+  max_weight: 1.0
+
+  # CVaR tail probability. 0.05 ⇒ 5% worst tail.
+  cvar_alpha: 0.05
+
+  # Kelly settings.
+  kelly_half: true
+  kelly_hard_cap: 1.0   # never above 100% of capital
+  kelly_floor: 0.0      # never short via Kelly
+
+  # Fallback when the primary solver fails.
+  fallback_method: equal
+
+  # ── vol-targeting / drawdown overlay ──────────────────────────────────
+  # When enabled, the D015 allocator's gross-exposure target `ge` is
+  # multiplied by `vol_targeting.combined_scale(...)` using the regime
+  # state's `market_volatility` as realised vol and the portfolio's
+  # drawdown_from_hwm_pct. This is independent of `enabled` above —
+  # the operator can flip the overlay on without switching the
+  # target-weight method.
+  vol_targeting_overlay:
+    enabled: false
+    target_vol: 0.15           # annualised target for the overlay
+    min_scale: 0.25
+    max_scale: 1.50            # cap upside scaling so vol-targeting can't lever up
+    soft_drawdown: 0.05        # scaling starts here
+    hard_drawdown: 0.20        # clamped to floor at and beyond this
+    drawdown_floor: 0.10       # minimum scale during deep drawdowns

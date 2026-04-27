@@ -3,20 +3,217 @@ D015 regime / market state from M2 cross-section + optional news dispersion.
 
 ``ai/regime.py`` remains strategy gating; this module feeds allocator exposure and
 dynamic weights. All anchors come from ``allocation.yaml`` ``market_state`` section.
+
+Wave 4 wiring — when ``regime_models.classifier.enabled: true`` in
+``config/regime_models.yaml`` AND a fitted ``HMMRegimeClassifier`` artefact
+is configured, the heuristic label is *augmented* (not replaced) by the
+classifier's prediction. The classifier label is mapped onto the
+existing ``RegimeLabel`` vocabulary; heuristic-derived metadata
+(symbol_count, insufficient_cross_section) is preserved unchanged.
+Operators flip the gate after a paper soak per docs/MODEL_GOVERNANCE.md.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Optional, cast
+
+import yaml
 
 from config.models import AllocationConfig
 from core.models_runtime import MarketStateComponents, PortfolioState, RegimeLabel, RegimeState, clip_decimal
 from data.regime_metrics import cross_section_from_feature_rows, fetch_latest_feature_rows, fetch_news_score_dispersion
 
 logger = logging.getLogger(__name__)
+
+
+# ── Wave 4 wiring ───────────────────────────────────────────────────────────
+
+
+REGIME_MODELS_DEFAULT_PATH = Path("config/regime_models.yaml")
+
+
+@dataclass
+class _RegimeClassifierGate:
+    enabled: bool = False
+    artifact_path: Optional[Path] = None
+    feature_names: tuple[str, ...] = ()
+    min_samples: int = 60
+
+
+_CLASSIFIER_GATE_UNLOADED = object()
+_CLASSIFIER_GATE_CACHE: object = _CLASSIFIER_GATE_UNLOADED
+_CLASSIFIER_ARTEFACT_CACHE: object = _CLASSIFIER_GATE_UNLOADED
+
+
+def _load_regime_classifier_gate() -> _RegimeClassifierGate:
+    """Read the YAML once; subsequent calls hit the module cache."""
+    global _CLASSIFIER_GATE_CACHE
+    if _CLASSIFIER_GATE_CACHE is not _CLASSIFIER_GATE_UNLOADED:
+        return _CLASSIFIER_GATE_CACHE  # type: ignore[return-value]
+    p = REGIME_MODELS_DEFAULT_PATH
+    if not p.exists():
+        _CLASSIFIER_GATE_CACHE = _RegimeClassifierGate()
+        return _CLASSIFIER_GATE_CACHE  # type: ignore[return-value]
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        logger.warning("regime_state | could not parse %s: %s", p, exc)
+        _CLASSIFIER_GATE_CACHE = _RegimeClassifierGate()
+        return _CLASSIFIER_GATE_CACHE  # type: ignore[return-value]
+    sect = ((raw.get("regime_models") or {}).get("classifier") or {})
+    ap = sect.get("artifact_path")
+    _CLASSIFIER_GATE_CACHE = _RegimeClassifierGate(
+        enabled=bool(sect.get("enabled", False)),
+        artifact_path=Path(ap) if ap else None,
+        feature_names=tuple(sect.get("feature_names") or ()),
+        min_samples=int(sect.get("min_samples", 60)),
+    )
+    return _CLASSIFIER_GATE_CACHE  # type: ignore[return-value]
+
+
+def reset_regime_classifier_cache() -> None:
+    """Test helper — clear cached gate and artefact."""
+    global _CLASSIFIER_GATE_CACHE, _CLASSIFIER_ARTEFACT_CACHE
+    _CLASSIFIER_GATE_CACHE = _CLASSIFIER_GATE_UNLOADED
+    _CLASSIFIER_ARTEFACT_CACHE = _CLASSIFIER_GATE_UNLOADED
+
+
+def _load_regime_classifier_artefact(gate: _RegimeClassifierGate):
+    """Load the pickled HMMRegimeClassifier on first use; cache thereafter."""
+    global _CLASSIFIER_ARTEFACT_CACHE
+    if _CLASSIFIER_ARTEFACT_CACHE is not _CLASSIFIER_GATE_UNLOADED:
+        return _CLASSIFIER_ARTEFACT_CACHE
+    if not gate.enabled or gate.artifact_path is None or not gate.artifact_path.exists():
+        _CLASSIFIER_ARTEFACT_CACHE = None
+        return None
+    try:
+        from risk.regime_models import HMMRegimeClassifier
+
+        _CLASSIFIER_ARTEFACT_CACHE = HMMRegimeClassifier.load(gate.artifact_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "regime_state | classifier artefact %s could not be loaded: %s — falling back to heuristic",
+            gate.artifact_path,
+            exc,
+        )
+        _CLASSIFIER_ARTEFACT_CACHE = None
+    return _CLASSIFIER_ARTEFACT_CACHE
+
+
+# Map classifier vocabulary → RegimeLabel vocabulary. Both share most
+# labels; only "trend" needs a remap.
+_CLASSIFIER_LABEL_MAP: dict[str, RegimeLabel] = {
+    "risk_on": "risk_on",
+    "risk_off": "risk_off",
+    "trend": "trend_up",
+    "range": "range",
+    "volatile": "volatile",
+    "crash": "crash",
+}
+
+
+def _build_classifier_feature_vector(
+    *,
+    feature_names: tuple[str, ...],
+    comps: MarketStateComponents,
+    market_state_score: Decimal,
+    breadth_score: Decimal,
+    news_conflict: float,
+) -> Optional[list[float]]:
+    """
+    Construct the feature vector the classifier was trained on.
+
+    The supported keys mirror the defaults shipped in
+    ``config/regime_models.yaml``. Missing keys are filled with 0.0; if
+    the operator trained on a feature we cannot derive at runtime, we
+    fall back to 0.0 rather than refuse classification — the
+    classifier itself returns ``insufficient_data`` if the dim is wrong.
+    """
+    if not feature_names:
+        return None
+    derived: dict[str, float] = {
+        "mean_return": float(market_state_score),
+        "volatility": float(comps.volatility_structure or comps.chaos_penalty),
+        "breadth": float(breadth_score),
+        "news_dispersion": float(news_conflict),
+        "trend_strength": float(comps.trend_strength),
+        "chaos_penalty": float(comps.chaos_penalty),
+        "correlation_crowding": float(comps.correlation_crowding),
+        "anomaly_breadth": float(comps.anomaly_breadth),
+        "macro_clarity": float(comps.macro_clarity),
+        "liquidity_state": float(comps.liquidity_state),
+    }
+    return [float(derived.get(name, 0.0)) for name in feature_names]
+
+
+def _maybe_apply_classifier(
+    *,
+    heuristic_label: RegimeLabel,
+    insufficient: bool,
+    comps: MarketStateComponents,
+    market_state_score: Decimal,
+    breadth_score: Decimal,
+    news_conflict: float,
+    meta: dict,
+) -> RegimeLabel:
+    """
+    When the trained classifier is enabled and an artefact is loadable,
+    override ``heuristic_label`` with its prediction (mapped to
+    ``RegimeLabel``). Otherwise return ``heuristic_label`` unchanged.
+
+    Always populates ``meta`` with diagnostics so the dashboard can show
+    which path produced the label.
+    """
+    meta["regime_classifier_used"] = False
+    if insufficient:
+        # Never let the classifier override an explicit insufficient_data
+        # signal — that would mask data-quality issues.
+        return heuristic_label
+
+    gate = _load_regime_classifier_gate()
+    if not gate.enabled:
+        return heuristic_label
+
+    artefact = _load_regime_classifier_artefact(gate)
+    if artefact is None:
+        meta["regime_classifier_reason"] = "artefact_unavailable"
+        return heuristic_label
+
+    feature_names = artefact.feature_names or gate.feature_names
+    feats = _build_classifier_feature_vector(
+        feature_names=feature_names,
+        comps=comps,
+        market_state_score=market_state_score,
+        breadth_score=breadth_score,
+        news_conflict=news_conflict,
+    )
+    if not feats:
+        meta["regime_classifier_reason"] = "no_features_configured"
+        return heuristic_label
+
+    try:
+        import numpy as np
+
+        clf_label = artefact.predict_label(np.asarray(feats, dtype=float))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("regime_state | classifier predict failed: %s — falling back", exc)
+        meta["regime_classifier_reason"] = "predict_failed"
+        return heuristic_label
+
+    mapped = _CLASSIFIER_LABEL_MAP.get(clf_label)
+    meta["regime_classifier_used"] = True
+    meta["regime_classifier_backend"] = getattr(artefact, "backend_", "unknown")
+    meta["regime_classifier_label_raw"] = clf_label
+    meta["regime_heuristic_label"] = heuristic_label
+    if mapped is None:
+        meta["regime_classifier_reason"] = "label_unmapped"
+        return heuristic_label
+    return mapped
 
 
 def _dec(x: float) -> Decimal:
@@ -118,7 +315,7 @@ def compute_regime_state_from_inputs(
     breadth = comps.risk_on_breadth + comps.anomaly_breadth * Decimal("0.5")
     breadth_score = clip_decimal(breadth, Decimal("0"), Decimal("1"))
 
-    label = _label_from_components(comps, insufficient=insufficient)
+    heuristic_label = _label_from_components(comps, insufficient=insufficient)
 
     meta: dict[str, str | int | float | bool] = {
         "symbol_count": int(raw["symbol_count"]),
@@ -130,6 +327,16 @@ def compute_regime_state_from_inputs(
             raw["symbol_count"],
             min_sym,
         )
+
+    label = _maybe_apply_classifier(
+        heuristic_label=heuristic_label,
+        insufficient=insufficient,
+        comps=comps,
+        market_state_score=market_state_score,
+        breadth_score=breadth_score,
+        news_conflict=news_conflict,
+        meta=meta,
+    )
 
     return RegimeState(
         timestamp=ts,
