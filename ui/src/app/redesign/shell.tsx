@@ -40,7 +40,7 @@ const NAV: NavItem[] = [
 ];
 
 export function Sidebar({
-  current, onNav, accent, state, collapsed, loopIteration, path,
+  current, onNav, accent, state, collapsed, loopIteration, path, universeNavDisabled,
 }: {
   current: Route;
   onNav: (r: Route) => void;
@@ -49,6 +49,8 @@ export function Sidebar({
   collapsed: boolean;
   loopIteration: number;
   path: string;
+  /** When true, Universe is not reachable (orchestrator not running). */
+  universeNavDisabled?: boolean;
 }) {
   const w = collapsed ? 56 : 200;
   return (
@@ -64,25 +66,32 @@ export function Sidebar({
       </div>
       <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {NAV.map((n) => {
-          const active = n.id === current;
+          const uniLock = n.id === 'universe' && universeNavDisabled;
+          const active = n.id === current && !uniLock;
           return (
             <button
               key={n.id}
-              onClick={() => onNav(n.id)}
+              type="button"
+              title={uniLock ? 'Start the system to open Universe' : undefined}
+              disabled={uniLock}
+              onClick={() => { if (!uniLock) onNav(n.id); }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 12, padding: '8px 10px',
                 borderRadius: 8, background: active ? 'rgba(255,255,255,0.06)' : 'transparent',
-                border: 'none', cursor: 'pointer',
+                border: 'none', cursor: uniLock ? 'not-allowed' : 'pointer',
+                opacity: uniLock ? 0.42 : 1,
                 color: active ? TOKENS.ink0 : TOKENS.ink2,
                 fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 450,
                 letterSpacing: '-0.01em', textAlign: 'left',
                 transition: `background ${TOKENS.fast}ms ${TOKENS.ease}, color ${TOKENS.fast}ms ${TOKENS.ease}`,
               }}
               onMouseEnter={(e: ReactMouseEvent<HTMLButtonElement>) => {
-                if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                if (uniLock || active) return;
+                e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
               }}
               onMouseLeave={(e: ReactMouseEvent<HTMLButtonElement>) => {
-                if (!active) e.currentTarget.style.background = 'transparent';
+                if (uniLock || active) return;
+                e.currentTarget.style.background = 'transparent';
               }}
             >
               <span style={{ color: active ? accent : TOKENS.ink3, display: 'flex' }}>{n.icon()}</span>
@@ -384,7 +393,7 @@ const CMD_ITEMS: CmdItem[] = [
 ];
 
 export function CmdPalette({
-  open, onClose, onNav, onStart, onStop, onSetMode,
+  open, onClose, onNav, onStart, onStop, onSetMode, universeNavEnabled = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -392,6 +401,7 @@ export function CmdPalette({
   onStart: () => void;
   onStop: () => void;
   onSetMode: (m: TradingMode) => void;
+  universeNavEnabled?: boolean;
 }) {
   const [q, setQ] = useState('');
   useEffect(() => { if (!open) setQ(''); }, [open]);
@@ -405,6 +415,7 @@ export function CmdPalette({
     : CMD_ITEMS;
 
   const execute = (it: CmdItem) => {
+    if (it.kind === 'nav' && it.route === 'universe' && !universeNavEnabled) return;
     if (it.kind === 'nav' && it.route) onNav(it.route);
     if (it.kind === 'action' && it.action === 'start') onStart();
     if (it.kind === 'action' && it.action === 'stop') onStop();
@@ -445,18 +456,30 @@ export function CmdPalette({
         <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
           {filtered.length === 0 ? (
             <div style={{ padding: 14, color: TOKENS.ink3, fontSize: 12 }}>No matches</div>
-          ) : filtered.map((it) => (
+          ) : filtered.map((it) => {
+            const uniLock = it.id === 'universe' && !universeNavEnabled;
+            return (
             <button
               key={it.id}
+              type="button"
+              title={uniLock ? 'Start the system to open Universe' : undefined}
+              disabled={uniLock}
               onClick={() => execute(it)}
               style={{
                 display: 'flex', alignItems: 'center', width: '100%', padding: '10px 12px',
-                background: 'transparent', border: 'none', borderRadius: 8, cursor: 'pointer',
+                background: 'transparent', border: 'none', borderRadius: 8,
+                cursor: uniLock ? 'not-allowed' : 'pointer',
+                opacity: uniLock ? 0.45 : 1,
                 color: TOKENS.ink1, fontFamily: TOKENS.sans, fontSize: 13, textAlign: 'left',
                 justifyContent: 'space-between',
               }}
-              onMouseEnter={(e: ReactMouseEvent<HTMLButtonElement>) => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; }}
-              onMouseLeave={(e: ReactMouseEvent<HTMLButtonElement>) => { e.currentTarget.style.background = 'transparent'; }}
+              onMouseEnter={(e: ReactMouseEvent<HTMLButtonElement>) => {
+                if (uniLock) return;
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              }}
+              onMouseLeave={(e: ReactMouseEvent<HTMLButtonElement>) => {
+                e.currentTarget.style.background = 'transparent';
+              }}
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span style={{
@@ -465,9 +488,9 @@ export function CmdPalette({
                 }}>{it.kind}</span>
                 {it.label}
               </span>
-              <span style={{ color: TOKENS.ink3, fontSize: 11 }}>{it.hint}</span>
+              <span style={{ color: TOKENS.ink3, fontSize: 11 }}>{uniLock ? 'start system' : it.hint}</span>
             </button>
-          ))}
+          );})}
         </div>
       </div>
     </div>

@@ -88,6 +88,15 @@ export default function App() {
     try { localStorage.setItem(ROUTE_KEY, route); } catch { /* ignore */ }
   }, [route]);
 
+  /** Universe is intelligence-only; keep sidebar highlight on Dashboard when the stack is idle (same as legacy discovery gating). */
+  const universeNavEnabled =
+    live.backendState === 'running' || live.backendState === 'starting';
+  const effectiveRoute: Route =
+    universeNavEnabled || route !== 'universe' ? route : 'dash';
+  useEffect(() => {
+    if (!universeNavEnabled && route === 'universe') setRoute('dash');
+  }, [universeNavEnabled, route]);
+
   const [cmdOpen, setCmdOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
   const [armed, setArmed] = useState(false);
@@ -133,7 +142,7 @@ export default function App() {
   if (tweaks.viewport === 'mobile') {
     return (
       <div
-        data-screen-label={`mobile · ${TITLES[route]}`}
+        data-screen-label={`mobile · ${TITLES[effectiveRoute]}`}
         style={{
           width: '100vw', height: '100vh', background: TOKENS.bg0,
           display: 'flex', flexDirection: 'column', alignItems: 'center',
@@ -165,7 +174,7 @@ export default function App() {
 
   return (
     <div
-      data-screen-label={`${tweaks.viewport} · ${TITLES[route]}`}
+      data-screen-label={`${tweaks.viewport} · ${TITLES[effectiveRoute]}`}
       style={{
         ...containerStyle,
         display: 'flex', background: bg, color: TOKENS.ink1,
@@ -173,13 +182,14 @@ export default function App() {
       }}
     >
       <Sidebar
-        current={route}
+        current={effectiveRoute}
         onNav={setRoute}
         accent={accentMain}
         state={state}
         collapsed={tweaks.density === 'compact'}
         loopIteration={live.loopIteration}
         path={live.path}
+        universeNavDisabled={!universeNavEnabled}
       />
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar
@@ -188,7 +198,7 @@ export default function App() {
           onArm={setArmed}
           armed={armed}
           onPower={togglePower}
-          currentTitle={TITLES[route]}
+          currentTitle={TITLES[effectiveRoute]}
           onOpenCmd={() => setCmdOpen(true)}
           onOpenTweaks={() => setTweaksOpen((o) => !o)}
           loopIteration={live.loopIteration}
@@ -198,7 +208,7 @@ export default function App() {
           onSetMode={(m) => void live.setMode(m)}
         />
         <div style={{ flex: 1, minHeight: 0, background: TOKENS.bg0, position: 'relative' }}>
-          {route === 'dash' && (
+          {effectiveRoute === 'dash' && (
             <DashboardScreen
               state={state}
               accent={tweaks.accent}
@@ -208,22 +218,22 @@ export default function App() {
               live={live}
             />
           )}
-          {route === 'signals' && (
+          {effectiveRoute === 'signals' && (
             <SignalsScreen accent={tweaks.accent} live={live} />
           )}
-          {route === 'book' && (
+          {effectiveRoute === 'book' && (
             <BookScreen accent={tweaks.accent} live={live} />
           )}
-          {route === 'risk' && (
+          {effectiveRoute === 'risk' && (
             <RiskScreen accent={tweaks.accent} live={live} />
           )}
-          {route === 'strat' && (
+          {effectiveRoute === 'strat' && (
             <StrategiesScreen accent={tweaks.accent} live={live} />
           )}
-          {route === 'universe' && (
+          {effectiveRoute === 'universe' && (
             <UniverseScreen accent={tweaks.accent} density={tweaks.density} live={live} />
           )}
-          {route === 'log' && (
+          {effectiveRoute === 'log' && (
             <TradeLogScreen live={live} />
           )}
           {state === 'error' && <ErrorOverlay message={live.lastStartError ?? undefined} />}
@@ -241,6 +251,7 @@ export default function App() {
         onStart={() => void live.start()}
         onStop={() => void live.stop()}
         onSetMode={(m) => void live.setMode(m)}
+        universeNavEnabled={universeNavEnabled}
       />
       <TweaksPanel open={tweaksOpen} onClose={() => setTweaksOpen(false)} tweaks={tweaks} setTweaks={setTweaks} />
     </div>
