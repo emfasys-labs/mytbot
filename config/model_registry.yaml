@@ -1,0 +1,36 @@
+# config/model_registry.yaml
+# ===========================
+# Wave 1 — operator-controlled approval list for trained models.
+#
+# A model MUST appear here AND have a matching row in `model_versions`
+# (status >= paper) before any code path is allowed to use it in live
+# mode. See docs/MODEL_GOVERNANCE.md for the lifecycle and demotion
+# triggers.
+#
+# Schema (one entry per model version):
+#   - name: canonical model name (matches `model_versions.name`)
+#     version: semver string (matches `model_versions.version`)
+#     task: classification | regression
+#     target: human-readable target name
+#     horizon_seconds: optional int — null if bar-based
+#     horizon_bars: optional int — null if time-based
+#     feature_contract_hash: 64-char hex from compute_feature_hash(...)
+#     validation_method: purged_kfold | walk_forward | ...
+#     calibration_method: none | isotonic | platt
+#     min_sample_size: int
+#     approval_status: research | paper | micro_live | live | retired
+#     notes: free text
+#     metadata: arbitrary JSON-friendly dict
+#     training_dataset:
+#       name: ...
+#       version: ...
+#       start_ts: ISO-8601
+#       end_ts: ISO-8601
+#       feature_contract_hash: matches parent (or independent if shared)
+#       row_count: int (optional)
+#       metadata: {}
+#
+# Wave 1 ships an empty list. Wave 2 lands the first real entry
+# (trained meta-labeller).
+
+models: []

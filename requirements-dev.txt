@@ -10,3 +10,4 @@
 
 # Test/tooling extras
 pytest-cov>=5.0,<6
+aiosqlite>=0.20,<1

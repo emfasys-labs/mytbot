@@ -1,0 +1,113 @@
+# config/ml_features.yaml
+# ========================
+# Wave 1 — registered feature columns available to trained models.
+#
+# This is documentation + a lookup the Wave 2+ training scripts read to
+# build their feature contracts. The actual *contract hash* is
+# computed by `models.feature_contracts.compute_feature_hash(...)`
+# over the ordered subset a model picks; it is NOT this whole file.
+#
+# Each entry MUST be deterministic and as-of-safe (computed strictly
+# from data with timestamps <= the prediction timestamp).
+#
+# Source columns are populated by:
+#   - data/features.py            (technical / volatility / VPIN proxy / volume-flow)
+#   - data/regime_metrics.py      (cross-section + news dispersion)
+#   - data/feature_lookup.py      (latest per-symbol feature snapshot)
+#   - signals/accumulator.py      (state values exposed via dashboard_snapshot)
+#
+# `dtype` and `transform` are part of the hash. Mutating either without
+# retraining the consuming model is a contract violation.
+
+features:
+  # ── technical ─────────────────────────────────────────────────────
+  - name: rsi_14
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: macd_hist
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: atr_14
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: bb_width
+    dtype: float64
+    transform: identity
+    source: data/features.py
+
+  # ── research ──────────────────────────────────────────────────────
+  - name: fracdiff_close
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: hurst_64
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: garch_vol
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: vpin_proxy
+    dtype: float64
+    transform: identity
+    source: data/features.py
+
+  # ── volume / flow ────────────────────────────────────────────────
+  - name: volume_z
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: relative_dollar_volume
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: trade_count_anomaly
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: volume_persistence
+    dtype: float64
+    transform: identity
+    source: data/features.py
+  - name: fake_spike_penalty
+    dtype: float64
+    transform: identity
+    source: data/features.py
+
+  # ── regime / macro ───────────────────────────────────────────────
+  - name: cross_section_breadth
+    dtype: float64
+    transform: identity
+    source: data/regime_metrics.py
+  - name: news_score_dispersion
+    dtype: float64
+    transform: identity
+    source: data/regime_metrics.py
+
+  # ── signal accumulator state ─────────────────────────────────────
+  - name: accumulator_score
+    dtype: float64
+    transform: identity
+    source: signals/accumulator.py
+  - name: accumulator_alignment
+    dtype: float64
+    transform: identity
+    source: signals/accumulator.py
+
+  # ── strategy / context ───────────────────────────────────────────
+  - name: strategy_confidence
+    dtype: float64
+    transform: identity
+    source: signals/engine.py
+  - name: side
+    dtype: category
+    transform: identity
+    source: signals/engine.py
+  - name: asset_class
+    dtype: category
+    transform: identity
+    source: brokers/base.py::AssetClass

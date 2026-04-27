@@ -2047,9 +2047,11 @@ async def set_system_mode(
 # Serve the React UI from ui/dist (must be LAST so API routes take priority)
 # ---------------------------------------------------------------------------
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
-# Avoid stale `index.html` in browsers that cache aggressively: new builds change chunk hashes
-# in this file, so a cached shell can load an old app bundle.
+# Avoid stale UI in browsers that cache aggressively. New builds change chunk
+# hashes, but during rapid local iteration the operator should never have to
+# wonder whether 127.0.0.1:8000 is serving yesterday's control surface.
 _UI_INDEX_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+_UI_ASSET_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
 if _UI_DIR.is_dir():
     _index_html = _UI_DIR / "index.html"
 
@@ -2062,7 +2064,7 @@ if _UI_DIR.is_dir():
             p = _UI_DIR / full_path
             if p.name == "index.html":
                 return FileResponse(p, headers=_UI_INDEX_HEADERS)
-            return FileResponse(p)
+            return FileResponse(p, headers=_UI_ASSET_HEADERS)
         if _index_html.is_file():
             return FileResponse(_index_html, headers=_UI_INDEX_HEADERS)
         raise HTTPException(404)

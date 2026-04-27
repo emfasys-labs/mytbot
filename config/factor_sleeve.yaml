@@ -1,0 +1,66 @@
+# config/factor_sleeve.yaml
+# ==========================
+# Wave 3 — cross-sectional factor sleeve.
+#
+# Default state: DISABLED. The sleeve is paper-only research code until
+# the operator validates factor exposure attribution and confirms the
+# universe data pipeline is populating both `data/factor_features.py`
+# (price-based) and `data/fundamental_features.py` (where available).
+#
+# Activation steps:
+#   1. Build a daily-cadence universe snapshot (close prices + optional
+#      fundamentals dict) per symbol.
+#   2. Set `factor_sleeve.enabled: true` here and run paper for 2-4 weeks.
+#   3. Inspect the per-family breakdown via `scripts/evaluate_factor_sleeve.py`
+#      before promoting to micro_live.
+
+factor_sleeve:
+  enabled: false
+  long_top_n: 10
+  short_bottom_n: 0          # 0 ⇒ long-only sleeve
+  neutralise_by_asset_class: true
+  treat_missing: zero        # "zero" or "drop"
+  confidence_floor: 0.05
+  confidence_ceiling: 0.85
+  strategy_name: factor_sleeve
+  preferred_broker: ibkr
+
+  # Default blend lives in signals/factor_scoring.py:DEFAULT_BLEND.
+  # Override only what you want to change; family weights default to 1.0
+  # and member weights to 1.0 (positive ⇒ higher-is-better, negative ⇒
+  # lower-is-better).
+  blend:
+    families:
+      - name: value
+        weight: 1.0
+        members:
+          - { name: earnings_yield, weight: 1.0 }
+          - { name: book_to_market, weight: 1.0 }
+          - { name: fcf_yield, weight: 1.0 }
+          - { name: sales_yield, weight: 0.5 }
+      - name: quality
+        weight: 1.0
+        members:
+          - { name: profitability, weight: 1.0 }
+          - { name: margin_stability, weight: 0.5 }
+          - { name: leverage, weight: -1.0 }
+          - { name: accruals_proxy, weight: -1.0 }
+      - name: momentum
+        weight: 1.0
+        members:
+          - { name: momentum_12_1, weight: 1.0 }
+          - { name: momentum_6m, weight: 0.5 }
+          - { name: reversal_1m, weight: -0.5 }
+      - name: defensive
+        weight: 0.7
+        members:
+          - { name: realised_vol, weight: -1.0 }
+          - { name: downside_vol, weight: -0.5 }
+          - { name: drawdown_stability, weight: 1.0 }
+      - name: carry
+        weight: 0.5
+        members:
+          - { name: dividend_yield, weight: 1.0 }
+          - { name: fx_carry, weight: 1.0 }
+          - { name: crypto_funding_carry, weight: 1.0 }
+          - { name: bond_yield_carry, weight: 1.0 }

@@ -1,7 +1,8 @@
 param(
     [switch]$InstallUiDeps,
-    [string]$UiUrl = "http://localhost:5173/",
-    [int]$BrowserDelaySec = 5
+    [string]$UiUrl = "http://127.0.0.1:8000/",
+    [int]$BrowserDelaySec = 5,
+    [switch]$RunViteDev
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,7 +36,6 @@ if ($InstallUiDeps -or -not (Test-Path -LiteralPath $nodeModulesPath)) {
 }
 
 $serverCommand = "Set-Location -LiteralPath '$repoRoot'; & '$pythonExe' 'run.py'"
-$uiCommand = "Set-Location -LiteralPath '$uiRoot'; npm run dev"
 
 Start-Process powershell -ArgumentList @(
     "-NoExit",
@@ -43,14 +43,22 @@ Start-Process powershell -ArgumentList @(
     "-Command", $serverCommand
 ) -WindowStyle Normal
 
-Start-Process powershell -ArgumentList @(
-    "-NoExit",
-    "-ExecutionPolicy", "Bypass",
-    "-Command", $uiCommand
-) -WindowStyle Normal
+if ($RunViteDev) {
+    $uiCommand = "Set-Location -LiteralPath '$uiRoot'; npm run dev"
+    Start-Process powershell -ArgumentList @(
+        "-NoExit",
+        "-ExecutionPolicy", "Bypass",
+        "-Command", $uiCommand
+    ) -WindowStyle Normal
+}
 
 Write-Host "Opening UI in the default browser after ${BrowserDelaySec}s: $UiUrl"
 Start-Sleep -Seconds $BrowserDelaySec
 Start-Process $UiUrl
 
-Write-Host "mytbot server and UI launched in separate windows."
+if ($RunViteDev) {
+    Write-Host "mytbot server, Vite dev, and browser URL ready."
+}
+else {
+    Write-Host "mytbot server started. UI is served by run.py — run 'cd ui; npm run build' if dist is stale."
+}

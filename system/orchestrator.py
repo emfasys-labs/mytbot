@@ -32,6 +32,7 @@ from risk.engine import RiskVerdict
 from risk.stop_loss import evaluate_stop_loss
 from system.broker_manager import BrokerManager, BrokerReport
 from system.dependency_manager import DependencyManager, DependencyReport
+from system.telegram_notify import send_lifecycle_notification
 from system.trading_loop import TradingLoop
 
 
@@ -206,6 +207,14 @@ class Orchestrator:
                     active_brokers or "none (observation)",
                     paper_mode,
                 )
+                asyncio.create_task(send_lifecycle_notification(
+                    "started",
+                    broker_manager=self._broker_manager,
+                    broker_report=self._broker_report,
+                    paper_mode=paper_mode,
+                    require_full_coverage=True,
+                    wait_timeout_sec=float(os.getenv("TELEGRAM_START_READY_TIMEOUT_SEC", "180")),
+                ))
 
             except Exception as exc:
                 err = f"Startup failed: {exc}"
@@ -229,6 +238,7 @@ class Orchestrator:
             # Capture execution engine before clearing the loop (loop holds the live instance).
             tl = self._trading_loop
             execution_engine = getattr(tl, "execution_engine", None) if tl is not None else None
+            paper_mode = os.getenv("APP_ENV", "paper").strip().lower() != "live"
 
             t_loop = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_TRADING_LOOP_SEC", 120.0)
             t_cancel = _shutdown_step_timeout_sec("ORCHESTRATOR_STOP_CANCEL_ALL_SEC", 45.0)
@@ -284,6 +294,15 @@ class Orchestrator:
                 await asyncio.wait_for(self._flush_nav_heartbeat(), timeout=10.0)
             except Exception as exc:
                 logger.warning("orchestrator | final NAV flush error: {}", exc)
+
+            await send_lifecycle_notification(
+                "stopped",
+                broker_manager=self._broker_manager,
+                broker_report=self._broker_report,
+                paper_mode=paper_mode,
+                require_full_coverage=True,
+                wait_timeout_sec=float(os.getenv("TELEGRAM_STOP_READY_TIMEOUT_SEC", "30")),
+            )
 
             if self._nav_heartbeat_task is not None and not self._nav_heartbeat_task.done():
                 self._nav_heartbeat_task.cancel()

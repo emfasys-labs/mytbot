@@ -5,6 +5,14 @@ signal_engine:
   use_signal_accumulator: true
   # When accumulator is on, still veto if point-in-time AI rollup is below threshold
   accumulator_dual_ai_veto: true
+  # Wave 2 — trained meta-labeller. Default OFF; the heuristic in
+  # signals/meta_labeler.py remains the live filter. When True, the
+  # SignalEngine loads config/meta_labeler.yaml and consults the trained
+  # model for every candidate. The trained labeller itself is also
+  # gated by `enabled: false` in that file, so flipping this to true is
+  # a no-op until BOTH gates are flipped AND a registered+approved
+  # model exists. See docs/MODEL_GOVERNANCE.md.
+  use_trained_meta_labeler: false
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true

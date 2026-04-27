@@ -585,12 +585,26 @@ export function mapExposure(
   const navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none' =
     nav > 0 ? (usePnlFallback ? 'pnl_today_portfolio_value' : 'snapshot') : 'none';
 
-  const gross = normalizeExposure(portfolio.gross_exposure, nav);
+  const grossRaw = normalizeExposure(portfolio.gross_exposure, nav);
+  const sampleGross = sampleGrossExposure(portfolio.positions_sample, nav);
+  const gross = Math.max(grossRaw, sampleGross);
   // Net can legitimately be negative (short bias); clamp to [0,1] for display
   // by taking absolute value — the sign is conveyed via P&L + position sides.
-  const net = normalizeExposure(portfolio.net_exposure, nav);
+  const netRaw = normalizeExposure(portfolio.net_exposure, nav);
+  const net = Math.max(netRaw, sampleGross);
   const cash = Math.max(0, 1 - gross);
   return { gross, net, cash, navBasis, navDivergencePct };
+}
+
+function sampleGrossExposure(raw: unknown, nav: number): number {
+  if (nav <= 0 || !Array.isArray(raw)) return 0;
+  let total = 0;
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const mv = toNumber((row as Record<string, unknown>).market_value, 0);
+    if (Number.isFinite(mv)) total += Math.abs(mv);
+  }
+  return total > 0 ? total / nav : 0;
 }
 
 /** Exposure figures from the backend arrive in three shapes depending on the

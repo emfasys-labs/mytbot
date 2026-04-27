@@ -571,14 +571,16 @@ class ExecutionEngine:
     async def _maybe_notify_fill(
         self, order: Order, result: OrderResult, signal: Signal
     ) -> None:
-        """Emit a single Telegram notification per persisted fill.
+        """Optionally emit fill Telegram messages when explicitly enabled.
 
-        Operator preference (post-D031): only open/close position events reach
-        Telegram — no per-signal or per-reject chatter. A FILLED or
-        PARTIALLY_FILLED OrderResult is the authoritative trigger because every
-        fill either opens, adds to, reduces, or closes a position.
+        Default operator preference: Telegram is lifecycle-only. Start/stop
+        messages are sent by the orchestrator with balances; execution fills,
+        rejects, and failures stay in logs/UI unless MYTBOT_TELEGRAM_EXECUTION_ALERTS
+        is deliberately enabled for a diagnostic session.
         """
         try:
+            if not self._execution_telegram_enabled():
+                return
             status = getattr(result, "status", None)
             if status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                 return
@@ -1562,6 +1564,8 @@ class ExecutionEngine:
         await dispose_engine(engine)
 
     async def _send_critical_alert(self, message: str) -> None:
+        if not self._execution_telegram_enabled():
+            return
         # Never send real Telegram alerts from unit tests.
         if os.getenv("PYTEST_CURRENT_TEST"):
             return
@@ -1579,3 +1583,8 @@ class ExecutionEngine:
                 await client.post(url, json=payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Telegram alert failed | %s", exc)
+
+    @staticmethod
+    def _execution_telegram_enabled() -> bool:
+        enabled = (os.getenv("MYTBOT_TELEGRAM_EXECUTION_ALERTS", "") or "").strip().lower()
+        return enabled in ("1", "true", "yes", "on")

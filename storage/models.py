@@ -298,6 +298,152 @@ class ControlState(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now(), onupdate=func.now())
 
 
+class FeatureContract(Base):
+    """Frozen feature list used by a trained model. Wave 1.
+
+    The ``hash`` column is a deterministic SHA-256 over the canonical
+    feature list (see ``models.feature_contracts.compute_feature_hash``).
+    Multiple model versions can share a contract; we never mutate one in
+    place.
+    """
+
+    __tablename__ = "feature_contracts"
+
+    hash = Column(String(64), primary_key=True)
+    feature_list = Column(JSON, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    notes = Column(Text, nullable=True)
+
+
+class TrainingDataset(Base):
+    """Pointer to the dataset snapshot used to train a model. Wave 1."""
+
+    __tablename__ = "training_datasets"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_training_datasets_name_version"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False, index=True)
+    version = Column(String(32), nullable=False)
+    start_ts = Column(DateTime(timezone=True), nullable=False)
+    end_ts = Column(DateTime(timezone=True), nullable=False)
+    row_count = Column(Integer, nullable=True)
+    feature_contract_hash = Column(String(64), nullable=True, index=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class ModelVersion(Base):
+    """Registered, immutable model artefact. Wave 1.
+
+    A model may not influence live trading until a row exists here with
+    ``approval_status in ('paper','micro_live','live')`` and the matching
+    entry in ``config/model_registry.yaml``.
+    """
+
+    __tablename__ = "model_versions"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_model_versions_name_version"),
+        Index("ix_model_versions_name_status", "name", "approval_status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False, index=True)
+    version = Column(String(32), nullable=False)
+    task = Column(String(32), nullable=False)  # classification | regression
+    target = Column(String(128), nullable=False)
+    horizon_seconds = Column(Integer, nullable=True)
+    horizon_bars = Column(Integer, nullable=True)
+    feature_contract_hash = Column(String(64), nullable=False, index=True)
+    training_dataset_id = Column(Integer, nullable=True, index=True)
+    validation_method = Column(String(64), nullable=False)
+    calibration_method = Column(String(32), nullable=False, default="none")
+    min_sample_size = Column(Integer, nullable=False, default=0)
+    approval_status = Column(
+        String(20),
+        nullable=False,
+        default="research",
+        index=True,
+    )  # research | paper | micro_live | live | retired
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    created_by = Column(String(64), nullable=False, default="system")
+    notes = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+
+
+class ModelRun(Base):
+    """One row per training or evaluation invocation. Wave 1."""
+
+    __tablename__ = "model_runs"
+    __table_args__ = (
+        Index("ix_model_runs_name_version_kind", "model_name", "model_version", "kind"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model_name = Column(String(128), nullable=False, index=True)
+    model_version = Column(String(32), nullable=False)
+    kind = Column(String(16), nullable=False)  # train | eval
+    status = Column(String(16), nullable=False, default="running")  # running | succeeded | failed
+    started_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    metrics = Column(JSON, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
+class ModelPrediction(Base):
+    """One row per live/paper/research prediction emitted by a registered model. Wave 1.
+
+    ``as_of_ts`` is the latest feature timestamp used to compute the
+    prediction. ``prediction_ts`` is when the model was invoked.
+    ``as_of_ts <= prediction_ts`` is a hard invariant — future-stamped
+    rows are rejected by ``models.prediction_store.write_prediction``.
+    """
+
+    __tablename__ = "model_predictions"
+    __table_args__ = (
+        Index(
+            "ix_model_pred_name_version_ts",
+            "model_name",
+            "model_version",
+            "prediction_ts",
+        ),
+        Index("ix_model_pred_symbol_ts", "symbol", "prediction_ts"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model_name = Column(String(128), nullable=False, index=True)
+    model_version = Column(String(32), nullable=False)
+    symbol = Column(String(72), nullable=False, index=True)
+    as_of_ts = Column(DateTime(timezone=True), nullable=False)
+    prediction_ts = Column(DateTime(timezone=True), nullable=False)
+    horizon_seconds = Column(Integer, nullable=True)
+    horizon_bars = Column(Integer, nullable=True)
+    predicted_probability = Column(Numeric(10, 8), nullable=True)
+    expected_return = Column(Numeric(20, 10), nullable=True)
+    expected_volatility = Column(Numeric(20, 10), nullable=True)
+    confidence = Column(Numeric(10, 8), nullable=True)
+    feature_hash = Column(String(64), nullable=False, index=True)
+    mode = Column(String(16), nullable=False, default="research")  # research | paper | live
+    metadata_ = Column("metadata", JSON, nullable=True)
+
+
 class StrategyCandidateLog(Base):
     """Pre-execution strategy attempts: not the same as ``SignalLog`` (execution-bound).
 

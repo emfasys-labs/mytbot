@@ -682,7 +682,26 @@ export function useLiveSystem(): LiveData {
     () => mergeStrategiesWithSignals(mapStrategies(snapshot), intelligence, loadedStrategies, strategyMix),
     [snapshot, intelligence, loadedStrategies, strategyMix],
   );
-  const exposure = useMemo(() => mapExposure(snapshot, pnl), [snapshot, pnl]);
+  const exposure = useMemo(() => {
+    const mapped = mapExposure(snapshot, pnl);
+    if (nav <= 0 || positions.length === 0) return mapped;
+    const grossNotional = positions.reduce((sum, p) => sum + Math.abs(p.notional || 0), 0);
+    const netNotional = Math.abs(
+      positions.reduce((sum, p) => {
+        const sign = p.qty < 0 ? -1 : 1;
+        return sum + sign * Math.abs(p.notional || 0);
+      }, 0),
+    );
+    if (grossNotional <= 0) return mapped;
+    const gross = grossNotional / nav;
+    const net = netNotional / nav;
+    return {
+      ...mapped,
+      gross: Math.max(mapped.gross, gross),
+      net: Math.max(mapped.net, net),
+      cash: Math.max(0, 1 - Math.max(mapped.gross, gross)),
+    };
+  }, [snapshot, pnl, positions, nav]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(
     () => mapPnlRollups(pnl, nav, equitySeries),

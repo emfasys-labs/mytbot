@@ -25,6 +25,7 @@ from signals.accumulator import NetSignal, raw_signal_to_input_signal
 
 if TYPE_CHECKING:
     from signals.accumulator import SignalAccumulator
+    from signals.trained_meta_labeler import TrainedMetaLabelerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,24 @@ class SignalEngine:
     def __init__(self, config: dict, accumulator: Optional["SignalAccumulator"] = None):
         self.config = config
         self.accumulator = accumulator
+        # Wave 2 — trained meta-labeller. Default OFF (heuristic in
+        # ``signals/meta_labeler.py`` remains the live filter). When
+        # ``signal_engine.use_trained_meta_labeler`` is True we lazy-load
+        # the YAML config; the runtime hook itself enforces the
+        # registry/approval gates and falls back safely if no model is
+        # registered.
+        self._trained_meta_cfg: Optional["TrainedMetaLabelerConfig"] = None
+        if bool(self.config.get("use_trained_meta_labeler", False)):
+            from signals.trained_meta_labeler import TrainedMetaLabelerConfig
+
+            try:
+                self._trained_meta_cfg = TrainedMetaLabelerConfig.load()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "signal_engine | trained_meta_labeler config load failed (%s) — disabling",
+                    exc,
+                )
+                self._trained_meta_cfg = None
 
     def _apply_accumulator(
         self,
@@ -93,6 +112,88 @@ class SignalEngine:
             return net, net.score
         net = self.accumulator.update(inp, now)
         return net, net.score
+
+    def _apply_trained_meta_label(
+        self,
+        raw: RawSignal,
+        *,
+        adjusted_confidence: float,
+        news_score: Optional[float],
+        net: Optional[NetSignal],
+        md: dict,
+    ) -> bool:
+        """
+        Wave 2 — score the candidate through the trained meta-labeller.
+
+        Returns ``True`` if the signal should proceed (or the labeller is
+        disabled / passing through), ``False`` if it must be skipped.
+        Either way, decision metadata is attached to ``md`` so the
+        dashboard funnel can render the reason.
+        """
+        cfg = self._trained_meta_cfg
+        if cfg is None:
+            return True
+
+        # Build a flat feature dict. The artefact reorders to its own
+        # contract; missing keys default to 0.0 inside ``evaluate_features``.
+        side_sign = 1.0 if (raw.side or "").lower() in ("buy", "long") else -1.0
+        features: dict[str, float] = {
+            "strategy_confidence": float(adjusted_confidence),
+            "raw_confidence": float(raw.confidence),
+            "side_sign": side_sign,
+            "news_score": float(news_score) if news_score is not None else 0.0,
+        }
+        if net is not None:
+            try:
+                features["accumulator_score"] = float(net.score)
+                features["accumulator_confidence"] = float(net.confidence)
+            except (TypeError, ValueError):
+                pass
+        # Promote any pre-numeric metadata keys (volume_z, atr_pct, etc.)
+        # so the artefact can use them without a separate lookup.
+        for k, v in (raw.metadata or {}).items():
+            if k in features:
+                continue
+            try:
+                features[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+
+        # Mode is determined at runtime; default to PAPER so research
+        # models never sneak into live without a deliberate flip.
+        from signals.trained_meta_labeler import evaluate_features
+        from models.schemas import Mode
+
+        try:
+            decision = evaluate_features(
+                features=features,
+                mode=Mode.PAPER,
+                config=cfg,
+                regime=md.get("regime_label"),
+                portfolio_mode=md.get("profile_mode"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Defensive: never let the meta-labeller take down signal
+            # generation. Surface the failure as a metadata note and
+            # pass through.
+            logger.warning("trained_meta_labeler | evaluate failed: %s", exc)
+            md["meta_label_error"] = str(exc)
+            return True
+
+        md["meta_label_probability"] = (
+            None if decision.probability is None else float(decision.probability)
+        )
+        md["meta_label_threshold"] = float(decision.threshold)
+        md["meta_label_reason"] = decision.reason
+        md["meta_label_kept"] = bool(decision.kept)
+        if decision.model_name:
+            md["meta_label_model_name"] = decision.model_name
+        if decision.model_version:
+            md["meta_label_model_version"] = decision.model_version
+        if decision.feature_hash:
+            md["meta_label_feature_hash"] = decision.feature_hash
+
+        return bool(decision.kept)
 
     @staticmethod
     def _enrich_metadata_with_net(md: dict, net: Optional[NetSignal], ai_news_score: Optional[float]) -> None:
@@ -265,6 +366,22 @@ class SignalEngine:
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
+        if not self._apply_trained_meta_label(
+            raw,
+            adjusted_confidence=adjusted_confidence,
+            news_score=news_score,
+            net=net,
+            md=md,
+        ):
+            logger.info(
+                "Signal SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s",
+                raw.symbol,
+                raw.side,
+                md.get("meta_label_reason"),
+                md.get("meta_label_probability"),
+                md.get("meta_label_threshold"),
+            )
+            return None
         md["signal_engine_sizing_path"] = sizing_path
         if last_price is not None and last_price > 0:
             md["signal_engine_resolved_notional"] = str(
@@ -422,6 +539,22 @@ class SignalEngine:
         side: Side = "long" if (raw.side or "").lower() in ("buy", "long") else "short"
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
+        if not self._apply_trained_meta_label(
+            raw,
+            adjusted_confidence=adjusted_confidence,
+            news_score=news_score,
+            net=net,
+            md=md,
+        ):
+            logger.info(
+                "SignalCandidate SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s",
+                raw.symbol,
+                raw.side,
+                md.get("meta_label_reason"),
+                md.get("meta_label_probability"),
+                md.get("meta_label_threshold"),
+            )
+            return None
         return SignalCandidate(
             symbol=raw.symbol,
             asset_class=cast(AssetClass, ac),

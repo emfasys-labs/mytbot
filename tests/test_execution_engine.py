@@ -865,13 +865,54 @@ def test_d031c_boundary_guard_exempts_arbitrage() -> None:
 
 
 # =============================================================================
-# Telegram notifications — only open/close events (post-D031 operator prefs)
+# Telegram notifications — lifecycle-only by default
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_maybe_notify_fill_sends_for_filled_orders(monkeypatch) -> None:
-    """A FILLED OrderResult triggers a Telegram message via _send_critical_alert."""
+async def test_maybe_notify_fill_suppressed_by_default(monkeypatch) -> None:
+    """Fill notifications are off unless explicitly enabled."""
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+
+    captured: list[str] = []
+
+    async def _fake_alert(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr(eng, "_send_critical_alert", _fake_alert)
+
+    order = Order(
+        symbol="COHR",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("22"),
+        limit_price=Decimal("355"),
+        client_order_id="x-fill-1",
+    )
+    result = OrderResult(
+        broker_order_id="bid-1",
+        client_order_id="x-fill-1",
+        status=OrderStatus.FILLED,
+        symbol="COHR",
+        side=OrderSide.BUY,
+        quantity=Decimal("22"),
+        filled_quantity=Decimal("22"),
+        avg_fill_price=Decimal("355.10"),
+        fee=Decimal("0"),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    signal = _sizing_signal({"coordinator_kind": "open_strategy"})
+    await eng._maybe_notify_fill(order, result, signal)
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_maybe_notify_fill_can_be_enabled_for_diagnostics(monkeypatch) -> None:
+    """A FILLED OrderResult can still trigger Telegram when explicitly opted in."""
+    monkeypatch.setenv("MYTBOT_TELEGRAM_EXECUTION_ALERTS", "1")
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
@@ -916,6 +957,7 @@ async def test_maybe_notify_fill_sends_for_filled_orders(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_maybe_notify_fill_labels_close_on_reduce_only(monkeypatch) -> None:
+    monkeypatch.setenv("MYTBOT_TELEGRAM_EXECUTION_ALERTS", "1")
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
