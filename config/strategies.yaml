@@ -12,7 +12,7 @@ signal_engine:
   # gated by `enabled: false` in that file, so flipping this to true is
   # a no-op until BOTH gates are flipped AND a registered+approved
   # model exists. See docs/MODEL_GOVERNANCE.md.
-  use_trained_meta_labeler: false
+  use_trained_meta_labeler: true
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true

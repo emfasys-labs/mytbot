@@ -25,6 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # noqa: BLE001
+    load_dotenv = None
+
 from models.registry import ModelRegistry  # noqa: E402
 from models.prediction_store import read_predictions  # noqa: E402
 
@@ -99,6 +104,8 @@ async def _print_recent_predictions(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    if load_dotenv is not None:
+        load_dotenv(ROOT / ".env")
     args = _parse_args()
     registry = ModelRegistry.load(args.registry) if args.registry else ModelRegistry.load()
     _print_registry(registry, args.name)

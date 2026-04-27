@@ -795,11 +795,25 @@ class ExecutionEngine:
                 "instrument_type": "option",
                 "option_contract": dict(meta["option_contract"]),
             }
+            for key in (
+                "options_buy_to_open",
+                "options_sell_to_open",
+                "options_hedge_role",
+                "options_paper_only",
+            ):
+                if key in meta:
+                    inst_meta[key] = meta[key]
         spec = parse_option_contract_from_metadata(meta)
         sym = spec.position_key() if spec is not None else signal.symbol
+        if spec is not None and bool(meta.get("options_buy_to_open")):
+            side = OrderSide.BUY
+        elif spec is not None and bool(meta.get("options_sell_to_open")):
+            side = OrderSide.SELL
+        else:
+            side = OrderSide.BUY if signal.side in {"buy", "long"} else OrderSide.SELL
         return Order(
             symbol=sym,
-            side=OrderSide.BUY if signal.side == "buy" else OrderSide.SELL,
+            side=side,
             order_type=OrderType.MARKET if signal.suggested_price is None else OrderType.LIMIT,
             quantity=signal.suggested_quantity,
             limit_price=signal.suggested_price,

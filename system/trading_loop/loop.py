@@ -61,6 +61,10 @@ from system.dashboard_publish import (
     publish_dashboard_snapshot_global_edge,
     publish_dashboard_snapshot_heartbeat,
 )
+from system.funnel_telemetry import (
+    get_default_funnel_telemetry,
+    record_strategy_candidate_rows,
+)
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
@@ -614,6 +618,7 @@ class TradingLoop:
             futures_execution_enabled = os.getenv(
                 "FUTURES_EXECUTION_ENABLED", "0"
             ).strip().lower() in ("1", "true", "yes", "on")
+            funnel = get_default_funnel_telemetry()
 
             async def _process_signal(
                 signal,
@@ -626,7 +631,9 @@ class TradingLoop:
                     signal.symbol,
                     metadata=getattr(signal, "metadata", None),
                 )
+                strategy_key = str(getattr(signal, "strategy", "") or "unknown").strip() or "unknown"
                 if routed is None:
+                    funnel.record_execution_blocked(strategy_key)
                     return False
                 signal.broker = routed
                 # Futures data-only gate. Signal still logs; order never lands.
@@ -644,6 +651,7 @@ class TradingLoop:
                         timeframe=self.timeframe,
                         feature_ts=datetime.now(timezone.utc),
                     )
+                    funnel.record_execution_blocked(strategy_key)
                     return False
                 # Rewrite the pipeline ticker to the broker's native form
                 # before the order builder sees it (e.g. ``EURUSD=X`` → ``EURUSD``).
@@ -667,6 +675,7 @@ class TradingLoop:
                     session_factory, signal, portfolio_state,
                 )
                 if risk_decision.verdict != RiskVerdict.APPROVED:
+                    funnel.record_risk_rejected(strategy_key)
                     if sc_log_buffer is not None:
                         _md0 = (
                             "d015"
@@ -699,6 +708,7 @@ class TradingLoop:
                         feature_ts=datetime.now(timezone.utc),
                     )
                     return False
+                funnel.record_risk_approved(strategy_key)
                 await _persist_signal(
                     session_factory, signal,
                     paper_mode=self.paper_mode,
@@ -709,6 +719,7 @@ class TradingLoop:
                     signal, risk_decision, session_factory=session_factory,
                 )
                 if result is None:
+                    funnel.record_execution_blocked(strategy_key)
                     if sc_log_buffer is not None:
                         sc_log_buffer.append(
                             strategy_candidate_row(
@@ -738,6 +749,7 @@ class TradingLoop:
                     return False
                 status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
                 if status_val != "filled":
+                    funnel.record_execution_blocked(strategy_key)
                     if sc_log_buffer is not None:
                         sc_log_buffer.append(
                             strategy_candidate_row(
@@ -768,6 +780,7 @@ class TradingLoop:
                     return False
                 filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
                 if filled_qty <= 0:
+                    funnel.record_execution_blocked(strategy_key)
                     if sc_log_buffer is not None:
                         sc_log_buffer.append(
                             strategy_candidate_row(
@@ -888,6 +901,8 @@ class TradingLoop:
                             metadata={"path": _md1},
                         )
                     )
+                funnel.record_execution_approved(strategy_key)
+                funnel.record_executed(strategy_key)
                 return True
 
             while not self._stop_event.is_set():
@@ -1198,6 +1213,7 @@ class TradingLoop:
                                 executed += 1
 
                         if sc_log_rows_legacy:
+                            record_strategy_candidate_rows(sc_log_rows_legacy)
                             await persist_strategy_candidate_rows(session_factory, sc_log_rows_legacy)
 
                         if discovery_pipeline is not None:
@@ -1654,6 +1670,7 @@ class TradingLoop:
                                         executed += 1
 
                         if not use_legacy and sc_log_rows:
+                            record_strategy_candidate_rows(sc_log_rows)
                             c_status = Counter(str(r.get("status", "")) for r in sc_log_rows)
                             c_strat = Counter(str(r.get("strategy", "")) for r in sc_log_rows if r.get("status") == "generated")
                             logger.info(
@@ -2149,6 +2166,8 @@ class TradingLoop:
         """Single-signal processing mirroring _process_signal for coordinator path."""
         if self.router is None or self.risk_engine is None or self.execution_engine is None:
             return False
+        funnel = get_default_funnel_telemetry()
+        strategy_key = str(getattr(signal, "strategy", "") or "unknown").strip() or "unknown"
         sig_md = getattr(signal, "metadata", None)
         sig_md = sig_md if isinstance(sig_md, dict) else {}
         is_reduce = bool(
@@ -2166,6 +2185,7 @@ class TradingLoop:
                 metadata=sig_md,
             )
         if routed is None:
+            funnel.record_execution_blocked(strategy_key)
             return False
         signal.broker = routed
         # Futures execution gate — same as legacy path. See _process_signal().
@@ -2186,6 +2206,7 @@ class TradingLoop:
                 timeframe=self.timeframe,
                 feature_ts=datetime.now(timezone.utc),
             )
+            funnel.record_execution_blocked(strategy_key)
             return False
         native = broker_symbol_for(signal.symbol, routed)
         if native and native != signal.symbol:
@@ -2203,6 +2224,7 @@ class TradingLoop:
             portfolio_dict,
         )
         if risk_decision.verdict != RiskVerdict.APPROVED:
+            funnel.record_risk_rejected(strategy_key)
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -2227,6 +2249,7 @@ class TradingLoop:
                 feature_ts=datetime.now(timezone.utc),
             )
             return False
+        funnel.record_risk_approved(strategy_key)
         await _persist_signal(
             session_factory,
             signal,
@@ -2240,6 +2263,7 @@ class TradingLoop:
             session_factory=session_factory,
         )
         if result is None:
+            funnel.record_execution_blocked(strategy_key)
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -2269,6 +2293,7 @@ class TradingLoop:
             return False
         status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
         if status_val != "filled":
+            funnel.record_execution_blocked(strategy_key)
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -2298,6 +2323,7 @@ class TradingLoop:
             return False
         filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
         if filled_qty <= 0:
+            funnel.record_execution_blocked(strategy_key)
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -2370,6 +2396,8 @@ class TradingLoop:
                     loop_iteration=self.iterations,
                 )
             )
+        funnel.record_execution_approved(strategy_key)
+        funnel.record_executed(strategy_key)
         return True
 
     def _load_mode_cadence_map(self) -> dict[str, int]:

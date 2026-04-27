@@ -9,6 +9,7 @@ import { Conviction, Coverage, LiveEvent, Position } from './data';
 import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } from './tokens';
+import type { BackendSystemState } from '../lib/api';
 import type { LiveData } from './useLiveSystem';
 
 export function DashboardScreen({
@@ -112,7 +113,13 @@ export function DashboardScreen({
             </div>
           </div>
         ) : navPending ? (
-          <NavPendingPanel state={state} missing={live.navMissing} coverage={live.coverage} density={density} />
+          <NavPendingPanel
+            uiState={state}
+            backendState={live.backendState}
+            missing={live.navMissing}
+            coverage={live.coverage}
+            density={density}
+          />
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
@@ -331,27 +338,49 @@ function NavMissingBanner({ missing }: { missing: string[] }) {
 }
 
 function NavPendingPanel({
-  state,
+  uiState,
+  backendState,
   missing,
   coverage,
   density,
 }: {
-  state: SystemState;
+  uiState: SystemState;
+  backendState: BackendSystemState;
   missing: string[];
   coverage: Coverage;
   density: Density;
 }) {
-  const waiting = missing.length > 0
-    ? `waiting for ${missing.join(', ')}`
-    : state === 'running'
-      ? 'verifying broker balances'
-      : 'system warming up';
-  const coverageText = coverage.configured.length > 0
-    ? `${coverage.included.length} of ${coverage.configured.length} configured brokers ready`
-    : 'discovering configured brokers';
+  const stopping = backendState === 'stopping';
+  const waiting = (() => {
+    if (missing.length > 0) {
+      return `waiting for ${missing.join(', ')}`;
+    }
+    if (stopping) {
+      return 'shutting down';
+    }
+    if (uiState === 'running') {
+      return 'verifying broker balances';
+    }
+    if (uiState === 'error') {
+      return 'system needs attention';
+    }
+    if (uiState === 'paused') {
+      return 'paused';
+    }
+    if (uiState === 'starting' && coverage.full) {
+      return 'syncing net asset value';
+    }
+    return 'system warming up';
+  })();
+  const coverageText = stopping
+    ? 'finishing shutdown — NAV hidden until next session'
+    : coverage.configured.length > 0
+      ? `${coverage.included.length} of ${coverage.configured.length} configured brokers ready`
+      : 'discovering configured brokers';
+  const glyphState: SystemState = stopping ? 'stopping' : uiState;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 18, minHeight: 150 }}>
-      <Glyph state="starting" accent={TOKENS.caution} size={14} />
+      <Glyph state={glyphState} accent={TOKENS.caution} size={14} />
       <div>
         <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
         <div style={{

@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DashboardScreen } from './dashboard';
+import { UniverseScreen } from './universe/UniverseScreen';
 import { MobileApp } from './mobile';
 import { Glyph, Label } from './primitives';
 import {
@@ -36,6 +37,7 @@ const TITLES: Record<Route, string> = {
   book:    'Book',
   risk:    'Risk',
   strat:   'Strategies',
+  universe: 'Universe',
   log:     'Trade log',
 };
 
@@ -217,6 +219,9 @@ export default function App() {
           )}
           {route === 'strat' && (
             <StrategiesScreen accent={tweaks.accent} live={live} />
+          )}
+          {route === 'universe' && (
+            <UniverseScreen accent={tweaks.accent} density={tweaks.density} live={live} />
           )}
           {route === 'log' && (
             <TradeLogScreen live={live} />

@@ -1,6 +1,6 @@
 # MODEL_GOVERNANCE.md
 
-**Status:** Wave 0 baseline (2026-04-27).
+**Status:** Waves 0-14 scaffolded; activation enforcement updated 2026-04-27.
 **Scope:** How trained models are introduced, registered, validated, deployed,
 monitored, and retired in mytbot.
 
@@ -96,8 +96,16 @@ Tables (Alembic migration in Wave 1):
 
 ## Approval
 
-Approval is a manual flip in `config/model_registry.yaml` and a matching
-DB row update. Wave 0 leaves the YAML stub empty. Wave 1 wires loading.
+Approval starts as a manual flip in `config/model_registry.yaml` plus a matching
+DB row update, but live model retrieval is now hard-gated. For `Mode.LIVE`,
+`models/registry.py` evaluates the Wave 14 activation gates from the model
+entry's `metadata.activation_gates` block and refuses the model unless every
+gate passes. A YAML status flip without validation, paper-soak, risk,
+execution-cost, rollback, and config-flag evidence fails closed.
+
+The registry now contains `mytbot_meta_labeler@0.1.0` as a paper-only candidate.
+It is not micro-live or live approved; activation evidence is intentionally
+incomplete until paper soak finishes.
 
 ## Audit hooks
 

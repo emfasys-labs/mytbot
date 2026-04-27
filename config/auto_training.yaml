@@ -1,0 +1,88 @@
+# config/auto_training.yaml
+# =========================
+# Automatic model-training plan.
+#
+# This file is consumed by scripts/auto_train_models.py. It is deliberately
+# research/paper-only: jobs may build datasets, train artefacts, write reports,
+# and optionally register paper candidates, but they never promote anything to
+# micro_live/live.
+
+auto_training:
+  enabled: true
+  mode: paper
+  timezone: Europe/London
+  output_root: artifacts/models
+  research_root: data/research
+  report_root: reports/models
+  registry_path: config/model_registry.yaml
+
+  safety:
+    allow_live_promotion: false
+    default_dry_run: false
+    require_min_rows: true
+    min_rows:
+      meta_label: 200
+      forecast: 300
+      regime: 120
+      microstructure: 1000
+
+  schedule:
+    # The helper script can be installed with Windows Task Scheduler. The
+    # schedule is documented here so the automation remains auditable in git.
+    windows_task_name: mytbot-auto-training
+    cadence: daily
+    start_time_local: "03:20"
+
+  jobs:
+    meta_labeler:
+      enabled: true
+      model_name: mytbot_meta_labeler
+      classifier_candidates: [logreg]
+      calibration: platt
+      horizon_bars: 10
+      timeframe: 1h
+      min_rows: 200
+      promote_to_paper: false
+
+    forecasts:
+      enabled: true
+      estimator_candidates: [ridge]
+      calibration: none
+      timeframe: 1h
+      min_rows: 300
+      promote_to_paper: false
+      targets:
+        - model_name: forecast_return_1h
+          target_kind: forward_return
+          horizon: 1
+          symbol: SPY
+        - model_name: forecast_return_4h
+          target_kind: forward_return
+          horizon: 4
+          symbol: SPY
+        - model_name: forecast_vol_1d
+          target_kind: realised_vol_forward
+          horizon: 24
+          symbol: SPY
+        - model_name: forecast_drawdown_1d
+          target_kind: drawdown_probability
+          horizon: 24
+          symbol: SPY
+
+    regime_classifier:
+      enabled: true
+      min_rows: 120
+      promote_to_paper: false
+      features_csv: data/research/regime/regime_features.csv
+
+    # These require data feeds that may not exist on every machine yet. Keep
+    # them visible in the plan, but the runner will skip when input data is
+    # absent.
+    microstructure:
+      enabled: true
+      promote_to_paper: false
+      input_csv: data/research/microstructure/orderbook_training.csv
+
+    deep_sequence:
+      enabled: false
+      promote_to_paper: false

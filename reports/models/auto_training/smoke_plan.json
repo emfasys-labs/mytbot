@@ -1,0 +1,87 @@
+{
+  "dry_run": true,
+  "generated_at": "2026-04-27T17:49:02.112761+00:00",
+  "results": [
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/build_meta_label_dataset.py",
+        "--out-dir",
+        "data\\research\\meta_label\\smoke_plan",
+        "--timeframe",
+        "1h",
+        "--horizon-bars",
+        "10",
+        "--min-rows",
+        "200"
+      ],
+      "name": "meta_labeler.build_dataset",
+      "reason": null,
+      "returncode": null,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_meta_labeler.py",
+        "--features",
+        "data\\research\\meta_label\\smoke_plan\\features.csv",
+        "--labels",
+        "data\\research\\meta_label\\smoke_plan\\labels.csv",
+        "--out",
+        "artifacts\\models\\meta_label\\mytbot_meta_labeler-smoke_plan.pkl",
+        "--classifier",
+        "logreg",
+        "--calibration",
+        "platt"
+      ],
+      "name": "meta_labeler.train",
+      "reason": null,
+      "returncode": null,
+      "skipped": false
+    },
+    {
+      "command": [],
+      "name": "forecast_return_1h.train",
+      "reason": "insufficient_rows:67<300",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "forecast_return_4h.train",
+      "reason": "insufficient_rows:67<300",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "forecast_vol_1d.train",
+      "reason": "insufficient_rows:67<300",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "forecast_drawdown_1d.train",
+      "reason": "insufficient_rows:67<300",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "regime_classifier.train",
+      "reason": "features_csv_missing",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "microstructure.train",
+      "reason": "input_csv_missing",
+      "returncode": null,
+      "skipped": true
+    }
+  ],
+  "run_id": "smoke_plan"
+}

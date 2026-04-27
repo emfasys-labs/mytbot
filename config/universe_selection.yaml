@@ -1,0 +1,66 @@
+# Universe Intelligence Layer — correlation-aware tiers (optional).
+# When enabled: run `python scripts/build_universe_tiers.py` periodically to refresh
+# `data/runtime/universe_intelligence.json`. Pipeline symbols remain authoritative
+# when disabled or on build failure.
+
+enabled: false
+fallback_to_pipeline: true
+
+candidate_pool_default: 0
+
+capacity:
+  source: null
+  watching: 300
+  core: 50
+  scan: 250
+  candidates: 400
+
+filters:
+  allowed_asset_classes: [equity, etf, crypto, fx, bond, index]
+  min_history_bars: 20
+  min_adv_usd: 50000
+  max_spread_bps: 50
+  max_data_age_sec: 900
+  min_order_notional_usd: 1
+
+factor_weights:
+  momentum: 0.20
+  mean_reversion: 0.10
+  liquidity: 0.15
+  correlation: 0.15
+  macro: 0.10
+  strategy_fit: 0.10
+  idiosyncratic: 0.20
+
+promotion:
+  conviction_threshold: 65
+  hold_time_min: 15
+  volume_z_threshold: 3.0
+  price_z_threshold: 3.0
+  correlation_break_z: 2.5
+  funding_opportunity_bps: 15.0
+  spread_divergence_bps: 8.0
+  promotion_ttl_minutes: 240
+
+demotion:
+  redundancy_threshold: 0.85
+
+rebuild:
+  interval_sec: 86400
+  last_duration_ms: 0
+
+correlation_cluster_threshold: 0.88
+cluster_max_symbols: 120
+
+persistence:
+  intelligence_json: data/runtime/universe_intelligence.json
+
+funnel_display:
+  drops_eligible:
+    - { reason: "Low liquidity (ADV)", count: 0 }
+    - { reason: "Asset class / region filter", count: 0 }
+    - { reason: "Stale or missing data", count: 0 }
+  drops_watching:
+    - { reason: "Capacity cap", count: 0 }
+    - { reason: "Correlation overlap (representative kept)", count: 0 }
+    - { reason: "Low opportunity score", count: 0 }

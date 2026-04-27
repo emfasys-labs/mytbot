@@ -52,6 +52,9 @@ from strategies.options_hedging import (
     OptionsHedgingConfig,
     ProtectivePutStrategy,
 )
+from execution.engine import ExecutionEngine
+from risk.engine import Signal
+from brokers.base import OrderSide
 
 
 # ── Black-Scholes ──────────────────────────────────────────────────────────
@@ -369,9 +372,67 @@ def test_covered_call_emits_when_underlying_held() -> None:
 # ── config ────────────────────────────────────────────────────────────────
 
 
-def test_default_yaml_ships_disabled() -> None:
+def test_default_yaml_ships_enabled_for_paper() -> None:
     raw = yaml.safe_load(Path("config/options_strategies.yaml").read_text(encoding="utf-8"))
-    assert (raw.get("options_directional") or {}).get("enabled") is False
-    assert (raw.get("options_hedging") or {}).get("enabled") is False
+    assert (raw.get("options_directional") or {}).get("enabled") is True
+    assert (raw.get("options_hedging") or {}).get("enabled") is True
     assert (raw.get("options_directional") or {}).get("paper_only") is True
     assert (raw.get("options_hedging") or {}).get("paper_only") is True
+
+
+# ── execution-boundary option direction ───────────────────────────────────
+
+
+def _option_signal(*, side: str, right: str, metadata: dict) -> Signal:
+    return Signal(
+        signal_id="sig-options-test",
+        symbol="SPY",
+        side=side,
+        strategy="options_test",
+        confidence=0.80,
+        suggested_quantity=Decimal("1"),
+        suggested_price=Decimal("2.50"),
+        broker="ibkr",
+        asset_class="option",
+        timestamp=_now().isoformat(),
+        metadata={
+            "instrument_type": "option",
+            "option_contract": {
+                "underlying_symbol": "SPY",
+                "expiry": "20260201",
+                "strike": "100",
+                "right": right,
+                "multiplier": 100,
+            },
+            **metadata,
+        },
+    )
+
+
+def test_execution_builds_long_call_as_buy_call() -> None:
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = eng._build_order(_option_signal(side="long", right="C", metadata={"options_buy_to_open": True}))
+    assert order.side is OrderSide.BUY
+    assert order.instrument_metadata["option_contract"]["right"] == "C"
+
+
+def test_execution_builds_long_put_as_buy_put_not_underlying_sell() -> None:
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = eng._build_order(_option_signal(side="short", right="P", metadata={"options_buy_to_open": True}))
+    assert order.side is OrderSide.BUY
+    assert order.instrument_metadata["option_contract"]["right"] == "P"
+    assert order.symbol == "SPY|20260201|P|100"
+
+
+def test_execution_builds_covered_call_as_sell_call() -> None:
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = eng._build_order(_option_signal(side="long", right="C", metadata={"options_sell_to_open": True}))
+    assert order.side is OrderSide.SELL
+    assert order.instrument_metadata["option_contract"]["right"] == "C"
+
+
+def test_execution_builds_protective_put_as_buy_put() -> None:
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = eng._build_order(_option_signal(side="long", right="P", metadata={"options_buy_to_open": True}))
+    assert order.side is OrderSide.BUY
+    assert order.instrument_metadata["option_contract"]["right"] == "P"

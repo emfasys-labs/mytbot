@@ -44,6 +44,7 @@ from models.schemas import (
     Task,
     TrainingDatasetSpec,
 )
+from governance.activation_gates import ActivationContext, evaluate_activation
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,7 @@ class ModelRegistry:
                     f"model {name}@{contract.version} status={status.value} "
                     f"is not approved for live mode (need paper/micro_live/live)"
                 )
+            self._require_activation_cleared(contract, target_status="live")
             return contract
 
         if m is Mode.PAPER:
@@ -174,6 +176,23 @@ class ModelRegistry:
             raise ValueError(f"duplicate registration: {contract.name}@{contract.version}")
         self._by_key[key] = _RegistryEntry(contract=contract)
         self._by_name.setdefault(contract.name, []).append(contract)
+
+    def _require_activation_cleared(
+        self,
+        contract: ModelContract,
+        *,
+        target_status: str,
+    ) -> None:
+        """Hard runtime enforcement for real-money model use."""
+        ctx = _activation_context_from_contract(contract, target_status=target_status)
+        verdict = evaluate_activation(ctx)
+        if verdict.cleared_for_activation:
+            return
+        failed = ", ".join(f"{g.gate.value}:{g.reason}" for g in verdict.failed_gates)
+        raise ModelNotApprovedError(
+            f"model {contract.name}@{contract.version} activation gates not cleared "
+            f"for {target_status}: {failed}"
+        )
 
 
 # ── YAML mapping ────────────────────────────────────────────────────────────
@@ -229,6 +248,78 @@ def _parse_ts(raw: object) -> datetime:
     if isinstance(raw, datetime):
         return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(str(raw)).astimezone(timezone.utc)
+
+
+def _activation_context_from_contract(
+    contract: ModelContract,
+    *,
+    target_status: str,
+) -> ActivationContext:
+    raw = dict((contract.metadata or {}).get("activation_gates") or {})
+
+    def _float_or_none(key: str):
+        value = raw.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _dt_or_none(key: str):
+        value = raw.get(key)
+        if value is None:
+            return None
+        try:
+            return _parse_ts(value)
+        except Exception:  # noqa: BLE001
+            return None
+
+    report_path = raw.get("validation_report_path")
+    return ActivationContext(
+        model_name=contract.name,
+        model_version=contract.version,
+        target_status=target_status,
+        feature_contract_hash=contract.feature_contract_hash,
+        feature_contract_frozen=bool(raw.get("feature_contract_frozen", False)),
+        registered_in_yaml=True,
+        registered_in_db=bool(raw.get("registered_in_db", False)),
+        registry_status=contract.approval_status.value,
+        validation_report_path=(Path(str(report_path)) if report_path else None),
+        validation_metric_value=_float_or_none("validation_metric_value"),
+        validation_metric_threshold=_float_or_none("validation_metric_threshold"),
+        validation_metric_name=(
+            str(raw.get("validation_metric_name"))
+            if raw.get("validation_metric_name") is not None
+            else None
+        ),
+        paper_soak_start=_dt_or_none("paper_soak_start"),
+        paper_soak_min_days=int(raw.get("paper_soak_min_days", 14) or 14),
+        paper_soak_anomalies=[str(x) for x in (raw.get("paper_soak_anomalies") or [])],
+        risk_rejection_review_signed_off=bool(
+            raw.get("risk_rejection_review_signed_off", False)
+        ),
+        risk_rejection_rate=_float_or_none("risk_rejection_rate"),
+        risk_rejection_rate_max=float(raw.get("risk_rejection_rate_max", 0.40) or 0.40),
+        realised_slippage_bps_p95=_float_or_none("realised_slippage_bps_p95"),
+        expected_slippage_bps=_float_or_none("expected_slippage_bps"),
+        slippage_tolerance_multiplier=float(
+            raw.get("slippage_tolerance_multiplier", 1.5) or 1.5
+        ),
+        rollback_documented=bool(raw.get("rollback_documented", False)),
+        rollback_test_passed=bool(raw.get("rollback_test_passed", False)),
+        config_flag_path=(
+            str(raw.get("config_flag_path"))
+            if raw.get("config_flag_path") is not None
+            else None
+        ),
+        config_flag_value=(
+            bool(raw.get("config_flag_value"))
+            if raw.get("config_flag_value") is not None
+            else None
+        ),
+        metadata={"source": "model_registry.yaml"},
+    )
 
 
 # ── convenience ─────────────────────────────────────────────────────────────

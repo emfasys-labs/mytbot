@@ -859,6 +859,12 @@ const STRATEGY_TITLE: Record<string, string> = {
   regime_rotation: 'Regime rotation',
   funding_rate_arbitrage: 'Funding rate arb',
   cross_exchange_arbitrage: 'Cross-exchange arb',
+  factor_sleeve: 'Factor sleeve',
+  stat_arb_pairs: 'Stat-arb pairs',
+  options_long_call: 'Options long call',
+  options_long_put: 'Options long put',
+  options_protective_put: 'Protective put',
+  options_covered_call: 'Covered call',
 };
 
 function strategyTitle(name: string): string {
@@ -890,7 +896,9 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
             const rosterIdle = mix
               ? mix.evaluated === 0
               : (!!s.idle || (s.weight === 0 && s.trades === 0));
-            const isArb = s.kind === 'arbitrage';
+            const kind = String(s.kind ?? 'signal');
+            const isArb = kind === 'arbitrage';
+            const kindLabel = kind === 'relative_value' ? 'relative value' : kind.replace(/_/g, ' ');
             const showSpark = trace != null || !rosterIdle;
             const synthSpark =
               !trace && !rosterIdle
@@ -922,7 +930,7 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                     }}
                   >{strategyTitle(s.name)}</span>
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    {isArb && <Pill tone="neutral">arbitrage</Pill>}
+                    {kind !== 'signal' && <Pill tone="neutral">{kindLabel}</Pill>}
                     {s.enabled === false && <Pill tone="loss">disabled</Pill>}
                     {mix ? (
                       <Pill tone={lifecycleTone}>{mix.lifecycleDisplay}</Pill>

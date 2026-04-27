@@ -2,7 +2,7 @@
 # ================================
 # Wave 12 — options strategy layer.
 #
-# Default state: DISABLED. Conservative scope per the plan:
+# Default state: ENABLED FOR PAPER. Conservative scope per the plan:
 #   - Long-only directional (long calls / long puts).
 #   - Protective puts (REQUIRES long stock position).
 #   - Covered calls (REQUIRES long stock position).
@@ -17,12 +17,12 @@
 #   1. Confirm the IBKR adapter has options entitlements
 #      (`scripts/smoke_ibkr_options.py`).
 #   2. Calibrate the IV surface via the operator's data feed.
-#   3. Set `options_directional.enabled: true` (paper_only) and watch
+#   3. Keep `options_directional.enabled: true` (paper_only) and watch
 #      the dashboard funnel.
 #   4. Promote to non-paper only after a paper-soak window.
 
 options_directional:
-  enabled: false
+  enabled: true
   paper_only: true
 
   # Premium-exposure caps (fractions of NAV).
@@ -48,7 +48,7 @@ options_directional:
 
 
 options_hedging:
-  enabled: false
+  enabled: true
   paper_only: true
 
   max_premium_pct_per_trade: 0.005

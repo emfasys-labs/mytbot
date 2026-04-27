@@ -289,9 +289,9 @@ def test_factor_sleeve_disabled_emits_nothing() -> None:
     assert scores.composite == {}
 
 
-def test_factor_sleeve_default_yaml_loads_disabled() -> None:
+def test_factor_sleeve_default_yaml_loads_enabled_for_paper() -> None:
     cfg = FactorSleeveConfig.load(Path("config/factor_sleeve.yaml"))
-    assert cfg.enabled is False
+    assert cfg.enabled is True
     # Make sure the blend parses without error.
     assert any(fam.name == "value" for fam in cfg.blend.families)
 

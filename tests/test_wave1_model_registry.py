@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -129,9 +130,45 @@ def test_require_for_mode_live_accepts_paper_micro_live_live() -> None:
     reg.register(_make_dummy_contract(version="0.2.0", status=ApprovalStatus.MICRO_LIVE))
     reg.register(_make_dummy_contract(version="0.3.0", status=ApprovalStatus.LIVE))
 
-    assert reg.require_for_mode("dummy_meta", Mode.LIVE, version="0.1.0").approval_status is ApprovalStatus.PAPER
-    assert reg.require_for_mode("dummy_meta", Mode.LIVE, version="0.2.0").approval_status is ApprovalStatus.MICRO_LIVE
-    assert reg.require_for_mode("dummy_meta", Mode.LIVE, version="0.3.0").approval_status is ApprovalStatus.LIVE
+    for version in ("0.1.0", "0.2.0", "0.3.0"):
+        with pytest.raises(ModelNotApprovedError, match="activation gates not cleared"):
+            reg.require_for_mode("dummy_meta", Mode.LIVE, version=version)
+
+
+def test_require_for_mode_live_requires_activation_gate_metadata(tmp_path: Path) -> None:
+    report = tmp_path / "validation.md"
+    report.write_text("# validation\n", encoding="utf-8")
+    contract = replace(
+        _make_dummy_contract(version="0.3.0", status=ApprovalStatus.LIVE),
+        metadata={
+            "activation_gates": {
+                "feature_contract_frozen": True,
+                "registered_in_db": True,
+                "validation_report_path": str(report),
+                "validation_metric_value": 0.65,
+                "validation_metric_threshold": 0.55,
+                "validation_metric_name": "hit_rate",
+                "paper_soak_start": (
+                    datetime.now(timezone.utc) - timedelta(days=20)
+                ).isoformat(),
+                "paper_soak_min_days": 14,
+                "paper_soak_anomalies": [],
+                "risk_rejection_review_signed_off": True,
+                "risk_rejection_rate": 0.10,
+                "risk_rejection_rate_max": 0.40,
+                "realised_slippage_bps_p95": 8.0,
+                "expected_slippage_bps": 10.0,
+                "slippage_tolerance_multiplier": 1.5,
+                "rollback_documented": True,
+                "rollback_test_passed": True,
+                "config_flag_path": "config/model_registry.yaml",
+                "config_flag_value": True,
+            }
+        },
+    )
+    reg = ModelRegistry([contract])
+
+    assert reg.require_for_mode("dummy_meta", Mode.LIVE, version="0.3.0") is contract
 
 
 def test_require_for_mode_paper_warns_on_research(caplog) -> None:
@@ -304,10 +341,13 @@ models:
     assert c.metadata == {"family": "meta_label"}
 
 
-def test_default_yaml_loads_empty_models_list() -> None:
-    # The shipping config/model_registry.yaml MUST be loadable and empty.
+def test_default_yaml_loads_registered_paper_meta_labeler() -> None:
+    # The shipping registry now contains the first paper-soak model.
     reg = ModelRegistry.load(Path("config/model_registry.yaml"))
-    assert reg.names() == []
+    assert reg.names() == ["mytbot_meta_labeler"]
+    c = reg.get("mytbot_meta_labeler", "0.1.0")
+    assert c.approval_status is ApprovalStatus.PAPER
+    assert c.feature_contract_hash == "8615c3cf26f8d684df3ebd90411af60039c380bd7ef154fd2b61be0cee1ab955"
 
 
 # ── 7. Calibration smoke ────────────────────────────────────────────────

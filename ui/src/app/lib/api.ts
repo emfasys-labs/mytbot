@@ -3,14 +3,21 @@ const CANDIDATE_PORTS = [8000, 8001, 8002, 8003, 8004];
 /** Default rows for `GET /positions` — must cover the full book; low limits slice alphabetically and skew weights. */
 export const POSITIONS_POLL_LIMIT = 200;
 
+/** Default FastAPI origin for `npm run dev` when `.env*` did not load `VITE_API_BASE`. */
+const DEV_DEFAULT_API_BASE = 'http://127.0.0.1:8000';
+
 /** Must be absolute `http(s)://host:port` — relative values break fetches (browser loads SPA HTML → JSON parse error). */
 function getSafeConfiguredBase(): string {
   const raw = (import.meta.env.VITE_API_BASE || '').trim();
-  if (!raw) return '';
   if (/^https?:\/\//i.test(raw)) return raw.replace(/\/$/, '');
-  console.warn(
-    `[api] VITE_API_BASE must be a full URL (e.g. http://127.0.0.1:8000). Ignoring invalid value: ${raw}`,
-  );
+  if (raw) {
+    console.warn(
+      `[api] VITE_API_BASE must be a full URL (e.g. http://127.0.0.1:8000). Ignoring invalid value: ${raw}`,
+    );
+  }
+  if (import.meta.env.DEV) {
+    return DEV_DEFAULT_API_BASE;
+  }
   return '';
 }
 
@@ -105,46 +112,110 @@ export function resetApiBaseCache(): void {
 
 let _resolvedBase: string | null = null;
 
+/** `/healthz` is exempt from `DASHBOARD_READ_TOKEN` — use for discovery so probing works before the banner token is pasted. */
+type HealthzPayload = { ok?: boolean; service?: string };
+
+function isMytbotHealthz(data: unknown): data is HealthzPayload {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as HealthzPayload;
+  return d.ok === true && d.service === 'api';
+}
+
+async function verifyMytbotApiBase(base: string): Promise<boolean> {
+  const root = base.replace(/\/$/, '');
+  try {
+    const r = await fetch(`${root}/healthz`, { signal: AbortSignal.timeout(2000) });
+    if (!r.ok) return false;
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (ct && !ct.includes('json')) return false;
+    const payload = await parseJsonBody<HealthzPayload>(r, '/healthz');
+    return isMytbotHealthz(payload);
+  } catch {
+    return false;
+  }
+}
+
 async function resolveApiBase(): Promise<string> {
   if (_resolvedBase) return _resolvedBase;
 
   const cfg = getSafeConfiguredBase();
-  if (cfg) {
+  if (cfg && (await verifyMytbotApiBase(cfg))) {
     _resolvedBase = cfg;
+    console.log(`[api] using configured API ${cfg} (healthz ok)`);
     return _resolvedBase;
   }
+  if (cfg) {
+    console.warn(`[api] ${cfg} is not responding as mytbot API — probing common ports`);
+  }
 
+  const hosts: string[] = [];
   const host = window.location.hostname || 'localhost';
+  hosts.push(host);
+  if (host !== '127.0.0.1') hosts.push('127.0.0.1');
+  if (host !== 'localhost') hosts.push('localhost');
+
   let firstReachable: string | null = null;
-  for (const port of CANDIDATE_PORTS) {
-    const candidate = `http://${host}:${port}`;
-    try {
-      const r = await fetch(`${candidate}/system/status`, {
-        signal: AbortSignal.timeout(1500),
-        headers: dashboardReadHeaders(),
-      });
-      if (!r.ok) continue;
-      if (!firstReachable) firstReachable = candidate;
-      const payload = await parseJsonBody<SystemStatusResponse>(r, '/system/status');
-      const ib = payload?.brokers?.ibkr;
-      const ibOk = !!(ib && ib.connected && ib.balance_ready !== false);
-      if (ibOk) {
-        _resolvedBase = candidate;
-        console.log(`[api] connected to ${candidate} (ibkr ready)`);
-        return _resolvedBase;
+  let ibkrPreferred: string | null = null;
+
+  for (const h of hosts) {
+    for (const port of CANDIDATE_PORTS) {
+      const candidate = `http://${h}:${port}`;
+      try {
+        const r = await fetch(`${candidate}/healthz`, { signal: AbortSignal.timeout(1500) });
+        if (!r.ok) continue;
+        const ct = (r.headers.get('content-type') || '').toLowerCase();
+        if (ct && !ct.includes('json')) continue;
+        let hz: HealthzPayload;
+        try {
+          hz = await parseJsonBody<HealthzPayload>(r, '/healthz');
+        } catch {
+          continue;
+        }
+        if (!isMytbotHealthz(hz)) continue;
+        if (!firstReachable) firstReachable = candidate;
+
+        try {
+          const sr = await fetch(`${candidate}/system/status`, {
+            signal: AbortSignal.timeout(1500),
+            headers: dashboardReadHeaders(),
+          });
+          if (sr.ok) {
+            const ct2 = (sr.headers.get('content-type') || '').toLowerCase();
+            if (!ct2 || ct2.includes('json')) {
+              try {
+                const sys = await parseJsonBody<SystemStatusResponse>(sr, '/system/status');
+                const ib = sys?.brokers?.ibkr;
+                if (ib && ib.connected && ib.balance_ready !== false) {
+                  ibkrPreferred = candidate;
+                }
+              } catch {
+                /* token may be required — healthz already validated API */
+              }
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        if (ibkrPreferred) {
+          _resolvedBase = ibkrPreferred;
+          console.log(`[api] connected to ${ibkrPreferred} (ibkr ready)`);
+          return _resolvedBase;
+        }
+      } catch {
+        /* try next */
       }
-    } catch {
-      /* port not reachable, try next */
     }
   }
+
   if (firstReachable) {
     _resolvedBase = firstReachable;
-    console.log(`[api] connected to ${firstReachable}`);
+    console.log(`[api] connected to ${firstReachable} (healthz)`);
     return _resolvedBase;
   }
 
-  _resolvedBase = `http://${host}:8000`;
-  console.warn('[api] no reachable API found — falling back to :8000');
+  const fallback = cfg || `http://${host}:8000`;
+  _resolvedBase = fallback;
+  console.warn(`[api] no healthz match — falling back to ${fallback}`);
   return _resolvedBase;
 }
 
@@ -374,6 +445,60 @@ export type DiscoveryAnomaliesResponse = {
     thesis_generated: boolean;
     signals_produced: number | null;
   }>;
+};
+
+export type UniverseFunnelStage = {
+  stage: string;
+  count: number;
+  fresh?: boolean;
+  drops?: Array<{ reason: string; count: number }> | null;
+};
+
+export type UniverseSymbolRow = {
+  sym: string;
+  klass: string;
+  stage: string;
+  conviction: number;
+  trend?: string;
+  sector?: string;
+  factors?: Record<string, number>;
+  spread?: number;
+  spark?: number[];
+  bookCorr?: number;
+  tierReason?: string | null;
+  pairWatch?: boolean;
+  override?: { kind?: string; reason?: string } | null;
+};
+
+export type IntelligenceUniverseResponse = {
+  enabled: boolean;
+  fallback?: string | null;
+  generated_at: string;
+  funnel: UniverseFunnelStage[];
+  symbols: UniverseSymbolRow[];
+  clusters: Array<{
+    id: number;
+    members: string[];
+    representative: string;
+    avg_abs_correlation: number;
+    member_count: number;
+  }>;
+  promotions: unknown[];
+  stream: Array<{
+    sym: string;
+    klass?: string;
+    why?: string;
+    conviction?: number;
+    trend?: string;
+    promotedAt?: number;
+    spark?: number[];
+    bookCorr?: number;
+    topFactors?: Array<[string, string]>;
+    relatedNews?: Array<{ source?: string; text?: string }>;
+  }>;
+  config_mirror: Record<string, unknown>;
+  build: Record<string, unknown>;
+  broker_totals?: Record<string, number>;
 };
 
 export type TradingMode = 'defender' | 'trader' | 'hunter';
@@ -617,6 +742,7 @@ export const api = {
   getDiscoverySummary: () => getJson<DiscoverySummaryResponse>('/discovery/summary'),
   getDiscoveryAnomalies: (limit = 8) => getJson<DiscoveryAnomaliesResponse>(`/discovery/anomalies?limit=${limit}`),
   getIntelligenceRegime: () => getJson<IntelligenceRegimeResponse>('/intelligence/regime'),
+  getIntelligenceUniverse: () => getJson<IntelligenceUniverseResponse>('/intelligence/universe'),
   getIntelligenceSignals: (limit = 8) => getJson<IntelligenceSignalsResponse>(`/intelligence/signals?limit=${limit}`),
   getDashboardSnapshot: () => getJson<DashboardSnapshot>('/dashboard/snapshot'),
   getRoutingQuality: () => getJson<RoutingQualityResponse>('/diagnostics/routing-quality'),

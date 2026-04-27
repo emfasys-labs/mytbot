@@ -695,7 +695,7 @@ export function mapOrdersToTradeLog(orders: ApiOrderRow[]) {
 /** Canonical roster matching `TradingLoop` + arbitrage stack (`config/strategies.yaml`). Used when the system is off or before the loop exposes `loaded_strategies`. */
 export const DEFAULT_STRATEGY_MIX_ROSTER: Array<{
   name: string;
-  kind: 'signal' | 'arbitrage';
+  kind: 'signal' | 'arbitrage' | 'factor' | 'relative_value' | 'options';
   enabled: boolean;
 }> = [
   { name: 'momentum_breakout', kind: 'signal', enabled: true },
@@ -707,7 +707,23 @@ export const DEFAULT_STRATEGY_MIX_ROSTER: Array<{
   { name: 'regime_rotation', kind: 'signal', enabled: true },
   { name: 'funding_rate_arbitrage', kind: 'arbitrage', enabled: true },
   { name: 'cross_exchange_arbitrage', kind: 'arbitrage', enabled: true },
+  { name: 'factor_sleeve', kind: 'factor', enabled: true },
+  { name: 'stat_arb_pairs', kind: 'relative_value', enabled: true },
+  { name: 'options_long_call', kind: 'options', enabled: true },
+  { name: 'options_long_put', kind: 'options', enabled: true },
+  { name: 'options_protective_put', kind: 'options', enabled: true },
+  { name: 'options_covered_call', kind: 'options', enabled: true },
 ];
+
+const INTERNAL_ALLOCATION_ACTIONS = new Set([
+  'global_edge_trim',
+  'trim_symbol',
+]);
+
+function isStrategyScreenEligible(name: string | null | undefined): boolean {
+  const key = String(name ?? '').trim();
+  return key.length > 0 && !INTERNAL_ALLOCATION_ACTIONS.has(key);
+}
 
 function _parseSigTs(iso: string | null | undefined): number {
   if (!iso) return 0;
@@ -750,6 +766,7 @@ export function mapStrategies(snapshot: DashboardSnapshot | null): Strategy[] {
   let grandTotal = 0;
   for (const o of opps) {
     const name = strategyFromRow(o);
+    if (!isStrategyScreenEligible(name)) continue;
     const score =
       typeof o.priority_score === 'number'
         ? o.priority_score
@@ -868,7 +885,7 @@ export function mergeStrategiesWithSignals(
     let total = 0;
     for (const r of rows) {
       const nameRaw = String(r.strategy ?? '').trim();
-      if (!nameRaw) continue;
+      if (!isStrategyScreenEligible(nameRaw)) continue;
       const conf = typeof r.confidence === 'number' && Number.isFinite(r.confidence)
         ? Math.max(0, Math.min(1, r.confidence))
         : 0;
@@ -899,7 +916,7 @@ export function mergeStrategiesWithSignals(
   // collapse to a single entry whenever the regime favours one strategy.
   for (const ls of loadedStrategies) {
     const name = (ls?.name ?? '').trim();
-    if (!name) continue;
+    if (!isStrategyScreenEligible(name)) continue;
     if (out.has(name)) {
       const prev = out.get(name)!;
       out.set(name, { ...prev, kind: ls.kind ?? prev.kind, enabled: ls.enabled });
@@ -937,12 +954,13 @@ export function mergeStrategiesWithSignals(
   if (mixResponse?.strategies?.length) {
     for (const row of mixResponse.strategies) {
       const n = (row.name ?? '').trim();
-      if (n) mixByName.set(n, row);
+      if (isStrategyScreenEligible(n)) mixByName.set(n, row);
     }
   }
   const mixApiOk = !!(mixResponse && !mixResponse.error && Array.isArray(mixResponse.strategies));
 
   return [...out.values()]
+    .filter((s) => isStrategyScreenEligible(s.name))
     .map((s) => {
       const sp = intelligenceSparkForStrategy(s.name, sigs);
       const hasTrace = sp.values.length >= 2;

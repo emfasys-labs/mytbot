@@ -32,6 +32,7 @@ from api.wave13_dashboard import (
 from system.funnel_telemetry import (
     FunnelTelemetry,
     get_default_funnel_telemetry,
+    record_strategy_candidate_rows,
     reset_default_funnel_telemetry,
 )
 
@@ -71,6 +72,22 @@ def test_funnel_default_singleton_reset() -> None:
     assert f.snapshot().to_dict()["aggregate"]["executed"] == 7
     reset_default_funnel_telemetry()
     assert f.snapshot().to_dict()["aggregate"]["executed"] == 0
+
+
+def test_strategy_candidate_rows_feed_funnel() -> None:
+    f = FunnelTelemetry()
+    record_strategy_candidate_rows(
+        [
+            {"strategy": "momentum", "status": "generated"},
+            {"strategy": "momentum", "status": "filtered_meta"},
+            {"strategy": "mean_reversion", "status": "no_setup"},
+        ],
+        funnel=f,
+    )
+    d = f.snapshot().to_dict()
+    assert d["aggregate"]["evaluated"] == 3
+    assert d["per_strategy"]["momentum"]["generated"] == 1
+    assert d["per_strategy"]["momentum"]["meta_label_blocked"] == 1
 
 
 # ── strategy-status classification ────────────────────────────────────────
@@ -144,12 +161,15 @@ def test_payload_strategy_coverage_reflects_yaml_state() -> None:
     payload = build_wave13_payload()
     coverage = payload["strategy_coverage"]
     families = {f["name"]: f for f in coverage["families"]}
-    # All shipping YAMLs default to disabled (verified in earlier wave tests).
-    assert families["trained_meta_labeler"]["enabled"] is False
-    assert families["factor_sleeve"]["enabled"] is False
-    assert families["stat_arb_pairs"]["enabled"] is False
-    assert families["options_directional"]["enabled"] is False
-    assert families["options_hedging"]["enabled"] is False
+    # Paper mode exercises all paper-safe advanced sleeves; live activation
+    # remains governed by paper_only flags and model/strategy gates.
+    assert families["trained_meta_labeler"]["enabled"] is True
+    assert families["factor_sleeve"]["enabled"] is True
+    assert families["stat_arb_pairs"]["enabled"] is True
+    assert families["options_directional"]["enabled"] is True
+    assert families["options_hedging"]["enabled"] is True
+    assert families["options_directional"]["paper_only"] is True
+    assert families["options_hedging"]["paper_only"] is True
 
 
 def test_payload_model_health_stale_warning_triggers() -> None:

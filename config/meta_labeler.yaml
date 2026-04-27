@@ -2,9 +2,8 @@
 # =========================
 # Wave 2 — trained meta-labeller runtime configuration.
 #
-# Default state: DISABLED. The trained_meta_labeler must remain off
-# until an operator has registered a model and soaked it through paper
-# mode per docs/MODEL_GOVERNANCE.md.
+# Current state: ENABLED for paper soak only with the registered
+# `mytbot_meta_labeler@0.1.0` baseline. It is not micro-live/live approved.
 #
 # Activation steps (manual, deliberate):
 #   1. Train an artefact:
@@ -18,30 +17,30 @@
 #      docs/MODEL_GOVERNANCE.md are satisfied.
 
 trained_meta_labeler:
-  enabled: false
-  model_name: null
-  model_version: null
+  enabled: true
+  model_name: mytbot_meta_labeler
+  model_version: 0.1.0
   # Path to the pickle artefact produced by `models.meta_label.train`.
   # If null, the loader falls back to <metadata.artifact_dir>/<name>-<version>.pkl
   # from the model_registry entry.
-  artifact_path: null
+  artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.1.0.pkl
   # Persist every prediction to model_predictions when True (recommended).
   write_predictions: true
 
   # Per-mode / per-regime probability thresholds. See
   # models/meta_label/thresholds.py for resolution precedence.
   thresholds:
-    default: 0.55
+    default: 0.42
     by_mode:
-      defender: 0.62
-      trader: 0.55
-      hunter: 0.50
+      defender: 0.45
+      trader: 0.42
+      hunter: 0.40
     by_regime:
-      crash: 0.70
-      volatile: 0.60
-      trend: 0.52
-      range: 0.55
+      crash: 0.60
+      volatile: 0.45
+      trend: 0.40
+      range: 0.42
     # Combined keys, e.g. "hunter.crash" overrides both "hunter" and "crash".
     by_mode_regime:
-      hunter.crash: 0.65
-      defender.volatile: 0.66
+      hunter.crash: 0.50
+      defender.volatile: 0.50

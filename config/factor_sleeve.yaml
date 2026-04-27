@@ -2,7 +2,7 @@
 # ==========================
 # Wave 3 — cross-sectional factor sleeve.
 #
-# Default state: DISABLED. The sleeve is paper-only research code until
+# Default state: ENABLED FOR PAPER. The sleeve remains paper-only research code until
 # the operator validates factor exposure attribution and confirms the
 # universe data pipeline is populating both `data/factor_features.py`
 # (price-based) and `data/fundamental_features.py` (where available).
@@ -10,12 +10,12 @@
 # Activation steps:
 #   1. Build a daily-cadence universe snapshot (close prices + optional
 #      fundamentals dict) per symbol.
-#   2. Set `factor_sleeve.enabled: true` here and run paper for 2-4 weeks.
+#   2. Keep `factor_sleeve.enabled: true` here and run paper for 2-4 weeks.
 #   3. Inspect the per-family breakdown via `scripts/evaluate_factor_sleeve.py`
 #      before promoting to micro_live.
 
 factor_sleeve:
-  enabled: false
+  enabled: true
   long_top_n: 10
   short_bottom_n: 0          # 0 ⇒ long-only sleeve
   neutralise_by_asset_class: true

@@ -35,6 +35,7 @@ const NAV: NavItem[] = [
   { id: 'book',    label: 'Book',       icon: I.wallet },
   { id: 'risk',    label: 'Risk',       icon: I.shield },
   { id: 'strat',   label: 'Strategies', icon: I.brain },
+  { id: 'universe', label: 'Universe',  icon: I.universe },
   { id: 'log',     label: 'Trade log',  icon: I.log },
 ];
 
@@ -373,6 +374,7 @@ const CMD_ITEMS: CmdItem[] = [
   { id: 'book',        label: 'Go to Book',       hint: 'positions',      kind: 'nav',    route: 'book' },
   { id: 'risk',        label: 'Go to Risk',       hint: 'approvals',      kind: 'nav',    route: 'risk' },
   { id: 'strat',       label: 'Go to Strategies', hint: 'performance',    kind: 'nav',    route: 'strat' },
+  { id: 'universe',    label: 'Go to Universe',   hint: 'tiers · funnel', kind: 'nav',    route: 'universe' },
   { id: 'log',         label: 'Go to Trade log',  hint: 'events',         kind: 'nav',    route: 'log' },
   { id: 'start',       label: 'Start system',     hint: 'api /system/start', kind: 'action', action: 'start' },
   { id: 'stop',        label: 'Stop system',      hint: 'api /system/stop',  kind: 'action', action: 'stop' },

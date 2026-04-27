@@ -165,3 +165,43 @@ def get_default_funnel_telemetry() -> FunnelTelemetry:
 def reset_default_funnel_telemetry() -> None:
     """Test helper."""
     _default.reset()
+
+
+def record_strategy_candidate_rows(
+    rows: list[dict],
+    *,
+    funnel: Optional[FunnelTelemetry] = None,
+) -> None:
+    """
+    Bridge ``strategy_candidate_log`` rows into the Wave 13 funnel.
+
+    The trading loop already records the strategy lifecycle in these row dicts.
+    This helper keeps the dashboard counters aligned with that existing runtime
+    source instead of adding a parallel per-strategy instrumentation path.
+    """
+    if not rows:
+        return
+    f = funnel or get_default_funnel_telemetry()
+    evaluated_statuses = {
+        "no_setup",
+        "skipped",
+        "filtered_regime",
+        "filtered_signal_engine",
+        "filtered_meta",
+        "lost_to_strategy",
+        "generated",
+        "batched",
+    }
+    for r in rows:
+        strategy = str(r.get("strategy") or "unknown").strip() or "unknown"
+        status = str(r.get("status") or "").strip().lower()
+        if status in evaluated_statuses:
+            f.record_evaluated(strategy)
+        if status in {"generated", "batched"}:
+            f.record_generated(strategy)
+        elif status == "filtered_meta":
+            f.record_meta_label_blocked(strategy)
+        elif status == "filtered_signal_engine":
+            reason = str(r.get("reason") or "").lower()
+            if "forecast" in reason:
+                f.record_forecast_blocked(strategy)

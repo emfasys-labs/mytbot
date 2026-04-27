@@ -2,8 +2,8 @@
 # ===========================
 # Wave 5 — research-grade statistical-arbitrage pairs strategy.
 #
-# Default state: DISABLED. The existing heuristic in
-# strategies/pairs_trading.py remains the live pairs path until the
+# Default state: ENABLED FOR PAPER. The existing heuristic in
+# strategies/pairs_trading.py remains the production-proven pairs path until the
 # operator validates the Wave 5 module via scripts/discover_pairs.py
 # and scripts/evaluate_pairs.py.
 #
@@ -13,11 +13,11 @@
 #   2. Calibrate `round_trip_cost_bps` against actual fill telemetry.
 #   3. Run `scripts/evaluate_pairs.py` to estimate IS / OOS half-lives
 #      and net P&L after costs.
-#   4. Set `stat_arb_pairs.enabled: true` and let it emit
+#   4. Keep `stat_arb_pairs.enabled: true` and let it emit paper
 #      ``LinkedOpportunity`` candidates.
 
 stat_arb_pairs:
-  enabled: false
+  enabled: true
 
   # Hedge ratio: Kalman (time-varying) vs OLS (static).
   # Kalman is recommended for non-stationary regimes (FX, crypto).

@@ -340,7 +340,7 @@ def test_reset_factor_sleeve_cache_clears_loaded_value() -> None:
     # Load to populate.
     from signals.opportunity_engine import _get_default_factor_sleeve_config
     _ = _get_default_factor_sleeve_config()
-    # Reset and verify next load returns the disabled YAML default.
+    # Reset and verify next load returns the paper-enabled YAML default.
     reset_factor_sleeve_cache()
     cfg = _get_default_factor_sleeve_config()
-    assert cfg is None or cfg.enabled is False
+    assert cfg is None or cfg.enabled is True

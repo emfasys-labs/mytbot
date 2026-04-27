@@ -1,11 +1,16 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 
 const BUILD_ID = String(Date.now())
+const UI_ROOT = path.resolve(__dirname)
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, UI_ROOT, '')
+  const viteApiBase = (env.VITE_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '')
+
+  return {
   plugins: [
     // The React and Tailwind plugins are both required for Make, even if
     // Tailwind is not being actively used – do not remove them
@@ -25,8 +30,11 @@ export default defineConfig({
   // Inject a build id so every build emits a distinct chunk hash — prevents
   // browsers from serving a stale bundle when the content-hash happens to
   // collide across builds with the same entry graph.
+  envDir: UI_ROOT,
   define: {
     __MYTBOT_BUILD_ID__: JSON.stringify(BUILD_ID),
+    // Baked-in default matches `python run.py` / uvicorn so Vite dev never hits :5173 as “API”.
+    'import.meta.env.VITE_API_BASE': JSON.stringify(viteApiBase),
   },
 
   server: {
@@ -45,4 +53,5 @@ export default defineConfig({
       },
     },
   },
+  }
 })

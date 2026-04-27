@@ -30,7 +30,56 @@
 #       row_count: int (optional)
 #       metadata: {}
 #
-# Wave 1 ships an empty list. Wave 2 lands the first real entry
-# (trained meta-labeller).
+# First paper candidate is registered below. Do not promote it beyond paper
+# until paper-soak reports and activation evidence are complete.
 
-models: []
+models:
+  - name: mytbot_meta_labeler
+    version: 0.1.0
+    task: classification
+    target: triple_barrier_profit_before_stop
+    horizon_seconds: null
+    horizon_bars: 10
+    feature_contract_hash: 8615c3cf26f8d684df3ebd90411af60039c380bd7ef154fd2b61be0cee1ab955
+    validation_method: purged_kfold_embargo
+    calibration_method: platt
+    min_sample_size: 200
+    approval_status: paper
+    notes: Initial paper-only logistic meta-label baseline; not live-approved.
+    metadata:
+      artifact_dir: artifacts/models/meta_label
+      artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.1.0.pkl
+      dataset_manifest: data/research/meta_label/20260427_meta_label_v0_1_0/manifest.json
+      paper_candidate: true
+      activation_gates:
+        feature_contract_frozen: true
+        registered_in_db: true
+        validation_report_path: reports/models/mytbot_meta_labeler/0.1.0/validation.md
+        validation_metric_value: 0.46498516668425555
+        validation_metric_threshold: 0.45
+        validation_metric_name: hit_rate@thr_mean
+        paper_soak_start: "2026-04-27T16:06:54+00:00"
+        paper_soak_min_days: 14
+        paper_soak_anomalies: []
+        risk_rejection_review_signed_off: false
+        risk_rejection_rate: null
+        risk_rejection_rate_max: 0.40
+        realised_slippage_bps_p95: null
+        expected_slippage_bps: null
+        slippage_tolerance_multiplier: 1.5
+        rollback_documented: true
+        rollback_test_passed: false
+        config_flag_path: config/meta_labeler.yaml:trained_meta_labeler.enabled
+        config_flag_value: true
+    training_dataset:
+      name: meta_label_signals_1h
+      version: "20260427"
+      start_ts: "2026-04-20T18:18:55+00:00"
+      end_ts: "2026-04-27T16:03:08+00:00"
+      feature_contract_hash: 8615c3cf26f8d684df3ebd90411af60039c380bd7ef154fd2b61be0cee1ab955
+      row_count: 3679
+      metadata:
+        timeframe: 1h
+        horizon_bars: 10
+        pt_mult: 2.0
+        sl_mult: 1.5

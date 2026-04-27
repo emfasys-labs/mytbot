@@ -1047,6 +1047,25 @@ async def get_discovery_summary(session_factory=Depends(_session_factory)):
     }
 
 
+@app.get("/intelligence/universe")
+async def get_intelligence_universe(response: Response):
+    """Universe Intelligence snapshot for the dashboard (tiers, funnel, clusters)."""
+    from universe.snapshot_service import build_universe_snapshot_dict
+
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch else None
+    broker_total: dict[str, int] = {}
+    if bm is not None:
+        for name, adapter in bm.adapters.items():
+            try:
+                syms = await asyncio.wait_for(adapter.get_supported_symbols(), timeout=5)
+                broker_total[name] = len(syms or [])
+            except Exception:  # noqa: BLE001
+                broker_total[name] = 0
+    return build_universe_snapshot_dict(broker_symbol_totals=broker_total)
+
+
 @app.get("/intelligence/regime")
 async def get_intelligence_regime(
     response: Response,

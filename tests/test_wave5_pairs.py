@@ -310,7 +310,7 @@ def test_stat_arb_config_from_dict_round_trips_linkage_policy() -> None:
     assert cfg.linkage_policy is LinkagePolicy.FLATTEN_BOTH
 
 
-def test_stat_arb_default_yaml_loads_disabled() -> None:
+def test_stat_arb_default_yaml_loads_enabled_for_paper() -> None:
     cfg = StatArbPairsConfig.load(Path("config/pairs_trading.yaml"))
-    assert cfg.enabled is False
+    assert cfg.enabled is True
     assert cfg.linkage_policy is LinkagePolicy.CANCEL_SIBLING
