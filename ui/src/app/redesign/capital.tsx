@@ -31,7 +31,10 @@
  *
  * Wiring
  * ──────
- *   <CapitalPanel live={live} accent={accentColor} />
+ *   <CapitalPanel live={live} accent={accentColor} systemState={state} />
+ *
+ * When ``systemState === 'off'``, the gauge is non-interactive and hides
+ * percentages until the operator starts the system.
  */
 
 import {
@@ -45,7 +48,7 @@ import {
   useState,
 } from 'react';
 import { Card, Label } from './primitives';
-import { CURRENCY_SYMBOL, TOKENS } from './tokens';
+import { CURRENCY_SYMBOL, SystemState, TOKENS } from './tokens';
 import { capitalAtWork } from './mapping';
 import type { LiveData } from './useLiveSystem';
 import type { Position } from './data';
@@ -113,10 +116,13 @@ function computeTrim(
 export interface CapitalPanelProps {
   live: LiveData;
   accent: string;
+  /** When `off`, the slider is read-only and percentages are hidden. */
+  systemState?: SystemState;
   style?: CSSProperties;
 }
 
-export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
+export function CapitalPanel({ live, accent, systemState = 'running', style }: CapitalPanelProps) {
+  const interactive = systemState !== 'off';
   const nav = live.nav;
   const ceilingPct = live.capitalPct;
   // Gauge the slider against **capital at work** — positions + pending
@@ -141,6 +147,16 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
   const [protectedSyms, setProtectedSyms] = useState<Set<string>>(new Set());
   const [reviewing, setReviewing] = useState(false);
   const crossedRef = useRef(false);
+
+  useEffect(() => {
+    if (interactive) return;
+    setDragging(false);
+    setStagedPct(null);
+    setReviewing(false);
+    setProtectedSyms(new Set());
+    setDragPct(ceilingPct);
+    crossedRef.current = false;
+  }, [interactive, ceilingPct]);
 
   // If the ceiling changes under us (e.g. WS tick from another client) while
   // we're idle, follow it. During a drag or a staged trim we leave the
@@ -193,6 +209,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
 
   const startDrag = useCallback(
     (e: RPointerEvent<HTMLDivElement>) => {
+      if (!interactive) return;
       e.preventDefault();
       setDragging(true);
       setStagedPct(null);
@@ -221,7 +238,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
-    [readPointerPct, workingPct, commitCeiling],
+    [interactive, readPointerPct, workingPct, commitCeiling],
   );
 
   const cancelStage = useCallback(() => {
@@ -274,13 +291,28 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
           marginBottom: 16,
         }}
       >
-        <Label>Capital allocation</Label>
-        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-          ceiling · at work · free
+        <Label style={{ color: interactive ? undefined : TOKENS.ink3 }}>Capital allocation</Label>
+        <span
+          style={{
+            fontFamily: TOKENS.mono,
+            fontSize: 10,
+            color: interactive ? TOKENS.ink3 : TOKENS.ink4,
+          }}
+        >
+          {interactive ? 'ceiling · at work · free' : 'idle'}
         </span>
       </div>
 
-      <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+      <div
+        style={{
+          display: 'flex',
+          gap: 24,
+          alignItems: 'flex-start',
+          opacity: interactive ? 1 : 0.42,
+          filter: interactive ? 'none' : 'grayscale(1)',
+          transition: `opacity 220ms ${TOKENS.ease}, filter 220ms ${TOKENS.ease}`,
+        }}
+      >
         {/* Scale */}
         <div
           style={{
@@ -299,11 +331,11 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
                 position: 'absolute',
                 right: 0,
                 top: (1 - p) * height - 6,
-                color: TOKENS.ink3,
+                color: interactive ? TOKENS.ink3 : TOKENS.ink4,
                 textAlign: 'right',
               }}
             >
-              {(p * 100).toFixed(0)}%
+              {interactive ? `${(p * 100).toFixed(0)}%` : '—'}
             </div>
           ))}
         </div>
@@ -312,7 +344,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
         <div style={{ position: 'relative', paddingRight: 140 }}>
           <div
             ref={trackRef}
-            onPointerDown={startDrag}
+            onPointerDown={interactive ? startDrag : undefined}
             style={{
               position: 'relative',
               width: 32,
@@ -320,12 +352,13 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               borderRadius: 10,
               background: TOKENS.bg2,
               border: `1px solid ${TOKENS.line}`,
-              cursor: dragging ? 'grabbing' : 'grab',
-              touchAction: 'none',
+              cursor: interactive ? (dragging ? 'grabbing' : 'grab') : 'not-allowed',
+              touchAction: interactive ? 'none' : 'auto',
+              pointerEvents: interactive ? 'auto' : 'none',
             }}
           >
             {/* deployed fill (dim) */}
-            {workingPct > 0 && (
+            {interactive && workingPct > 0 && (
               <div
                 style={{
                   position: 'absolute',
@@ -341,7 +374,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             )}
 
             {/* ceiling headroom fill */}
-            {shownPct > workingPct && (
+            {interactive && shownPct > workingPct && (
               <div
                 style={{
                   position: 'absolute',
@@ -356,7 +389,7 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             )}
 
             {/* release zone (below deployed) */}
-            {shownPct < workingPct && (
+            {interactive && shownPct < workingPct && (
               <div
                 style={{
                   position: 'absolute',
@@ -377,67 +410,73 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
             )}
 
             {/* deployed landmark line */}
-            <div
-              style={{
-                position: 'absolute',
-                left: -6,
-                right: -6,
-                top: workingY - 0.5,
-                height: 1,
-                background: TOKENS.ink1,
-                pointerEvents: 'none',
-                animation: flashTick ? 'ds-tick-flash 400ms ease' : 'none',
-              }}
-            />
-            <div
-              style={{
-                position: 'absolute',
-                left: 44,
-                top: workingY - 9,
-                fontFamily: TOKENS.mono,
-                fontSize: 10,
-                color: TOKENS.ink2,
-                whiteSpace: 'nowrap',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-              }}
-            >
-              <span style={{ width: 14, height: 1, background: TOKENS.ink2 }} />
-              at work · {(workingRatio * 100).toFixed(1)}%
-            </div>
+            {interactive && (
+              <>
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: -6,
+                    right: -6,
+                    top: workingY - 0.5,
+                    height: 1,
+                    background: TOKENS.ink1,
+                    pointerEvents: 'none',
+                    animation: flashTick ? 'ds-tick-flash 400ms ease' : 'none',
+                  }}
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 44,
+                    top: workingY - 9,
+                    fontFamily: TOKENS.mono,
+                    fontSize: 10,
+                    color: TOKENS.ink2,
+                    whiteSpace: 'nowrap',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <span style={{ width: 14, height: 1, background: TOKENS.ink2 }} />
+                  at work · {(workingRatio * 100).toFixed(1)}%
+                </div>
+              </>
+            )}
 
             {/* thumb */}
-            <div
-              style={{
-                position: 'absolute',
-                left: -16,
-                top: thumbY - 14,
-                width: 64,
-                height: 28,
-                borderRadius: 6,
-                background: TOKENS.ink0,
-                color: TOKENS.bg0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontFamily: TOKENS.mono,
-                fontSize: 12,
-                fontWeight: 500,
-                boxShadow: `0 6px 14px rgba(0,0,0,0.5), 0 0 0 1px ${zoneColor}55`,
-                cursor: dragging ? 'grabbing' : 'grab',
-                transition: dragging
-                  ? 'none'
-                  : `top 300ms ${TOKENS.ease}, box-shadow 300ms ${TOKENS.ease}`,
-                animation: isFlatten ? 'ds-danger-pulse 1.2s ease-in-out infinite' : 'none',
-                userSelect: 'none',
-              }}
-            >
-              {(shownPct * 100).toFixed(0)}%
-            </div>
+            {interactive && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: -16,
+                  top: thumbY - 14,
+                  width: 64,
+                  height: 28,
+                  borderRadius: 6,
+                  background: TOKENS.ink0,
+                  color: TOKENS.bg0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontFamily: TOKENS.mono,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  boxShadow: `0 6px 14px rgba(0,0,0,0.5), 0 0 0 1px ${zoneColor}55`,
+                  cursor: dragging ? 'grabbing' : 'grab',
+                  transition: dragging
+                    ? 'none'
+                    : `top 300ms ${TOKENS.ease}, box-shadow 300ms ${TOKENS.ease}`,
+                  animation: isFlatten ? 'ds-danger-pulse 1.2s ease-in-out infinite' : 'none',
+                  userSelect: 'none',
+                }}
+              >
+                {(shownPct * 100).toFixed(0)}%
+              </div>
+            )}
 
             {/* staged ghost bar */}
-            {stagedPct != null && (
+            {interactive && stagedPct != null && (
               <div
                 style={{
                   position: 'absolute',
@@ -452,24 +491,13 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               />
             )}
           </div>
-
-          <div
-            style={{
-              position: 'absolute',
-              left: 44,
-              bottom: -2,
-              fontFamily: TOKENS.mono,
-              fontSize: 10,
-              color: TOKENS.ink3,
-            }}
-          >
-            flatten all
-          </div>
         </div>
 
         {/* Info / action panel */}
         <div style={{ flex: 1, minWidth: 280 }}>
-          {stagedPct == null ? (
+          {!interactive ? (
+            <CapitalOffIdle />
+          ) : stagedPct == null ? (
             <IdleInfo
               ceilingPct={ceilingPct}
               shownPct={shownPct}
@@ -508,6 +536,39 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
 }
 
 // ────────────────────────── sub-panels ────────────────────────────────
+function CapitalOffIdle() {
+  return (
+    <div style={{ animation: `ds-fade-in 200ms ${TOKENS.ease}` }}>
+      <div
+        style={{
+          fontFamily: TOKENS.sans,
+          fontSize: 14,
+          fontWeight: 400,
+          color: TOKENS.ink2,
+          lineHeight: 1.55,
+          maxWidth: 420,
+        }}
+      >
+        Allocation controls stay idle while the system is off. Press{' '}
+        <span style={{ color: TOKENS.ink0, fontWeight: 500 }}>Start</span> to load the book and set
+        your deployment ceiling.
+      </div>
+      <div
+        style={{
+          marginTop: 14,
+          fontFamily: TOKENS.mono,
+          fontSize: 10,
+          color: TOKENS.ink4,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+        }}
+      >
+        Slider locked · no preview
+      </div>
+    </div>
+  );
+}
+
 function IdleInfo({
   ceilingPct,
   shownPct,

@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from brokers.base import Balance
-from system.portfolio_equity import live_portfolio_value
+from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
 
 
 class _StubAdapter:
@@ -26,6 +26,18 @@ class _StubAdapter:
 
     async def get_balance(self) -> list[Balance]:
         return list(self._balances)
+
+
+class _FlakyAdapter:
+    def __init__(self, first: list[Balance]) -> None:
+        self._first = first
+        self._calls = 0
+
+    async def get_balance(self) -> list[Balance]:
+        self._calls += 1
+        if self._calls == 1:
+            return list(self._first)
+        raise RuntimeError("temporary balance miss")
 
 
 class _StubReport:
@@ -130,8 +142,32 @@ async def test_empty_or_zero_balances_are_skipped() -> None:
     empty = _StubAdapter([])
     zero = _StubAdapter([_bal("USD", "0")])
     ok = _StubAdapter([_bal("BASE", "100000")])
-    bm = _StubBrokerManager({"kraken": empty, "binance": zero, "ibkr": ok})
+    bm = _StubBrokerManager({"kraken": empty, "binance": zero, "ibkr": ok}, included=["ibkr"])
     assert await live_portfolio_value(bm) == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_empty_included_non_ibkr_balance_counts_as_complete_zero() -> None:
+    bybit = _StubAdapter([])
+    ibkr = _StubAdapter([_bal("BASE", "100000")])
+    bm = _StubBrokerManager({"bybit": bybit, "ibkr": ibkr}, included=["bybit", "ibkr"])
+
+    snap = await live_portfolio_snapshot(bm)
+    assert snap.complete is True
+    assert snap.missing == tuple()
+    assert snap.value == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_empty_included_ibkr_balance_suppresses_partial_nav() -> None:
+    bybit = _StubAdapter([_bal("USDT", "5000")])
+    ibkr = _StubAdapter([])
+    bm = _StubBrokerManager({"bybit": bybit, "ibkr": ibkr}, included=["bybit", "ibkr"])
+
+    snap = await live_portfolio_snapshot(bm)
+    assert snap.complete is False
+    assert snap.missing == ("ibkr",)
+    assert snap.value == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -141,8 +177,48 @@ async def test_adapter_exception_does_not_abort_aggregation() -> None:
             raise RuntimeError("boom")
 
     ok = _StubAdapter([_bal("BASE", "100000")])
-    bm = _StubBrokerManager({"kraken": _Broken(), "ibkr": ok})  # type: ignore[dict-item]
+    bm = _StubBrokerManager({"kraken": _Broken(), "ibkr": ok}, included=["ibkr"])  # type: ignore[dict-item]
     assert await live_portfolio_value(bm) == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_included_adapter_exception_without_cache_suppresses_partial_nav() -> None:
+    class _Broken:
+        async def get_balance(self) -> list[Balance]:
+            raise RuntimeError("boom")
+
+    ok = _StubAdapter([_bal("BASE", "100000")])
+    bm = _StubBrokerManager({"kraken": _Broken(), "ibkr": ok}, included=["kraken", "ibkr"])  # type: ignore[dict-item]
+    snap = await live_portfolio_snapshot(bm)
+    assert snap.value == Decimal("0")
+    assert snap.complete is False
+    assert snap.missing == ("kraken",)
+    assert await live_portfolio_value(bm) == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_cached_adapter_value_prevents_transient_partial_nav(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A temporary balance miss from an included broker should not publish a partial NAV."""
+    monkeypatch.setenv("LIVE_PORTFOLIO_VALUE_CACHE_TTL_SEC", "60")
+    ibkr = _FlakyAdapter([_bal("BASE", "1000000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    bm = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca}, included=["ibkr", "alpaca"])
+
+    assert await live_portfolio_value(bm) == Decimal("1050000")
+    assert await live_portfolio_value(bm) == Decimal("1050000")
+
+
+@pytest.mark.asyncio
+async def test_cached_adapter_value_respects_current_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cached values are only used while the broker is still part of live NAV coverage."""
+    monkeypatch.setenv("LIVE_PORTFOLIO_VALUE_CACHE_TTL_SEC", "60")
+    ibkr = _FlakyAdapter([_bal("BASE", "1000000")])
+    alpaca = _StubAdapter([_bal("USD", "50000")])
+    bm = _StubBrokerManager({"ibkr": ibkr, "alpaca": alpaca}, included=["ibkr", "alpaca"])
+
+    assert await live_portfolio_value(bm) == Decimal("1050000")
+    bm.report = _StubReport(["alpaca"])
+    assert await live_portfolio_value(bm) == Decimal("50000")
 
 
 @pytest.mark.asyncio

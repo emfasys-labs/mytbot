@@ -39,7 +39,7 @@ from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from control.command_bus import CommandBus
 from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
-from system.portfolio_equity import live_portfolio_value
+from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
@@ -1344,6 +1344,29 @@ async def _live_portfolio_value() -> Decimal:
     return await live_portfolio_value(bm)
 
 
+async def _live_portfolio_nav_status() -> dict[str, Any]:
+    orch = _get_orchestrator()
+    if orch is None:
+        return {"complete": False, "included": [], "missing": []}
+    bm = getattr(orch, "_broker_manager", None)
+    if bm is None:
+        return {"complete": False, "included": [], "missing": []}
+    snap = await live_portfolio_snapshot(bm)
+    return {
+        "complete": bool(snap.complete),
+        "included": list(snap.included),
+        "missing": list(snap.missing),
+    }
+
+
+def _nav_status_from_snapshot(snap: Any) -> dict[str, Any]:
+    return {
+        "complete": bool(getattr(snap, "complete", False)),
+        "included": list(getattr(snap, "included", ()) or ()),
+        "missing": list(getattr(snap, "missing", ()) or ()),
+    }
+
+
 def _configured_paper_nav() -> Decimal:
     """Fallback total equity when no broker balances and no DB snapshot."""
     orch = _get_orchestrator()
@@ -1404,7 +1427,11 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     # persisted NAV. Prevents the UI from dropping back to ``PORTFOLIO_VALUE``
     # (100k default) when brokers are slow to report balances post-restart.
     last_persisted_value = pv_vals[-1] if pv_vals else Decimal(0)
-    live_value = await _live_portfolio_value()
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch is not None else None
+    live_snap = await live_portfolio_snapshot(bm) if bm is not None else None
+    nav_status = _nav_status_from_snapshot(live_snap) if live_snap is not None else {"complete": False, "included": [], "missing": []}
+    live_value = live_snap.value if live_snap is not None else Decimal(0)
     configured_nav = _configured_paper_nav()
     # When brokers report a positive live sum, that figure wins — do not `max` with
     # `daily_pnl` or older persisted rows that were written while an excluded/buggy
@@ -1450,6 +1477,7 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             "portfolio_value": _decimal_str(display_value),
             "tradable_capital": _decimal_str(tradable_value),
             "capital_allocation_pct": cap_pct,
+            "nav_status": nav_status,
         },
         "all_time": {
             "realised": _decimal_str(agg[0]),

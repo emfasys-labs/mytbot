@@ -404,19 +404,6 @@ export function CapitalPanel({ live, accent, style }: CapitalPanelProps) {
               />
             )}
           </div>
-
-          <div
-            style={{
-              position: 'absolute',
-              left: 44,
-              bottom: -2,
-              fontFamily: TOKENS.mono,
-              fontSize: 10,
-              color: TOKENS.ink3,
-            }}
-          >
-            flatten all
-          </div>
         </div>
 
         {/* Info / action panel */}

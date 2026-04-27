@@ -304,10 +304,15 @@ function NewsFooterTicker({
 }) {
   const [x, setX] = useState(0);
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '-', s: 0 as const }];
+  const newsSignature = useMemo(
+    () => rows.map((n) => `${n.src}\u001f${n.text}\u001f${n.s}`).join('\u001e'),
+    [rows],
+  );
 
   useEffect(() => {
     setX(0);
-  }, [news]);
+  }, [newsSignature]);
 
   useEffect(() => {
     if (paused || news.length === 0) return;
@@ -330,9 +335,8 @@ function NewsFooterTicker({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [news, paused]);
+  }, [newsSignature, news.length, paused]);
 
-  const rows = news.length > 0 ? news : [{ text: 'Awaiting news feed...', src: 'system', age: '-', s: 0 as const }];
   const doubled = [...rows, ...rows];
 
   return (

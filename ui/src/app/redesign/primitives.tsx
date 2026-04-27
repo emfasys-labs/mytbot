@@ -24,6 +24,7 @@ export function Glyph({
   const color =
     state === 'running' ? accent :
     state === 'starting' ? TOKENS.caution :
+    state === 'stopping' ? TOKENS.caution :
     state === 'paused' ? TOKENS.caution :
     state === 'error' ? danger : off;
   const glow = state === 'running' || state === 'error' ? color : 'transparent';
@@ -41,7 +42,7 @@ export function Glyph({
         background: glow, filter: `blur(${Math.round(size * 0.6)}px)`, opacity: 0.5,
         animation: pulse,
       }} />
-      {state === 'starting' ? (
+      {state === 'starting' || state === 'stopping' ? (
         <svg
           width={size} height={size} viewBox="0 0 10 10"
           style={{ position: 'relative', animation: 'ds-spin 1.2s linear infinite' }}

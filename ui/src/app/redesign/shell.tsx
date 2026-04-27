@@ -141,11 +141,13 @@ export function TopBar({
           const displayState: SystemState = armed ? 'paused' : state;
           const label =
             displayState === 'starting' ? 'warming up' :
+            displayState === 'stopping' ? 'shutting down' :
             displayState;
           const color =
             displayState === 'running'  ? accent :
             displayState === 'error'    ? TOKENS.danger :
             displayState === 'starting' ? TOKENS.caution :
+            displayState === 'stopping' ? TOKENS.caution :
             displayState === 'paused'   ? TOKENS.caution :
             TOKENS.ink3;
           return (
@@ -249,6 +251,7 @@ export function MasterButton({
   const running = state === 'running';
   const off = state === 'off';
   const starting = state === 'starting';
+  const stopping = state === 'stopping';
   const holding = pressing;
   const c = holding
     ? TOKENS.danger
@@ -258,6 +261,8 @@ export function MasterButton({
         ? accent
         : starting
           ? TOKENS.caution
+          : stopping
+            ? TOKENS.caution
           : off
             ? TOKENS.ink3
             : TOKENS.caution;
@@ -341,6 +346,8 @@ export function MasterButton({
               ? 'live'
               : starting
                 ? 'warming up'
+                : stopping
+                  ? 'stopping'
                 : off
                   ? 'start'
                   : 'error'}

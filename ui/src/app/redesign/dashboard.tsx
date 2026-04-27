@@ -62,6 +62,7 @@ export function DashboardScreen({
 
   const topConviction = live.conviction[0];
   const tradable = live.tradableCapital;
+  const navPending = state !== 'off' && !live.navReady;
 
   return (
     <div style={{
@@ -85,6 +86,9 @@ export function DashboardScreen({
         {state !== 'off' && !live.coverage.full && live.coverage.excluded.length > 0 && (
           <PartialCoverageBanner coverage={live.coverage} />
         )}
+        {state !== 'off' && live.navMissing.length > 0 && (
+          <NavMissingBanner missing={live.navMissing} />
+        )}
         {state === 'off' ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, minHeight: 128 }}>
             <div>
@@ -107,6 +111,8 @@ export function DashboardScreen({
               </div>
             </div>
           </div>
+        ) : navPending ? (
+          <NavPendingPanel state={state} missing={live.navMissing} coverage={live.coverage} density={density} />
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
@@ -182,13 +188,12 @@ export function DashboardScreen({
         )}
       </Card>
 
-      {/* Capital allocation — always mounted so the ceiling can be set
-          while the system is off too (the control-state write is honoured
-          on next start). When NAV=0 the panel shows 0 deployed but remains
-          functional for pre-setting the cap. */}
+      {/* Capital allocation — mounted in every dashboard view; when the
+          system is off the slider is non-interactive and hides percentages. */}
       <CapitalPanel
         live={live}
         accent={accentColor}
+        systemState={state}
         style={{ gridColumn: '1 / -1' }}
       />
 
@@ -293,6 +298,86 @@ function PartialCoverageBanner({ coverage }: { coverage: Coverage }) {
         NAV below reflects {coverage.included.length} of {coverage.configured.length} configured brokers.
         Excluded: {names}. Hover for details.
       </span>
+    </div>
+  );
+}
+
+function NavMissingBanner({ missing }: { missing: string[] }) {
+  return (
+    <div
+      title={`Waiting for a current balance from: ${missing.join(', ')}`}
+      style={{
+        marginBottom: 14,
+        padding: '8px 12px',
+        borderRadius: 6,
+        background: 'rgba(255, 191, 0, 0.08)',
+        border: '1px solid rgba(255, 191, 0, 0.25)',
+        color: TOKENS.caution,
+        fontFamily: TOKENS.mono,
+        fontSize: 11,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+      }}
+    >
+      <span style={{ fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+        NAV verifying
+      </span>
+      <span style={{ color: TOKENS.ink2 }}>
+        Balance hidden until current values arrive from: {missing.join(', ')}.
+      </span>
+    </div>
+  );
+}
+
+function NavPendingPanel({
+  state,
+  missing,
+  coverage,
+  density,
+}: {
+  state: SystemState;
+  missing: string[];
+  coverage: Coverage;
+  density: Density;
+}) {
+  const waiting = missing.length > 0
+    ? `waiting for ${missing.join(', ')}`
+    : state === 'running'
+      ? 'verifying broker balances'
+      : 'system warming up';
+  const coverageText = coverage.configured.length > 0
+    ? `${coverage.included.length} of ${coverage.configured.length} configured brokers ready`
+    : 'discovering configured brokers';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 18, minHeight: 150 }}>
+      <Glyph state="starting" accent={TOKENS.caution} size={14} />
+      <div>
+        <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
+        <div style={{
+          fontFamily: TOKENS.sans,
+          fontSize: density === 'compact' ? 44 : 56,
+          fontWeight: 300,
+          color: TOKENS.ink3,
+          letterSpacing: '-0.02em',
+          lineHeight: 1,
+        }}>
+          —
+        </div>
+        <div style={{
+          marginTop: 10,
+          fontFamily: TOKENS.mono,
+          fontSize: 11,
+          color: TOKENS.caution,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+        }}>
+          {waiting}
+        </div>
+        <div style={{ marginTop: 6, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          {coverageText}
+        </div>
+      </div>
     </div>
   );
 }

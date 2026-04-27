@@ -172,6 +172,11 @@ export type ApiPnlResponse = {
     /** Total equity × capital_allocation_pct — order sizing budget, not a second balance. */
     tradable_capital?: string;
     capital_allocation_pct?: number;
+    nav_status?: {
+      complete?: boolean;
+      included?: string[];
+      missing?: string[];
+    };
   };
   week?: PnlPeriodRollup;
   month?: PnlPeriodRollup;

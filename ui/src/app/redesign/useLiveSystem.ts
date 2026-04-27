@@ -90,6 +90,8 @@ export interface LiveData {
   coverage: Coverage;
 
   nav: number;
+  navReady: boolean;
+  navMissing: string[];
   navOpen: number;
   navPeak: number;
   pnl: ApiPnlResponse | null;
@@ -198,9 +200,19 @@ export function useLiveSystem(): LiveData {
   // ────── refs ──────
   const refreshLock = useRef(false);
   const refreshPending = useRef(false);
+  const lastHttpRefresh = useRef(0);
   const lastIntelRefresh = useRef(0);
   const stateRef = useRef(backendState);
   useEffect(() => { stateRef.current = backendState; }, [backendState]);
+  const shutdownInFlight = useRef(false);
+
+  const commitBackendState = useCallback((next: BackendSystemState) => {
+    if (shutdownInFlight.current) {
+      if (next === 'running' || next === 'starting') return;
+      if (next === 'off' || next === 'error') shutdownInFlight.current = false;
+    }
+    setBackendState(next);
+  }, []);
   // Guards for the capital-allocation slider against two distinct races
   // with the refresh loop:
   //
@@ -259,6 +271,7 @@ export function useLiveSystem(): LiveData {
   const refresh = useCallback(async () => {
     if (refreshLock.current) { refreshPending.current = true; return; }
     refreshLock.current = true;
+    lastHttpRefresh.current = Date.now();
     // Snapshot the capital-write generation at the moment the refresh
     // begins. If it changes before we finish processing results, at
     // least one local capital write happened *during* this refresh and
@@ -290,7 +303,7 @@ export function useLiveSystem(): LiveData {
 
       if (sysRes) {
         const newState: BackendSystemState = sysRes.state ?? 'off';
-        setBackendState(newState);
+        commitBackendState(newState);
         setLastStartError(
           typeof sysRes.last_start_error === 'string' && sysRes.last_start_error.trim()
             ? sysRes.last_start_error.trim() : null,
@@ -374,7 +387,8 @@ export function useLiveSystem(): LiveData {
       } else {
         setNewsDataProviders(defaultNewsDataProviderRows());
       }
-      const feedsLive = (sysRes?.state ?? stateRef.current) === 'running';
+      const effectiveState = shutdownInFlight.current ? 'stopping' : (sysRes?.state ?? stateRef.current);
+      const feedsLive = effectiveState === 'running';
 
       if (statusRes) setKillSwitch(!!statusRes.kill_switch);
       if (statusRes?.runtime && typeof statusRes.runtime === 'object') {
@@ -510,7 +524,7 @@ export function useLiveSystem(): LiveData {
           const sys = msg.payload.system as Record<string, unknown> | undefined;
           const wsKill = !!msg.payload.status?.kill_switch;
           setKillSwitch(wsKill);
-          if (sys?.state && typeof sys.state === 'string') setBackendState(sys.state as BackendSystemState);
+          if (sys?.state && typeof sys.state === 'string') commitBackendState(sys.state as BackendSystemState);
           if (sys?.active_brokers && Array.isArray(sys.active_brokers)) setActiveBrokers(sys.active_brokers as string[]);
           if (sys?.brokers && typeof sys.brokers === 'object') setBrokersRaw(
             sys.brokers as Record<
@@ -519,7 +533,9 @@ export function useLiveSystem(): LiveData {
             >,
           );
           if (sys?.coverage !== undefined) setCoverageRaw(sys.coverage);
-          void refresh();
+          if (Date.now() - lastHttpRefresh.current > REFRESH_INTERVAL_MS) {
+            void refresh();
+          }
         } catch { /* malformed frame */ }
       };
       ws.onerror = () => { /* onclose will run */ };
@@ -538,28 +554,38 @@ export function useLiveSystem(): LiveData {
       if (ws && ws.readyState <= WebSocket.OPEN) ws.close();
       setWsConnected(false);
     };
-  }, [refresh]);
+  }, [commitBackendState, refresh]);
 
   // ────── Actions ──────
   const start = useCallback(async () => {
     try {
+      shutdownInFlight.current = false;
+      commitBackendState('starting');
       const r = await api.systemStart();
-      if (r.state) setBackendState(r.state);
+      if (r.state) commitBackendState(r.state);
       if (Array.isArray(r.active_brokers)) setActiveBrokers(r.active_brokers);
     } catch {
-      setBackendState('error');
+      shutdownInFlight.current = false;
+      commitBackendState('error');
     }
-  }, []);
+  }, [commitBackendState]);
 
   const stop = useCallback(async () => {
+    shutdownInFlight.current = true;
+    commitBackendState('stopping');
+    clearLive();
     try {
       const r = await api.systemStop();
-      if (r.state) setBackendState(r.state);
+      if (r.state) commitBackendState(r.state);
+      else {
+        shutdownInFlight.current = false;
+        commitBackendState('off');
+      }
       clearLive();
     } catch {
       /* ignore — status poll will eventually reflect reality */
     }
-  }, [clearLive]);
+  }, [clearLive, commitBackendState]);
 
   const setMode = useCallback(async (m: TradingMode) => {
     setModeState(m);
@@ -697,8 +723,22 @@ export function useLiveSystem(): LiveData {
 
   const brokers = useMemo(() => {
     const excludedSet = new Set(coverage.excluded.map((e) => e.name));
-    return mapBrokers(brokersRaw, excludedSet);
-  }, [brokersRaw, coverage]);
+    const orchestratorIdle = backendState === 'off' || backendState === 'stopping';
+    return mapBrokers(brokersRaw, excludedSet, orchestratorIdle);
+  }, [brokersRaw, coverage, backendState]);
+
+  const navStatus = pnl?.today?.nav_status;
+  const navMissing = useMemo(
+    () => (Array.isArray(navStatus?.missing)
+      ? navStatus.missing.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : []),
+    [navStatus],
+  );
+  const navReady = backendState === 'running'
+    && coverage.included.length > 0
+    && nav > 0
+    && navStatus?.complete !== false
+    && navMissing.length === 0;
 
   // ────── event log: merge WS + orders, newest first ──────
   const events = useMemo<LiveEvent[]>(() => {
@@ -770,12 +810,14 @@ export function useLiveSystem(): LiveData {
     activeBrokers,
     coverage,
 
-    nav,
-    navOpen,
-    navPeak,
+    nav: navReady ? nav : 0,
+    navReady,
+    navMissing,
+    navOpen: navReady ? navOpen : 0,
+    navPeak: navReady ? navPeak : 0,
     pnl,
     pnlRollups,
-    tradableCapital,
+    tradableCapital: navReady ? tradableCapital : null,
     capitalPct,
 
     exposure,

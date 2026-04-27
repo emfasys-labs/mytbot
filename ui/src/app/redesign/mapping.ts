@@ -43,7 +43,7 @@ export function mapSystemState(
   switch (backend) {
     case 'running':  return 'running';
     case 'starting': return 'starting';
-    case 'stopping': return 'starting';
+    case 'stopping': return 'stopping';
     case 'error':    return 'error';
     case 'off':
     default:         return 'off';
@@ -65,6 +65,12 @@ export function mapSystemState(
  *
  * ``excluded`` is set when the broker is not contributing to aggregated NAV,
  * which is used by the NAV card footnote to name the missing wallets.
+ *
+ * When ``orchestratorIdle`` is true (orchestrator ``off`` or ``stopping``),
+ * any ``warming`` row is shown as ``off`` instead: the trading stack is not
+ * actively bringing brokers up, so "warming" would read like a hung connect.
+ * ``live`` and ``offline`` are preserved (still useful if a venue stayed up or
+ * failed with a concrete error).
  */
 export function mapBrokers(
   brokers: Record<
@@ -72,6 +78,7 @@ export function mapBrokers(
     { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
   >,
   excludedNames?: Set<string>,
+  orchestratorIdle = false,
 ): BrokerStatus[] {
   return Object.entries(brokers)
     .map(([name, b]): BrokerStatus => {
@@ -88,6 +95,12 @@ export function mapBrokers(
       }
       if (b.balance_ready === false) return { name, state: 'warming', error: err, excluded };
       return { name, state: 'live', error: err, excluded };
+    })
+    .map((row): BrokerStatus => {
+      if (orchestratorIdle && row.state === 'warming') {
+        return { ...row, state: 'off', error: null };
+      }
+      return row;
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
