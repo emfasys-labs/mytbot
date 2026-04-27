@@ -1,0 +1,65 @@
+# config/options_strategies.yaml
+# ================================
+# Wave 12 — options strategy layer.
+#
+# Default state: DISABLED. Conservative scope per the plan:
+#   - Long-only directional (long calls / long puts).
+#   - Protective puts (REQUIRES long stock position).
+#   - Covered calls (REQUIRES long stock position).
+#   - NO naked short options (the strategies refuse to emit them).
+#   - NO multi-leg complex strategies.
+#
+# Premium-exposure caps are enforced inside each strategy via
+# `models/options/risk.check_premium_exposure`. The risk engine layer
+# in `risk/engine.py` + `risk/options_env.py` remains the final veto.
+#
+# Activation steps:
+#   1. Confirm the IBKR adapter has options entitlements
+#      (`scripts/smoke_ibkr_options.py`).
+#   2. Calibrate the IV surface via the operator's data feed.
+#   3. Set `options_directional.enabled: true` (paper_only) and watch
+#      the dashboard funnel.
+#   4. Promote to non-paper only after a paper-soak window.
+
+options_directional:
+  enabled: false
+  paper_only: true
+
+  # Premium-exposure caps (fractions of NAV).
+  max_premium_pct_per_trade: 0.005     # 0.5% NAV per trade
+  max_premium_pct_aggregate: 0.02      # 2% NAV aggregate
+
+  # Days-to-expiry band.
+  min_dte_days: 7
+  max_dte_days: 60
+
+  # Delta band — keep away from extreme ITM/OTM.
+  min_delta_call: 0.30
+  max_delta_call: 0.70
+  min_delta_put: 0.30
+  max_delta_put: 0.70
+
+  confidence_floor: 0.10
+  confidence_ceiling: 0.85
+
+  long_call_strategy_name: options_long_call
+  long_put_strategy_name: options_long_put
+  preferred_broker: ibkr
+
+
+options_hedging:
+  enabled: false
+  paper_only: true
+
+  max_premium_pct_per_trade: 0.005
+  max_premium_pct_aggregate: 0.02
+
+  min_dte_days: 14
+  max_dte_days: 90
+
+  confidence_floor: 0.10
+  confidence_ceiling: 0.85
+
+  protective_put_strategy_name: options_protective_put
+  covered_call_strategy_name: options_covered_call
+  preferred_broker: ibkr

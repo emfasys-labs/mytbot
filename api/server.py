@@ -1494,6 +1494,26 @@ async def get_pnl(session_factory=Depends(_session_factory)):
     }
 
 
+@app.get("/dashboard/wave13")
+async def get_dashboard_wave13(bus: CommandBus = Depends(_command_bus)):
+    """
+    Wave 13 — structured observability payload.
+
+    Aggregates the opportunity funnel (``system/funnel_telemetry.py``),
+    strategy coverage (which YAML gates are flipped), model health
+    (registered models + feature freshness), portfolio intelligence
+    (latest allocation snapshot + Wave 8 overlay diagnostics), and
+    execution intelligence (Wave 9 cost-gate counters).
+    """
+    from api.wave13_dashboard import build_wave13_payload
+
+    raw_snapshot = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
+    snap_for_payload = raw_snapshot if isinstance(raw_snapshot, dict) else None
+    return build_wave13_payload(
+        snapshot=snap_for_payload,
+    )
+
+
 @app.get("/dashboard/snapshot")
 async def get_dashboard_snapshot(bus: CommandBus = Depends(_command_bus)):
     """Latest allocator + accumulator snapshot from ``ControlState`` (trading loop)."""
