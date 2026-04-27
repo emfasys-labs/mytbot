@@ -271,6 +271,7 @@ class TradingLoop:
 
         self._task: asyncio.Task | None = None
         self._control_poll_task: asyncio.Task | None = None
+        self._broker_join_task: asyncio.Task | None = None
         self._control_bus: CommandBus | None = None
         self._strategies: dict[str, Any] = {}
         self._stop_event = asyncio.Event()
@@ -310,6 +311,32 @@ class TradingLoop:
                     self.execution_engine.add_allowed_broker(name)
                 logger.info("trading_loop | late broker joined: {}", name)
 
+    def _start_broker_join_poll(self) -> None:
+        """Poll broker_manager adapters so late connections are usable quickly."""
+        if self._broker_manager is None:
+            return
+        if self._broker_join_task is not None and not self._broker_join_task.done():
+            return
+        self._broker_join_task = asyncio.create_task(
+            self._broker_join_poll(), name="broker-join-poll"
+        )
+
+    async def _broker_join_poll(self) -> None:
+        try:
+            poll_sec = max(1.0, float(os.getenv("BROKER_JOIN_POLL_SEC", "2")))
+        except ValueError:
+            poll_sec = 2.0
+        while not self._stop_event.is_set():
+            try:
+                self._check_late_brokers()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("trading_loop | broker join poll failed: {}", exc)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=poll_sec)
+                return
+            except asyncio.TimeoutError:
+                pass
+
     async def start(self) -> None:
         if self.is_running:
             logger.warning("trading_loop | already running")
@@ -330,6 +357,13 @@ class TradingLoop:
             except (asyncio.CancelledError, Exception):
                 pass
             self._control_poll_task = None
+        if self._broker_join_task is not None:
+            self._broker_join_task.cancel()
+            try:
+                await self._broker_join_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._broker_join_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -418,6 +452,7 @@ class TradingLoop:
                 allowed_brokers=list(self.available_brokers),
                 broker_manager=self._broker_manager,
             )
+            self._start_broker_join_poll()
             _se_cfg = strategies_cfg.get("signal_engine", {}) or {}
             _acc = (
                 SignalAccumulator()

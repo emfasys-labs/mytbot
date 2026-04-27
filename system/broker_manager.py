@@ -231,6 +231,7 @@ class BrokerManager:
         self._ibkr_last_attempt: float = 0
         self._broker_fail_count: dict[str, int] = {}
         self._broker_last_attempt: dict[str, float] = {}
+        self._broker_ready_state: dict[str, bool] = {}
         # Consecutive rate-limit fails per broker. Resets on success or on any
         # non-rate-limit failure. Used to escalate backoff and error text when a
         # venue is persistently throttled server-side (e.g. Kraken key punishment).
@@ -316,7 +317,51 @@ class BrokerManager:
 
         return self.report
 
-    async def _handle_ibkr(self, cfg: dict[str, Any], status: BrokerStatus) -> None:
+    async def _probe_ibkr_ready(self, cfg: dict[str, Any], status: BrokerStatus) -> bool:
+        """
+        Cheap IBKR readiness probe.
+
+        This intentionally does not update ``_ibkr_last_attempt`` or the
+        exponential failure count. When TWS/Gateway is closed, we still want to
+        notice within the next health poll after the operator launches it.
+        """
+        host = cfg.get("host", "127.0.0.1")
+        port = cfg.get("port", 7497)
+
+        logger.info("broker | ibkr | probing {}:{}...", host, port)
+        reachable = await _tcp_probe(host, port, timeout=3.0)
+
+        if not reachable:
+            status.error = (
+                f"IB Gateway/TWS not reachable on {host}:{port} — "
+                f"start TWS/Gateway with API enabled (paper=7497, live=7496). "
+                "If Gateway shows 'API Server connected' but 'API Client disconnected', "
+                "accept the paper trading disclaimer / API-client prompt in Gateway."
+            )
+            logger.warning("broker | ibkr | {}", status.error)
+            return False
+
+        api_ok = await asyncio.get_event_loop().run_in_executor(
+            None, _ibkr_api_alive, host, port, 5.0
+        )
+        if not api_ok:
+            status.error = (
+                "Gateway listening but API not responding — "
+                "accept any paper trading disclaimer / API-client prompt in Gateway, "
+                "then restart Gateway if the prompt is not visible (possible zombie state)"
+            )
+            logger.warning("broker | ibkr | {}", status.error)
+            return False
+
+        return True
+
+    async def _handle_ibkr(
+        self,
+        cfg: dict[str, Any],
+        status: BrokerStatus,
+        *,
+        probe_ready: bool | None = None,
+    ) -> None:
         """
         IBKR connection with three safety layers:
           1. TCP probe — is the port open at all?
@@ -327,30 +372,9 @@ class BrokerManager:
             logger.debug("broker | ibkr | connection attempt already in progress, skipping")
             return
 
-        host = cfg.get("host", "127.0.0.1")
-        port = cfg.get("port", 7497)
-
-        logger.info("broker | ibkr | probing {}:{}...", host, port)
-        reachable = await _tcp_probe(host, port, timeout=3.0)
-
-        if not reachable:
-            status.error = (
-                f"IB Gateway/TWS not reachable on {host}:{port} — "
-                f"start TWS/Gateway with API enabled (paper=7497, live=7496)"
-            )
-            logger.warning("broker | ibkr | {}", status.error)
-            return
-
-        api_ok = await asyncio.get_event_loop().run_in_executor(
-            None, _ibkr_api_alive, host, port, 5.0
-        )
-        if not api_ok:
-            status.error = (
-                "Gateway listening but API not responding — "
-                "restart Gateway (zombie state)"
-            )
-            logger.warning("broker | ibkr | {}", status.error)
-            self._ibkr_fail_count += 1
+        api_ready = await self._probe_ibkr_ready(cfg, status) if probe_ready is None else probe_ready
+        self._broker_ready_state["ibkr"] = bool(api_ready)
+        if not api_ready:
             return
 
         self._ibkr_fail_count = 0
@@ -442,6 +466,7 @@ class BrokerManager:
                 status.balance_ready = False
                 self.adapters[name] = adapter
                 self._broker_fail_count[name] = 0
+                self._broker_ready_state[name] = True
                 self._broker_rate_limit_streak[name] = 0
                 logger.info("broker | {} | connected", name)
                 await self._mark_balance_ready(name, adapter, status)
@@ -569,22 +594,28 @@ class BrokerManager:
             attempted: list[str] = []
             for name in failed:
                 now = time.monotonic()
+                cfg = self.configs.get(name, {})
+                status = self.report.brokers[name]
+                readiness_bypass = False
+                ibkr_probe_ready: bool | None = None
                 if name == "ibkr":
                     backoff = self._ibkr_backoff()
                     last = self._ibkr_last_attempt
+                    was_ready = self._broker_ready_state.get(name, False)
+                    ibkr_probe_ready = await self._probe_ibkr_ready(cfg, status)
+                    self._broker_ready_state[name] = bool(ibkr_probe_ready)
+                    readiness_bypass = bool(ibkr_probe_ready and not was_ready)
                 else:
                     backoff = self._broker_backoff(name)
                     last = self._broker_last_attempt.get(name, 0)
                 elapsed = now - last
-                if last > 0 and elapsed < backoff:
+                if last > 0 and elapsed < backoff and not readiness_bypass:
                     continue
 
-                cfg = self.configs.get(name, {})
-                status = self.report.brokers[name]
                 attempted.append(name)
 
                 if name == "ibkr":
-                    await self._handle_ibkr(cfg, status)
+                    await self._handle_ibkr(cfg, status, probe_ready=ibkr_probe_ready)
                     if self._late_connect_task:
                         try:
                             await self._late_connect_task
@@ -621,6 +652,7 @@ class BrokerManager:
                 continue
 
             self.adapters.pop(name, None)
+            self._broker_ready_state[name] = False
             status = self.report.brokers.get(name)
             if status is not None:
                 status.connected = False

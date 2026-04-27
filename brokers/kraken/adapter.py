@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -210,8 +211,12 @@ class KrakenAdapter(BrokerAdapter):
         # reported as a generic "connect() returned False".
         self._last_connect_error: str | None = None
         # Proactive REST rate limiting — Kraken private API uses a counter-based
-        # system; ≥100 ms between calls keeps the counter from accumulating.
-        self._rest_gap = AsyncRestGap.from_env("KRAKEN", default_seconds=0.1)
+        # system and can punish bursts with a temporary key/account lockout.
+        # Default deliberately slower than Binance/Bybit; override with
+        # KRAKEN_REST_MIN_INTERVAL_SEC only if you have measured spare budget.
+        self._rest_gap = AsyncRestGap.from_env("KRAKEN", default_seconds=1.25)
+        self._balance_cache: list[Balance] | None = None
+        self._balance_cache_at: float = 0.0
 
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
@@ -262,7 +267,12 @@ class KrakenAdapter(BrokerAdapter):
             self._user = User(key=self.api_key, secret=self.api_secret)
             self._trade = Trade(key=self.api_key, secret=self.api_secret)
             auth_ok = False
-            for auth_attempt in range(3):
+            try:
+                auth_attempts = int(os.getenv("KRAKEN_CONNECT_AUTH_ATTEMPTS", "1"))
+            except ValueError:
+                auth_attempts = 1
+            auth_attempts = max(1, min(auth_attempts, 3))
+            for auth_attempt in range(auth_attempts):
                 try:
                     await self._run_sync(lambda: self._user.get_account_balance())  # type: ignore[union-attr]
                     auth_ok = True
@@ -274,13 +284,13 @@ class KrakenAdapter(BrokerAdapter):
                             "aborting inner retry loop (backoff handled by reconnect loop)",
                         )
                         raise
-                    if not _is_rate_limit_error(exc) or auth_attempt == 2:
+                    if not _is_rate_limit_error(exc) or auth_attempt >= auth_attempts - 1:
                         raise
                     sleep_s = 2 + auth_attempt * 3
                     logger.warning(
                         "connect | Kraken | private auth rate-limited (attempt {}/{}) — retry in {}s",
                         auth_attempt + 1,
-                        3,
+                        auth_attempts,
                         sleep_s,
                     )
                     await asyncio.sleep(sleep_s)
@@ -336,6 +346,14 @@ class KrakenAdapter(BrokerAdapter):
     async def get_balance(self) -> list[Balance]:
         if not self._private_ok or self._user is None:
             return []
+        try:
+            ttl = float(os.getenv("KRAKEN_BALANCE_CACHE_TTL_SEC", "45"))
+        except ValueError:
+            ttl = 45.0
+        ttl = max(0.0, ttl)
+        now = time.monotonic()
+        if self._balance_cache is not None and ttl > 0 and (now - self._balance_cache_at) < ttl:
+            return list(self._balance_cache)
 
         def _fetch_pair() -> tuple[dict[str, Any], dict[str, Any]]:
             assert self._user is not None
@@ -403,6 +421,8 @@ class KrakenAdapter(BrokerAdapter):
                     "get_balance | Kraken | Balance API returned no asset rows "
                     "(empty portfolio for this key / sub-account)"
                 )
+        self._balance_cache = list(out)
+        self._balance_cache_at = time.monotonic()
         return out
 
     async def get_positions(self) -> list[Position]:

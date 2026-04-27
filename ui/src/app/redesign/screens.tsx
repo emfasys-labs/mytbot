@@ -203,27 +203,36 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
   );
   const capitalAtWorkPct = nav > 0 ? Math.max(0, capitalAtWorkValue / nav) : 0;
 
+  const bookGridCols = '110px 110px 80px 80px 95px 1fr 80px';
+
   return (
     <div style={{
       padding: 20, display: 'grid', gap: 14,
-      gridTemplateColumns: '1fr 320px', height: '100%', overflow: 'hidden',
+      gridTemplateColumns: '1fr 320px', height: '100%', minHeight: 0, overflow: 'hidden',
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 0 }}>
-        <Card>
-          <Label style={{ marginBottom: 12 }}>Open positions</Label>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 0, overflow: 'hidden' }}>
+        <Card style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}>
+          <Label style={{ marginBottom: 12, flexShrink: 0 }}>Open positions</Label>
           {live.positions.length === 0 ? (
             <div style={{ padding: 20, color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
               No open positions
             </div>
           ) : (
-            <div style={{ display: 'grid', gap: 2 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1, gap: 0 }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: '110px 110px 80px 80px 95px 1fr 80px',
+                gridTemplateColumns: bookGridCols,
                 gap: 12, padding: '0 0 6px 0',
                 fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
                 textTransform: 'uppercase', letterSpacing: '0.06em',
                 borderBottom: `1px solid ${TOKENS.line}`,
+                flexShrink: 0,
               }}>
                 <span>Symbol</span>
                 <span>Size</span>
@@ -233,44 +242,54 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 <span>Weight</span>
                 <span style={{ textAlign: 'right' }}>Trend</span>
               </div>
-              {live.positions.map((p) => (
-                <div key={p.sym} style={{
-                  display: 'grid',
-                  gridTemplateColumns: '110px 110px 80px 80px 95px 1fr 80px',
-                  gap: 12, alignItems: 'center', padding: '10px 0',
-                  borderBottom: `1px solid ${TOKENS.line}`,
-                }}>
-                  <div>
-                    <div title={p.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(p.sym)}</div>
-                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-                      qty {p.qty}{p.broker ? ` · ${p.broker}` : ''}
+              <div style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                WebkitOverflowScrolling: 'touch',
+              }}>
+                <div style={{ display: 'grid', gap: 2 }}>
+                  {live.positions.map((p) => (
+                    <div key={p.sym} style={{
+                      display: 'grid',
+                      gridTemplateColumns: bookGridCols,
+                      gap: 12, alignItems: 'center', padding: '10px 0',
+                      borderBottom: `1px solid ${TOKENS.line}`,
+                    }}>
+                      <div>
+                        <div title={p.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(p.sym)}</div>
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                          qty {p.qty}{p.broker ? ` · ${p.broker}` : ''}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 13, color: TOKENS.ink0 }}>
+                          {fmtNotional(p.notional)}
+                        </div>
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>notional</div>
+                      </div>
+                      <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>{fmtPrice(p.avg)}</span>
+                      <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1 }}>{fmtPrice(p.last)}</span>
+                      <Signed value={p.pnl} size={12} />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1, height: 3, background: 'rgba(255,255,255,0.04)', borderRadius: 2, overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.min(100, p.w * 100 * 4)}%`, height: '100%', background: accentColor }} />
+                        </div>
+                        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, width: 36, textAlign: 'right' }}>
+                          {(p.w * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <Spark values={[p.avg * 0.99 || 0, p.avg || 0, p.avg * 1.01 || 0, p.last || p.avg || 0]} width={72} height={24} accent={accentColor} />
                     </div>
-                  </div>
-                  <div>
-                    <div style={{ fontFamily: TOKENS.mono, fontSize: 13, color: TOKENS.ink0 }}>
-                      {fmtNotional(p.notional)}
-                    </div>
-                    <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>notional</div>
-                  </div>
-                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>{fmtPrice(p.avg)}</span>
-                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1 }}>{fmtPrice(p.last)}</span>
-                  <Signed value={p.pnl} size={12} />
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ flex: 1, height: 3, background: 'rgba(255,255,255,0.04)', borderRadius: 2, overflow: 'hidden' }}>
-                      <div style={{ width: `${Math.min(100, p.w * 100 * 4)}%`, height: '100%', background: accentColor }} />
-                    </div>
-                    <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, width: 36, textAlign: 'right' }}>
-                      {(p.w * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                  <Spark values={[p.avg * 0.99 || 0, p.avg || 0, p.avg * 1.01 || 0, p.last || p.avg || 0]} width={72} height={24} accent={accentColor} />
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
           )}
         </Card>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 0, overflowY: 'auto' }}>
         <Card>
           <Label style={{ marginBottom: 10 }}>Totals</Label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

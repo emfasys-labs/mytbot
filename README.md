@@ -100,6 +100,7 @@ Use the included scripts to launch the API/trading server and Vite UI in two sep
 This creates a desktop shortcut named **`mytbot`**. Double-click it to run:
 - `python run.py` from repo root (uses `.venv\Scripts\python.exe` if present)
 - `npm run dev` in `ui/`
+- After a short delay, your default browser opens **http://localhost:5173/** (override with `-UiUrl`; `-BrowserDelaySec` defaults to 5).
 
 If UI dependencies are missing, run once manually:
 

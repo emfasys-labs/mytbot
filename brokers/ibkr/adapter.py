@@ -700,6 +700,46 @@ class IBKRAdapter(BrokerAdapter):
             logger.debug("account summary probe | {!r}", exc)
             return False
 
+    async def _connected_session_usable_after_connect_error(self, exc: Exception) -> bool:
+        """
+        Rescue a partially-synchronised IB session.
+
+        ``ib_insync.connectAsync()`` can raise after the TCP/API handshake has
+        completed if one of its startup sync requests stalls. In Gateway this
+        still looks healthy: API Client connected, account values flowing, and
+        positions/open orders replaying. Treat that as connected only after an
+        account signal is visible, otherwise the broker manager stays red while
+        a usable socket is already open.
+        """
+        if self._ib is None:
+            return False
+        try:
+            if not self._ib.isConnected():
+                return False
+            accounts = self._ib.managedAccounts()
+            if accounts or (self.account_id or "").strip():
+                logger.warning(
+                    "connect | IBKR | connectAsync raised after API session became usable; "
+                    "proceeding | accounts={} | error={}",
+                    accounts or "(explicit account configured)",
+                    exc,
+                )
+                return True
+            if await self._account_summary_probe_ok(timeout=5.0):
+                logger.warning(
+                    "connect | IBKR | connectAsync raised after account summary became usable; "
+                    "proceeding | error={}",
+                    exc,
+                )
+                return True
+        except Exception as probe_exc:  # noqa: BLE001
+            logger.debug(
+                "connect | IBKR | partial-session rescue probe failed | original={!r} probe={!r}",
+                exc,
+                probe_exc,
+            )
+        return False
+
     async def connect(self) -> bool:
         """Establish connection to IB Gateway / TWS. Return True if successful."""
         self._last_connect_error = None
@@ -855,6 +895,9 @@ class IBKRAdapter(BrokerAdapter):
             self._force_close_ib()
             return False
         except Exception as exc:  # noqa: BLE001 — broker connectivity
+            if await self._connected_session_usable_after_connect_error(exc):
+                self._last_connect_error = None
+                return True
             self._last_connect_error = str(exc)[:200]
             logger.exception("connect | IBKR | failed | error={}", exc)
             self._force_close_ib()

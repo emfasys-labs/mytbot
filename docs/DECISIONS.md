@@ -755,3 +755,16 @@ Duplicated `isPendingOrder` / `toFiniteNumber` in `screens.tsx` were removed in 
 **Reason:** Operators saw repetitive Telegram `PAPER OPEN FILLED` lines with identical size/price: real synthetic orders were logged, but reconciliation cleared paper crypto legs while strategies kept re-proposing the same edge; the coordinator could also add the same-direction leg again because trim selection skips same-symbol displacement.
 
 **Status:** Implemented in `execution/engine.py`, `core/broker_paper.py` (shared broker set), `portfolio/global_edge_coordinator.py`, and `GET /positions` now merges the latest `PositionLog` rows for `kraken` / `binance` / `bybit` whenever `APP_ENV` is not `live` and live adapters returned at least one row (`source=live_broker+synthetic_paper_log`), so the Book matches the persisted synthetic crypto leg. Tests in `tests/test_global_edge_coordinator.py`.
+
+---
+
+## D047 — Broker reconnect readiness bypass + immediate late-broker ingestion
+
+**Date:** 2026-04-27
+**Decision:** Keep the broker reconnect loop as the single retry mechanism for every configured registered broker, but make IBKR readiness edge-triggered: a cheap TCP/API probe runs while disconnected, and a transition from not-ready to ready bypasses any outstanding exponential full-connect backoff. The probe does not increment the full-connect failure counter, so a closed TWS/Gateway cannot push reconnects into multi-minute delay before the operator launches it. Separately, `TradingLoop` now runs a lightweight `broker-join-poll` (`BROKER_JOIN_POLL_SEC`, default 2s) so newly connected adapters are added to the router and execution engine without waiting for the next full strategy iteration.
+
+**Reason:** IBKR/TWS is locally operated and frequently starts after the trading system. A prior failed full connect could leave IBKR offline until a long backoff expired, and even after connection the trading loop could take up to the strategy cadence to include it. The system should pick up a launched/restarted API client within the next health/join polls while still respecting backoff for expensive remote exchange auth retries.
+
+**Status:** Implemented in `system/broker_manager.py`, `system/trading_loop/loop.py`, with regression coverage in `tests/test_broker_balance_ready.py`.
+
+**Operational note:** IB Gateway can show "API Server connected" while refusing all third-party clients until the paper-trading disclaimer is accepted. Gateway logs this as "Paper trading disclaimer must first be accepted for API connection" and the UI row remains "API Client disconnected". Broker status now points operators at that prompt before treating the condition as a generic zombie/restart case.

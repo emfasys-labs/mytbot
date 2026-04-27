@@ -1,5 +1,7 @@
 param(
-    [switch]$InstallUiDeps
+    [switch]$InstallUiDeps,
+    [string]$UiUrl = "http://localhost:5173/",
+    [int]$BrowserDelaySec = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,5 +48,9 @@ Start-Process powershell -ArgumentList @(
     "-ExecutionPolicy", "Bypass",
     "-Command", $uiCommand
 ) -WindowStyle Normal
+
+Write-Host "Opening UI in the default browser after ${BrowserDelaySec}s: $UiUrl"
+Start-Sleep -Seconds $BrowserDelaySec
+Start-Process $UiUrl
 
 Write-Host "mytbot server and UI launched in separate windows."

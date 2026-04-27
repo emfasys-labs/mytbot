@@ -1,6 +1,7 @@
 """Snapshot readiness helper for broker dashboard badges."""
 
 import asyncio
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -194,6 +195,52 @@ async def test_try_connect_rate_limit_streak_resets_on_success(
     assert status.connected is True
     assert mgr._broker_rate_limit_streak["kraken"] == 0
     assert mgr._broker_fail_count["kraken"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_loop_ibkr_ready_transition_bypasses_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Launching/restarting TWS must trigger IBKR connect on the next poll.
+
+    A previous full connect failure can put IBKR into a multi-minute backoff.
+    The cheap readiness probe is allowed to bypass that backoff only when the
+    local API transitions from not-ready to ready.
+    """
+    mgr = BrokerManager(paper_mode=True)
+    mgr._HEALTH_POLL_SEC = 0.01
+    mgr._ibkr_fail_count = 5
+    mgr._ibkr_last_attempt = time.monotonic()
+    mgr._broker_ready_state["ibkr"] = False
+    status = BrokerStatus(name="ibkr", configured=True, connected=False)
+    mgr.report.brokers["ibkr"] = status
+
+    async def _ready_probe(cfg: dict[str, Any], st: BrokerStatus) -> bool:
+        return True
+
+    called = asyncio.Event()
+
+    async def _handle(
+        cfg: dict[str, Any],
+        st: BrokerStatus,
+        *,
+        probe_ready: bool | None = None,
+    ) -> None:
+        assert probe_ready is True
+        called.set()
+
+    monkeypatch.setattr(mgr, "_probe_ibkr_ready", _ready_probe)
+    monkeypatch.setattr(mgr, "_handle_ibkr", _handle)
+
+    task = asyncio.create_task(mgr._reconnect_loop())
+    try:
+        await asyncio.wait_for(called.wait(), timeout=0.5)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def test_is_rate_limit_error_classifies_temporary_lockout() -> None:
