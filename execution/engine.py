@@ -361,6 +361,18 @@ class ExecutionEngine:
             )
             return None
 
+        if self.paper_mode and not self._use_native_paper_orders():
+            logger.info(
+                "PAPER FILL (local simulation) | %s %s qty=%s broker=%s",
+                signal.symbol,
+                signal.side,
+                order.quantity,
+                signal.broker,
+            )
+            result = await self._simulate_fill(order, signal, broker=broker)
+            await self._persist_result(session_factory, order, result, signal)
+            return result
+
         result: Optional[OrderResult] = None
         for attempt in range(self.place_order_retries + 1):
             try:
@@ -424,6 +436,16 @@ class ExecutionEngine:
         logger.info("ORDER PLACED | %s | status=%s", result.broker_order_id, result.status)
         await self._persist_result(session_factory, order, result, signal)
         return result
+
+    @staticmethod
+    def _use_native_paper_orders() -> bool:
+        """Opt into real broker paper-order placement instead of local fills."""
+        return os.getenv("EXECUTION_PAPER_USE_BROKER_ORDERS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
     def _paper_fee_bps(self) -> Decimal:
         risk_engine = get_risk_engine()
@@ -732,6 +754,81 @@ class ExecutionEngine:
                     logger.info(f"Cancelled {order.broker_order_id} on {broker_name}")
             except Exception as e:
                 logger.error(f"Failed to cancel orders on {broker_name}: {e}")
+
+    async def cancel_working_orders(
+        self,
+        *,
+        session_factory=None,
+        reason: str = "operator_cancel",
+    ) -> int:
+        """Cancel DB-tracked working orders and mark successful cancels locally."""
+        if session_factory is None:
+            return 0
+        try:
+            from sqlalchemy import select, update
+            from storage.models import OrderLog
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_working_orders imports failed | %s", exc)
+            return 0
+
+        async with session_factory() as session:
+            q = await session.execute(
+                select(OrderLog)
+                .where(OrderLog.status.in_(("pending", "open", "partially_filled")))
+                .order_by(OrderLog.timestamp.asc())
+            )
+            rows = list(q.scalars().all())
+
+        cancelled_ids: list[Any] = []
+        for row in rows:
+            broker_name = str(getattr(row, "broker", "") or "").strip().lower()
+            broker_order_id = str(getattr(row, "broker_order_id", "") or "").strip()
+            if not broker_name:
+                continue
+            if not broker_order_id:
+                cancelled_ids.append(getattr(row, "id", None))
+                continue
+            broker = await self._get_broker(broker_name)
+            if broker is None:
+                logger.warning(
+                    "cancel_working_orders broker unavailable | broker=%s id=%s symbol=%s",
+                    broker_name,
+                    broker_order_id,
+                    getattr(row, "symbol", ""),
+                )
+                continue
+            try:
+                ok = await broker.cancel_order(broker_order_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "cancel_working_orders failed | broker=%s id=%s symbol=%s | %s",
+                    broker_name,
+                    broker_order_id,
+                    getattr(row, "symbol", ""),
+                    exc,
+                )
+                continue
+            if ok:
+                cancelled_ids.append(getattr(row, "id", None))
+                logger.info(
+                    "cancel_working_orders cancelled | broker=%s id=%s symbol=%s reason=%s",
+                    broker_name,
+                    broker_order_id,
+                    getattr(row, "symbol", ""),
+                    reason,
+                )
+
+        cancelled_ids = [x for x in cancelled_ids if x is not None]
+        if not cancelled_ids:
+            return 0
+        async with session_factory() as session:
+            await session.execute(
+                update(OrderLog)
+                .where(OrderLog.id.in_(cancelled_ids))
+                .values(status="cancelled")
+            )
+            await session.commit()
+        return len(cancelled_ids)
 
     async def reconcile_positions(
         self,
@@ -1521,7 +1618,7 @@ class ExecutionEngine:
             logger.error("Failed to auto-kill/disable on execution failure: %s", exc)
 
     async def _reconcile_positions_internal(self, *, session_factory=None, max_quantity_diff: Decimal) -> bool:
-        from sqlalchemy import func, select
+        from sqlalchemy import and_, func, select
         from storage.models import PositionLog
 
         own_engine = None
@@ -1533,47 +1630,39 @@ class ExecutionEngine:
             return True
         try:
             local: dict[tuple[str, str], Decimal] = {}
+            local_rows: dict[tuple[str, str], Any] = {}
             paper_position_rows: dict[str, list[Any]] = {}
             async with sf() as session:
-                latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
-                latest_ts = latest_ts_q.scalar_one_or_none()
-                if latest_ts is not None:
-                    rows_q = await session.execute(
-                        select(PositionLog).where(PositionLog.timestamp == latest_ts)
+                latest_by_key = (
+                    select(
+                        PositionLog.broker.label("broker"),
+                        PositionLog.symbol.label("symbol"),
+                        func.max(PositionLog.timestamp).label("max_ts"),
                     )
-                    rows = list(rows_q.scalars().all())
-                    for row in rows:
-                        key = (str(row.broker).strip().lower(), str(row.symbol).strip().upper())
-                        local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
+                    .group_by(PositionLog.broker, PositionLog.symbol)
+                    .subquery()
+                )
+                rows_q = await session.execute(
+                    select(PositionLog).join(
+                        latest_by_key,
+                        and_(
+                            PositionLog.broker == latest_by_key.c.broker,
+                            PositionLog.symbol == latest_by_key.c.symbol,
+                            PositionLog.timestamp == latest_by_key.c.max_ts,
+                        ),
+                    )
+                )
+                rows = list(rows_q.scalars().all())
+                for row in rows:
+                    key = (str(row.broker).strip().lower(), str(row.symbol).strip().upper())
+                    qty = Decimal(str(row.quantity))
+                    local[key] = local.get(key, Decimal("0")) + qty
+                    local_rows[key] = row
                 if self.paper_mode:
-                    for broker_name in NO_NATIVE_PAPER_POSITION_BROKERS:
-                        b_ts_q = await session.execute(
-                            select(func.max(PositionLog.timestamp)).where(PositionLog.broker == broker_name)
-                        )
-                        b_ts = b_ts_q.scalar_one_or_none()
-                        if b_ts is None:
-                            continue
-                        b_rows_q = await session.execute(
-                            select(PositionLog).where(
-                                PositionLog.broker == broker_name,
-                                PositionLog.timestamp == b_ts,
-                            )
-                        )
-                        b_rows = list(b_rows_q.scalars().all())
-                        b_rows = [
-                            row for row in b_rows
-                            if str(getattr(row, "broker", "")).strip().lower() == broker_name
-                        ]
-                        if not b_rows:
-                            continue
-                        paper_position_rows[broker_name] = b_rows
-                        # When ``b_ts == latest_ts``, kraken/binance/bybit rows were already
-                        # folded into ``local`` by the global snapshot pass — do not add twice
-                        # or reconciliation sees a phantom 2× local qty vs synthetic remote.
-                        if b_ts != latest_ts:
-                            for row in b_rows:
-                                key = (broker_name, str(row.symbol).strip().upper())
-                                local[key] = local.get(key, Decimal("0")) + Decimal(str(row.quantity))
+                    for row in rows:
+                        broker_name = str(getattr(row, "broker", "") or "").strip().lower()
+                        if broker_name:
+                            paper_position_rows.setdefault(broker_name, []).append(row)
 
             # Ensure we attempt broker reconciliation even before any order execution.
             # Use the union of the construction-time allow-list, configured
@@ -1599,11 +1688,10 @@ class ExecutionEngine:
             remote_snapshots: list[tuple[str, Position]] = []
             for broker_name, broker in self._brokers.items():
                 bname = broker_name.strip().lower()
-                if self.paper_mode and bname in NO_NATIVE_PAPER_POSITION_BROKERS:
-                    # These adapters do not maintain exchange-native paper positions.
-                    # Their simulated fills are the authoritative paper book, so
-                    # reconciliation must preserve the latest synthetic snapshot
-                    # instead of overwriting it with the real account's empty book.
+                if self.paper_mode:
+                    # Paper execution is a local simulated ledger. Broker paper
+                    # APIs can be empty, delayed, or session-dependent, so they
+                    # must not tombstone locally simulated paper positions.
                     for row in paper_position_rows.get(bname, []):
                         asset_raw = str(row.asset_class or "equity").strip().lower()
                         try:
@@ -1682,6 +1770,45 @@ class ExecutionEngine:
                             )
                         )
                     await session.commit()
+
+            # If broker truth says a symbol no longer exists, persist an
+            # explicit zero row. Without this tombstone, latest-position
+            # consumers keep resurrecting the previous non-zero snapshot.
+            stale_closed: list[tuple[str, Any]] = []
+            for key, lq in local.items():
+                if abs(lq) <= max_quantity_diff:
+                    continue
+                if abs(remote.get(key, Decimal("0"))) > max_quantity_diff:
+                    continue
+                row = local_rows.get(key)
+                if row is not None:
+                    stale_closed.append((key[0], row))
+            if stale_closed:
+                snap_ts = datetime.now(timezone.utc)
+                async with sf() as session:
+                    for broker_name, row in stale_closed:
+                        session.add(
+                            PositionLog(
+                                timestamp=snap_ts,
+                                symbol=str(row.symbol).strip().upper()[:72],
+                                broker=str(broker_name).strip().lower()[:20],
+                                quantity=Decimal("0"),
+                                avg_entry_price=Decimal(str(row.avg_entry_price or "0")),
+                                current_price=Decimal(str(row.current_price or "0")),
+                                unrealised_pnl=Decimal("0"),
+                                asset_class=str(row.asset_class or "equity").strip().lower()[:20],
+                                instrument_metadata=(
+                                    row.instrument_metadata
+                                    if isinstance(row.instrument_metadata, dict)
+                                    else None
+                                ),
+                            )
+                        )
+                    await session.commit()
+                logger.warning(
+                    "Position reconciliation tombstoned %s stale local rows absent from broker truth",
+                    len(stale_closed),
+                )
 
             if any_mismatch:
                 # Still run the optional auto-kill hook — operators that opt in

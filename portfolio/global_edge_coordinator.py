@@ -506,6 +506,10 @@ class GlobalEdgeCoordinator:
             # these fields into the RawSignal metadata for execution-boundary
             # guards and dashboard display.
             action_meta = dict(opp.metadata)
+            action_meta.setdefault("confidence", str(opp.confidence))
+            action_meta.setdefault("expected_edge", str(opp.expected_edge))
+            action_meta.setdefault("side", str(opp.side))
+            action_meta["allocation_selected"] = True
             action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
             action_meta["sizing_mode"] = (active_mode or DEFAULT_MODE).strip().lower()
             action_meta["sizing_mode_fraction"] = str(clamped_frac)

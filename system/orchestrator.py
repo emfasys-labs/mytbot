@@ -444,6 +444,7 @@ class Orchestrator:
         self.capital_pct = max(0.0, min(1.0, float(pct)))
         if self._trading_loop is not None:
             self._trading_loop.capital_pct = self.capital_pct
+            self._trading_loop.request_iteration("capital_allocation_changed")
         logger.info("orchestrator | capital_pct set to {:.0%}", self.capital_pct)
 
     async def _run_migrations(self) -> None:

@@ -226,7 +226,8 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     engine = ExecutionEngine(broker_configs={}, paper_mode=True)
     result = await engine.execute(_signal(), _approved_decision())
     assert result is not None
-    assert broker.place_calls == 1
+    assert result.status == OrderStatus.FILLED
+    assert broker.place_calls == 0
     assert risk.killed is False
 
 
@@ -274,8 +275,8 @@ async def test_ibkr_equity_quantity_is_normalized_to_whole_units(monkeypatch) ->
     engine = ExecutionEngine(broker_configs={}, paper_mode=True)
     result = await engine.execute(s, _approved_decision())
     assert result is not None
-    assert broker.last_order is not None
-    assert broker.last_order.quantity == Decimal("10")
+    assert result.quantity == Decimal("10")
+    assert broker.place_calls == 0
 
 
 @pytest.mark.asyncio
@@ -366,7 +367,7 @@ async def test_reconcile_positions_mismatch_auto_kills(monkeypatch) -> None:
     monkeypatch.setattr(ExecutionEngine, "_init_db", staticmethod(_fake_init_db))
     monkeypatch.setattr(ExecutionEngine, "_dispose_db", staticmethod(_fake_dispose))
 
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     # prime broker cache
     await engine._get_broker("ibkr")
     ok = await engine.reconcile_positions()
@@ -434,7 +435,7 @@ async def test_reconcile_positions_happy_path(monkeypatch) -> None:
 
     monkeypatch.setattr(ExecutionEngine, "_init_db", staticmethod(_fake_init_db))
     monkeypatch.setattr(ExecutionEngine, "_dispose_db", staticmethod(_fake_dispose))
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     await engine._get_broker("ibkr")
     ok = await engine.reconcile_positions()
     assert ok is True
@@ -511,7 +512,7 @@ async def test_reconcile_persists_broker_truth_on_quantity_mismatch(monkeypatch)
     monkeypatch.setattr(ExecutionEngine, "_init_db", staticmethod(_fake_init_db))
     monkeypatch.setattr(ExecutionEngine, "_dispose_db", staticmethod(_fake_dispose))
 
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
     await engine._get_broker("ibkr")
     ok = await engine.reconcile_positions()
 
@@ -526,6 +527,173 @@ async def test_reconcile_persists_broker_truth_on_quantity_mismatch(monkeypatch)
     assert persisted.symbol == "SPY"
     assert persisted.broker == "ibkr"
     assert persisted.quantity == Decimal("2"), "persisted qty must match broker truth"
+    assert len(commits) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tombstones_local_position_missing_from_broker() -> None:
+    """When broker truth has no position, persist a zero row so stale DB rows do not reappear."""
+
+    risk = _FakeRiskEngine(
+        {
+            "auto_kill_on_reconciliation_failure": False,
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+
+    class _FlatBroker(_FakeBroker):
+        async def get_positions(self):
+            return []
+
+    latest_row = SimpleNamespace(
+        broker="ibkr",
+        symbol="SPY",
+        quantity=Decimal("2"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("101"),
+        unrealised_pnl=Decimal("2"),
+        asset_class="equity",
+        instrument_metadata=None,
+    )
+
+    class _FakeResult:
+        def __init__(self, *, scalar=None, rows=None):
+            self._scalar = scalar
+            self._rows = rows or []
+
+        def scalar_one_or_none(self):
+            return self._scalar
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+    added_rows: list = []
+    commits: list[int] = []
+    execute_calls = 0
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 1:
+                return _FakeResult(rows=[latest_row])
+            return _FakeResult(scalar=None)
+
+        def add(self, obj) -> None:
+            added_rows.append(obj)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    class _FakeFactory:
+        def __call__(self):
+            s = _FakeSession()
+
+            class _CM:
+                async def __aenter__(self_inner):
+                    return s
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _CM()
+
+    engine = ExecutionEngine(
+        broker_configs={"ibkr": {}},
+        paper_mode=False,
+        allowed_brokers=["ibkr"],
+    )
+    engine._brokers["ibkr"] = _FlatBroker()
+
+    ok = await engine.reconcile_positions(
+        session_factory=_FakeFactory(),
+        max_quantity_diff=Decimal("0.000001"),
+    )
+
+    assert ok is False
+    assert len(added_rows) == 1
+    tombstone = added_rows[0]
+    assert tombstone.broker == "ibkr"
+    assert tombstone.symbol == "SPY"
+    assert tombstone.quantity == Decimal("0")
+    assert len(commits) == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_reconcile_preserves_local_simulated_position() -> None:
+    """Paper-mode local fills are the book of record, even if broker API is empty."""
+
+    class _FlatBroker(_FakeBroker):
+        async def get_positions(self):
+            return []
+
+    latest_row = SimpleNamespace(
+        broker="ibkr",
+        symbol="SPY",
+        quantity=Decimal("2"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("101"),
+        unrealised_pnl=Decimal("2"),
+        asset_class="equity",
+        instrument_metadata=None,
+    )
+
+    class _FakeResult:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+    added_rows: list = []
+    commits: list[int] = []
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            return _FakeResult(rows=[latest_row])
+
+        def add(self, obj) -> None:
+            added_rows.append(obj)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    class _FakeFactory:
+        def __call__(self):
+            s = _FakeSession()
+
+            class _CM:
+                async def __aenter__(self_inner):
+                    return s
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _CM()
+
+    engine = ExecutionEngine(
+        broker_configs={"ibkr": {}},
+        paper_mode=True,
+        allowed_brokers=["ibkr"],
+    )
+    engine._brokers["ibkr"] = _FlatBroker()
+
+    ok = await engine.reconcile_positions(
+        session_factory=_FakeFactory(),
+        max_quantity_diff=Decimal("0.000001"),
+    )
+
+    assert ok is True
+    assert len(added_rows) == 1
+    assert added_rows[0].symbol == "SPY"
+    assert added_rows[0].quantity == Decimal("2")
     assert len(commits) == 1
 
 
@@ -552,6 +720,7 @@ async def test_fill_tracking_timeout_cancels_partial_remainder(monkeypatch) -> N
         }
     )
     set_risk_engine(risk)
+    monkeypatch.setenv("EXECUTION_PAPER_USE_BROKER_ORDERS", "1")
     broker = _FakeBroker(order_status_sequence=[OrderStatus.PARTIALLY_FILLED, OrderStatus.PARTIALLY_FILLED])
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
     engine = ExecutionEngine(
@@ -706,6 +875,60 @@ async def test_cancel_all_invokes_cancel_for_each_open_order() -> None:
     await engine.cancel_all()
     assert ibkr.cancel_calls == 1
     assert kraken.cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_working_orders_cancels_and_marks_db() -> None:
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from storage.models import Base, OrderLog
+
+    db = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with db.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(db, expire_on_commit=False)
+
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        session.add(
+            OrderLog(
+                id="client-ba",
+                broker_order_id="broker-ba",
+                signal_id="sig-ba",
+                timestamp=now,
+                symbol="BA",
+                side="buy",
+                order_type="limit",
+                quantity=Decimal("20"),
+                limit_price=Decimal("250"),
+                broker="ibkr",
+                status="pending",
+                filled_quantity=Decimal("0"),
+                paper_mode=True,
+            )
+        )
+        await session.commit()
+
+    broker = _FakeBroker()
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine._brokers = {"ibkr": broker}
+
+    try:
+        cancelled = await engine.cancel_working_orders(
+            session_factory=factory,
+            reason="capital_allocation_zero",
+        )
+
+        assert cancelled == 1
+        assert broker.cancel_calls == 1
+        async with factory() as session:
+            row = (
+                await session.execute(select(OrderLog).where(OrderLog.id == "client-ba"))
+            ).scalar_one()
+            assert row.status == "cancelled"
+    finally:
+        await db.dispose()
 
 
 def test_add_allowed_broker_appends_once() -> None:

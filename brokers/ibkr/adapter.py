@@ -1365,7 +1365,7 @@ class IBKRAdapter(BrokerAdapter):
             if trade is None:
                 logger.warning("cancel_order | IBKR | not found | id={}", broker_order_id)
                 return False
-            self._ib.cancelOrder(trade.contract, trade.order)
+            self._ib.cancelOrder(trade.order)
             logger.info("cancel_order | IBKR | id={}", broker_order_id)
             return True
         except Exception as exc:  # noqa: BLE001

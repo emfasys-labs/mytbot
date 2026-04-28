@@ -173,6 +173,12 @@ async def _merge_live_broker_positions_into_portfolio_state(
     paper_mode: bool = True,
 ) -> None:
     """Overlay broker-authoritative positions onto a DB-derived portfolio state."""
+    if paper_mode:
+        # Paper orders are filled into the local PositionLog ledger. Broker
+        # adapters may expose an empty native paper book (or be temporarily
+        # offline), and overlaying that here erases positions before the
+        # zero-allocation flatten path can close them.
+        return
     adapters = getattr(broker_manager, "adapters", None)
     if not isinstance(adapters, dict):
         return
@@ -288,6 +294,7 @@ class TradingLoop:
         self._control_bus: CommandBus | None = None
         self._strategies: dict[str, Any] = {}
         self._stop_event = asyncio.Event()
+        self._wake_event = asyncio.Event()
         self._running = False
 
         self.risk_engine: RiskEngine | None = None
@@ -323,6 +330,41 @@ class TradingLoop:
                 if self.execution_engine is not None:
                     self.execution_engine.add_allowed_broker(name)
                 logger.info("trading_loop | late broker joined: {}", name)
+
+    def request_iteration(self, reason: str = "operator_request") -> None:
+        """Wake the loop so operator control changes take effect promptly."""
+        self._wake_event.set()
+        logger.info("trading_loop | wake requested | {}", reason)
+
+    async def _wait_for_next_iteration(self, timeout_sec: float) -> bool:
+        """Wait for stop, timeout, or an operator wake.
+
+        Returns True when the loop should stop; False means continue with the
+        next trading iteration.
+        """
+        if self._stop_event.is_set():
+            return True
+        stop_task = asyncio.create_task(self._stop_event.wait())
+        wake_task = asyncio.create_task(self._wake_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {stop_task, wake_task},
+                timeout=max(0.0, float(timeout_sec)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if stop_task in done and stop_task.result():
+                return True
+            if wake_task in done and wake_task.result():
+                logger.info("trading_loop | wake consumed — running immediate iteration")
+                self._wake_event.clear()
+                return False
+            return False
+        finally:
+            for task in (stop_task, wake_task):
+                if not task.done():
+                    task.cancel()
 
     def _start_broker_join_poll(self) -> None:
         """Poll broker_manager adapters so late connections are usable quickly."""
@@ -1511,11 +1553,8 @@ class TradingLoop:
 
                         generated = len(batch_candidates)
                         executed = 0
-                        if batch_candidates or (
-                            self._use_global_edge
-                            and not use_legacy
-                            and Decimal(str(self.capital_pct)) <= 0
-                        ):
+                        zero_allocation = Decimal(str(self.capital_pct)) <= 0
+                        if batch_candidates or zero_allocation:
                             portfolio_dict = await _load_portfolio_state(
                                 session_factory,
                                 fallback_portfolio_value=total_equity,
@@ -1528,9 +1567,9 @@ class TradingLoop:
                                 capital_pct=float(self.capital_pct),
                             )
                             tradable_nav = total_equity * Decimal(str(self.capital_pct))
-                            if self._use_global_edge and not use_legacy:
+                            if zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
-                                    batch_candidates=batch_candidates,
+                                    batch_candidates=[] if zero_allocation else batch_candidates,
                                     portfolio_dict=portfolio_dict,
                                     tradable=tradable_nav,
                                     mode_raw=mode_raw,
@@ -1832,10 +1871,13 @@ class TradingLoop:
                 current_mode = self._read_active_mode()
                 iter_interval = mode_cadence_map.get(current_mode, self.loop_interval_sec)
                 try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=iter_interval)
-                    break
+                    should_stop = await self._wait_for_next_iteration(iter_interval)
+                    if should_stop:
+                        break
                 except asyncio.TimeoutError:
                     pass
+                except asyncio.CancelledError:
+                    break
 
         except asyncio.CancelledError:
             logger.info("trading_loop | cancelled")
@@ -2063,6 +2105,18 @@ class TradingLoop:
         repl_ctx = await load_replacement_context_from_bus(bus)
         mode_for_coord = mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader"
         if tradable <= 0:
+            try:
+                cancelled = await self.execution_engine.cancel_working_orders(
+                    session_factory=session_factory,
+                    reason="capital_allocation_zero",
+                )
+                if cancelled:
+                    logger.info(
+                        "global_edge | zero allocation cancelled {} working order(s)",
+                        cancelled,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("global_edge | zero allocation cancel working orders failed | {}", exc)
             actions = coord.propose_flatten_actions(
                 held,
                 active_mode=mode_for_coord,
@@ -2146,6 +2200,17 @@ class TradingLoop:
                 news_score=None,
             )
             if sig is None:
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=str(action.symbol),
+                            strategy=str(action.strategy_name),
+                            status="execution_incomplete",
+                            reason="signal_engine_returned_none",
+                            loop_iteration=self.iterations,
+                            metadata={"kind": str(action.kind)},
+                        )
+                    )
                 log_arb_event("reject", reason="signal_null", symbol=action.symbol)
                 continue
             if action.strategy_name == "cross_exchange_arbitrage" and self._broker_manager:
@@ -2205,8 +2270,29 @@ class TradingLoop:
             or sig_md.get("close_only")
             or str(sig_md.get("coordinator_kind", "")).lower() == "trim_symbol"
         )
+        if not is_reduce and Decimal(str(self.capital_pct)) <= 0:
+            logger.info(
+                "global_edge | open skipped because capital allocation is zero | symbol={} strategy={}",
+                getattr(signal, "symbol", ""),
+                strategy_key,
+            )
+            funnel.record_execution_blocked(strategy_key)
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(getattr(signal, "symbol", "") or ""),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="execution_incomplete",
+                        reason="capital_allocation_zero",
+                        loop_iteration=self.iterations,
+                        metadata={"execution_stage": "pre_risk_zero_allocation_guard"},
+                    )
+                )
+            return False
         preferred_broker = str(sig_md.get("broker") or getattr(signal, "broker", "") or "").strip().lower()
-        if is_reduce and preferred_broker and preferred_broker in self.available_brokers:
+        if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
             routed = preferred_broker
         else:
             routed = self.router.route(

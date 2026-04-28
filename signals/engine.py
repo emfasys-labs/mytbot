@@ -293,10 +293,13 @@ class SignalEngine:
             or raw_md.get("flatten_all")
             or str(raw_md.get("coordinator_kind", "")).lower() == "trim_symbol"
         )
-        if is_operator_close:
-            # Operator/runtime exits are not alpha ideas. They must not be
-            # delayed or vetoed by accumulated conviction, news overlay, or
-            # trained meta-label filters; risk still has unconditional say.
+        is_allocator_selected = bool(raw_md.get("allocation_selected")) or (
+            str(raw_md.get("coordinator_kind", "")).lower() == "open_strategy"
+        )
+        if is_operator_close or is_allocator_selected:
+            # Operator/runtime exits and allocator-selected opens are already
+            # post-selection intents. Do not run the same AI/meta gates twice;
+            # risk still has unconditional say before execution.
             net = None
             news_veto = False
             adjusted_confidence = float(raw.confidence)
@@ -379,7 +382,7 @@ class SignalEngine:
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
-        if not is_operator_close and not self._apply_trained_meta_label(
+        if not (is_operator_close or is_allocator_selected) and not self._apply_trained_meta_label(
             raw,
             adjusted_confidence=adjusted_confidence,
             news_score=news_score,

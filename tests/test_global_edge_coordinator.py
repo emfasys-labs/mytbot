@@ -561,6 +561,9 @@ def test_d031_audit_metadata_complete_on_emitted_action() -> None:
     assert md["sizing_mode"] == "hunter"
     assert Decimal(md["sizing_mode_fraction"]) == Decimal("1")
     assert actions[0].capital == Decimal("7913.22")
+    assert md["allocation_selected"] is True
+    assert Decimal(str(md["confidence"])) == opp.confidence
+    assert Decimal(str(md["expected_edge"])) == opp.expected_edge
 
 
 def test_d031_held_position_oversized_flag_when_above_ceiling() -> None:

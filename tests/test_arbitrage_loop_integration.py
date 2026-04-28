@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from portfolio.global_edge_coordinator import CoordinatorAction
-from risk.engine import RiskEngine, RiskVerdict
+from risk.engine import RiskDecision, RiskEngine, RiskVerdict
 from signals.arb_bridge import process_coordinator_action
 from signals.engine import SignalEngine
 
@@ -84,6 +84,44 @@ def test_coordinator_action_to_signal_passes_risk() -> None:
     assert decision.verdict == RiskVerdict.APPROVED
 
 
+def test_allocator_selected_open_does_not_run_meta_label_twice(monkeypatch) -> None:
+    """Once global-edge selects an open, it should proceed to risk/execution."""
+    se_cfg = {
+        "default_position_pct": 0.05,
+        "quantity_decimals": 4,
+        "news_veto_threshold": -0.7,
+        "news_confidence_weight": 0.15,
+    }
+    sig_engine = SignalEngine(se_cfg)
+    monkeypatch.setattr(sig_engine, "_apply_trained_meta_label", lambda *a, **k: False)
+    action = CoordinatorAction(
+        kind="open_strategy",
+        symbol="BA",
+        strategy_name="event_driven_news",
+        capital=Decimal("10840.47"),
+        priority_score=Decimal("0.4"),
+        metadata={
+            "side": "long",
+            "confidence": "0.82",
+            "broker": "ibkr",
+            "asset_class": "equity",
+            "last_price": "232",
+            "allocation_selected": True,
+        },
+    )
+
+    proc = process_coordinator_action(
+        action,
+        sig_engine,
+        portfolio_value=Decimal("536450"),
+        news_score=None,
+    )
+
+    assert proc is not None
+    assert proc.symbol == "BA"
+    assert proc.confidence == pytest.approx(0.82)
+
+
 @pytest.mark.asyncio
 async def test_smart_order_executor_polls_until_filled() -> None:
     from datetime import datetime, timezone
@@ -136,6 +174,197 @@ async def test_smart_order_executor_polls_until_filled() -> None:
     out = await ex.execute_spot_arbitrage(sig, Decimal("1"), max_latency_ms=5000.0)
     assert out.get("status") == "submitted"
     assert buy.polls >= 1 and sell.polls >= 1
+
+
+@pytest.mark.asyncio
+async def test_zero_allocation_blocks_stale_open_before_risk() -> None:
+    """If the slider drops to zero mid-iteration, stale open actions must not execute."""
+    from signals.engine import Signal
+    from system.trading_loop.loop import TradingLoop
+
+    class _Router:
+        calls = 0
+
+        def route(self, *_args, **_kwargs):
+            self.calls += 1
+            return "ibkr"
+
+    class _Risk:
+        calls = 0
+
+        def update_high_watermark(self, *_args, **_kwargs):
+            pass
+
+        def restore_runtime_state(self, *_args, **_kwargs):
+            pass
+
+        async def evaluate_and_persist(self, *_args, **_kwargs):
+            self.calls += 1
+            return RiskDecision(
+                verdict=RiskVerdict.APPROVED,
+                reason="ok",
+                signal_id="s-zero",
+                checks_passed=[],
+                checks_failed=[],
+            )
+
+    class _Execution:
+        calls = 0
+
+        async def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return None
+
+    loop = TradingLoop(broker_configs={}, available_brokers=["ibkr"], paper_mode=True, capital_pct=0)
+    router = _Router()
+    risk = _Risk()
+    execution = _Execution()
+    loop.router = router
+    loop.risk_engine = risk
+    loop.execution_engine = execution
+    signal = Signal(
+        signal_id="s-zero",
+        symbol="SPY",
+        side="buy",
+        strategy="global_edge",
+        confidence=0.9,
+        suggested_quantity=Decimal("1"),
+        suggested_price=Decimal("100"),
+        broker="ibkr",
+        asset_class="equity",
+        timestamp="2026-04-28T00:00:00+00:00",
+        metadata={"allocation_selected": True},
+    )
+
+    ok = await loop._process_signal_global(
+        signal,
+        session_factory=None,
+        portfolio_dict={"portfolio_value": Decimal("100000")},
+        total_equity=Decimal("100000"),
+        tradable=Decimal("0"),
+        sc_log_buffer=[],
+    )
+
+    assert ok is False
+    assert router.calls == 0
+    assert risk.calls == 0
+    assert execution.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_paper_reduce_uses_position_broker_even_when_offline(monkeypatch) -> None:
+    """Paper flatten closes the ledger broker, not a replacement venue."""
+    from signals.engine import Signal
+    from system.trading_loop.loop import TradingLoop
+
+    class _Router:
+        calls = 0
+
+        def route(self, *_args, **_kwargs):
+            self.calls += 1
+            return "alpaca"
+
+    class _Risk:
+        calls = 0
+        broker_seen = None
+
+        def update_high_watermark(self, *_args, **_kwargs):
+            pass
+
+        def restore_runtime_state(self, *_args, **_kwargs):
+            pass
+
+        async def evaluate_and_persist(self, _session_factory, signal, _portfolio_dict):
+            self.calls += 1
+            self.broker_seen = signal.broker
+            return RiskDecision(
+                verdict=RiskVerdict.APPROVED,
+                reason="ok",
+                signal_id="s-close",
+                checks_passed=[],
+                checks_failed=[],
+            )
+
+    class _Execution:
+        calls = 0
+        broker_seen = None
+
+        async def execute(self, signal, *_args, **_kwargs):
+            self.calls += 1
+            self.broker_seen = signal.broker
+            return None
+
+    loop = TradingLoop(broker_configs={}, available_brokers=["alpaca"], paper_mode=True, capital_pct=0)
+    router = _Router()
+    risk = _Risk()
+    execution = _Execution()
+    loop.router = router
+    loop.risk_engine = risk
+    loop.execution_engine = execution
+    async def _noop_persist(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("system.trading_loop.loop._persist_signal", _noop_persist)
+    signal = Signal(
+        signal_id="s-close",
+        symbol="AIP",
+        side="sell",
+        strategy="global_edge_flatten",
+        confidence=1.0,
+        suggested_quantity=Decimal("221"),
+        suggested_price=Decimal("26.59"),
+        broker="ibkr",
+        asset_class="equity",
+        timestamp="2026-04-28T00:00:00+00:00",
+        metadata={"reduce_only": True, "close_only": True, "broker": "ibkr"},
+    )
+
+    await loop._process_signal_global(
+        signal,
+        session_factory=None,
+        portfolio_dict={"portfolio_value": Decimal("100000")},
+        total_equity=Decimal("100000"),
+        tradable=Decimal("0"),
+        sc_log_buffer=[],
+    )
+
+    assert router.calls == 0
+    assert risk.calls == 1
+    assert execution.calls == 1
+    assert risk.broker_seen == "ibkr"
+    assert execution.broker_seen == "ibkr"
+
+
+@pytest.mark.asyncio
+async def test_paper_portfolio_overlay_preserves_local_ledger_positions() -> None:
+    from system.trading_loop.loop import _merge_live_broker_positions_into_portfolio_state
+
+    class _EmptyBroker:
+        async def get_positions(self):
+            return []
+
+    portfolio = {
+        "positions": {
+            "AIP": {
+                "quantity": Decimal("221"),
+                "current_price": Decimal("26.59"),
+                "avg_entry_price": Decimal("26.59"),
+                "asset_class": "equity",
+                "broker": "ibkr",
+            }
+        },
+        "current_gross_exposure": Decimal("5876.39"),
+    }
+    broker_manager = type("BM", (), {"adapters": {"ibkr": _EmptyBroker()}})()
+
+    await _merge_live_broker_positions_into_portfolio_state(
+        portfolio,
+        broker_manager,
+        paper_mode=True,
+    )
+
+    assert "AIP" in portfolio["positions"]
+    assert portfolio["positions"]["AIP"]["broker"] == "ibkr"
 
 
 @pytest.mark.asyncio

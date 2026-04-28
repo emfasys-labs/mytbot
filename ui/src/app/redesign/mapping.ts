@@ -301,23 +301,7 @@ export function mapPositions(
   pos: ApiPositionsResponse | null,
   totalNav: number,
 ): Position[] {
-  const rows = (pos?.positions ?? []).slice(0, 24);
-  const notionals = rows.map((p) => {
-    const avg = toNumber(p.avg_entry_price, 0);
-    const last = toNumber(p.current_price, avg);
-    const unreal = toNumber(p.unrealised_pnl, 0);
-    const qtyRaw = toNumber(p.quantity, NaN);
-    let qty: number;
-    if (Number.isFinite(qtyRaw) && qtyRaw !== 0) {
-      qty = qtyRaw;
-    } else {
-      const priceDelta = last - avg;
-      qty = Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
-    }
-    return Math.abs(qty * last);
-  });
-  const sumNot = notionals.reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
-  return rows.map<Position>((p, i) => {
+  const mapped = (pos?.positions ?? []).map<Position | null>((p) => {
     const avg = toNumber(p.avg_entry_price, 0);
     const last = toNumber(p.current_price, avg);
     const unreal = toNumber(p.unrealised_pnl, 0);
@@ -330,21 +314,31 @@ export function mapPositions(
       qty = Math.abs(priceDelta) > 1e-6 ? unreal / priceDelta : 0;
     }
     const notional = Math.abs(qty * last);
-    // Share of **displayed** book: ``notional / sum(notional)``. ``notional / NAV`` mis-labels
-    // lines as 100% with margin/aggregates because weights are clamped in [0,1].
-    const wDenom = sumNot > 0 ? sumNot : totalNav;
-    const weight = wDenom > 0 ? notional / wDenom : 0;
+    if (
+      !Number.isFinite(qty)
+      || !Number.isFinite(notional)
+      || Math.abs(qty) <= 1e-8
+      || notional <= 0.005
+    ) {
+      return null;
+    }
     return {
       sym: (p.symbol ?? '').toUpperCase(),
       qty: Number.isFinite(qty) ? Math.round(qty * 100) / 100 : 0,
       avg: Number.isFinite(avg) ? avg : 0,
       last: Number.isFinite(last) ? last : 0,
       pnl: Number.isFinite(unreal) ? unreal : 0,
-      w: Math.max(0, Math.min(1, weight)),
+      w: 0,
       notional: Number.isFinite(notional) ? notional : 0,
       broker: typeof p.broker === 'string' && p.broker.trim() ? p.broker.trim() : undefined,
     };
-  });
+  }).filter((p): p is Position => p !== null).slice(0, 24);
+  const sumNot = mapped.reduce((a, p) => a + (Number.isFinite(p.notional) && p.notional > 0 ? p.notional : 0), 0);
+  const wDenom = sumNot > 0 ? sumNot : totalNav;
+  return mapped.map((p) => ({
+    ...p,
+    w: wDenom > 0 ? Math.max(0, Math.min(1, p.notional / wDenom)) : 0,
+  }));
 }
 
 export function normalizeSide(raw: unknown): 'long' | 'short' {

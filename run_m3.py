@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -195,13 +196,18 @@ def _resolve_portfolio_value_for_state(
     """
     Choose ``portfolio_value`` for M3 state, NAV heartbeat, and dashboard snapshots.
 
-    **Live** broker equity (``fallback_portfolio_value`` from
-    :func:`system.portfolio_equity.live_portfolio_value`, post-D031 allowlist) must
-    win when it is **> 0**. Taking ``max(live, db)`` with ``daily_pnl`` reintroduced
-    a self-perpetuating stale higher value (e.g. 884K) after IBKR was excluded while
-    live summed correctly to ~98K. Use the DB figure only when live is still
-    unavailable (0) but we have a positive persisted row.
+    In live mode, broker equity (``fallback_portfolio_value`` from
+    :func:`system.portfolio_equity.live_portfolio_value`, post-D031 allowlist)
+    must win when it is **> 0**. Taking ``max(live, db)`` with ``daily_pnl``
+    reintroduced a self-perpetuating stale higher value after IBKR was excluded.
+
+    In paper mode, the persisted paper ledger is the account of record. Broker
+    balances are real venue cash snapshots and can be far below the simulated
+    paper NAV; using them creates a fake drawdown that blocks all opens.
     """
+    is_live = os.getenv("APP_ENV", "paper").strip().lower() == "live"
+    if not is_live and pv_from_db > 0:
+        return pv_from_db
     if fallback_portfolio_value > 0:
         return fallback_portfolio_value
     if pv_from_db > 0:

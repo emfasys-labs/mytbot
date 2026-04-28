@@ -556,7 +556,7 @@ async def _merge_synthetic_paper_positions_from_log(
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Append simulated legs for venues without native paper ``get_positions()``."""
+    """Append simulated paper-ledger legs that broker ``get_positions()`` lacks."""
 
     keys_seen: set[tuple[str, str]] = set()
     for r in live_rows:
@@ -573,10 +573,9 @@ async def _merge_synthetic_paper_positions_from_log(
         latest_ts = latest_ts_q.scalar_one_or_none()
         if latest_ts is None:
             return live_rows
-        brokers_t = tuple(sorted(NO_NATIVE_PAPER_POSITION_BROKERS))
         q = await session.execute(
             select(PositionLog)
-            .where(PositionLog.timestamp == latest_ts, PositionLog.broker.in_(brokers_t))
+            .where(PositionLog.timestamp == latest_ts)
             .order_by(PositionLog.symbol.asc())
         )
         pl_rows = list(q.scalars().all())
@@ -1534,20 +1533,33 @@ async def get_dashboard_wave13(bus: CommandBus = Depends(_command_bus)):
 
 
 @app.get("/dashboard/snapshot")
-async def get_dashboard_snapshot(bus: CommandBus = Depends(_command_bus)):
+async def get_dashboard_snapshot(
+    bus: CommandBus = Depends(_command_bus),
+):
     """Latest allocator + accumulator snapshot from ``ControlState`` (trading loop)."""
     raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
     if not isinstance(raw, dict):
         return {}
     out = dict(raw)
-    live_positions = await _live_broker_positions(500)
-    if live_positions:
+    session_factory = getattr(app.state, "db_session_factory", None)
+    if APP_ENV != "live":
+        if session_factory is not None:
+            pos_payload = await get_positions(limit=500, session_factory=session_factory)
+            position_rows = list(pos_payload.get("positions") or []) if isinstance(pos_payload, dict) else []
+            position_source = str(pos_payload.get("source", "position_log")) if isinstance(pos_payload, dict) else "position_log"
+        else:
+            position_rows = []
+            position_source = "position_log"
+    else:
+        position_rows = await _live_broker_positions(500)
+        position_source = "live_broker"
+    if position_rows:
         nav = await _live_portfolio_value()
         gross = Decimal(0)
         net = Decimal(0)
         total_unrealised = Decimal(0)
         sample: list[dict[str, Any]] = []
-        for p in live_positions:
+        for p in position_rows:
             try:
                 qty = Decimal(str(p.get("quantity", "0") or "0"))
                 px = Decimal(str(p.get("current_price", "0") or "0"))
@@ -1576,7 +1588,7 @@ async def get_dashboard_snapshot(bus: CommandBus = Depends(_command_bus)):
         portfolio["net_exposure"] = _decimal_str(net)
         portfolio["positions_sample"] = sample[:24]
         portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
-        portfolio["source"] = "live_broker"
+        portfolio["source"] = position_source
         out["portfolio"] = portfolio
     return out
 

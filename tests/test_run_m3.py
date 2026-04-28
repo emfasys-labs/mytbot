@@ -78,12 +78,20 @@ def test_main_parser_accepts_ai_config(monkeypatch):
         assert exc.code == 0
 
 
-def test_resolve_portfolio_value_live_wins_over_stale_db() -> None:
+def test_resolve_portfolio_value_live_wins_over_stale_db(monkeypatch) -> None:
     """D031: post-allowlist live (~98K) must not max() with stale daily_pnl (~884K)."""
+    monkeypatch.setenv("APP_ENV", "live")
     assert _resolve_portfolio_value_for_state(Decimal("98000"), Decimal("884000")) == Decimal("98000")
 
 
-def test_resolve_portfolio_value_falls_back_to_db_when_live_zero() -> None:
+def test_resolve_portfolio_value_paper_uses_paper_ledger(monkeypatch) -> None:
+    """Paper mode must not treat small real broker cash as simulated NAV."""
+    monkeypatch.setenv("APP_ENV", "paper")
+    assert _resolve_portfolio_value_for_state(Decimal("98000"), Decimal("884000")) == Decimal("884000")
+
+
+def test_resolve_portfolio_value_falls_back_to_db_when_live_zero(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "live")
     assert _resolve_portfolio_value_for_state(Decimal("0"), Decimal("884000")) == Decimal("884000")
 
 
@@ -91,6 +99,6 @@ def test_resolve_portfolio_value_both_zero() -> None:
     assert _resolve_portfolio_value_for_state(Decimal("0"), Decimal("0")) == Decimal("0")
 
 
-def test_resolve_portfolio_value_live_positive_db_zero() -> None:
+def test_resolve_portfolio_value_live_positive_db_zero(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "live")
     assert _resolve_portfolio_value_for_state(Decimal("1055000"), Decimal("0")) == Decimal("1055000")
-
