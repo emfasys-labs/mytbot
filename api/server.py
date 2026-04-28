@@ -36,7 +36,7 @@ from api.pnl_periods import (
     win_rate_from_daily_rows,
 )
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
-from control.command_bus import CommandBus
+from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
@@ -1775,6 +1775,11 @@ async def system_status(
         )
     out = orch.status()
     try:
+        cap_raw = await bus.get_state(CAPITAL_ALLOCATION_STATE_KEY, None)
+        if isinstance(cap_raw, dict):
+            cap_raw = cap_raw.get("pct")
+        if cap_raw is not None and str(out.get("state", "")).lower() != "running":
+            out["capital_pct"] = max(0.0, min(1.0, float(cap_raw)))
         dash_raw = await bus.get_state(DASHBOARD_SNAPSHOT_KEY, None)
         if isinstance(dash_raw, dict):
             ua = dash_raw.get("updated_at")
@@ -1859,14 +1864,34 @@ async def set_capital_allocation(
     pct = float(body.get("pct", 1.0))
     if not (0.0 <= pct <= 1.0):
         raise HTTPException(status_code=400, detail="pct must be between 0 and 1")
+    bus = getattr(app.state, "command_bus", None)
+    if bus is not None:
+        await bus.set_state(
+            CAPITAL_ALLOCATION_STATE_KEY,
+            {
+                "pct": pct,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "source": "api",
+            },
+        )
     orch.set_capital_pct(pct)
-    return {"capital_pct": orch.capital_pct}
+    return {"capital_pct": orch.capital_pct, "persisted": bus is not None}
 
 
 @app.get("/system/capital-allocation")
 async def get_capital_allocation():
     """Get the current capital allocation fraction."""
     orch = _get_orchestrator()
+    bus = getattr(app.state, "command_bus", None)
+    if bus is not None and (
+        orch is None or str(getattr(orch, "state", "")).lower().endswith("off")
+    ):
+        raw = await bus.get_state(CAPITAL_ALLOCATION_STATE_KEY, None)
+        if isinstance(raw, dict):
+            try:
+                return {"capital_pct": max(0.0, min(1.0, float(raw.get("pct", 1.0))))}
+            except (TypeError, ValueError):
+                pass
     if orch is None:
         return {"capital_pct": 1.0}
     return {"capital_pct": orch.capital_pct}

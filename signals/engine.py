@@ -286,14 +286,29 @@ class SignalEngine:
             return self._process_arbitrage(raw, portfolio_value, news_score)
 
         now = datetime.now(timezone.utc)
-        net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
-
-        news_veto, adjusted_confidence = self._veto_and_confidence(
-            raw,
-            news_score=news_score,
-            net=net,
-            apply_news_overlay=True,
+        raw_md = raw.metadata or {}
+        is_operator_close = bool(
+            raw_md.get("reduce_only")
+            or raw_md.get("close_only")
+            or raw_md.get("flatten_all")
+            or str(raw_md.get("coordinator_kind", "")).lower() == "trim_symbol"
         )
+        if is_operator_close:
+            # Operator/runtime exits are not alpha ideas. They must not be
+            # delayed or vetoed by accumulated conviction, news overlay, or
+            # trained meta-label filters; risk still has unconditional say.
+            net = None
+            news_veto = False
+            adjusted_confidence = float(raw.confidence)
+        else:
+            net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
+
+            news_veto, adjusted_confidence = self._veto_and_confidence(
+                raw,
+                news_score=news_score,
+                net=net,
+                apply_news_overlay=True,
+            )
 
         # Size the position.
         #
@@ -310,8 +325,6 @@ class SignalEngine:
         last_price = self._extract_last_price(raw.metadata)
         qty_decimals = int(self.config.get("quantity_decimals", 8))
         tick = Decimal("1").scaleb(-qty_decimals)
-
-        raw_md = raw.metadata or {}
 
         def _positive_decimal(v: object) -> Optional[Decimal]:
             if v is None:
@@ -366,7 +379,7 @@ class SignalEngine:
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
-        if not self._apply_trained_meta_label(
+        if not is_operator_close and not self._apply_trained_meta_label(
             raw,
             adjusted_confidence=adjusted_confidence,
             news_score=news_score,

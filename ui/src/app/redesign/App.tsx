@@ -207,7 +207,7 @@ export default function App() {
           mode={live.mode}
           onSetMode={(m) => void live.setMode(m)}
         />
-        <div style={{ flex: 1, minHeight: 0, background: TOKENS.bg0, position: 'relative' }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: TOKENS.bg0, position: 'relative' }}>
           {effectiveRoute === 'dash' && (
             <DashboardScreen
               state={state}

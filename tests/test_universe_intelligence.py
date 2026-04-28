@@ -8,7 +8,8 @@ from universe.eligibility import evaluate_eligibility
 from universe.persistence import merge_cluster_payload
 from universe.promotion_engine import PromotionCandidate, evaluate_promotion
 from universe.representative_selector import select_representatives
-from universe.snapshot_service import build_universe_snapshot_dict, load_universe_selection_config
+from data.universe import UniverseManager
+from universe.snapshot_service import _catalog_lookup, build_universe_snapshot_dict, load_universe_selection_config
 from universe.universe_tiers import UniverseIntelligenceState
 
 
@@ -93,6 +94,29 @@ def test_snapshot_disabled_does_not_crash():
     assert payload["enabled"] is False
     assert "funnel" in payload
     assert isinstance(payload["symbols"], list)
+
+
+def test_snapshot_symbol_rows_include_description():
+    payload = build_universe_snapshot_dict(broker_symbol_totals={})
+    assert payload["symbols"]
+    for row in payload["symbols"]:
+        assert row.get("description")
+        assert row.get("sym")
+
+
+def test_catalog_lookup_resolves_aliases():
+    assert _catalog_lookup("SPY") == ("S&P 500 ETF", "broad_market")
+    assert _catalog_lookup("BTC-USD")[0] == "Bitcoin"
+    assert _catalog_lookup("EUR.USD")[0] == "Euro/Dollar"
+    unknown = _catalog_lookup("ZZZNOTREAL")
+    assert unknown == (None, None)
+    catalog_syms = {inst.symbol.upper() for inst in UniverseManager.INITIAL_UNIVERSE}
+    payload = build_universe_snapshot_dict(broker_symbol_totals={})
+    overlap = [s for s in payload["symbols"] if s.get("sym") in catalog_syms]
+    if overlap:
+        row = overlap[0]
+        assert row.get("name")
+        assert row["sym"] in catalog_syms
 
 
 def test_load_config():

@@ -42,11 +42,23 @@ const STAGE_DESC: Record<string, string> = {
 
 type UniTab = 'overview' | 'funnel' | 'instruments' | 'config';
 
+function symbolTitle(row: UniverseSymbolRow): string {
+  return (row.description || row.name || row.sym).trim();
+}
+
+function symbolSubtitle(row: UniverseSymbolRow): string {
+  const fallback =
+    row.sector && row.sector !== 'general'
+      ? `${row.klass} · ${row.sector.replace(/_/g, ' ')}`
+      : row.klass;
+  return (row.name || row.description || fallback).trim();
+}
+
 function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
-function classGlyph(klass: string, size = 12): JSX.Element {
+function classGlyph(klass: string, size = 12) {
   const c =
     klass === 'crypto' ? TOKENS.profit :
     klass === 'fx' ? TOKENS.info :
@@ -124,10 +136,14 @@ export function UniverseScreen({
 
   return (
     <div style={{
-      minHeight: '100%',
+      height: '100%',
+      minHeight: 0,
+      boxSizing: 'border-box',
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
       background: `radial-gradient(ellipse at top left, ${accentColor}08, transparent 50%), ${TOKENS.bg0}`,
       color: TOKENS.ink1,
-      overflow: 'auto',
     }}>
       <style>{`
         @keyframes uni-flow { to { stroke-dashoffset: -12; } }
@@ -135,6 +151,7 @@ export function UniverseScreen({
 
       <header style={{
         display: 'flex',
+        flexShrink: 0,
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: `${pad}px ${pad + 8}px`,
@@ -164,6 +181,7 @@ export function UniverseScreen({
       </header>
 
       <nav style={{
+        flexShrink: 0,
         padding: `0 ${pad + 8}px`,
         borderBottom: `1px solid ${TOKENS.line}`,
         display: 'flex',
@@ -204,9 +222,22 @@ export function UniverseScreen({
         ))}
       </nav>
 
-      <main style={{ padding: `${pad}px ${pad + 8}px ${pad + 40}px`, maxWidth: 1440, margin: '0 auto' }}>
+      <main style={{
+        flex: 1,
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        padding: `${pad}px ${pad + 8}px 0`,
+        maxWidth: 1440,
+        margin: '0 auto',
+        width: '100%',
+        boxSizing: 'border-box',
+      }}
+      >
         {err && (
           <div style={{
+            flexShrink: 0,
             marginBottom: 14, padding: 12, borderRadius: 8,
             border: `1px solid ${TOKENS.danger}55`, color: TOKENS.danger,
             fontFamily: TOKENS.mono, fontSize: 12,
@@ -226,31 +257,41 @@ export function UniverseScreen({
           </div>
         )}
 
-        {tab === 'overview' && (
-          <OverviewTab
-            accentColor={accentColor}
-            heroLine={heroLine}
-            funnel={funnel}
-            stream={stream}
-            symbols={symbols}
-            clusters={clusters}
-            data={data}
-            onSelect={setSelected}
-            onJumpTo={onJumpTo}
-          />
-        )}
-        {tab === 'funnel' && (
-          <FunnelTab accentColor={accentColor} funnel={funnel} clusters={clusters} onJumpTo={onJumpTo} />
-        )}
-        {tab === 'instruments' && (
+        {tab === 'instruments' ? (
           <InstrumentsTab
             symbols={symbols}
             accentColor={accentColor}
             onSelect={setSelected}
             initialStage={stageFilter}
+            bottomPad={pad}
           />
+        ) : (
+          <div style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: 'auto',
+            paddingBottom: pad + 8,
+          }}
+          >
+            {tab === 'overview' && (
+              <OverviewTab
+                accentColor={accentColor}
+                heroLine={heroLine}
+                funnel={funnel}
+                stream={stream}
+                symbols={symbols}
+                clusters={clusters}
+                data={data}
+                onSelect={setSelected}
+                onJumpTo={onJumpTo}
+              />
+            )}
+            {tab === 'funnel' && (
+              <FunnelTab accentColor={accentColor} funnel={funnel} clusters={clusters} onJumpTo={onJumpTo} />
+            )}
+            {tab === 'config' && <ConfigTab data={data} />}
+          </div>
         )}
-        {tab === 'config' && <ConfigTab data={data} />}
       </main>
 
       {selected && (
@@ -622,11 +663,13 @@ function InstrumentsTab({
   accentColor,
   onSelect,
   initialStage,
+  bottomPad,
 }: {
   symbols: UniverseSymbolRow[];
   accentColor: string;
   onSelect: (s: string) => void;
   initialStage: string | null;
+  bottomPad: number;
 }) {
   const [view, setView] = useState<'grid' | 'list'>('grid');
   const [stageFilter, setStageFilter] = useState<string>(initialStage ?? 'all');
@@ -638,7 +681,11 @@ function InstrumentsTab({
 
   const filtered = useMemo(() => symbols.filter((s) => {
     if (stageFilter !== 'all' && s.stage !== stageFilter) return false;
-    if (q && !s.sym.toLowerCase().includes(q.toLowerCase())) return false;
+    if (q) {
+      const needle = q.toLowerCase();
+      const hay = `${s.sym} ${s.name ?? ''} ${s.description ?? ''}`.toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
     return true;
   }), [symbols, stageFilter, q]);
 
@@ -649,132 +696,180 @@ function InstrumentsTab({
   }, [symbols]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Card style={{ padding: 14 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          {(['all', 'source', 'eligible', 'watching', 'promoted', 'active', 'banned'] as const).map((st) => (
-            <button
-              key={st}
-              type="button"
-              onClick={() => setStageFilter(st)}
-              style={{
-                padding: '6px 10px',
-                borderRadius: 6,
-                border: `1px solid ${stageFilter === st ? TOKENS.lineStrong : TOKENS.line}`,
-                background: stageFilter === st ? TOKENS.bg3 : 'transparent',
-                color: stageFilter === st ? TOKENS.ink0 : TOKENS.ink2,
-                fontFamily: TOKENS.mono,
-                fontSize: 10,
-                cursor: 'pointer',
-              }}
-            >
-              {st} ({stageCounts[st] ?? (st === 'all' ? symbols.length : 0)})
-            </button>
-          ))}
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="search…"
-            style={{
-              marginLeft: 'auto',
-              padding: '6px 10px',
-              borderRadius: 6,
-              background: TOKENS.bg2,
-              border: `1px solid ${TOKENS.line}`,
-              color: TOKENS.ink1,
-              fontFamily: TOKENS.mono,
-              fontSize: 11,
-              width: 160,
-            }}
-          />
-          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${TOKENS.line}`, overflow: 'hidden' }}>
-            {(['grid', 'list'] as const).map((v) => (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      flex: 1,
+      minHeight: 0,
+      overflow: 'hidden',
+    }}
+    >
+      <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Card style={{ padding: 14 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            {(['all', 'source', 'eligible', 'watching', 'promoted', 'active', 'banned'] as const).map((st) => (
               <button
-                key={v}
+                key={st}
                 type="button"
-                onClick={() => setView(v)}
+                onClick={() => setStageFilter(st)}
                 style={{
                   padding: '6px 10px',
-                  background: view === v ? TOKENS.bg3 : 'transparent',
-                  border: 'none',
-                  color: view === v ? TOKENS.ink0 : TOKENS.ink2,
-                  fontFamily: TOKENS.sans,
-                  fontSize: 11,
+                  borderRadius: 6,
+                  border: `1px solid ${stageFilter === st ? TOKENS.lineStrong : TOKENS.line}`,
+                  background: stageFilter === st ? TOKENS.bg3 : 'transparent',
+                  color: stageFilter === st ? TOKENS.ink0 : TOKENS.ink2,
+                  fontFamily: TOKENS.mono,
+                  fontSize: 10,
                   cursor: 'pointer',
                 }}
               >
-                {v}
+                {st} ({stageCounts[st] ?? (st === 'all' ? symbols.length : 0)})
               </button>
             ))}
-          </div>
-        </div>
-      </Card>
-
-      <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
-        {filtered.length} symbols
-      </div>
-
-      {view === 'grid' ? (
-        <Card style={{ padding: 14 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
-            {filtered.slice(0, 240).map((s) => {
-              const c = STAGE_COLORS[s.stage] ?? accentColor;
-              return (
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="search…"
+              style={{
+                marginLeft: 'auto',
+                padding: '6px 10px',
+                borderRadius: 6,
+                background: TOKENS.bg2,
+                border: `1px solid ${TOKENS.line}`,
+                color: TOKENS.ink1,
+                fontFamily: TOKENS.mono,
+                fontSize: 11,
+                width: 160,
+              }}
+            />
+            <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${TOKENS.line}`, overflow: 'hidden' }}>
+              {(['grid', 'list'] as const).map((v) => (
                 <button
-                  key={s.sym}
+                  key={v}
                   type="button"
-                  onClick={() => onSelect(s.sym)}
+                  onClick={() => setView(v)}
                   style={{
-                    padding: 10,
-                    borderRadius: 8,
-                    background: TOKENS.bg2,
-                    border: `1px solid ${TOKENS.line}`,
-                    borderLeft: `2px solid ${c}`,
-                    textAlign: 'left',
+                    padding: '6px 10px',
+                    background: view === v ? TOKENS.bg3 : 'transparent',
+                    border: 'none',
+                    color: view === v ? TOKENS.ink0 : TOKENS.ink2,
+                    fontFamily: TOKENS.sans,
+                    fontSize: 11,
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {classGlyph(s.klass, 11)}
-                    <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500 }}>{s.sym}</span>
-                  </div>
-                  <div style={{ fontFamily: TOKENS.sans, fontSize: 18, fontWeight: 300, marginTop: 4 }}>{s.conviction}</div>
-                  {s.spark && <Spark values={s.spark} width={100} height={18} accent={c} />}
+                  {v}
                 </button>
-              );
-            })}
+              ))}
+            </div>
           </div>
         </Card>
-      ) : (
-        <Card style={{ padding: 0 }}>
-          <div style={{ overflowX: 'auto', maxHeight: 560 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ fontFamily: TOKENS.sans, fontSize: 10, color: TOKENS.ink3, textAlign: 'left' }}>
-                  <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>symbol</th>
-                  <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>stage</th>
-                  <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>conv</th>
-                  <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>ρ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.slice(0, 400).map((s) => (
-                  <tr
+
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+          {filtered.length} symbols
+        </div>
+      </div>
+
+      <div style={{
+        flex: 1,
+        minHeight: 0,
+        overflow: 'auto',
+        paddingBottom: bottomPad + 8,
+      }}
+      >
+        {view === 'grid' ? (
+          <Card style={{ padding: 14 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
+              {filtered.slice(0, 240).map((s) => {
+                const c = STAGE_COLORS[s.stage] ?? accentColor;
+                return (
+                  <button
                     key={s.sym}
+                    type="button"
+                    title={symbolTitle(s)}
                     onClick={() => onSelect(s.sym)}
-                    style={{ cursor: 'pointer', fontFamily: TOKENS.sans, fontSize: 12 }}
+                    style={{
+                      padding: 10,
+                      borderRadius: 8,
+                      background: TOKENS.bg2,
+                      border: `1px solid ${TOKENS.line}`,
+                      borderLeft: `2px solid ${c}`,
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                    }}
                   >
-                    <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.sym}</td>
-                    <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.stage}</td>
-                    <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.conviction}</td>
-                    <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.bookCorr?.toFixed(2)}</td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {classGlyph(s.klass, 11)}
+                      <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500 }}>{s.sym}</span>
+                    </div>
+                    <div style={{
+                      marginTop: 4,
+                      fontFamily: TOKENS.sans,
+                      fontSize: 10,
+                      color: TOKENS.ink3,
+                      lineHeight: 1.25,
+                      overflow: 'hidden',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      wordBreak: 'break-word',
+                    }}
+                    >
+                      {symbolSubtitle(s)}
+                    </div>
+                    <div style={{ fontFamily: TOKENS.sans, fontSize: 18, fontWeight: 300, marginTop: 4 }}>{s.conviction}</div>
+                    {s.spark && <Spark values={s.spark} width={100} height={18} accent={c} />}
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+        ) : (
+          <Card style={{ padding: 0 }}>
+            <div style={{ overflow: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead style={{ position: 'sticky', top: 0, background: TOKENS.bg1, zIndex: 1 }}>
+                  <tr style={{ fontFamily: TOKENS.sans, fontSize: 10, color: TOKENS.ink3, textAlign: 'left' }}>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>symbol</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>what</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>stage</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>conv</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>ρ</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
+                </thead>
+                <tbody>
+                  {filtered.slice(0, 400).map((s) => (
+                    <tr
+                      key={s.sym}
+                      title={symbolTitle(s)}
+                      onClick={() => onSelect(s.sym)}
+                      style={{ cursor: 'pointer', fontFamily: TOKENS.sans, fontSize: 12 }}
+                    >
+                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.sym}</td>
+                      <td style={{
+                        padding: 8,
+                        borderBottom: `1px solid ${TOKENS.line}`,
+                        color: TOKENS.ink2,
+                        maxWidth: 220,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      >
+                        {symbolSubtitle(s)}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.stage}</td>
+                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.conviction}</td>
+                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.bookCorr?.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+      </div>
     </div>
   );
 }
@@ -874,6 +969,18 @@ function Inspector({
               <h2 style={{ margin: 0, fontFamily: TOKENS.sans, fontSize: 24, fontWeight: 300, color: TOKENS.ink0 }}>{s.sym}</h2>
             </div>
             <div style={{ marginTop: 6, fontSize: 12, color: TOKENS.ink3 }}>{s.klass} · {s.stage}</div>
+            {(s.description || s.name) && (
+              <div style={{
+                marginTop: 10,
+                fontSize: 13,
+                color: TOKENS.ink2,
+                lineHeight: 1.45,
+                maxWidth: 360,
+              }}
+              >
+                {s.description || s.name}
+              </div>
+            )}
           </div>
           <button
             type="button"

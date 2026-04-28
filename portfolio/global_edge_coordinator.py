@@ -524,6 +524,57 @@ class GlobalEdgeCoordinator:
 
         return out
 
+    def propose_flatten_actions(
+        self,
+        held: list[HeldPositionEdge],
+        *,
+        active_mode: str = DEFAULT_MODE,
+        max_actions: int | None = None,
+    ) -> list[CoordinatorAction]:
+        """Emit reduce-only close intents when the operator sets allocation to zero.
+
+        This is the capital-slider "flatten book" path. It deliberately emits
+        normal ``trim_symbol`` coordinator actions so every close still flows
+        through SignalEngine -> RiskEngine -> ExecutionEngine; it only changes
+        the selection policy from "replace weak held edge with better new edge"
+        to "close held exposure because the deployment ceiling is zero".
+        """
+        cap_n = max_actions if max_actions is not None else len(held)
+        if cap_n <= 0:
+            return []
+
+        out: list[CoordinatorAction] = []
+        # Close the largest exposures first, then weakest edge, so over-lev is
+        # relieved quickly while remaining deterministic for tests/audits.
+        ranked = sorted(
+            held,
+            key=lambda h: (h.notional, -h.expected_remaining_edge),
+            reverse=True,
+        )
+        for h in ranked[:cap_n]:
+            meta = dict(h.metadata or {})
+            meta["coordinator_kind"] = "trim_symbol"
+            meta["reduce_only"] = True
+            meta["close_only"] = True
+            meta["flatten_all"] = True
+            meta["flatten_reason"] = "capital_allocation_zero"
+            meta["force_market_order"] = True
+            meta["target_notional"] = str(h.notional)
+            meta["risk_notional_override"] = str(h.notional)
+            if h.broker:
+                meta["broker"] = h.broker
+            out.append(
+                CoordinatorAction(
+                    kind="trim_symbol",
+                    symbol=h.symbol,
+                    strategy_name="global_edge_flatten",
+                    capital=h.notional,
+                    priority_score=Decimal("1"),
+                    metadata=meta,
+                )
+            )
+        return out
+
 
 def dedupe_opportunities_by_symbol(
     opportunities: list[StrategyOpportunity],
@@ -594,6 +645,7 @@ def held_positions_from_portfolio(
     for sym, row in pos.items():
         if not isinstance(row, dict):
             continue
+        actual_symbol = str(row.get("symbol") or sym)
         try:
             qty = Decimal(str(row.get("quantity", "0")))
             px = Decimal(str(row.get("current_price", "0")))
@@ -612,6 +664,8 @@ def held_positions_from_portfolio(
             "side": str(row.get("side") or ("short" if qty < 0 else "long")),
             "asset_class": str(row.get("asset_class", "equity") or "equity"),
         }
+        if actual_symbol != str(sym):
+            meta["position_key"] = str(sym)
         if ceiling is not None and ceiling > 0:
             ratio = (n / ceiling).quantize(Decimal("0.0001"))
             meta["position_above_target_ratio"] = str(ratio)
@@ -622,7 +676,7 @@ def held_positions_from_portfolio(
                 rem = max(Decimal("0"), rem - oversize_penalty)
         out.append(
             HeldPositionEdge(
-                symbol=str(sym),
+                symbol=actual_symbol,
                 notional=n,
                 expected_remaining_edge=rem,
                 broker=str(row.get("broker", "")),

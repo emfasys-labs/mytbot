@@ -7,9 +7,38 @@ from typing import Any
 
 import yaml
 
+from data.universe import UniverseManager
 from data.universe_tiers import load_universe_tiers
 from universe.persistence import DEFAULT_INTELLIGENCE_PATH, load_intelligence_state
 from universe.universe_tiers import UniverseIntelligenceState
+
+# Curated human names / sectors (data/universe.py). Pipeline symbols outside this set
+# still get a generated description from class + stage.
+_CATALOG_BY_SYMBOL: dict[str, tuple[str, str | None]] = {
+    inst.symbol.upper(): (inst.name, inst.sector) for inst in UniverseManager.INITIAL_UNIVERSE
+}
+
+
+def _catalog_lookup(sym: str) -> tuple[str | None, str | None]:
+    """Match pipeline/tier tickers to UniverseInstrument (handles EUR.USD, BTC-USD, etc.)."""
+    u = sym.upper().strip()
+    if u in _CATALOG_BY_SYMBOL:
+        return _CATALOG_BY_SYMBOL[u]
+    norm = u.replace(".", "_")
+    if norm in _CATALOG_BY_SYMBOL:
+        return _CATALOG_BY_SYMBOL[norm]
+    for sep in ("-", "/"):
+        if sep in u:
+            base = u.split(sep, 1)[0].strip()
+            if base in _CATALOG_BY_SYMBOL:
+                return _CATALOG_BY_SYMBOL[base]
+    return None, None
+
+
+def _fmt_sector_label(sector: str | None) -> str | None:
+    if not sector or str(sector).lower() == "general":
+        return None
+    return str(sector).replace("_", " ")
 
 CONFIG_PATH = Path("config/universe_selection.yaml")
 
@@ -248,11 +277,29 @@ def _symbols_fallback(
         tier_reason = "core" if i < core_max else "scan"
         klass = _classify_symbol(sym)
         spark = [max(0, min(100, sc + j * 2 - 10)) for j in range(12)]
+        su = sym.upper()
+        cat_name, cat_sector = _catalog_lookup(sym)
+        sector_ui = cat_sector if cat_sector else "general"
+        sec_lbl = _fmt_sector_label(sector_ui)
+        if cat_name:
+            name_ui: str | None = cat_name
+            desc_parts = [cat_name, klass]
+            if sec_lbl:
+                desc_parts.append(sec_lbl)
+            description_ui = " · ".join(desc_parts)
+        else:
+            name_ui = None
+            if sec_lbl:
+                description_ui = f"{su} · {klass} · {sec_lbl}"
+            else:
+                description_ui = f"{su} · {klass}"
         out.append(
             {
-                "sym": sym.upper(),
+                "sym": su,
+                "name": name_ui,
+                "description": description_ui,
                 "klass": klass,
-                "sector": "general",
+                "sector": sector_ui,
                 "stage": stage,
                 "conviction": int(min(100, max(0, sc + (i % 11) - 5))),
                 "trend": "rising" if i % 3 else "steady",
@@ -267,7 +314,7 @@ def _symbols_fallback(
                 "bookCorr": round((i % 17) / 33 - 0.5, 2),
                 "tierReason": tier_reason,
                 "override": None,
-                "pairWatch": sym.upper() in pair_syms,
+                "pairWatch": su in pair_syms,
             }
         )
     return out

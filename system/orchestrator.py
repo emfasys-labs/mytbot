@@ -127,6 +127,38 @@ class Orchestrator:
             await asyncio.sleep(step)
             remaining -= step
 
+    async def _load_persisted_capital_pct(self) -> None:
+        """Restore operator capital allocation from durable control state."""
+        try:
+            from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
+            from storage.db import dispose_engine as _dispose
+            from storage.db import init_async_database
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | capital allocation restore imports unavailable: {}", exc)
+            return
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            bus = CommandBus(sf)
+            raw = await bus.get_state(CAPITAL_ALLOCATION_STATE_KEY, None)
+            if isinstance(raw, dict):
+                raw = raw.get("pct")
+            if raw is None:
+                return
+            self.set_capital_pct(float(raw))
+            logger.info("orchestrator | restored capital_pct from control_state: {:.0%}", self.capital_pct)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("orchestrator | capital allocation restore failed: {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
     async def start(self) -> dict[str, Any]:
         """
         Bring the entire system to RUNNING state.
@@ -159,6 +191,7 @@ class Orchestrator:
 
                 # 2. Database migrations
                 await self._run_migrations()
+                await self._load_persisted_capital_pct()
 
                 # 3. Brokers
                 logger.info("orchestrator | discovering brokers...")

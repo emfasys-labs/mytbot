@@ -182,22 +182,36 @@ class ExecutionEngine:
         # exists within ``dedup_window_sec``, skip emitting a duplicate. This
         # prevents the allocator from re-submitting the same opportunity each
         # loop iteration when a prior limit order is still sitting unfilled.
+        sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
         if self.dedup_window_sec > 0:
             existing = await self._find_in_flight_order(session_factory, signal)
             if existing is not None:
-                self.dedup_skipped += 1
-                logger.info(
-                    "DEDUP SKIP | %s %s broker=%s (existing order %s status=%s qty=%s age=%ss)",
-                    signal.symbol,
-                    signal.side,
-                    signal.broker,
-                    existing.id,
-                    existing.status,
-                    existing.quantity,
-                    int((datetime.now(timezone.utc) - existing.timestamp).total_seconds())
-                    if existing.timestamp else -1,
-                )
-                return None
+                if bool(sig_md.get("flatten_all")):
+                    if not await self._cancel_in_flight_order(session_factory, existing, signal):
+                        self.dedup_skipped += 1
+                        logger.warning(
+                            "FLATTEN REPLACE BLOCKED | %s %s broker=%s existing=%s status=%s",
+                            signal.symbol,
+                            signal.side,
+                            signal.broker,
+                            existing.id,
+                            existing.status,
+                        )
+                        return None
+                else:
+                    self.dedup_skipped += 1
+                    logger.info(
+                        "DEDUP SKIP | %s %s broker=%s (existing order %s status=%s qty=%s age=%ss)",
+                        signal.symbol,
+                        signal.side,
+                        signal.broker,
+                        existing.id,
+                        existing.status,
+                        existing.quantity,
+                        int((datetime.now(timezone.utc) - existing.timestamp).total_seconds())
+                        if existing.timestamp else -1,
+                    )
+                    return None
 
         # Wave 9 — pre-flight cost-aware gate. When enabled, computes the
         # all-in expected cost (impact + fee + spread + slippage prior),
@@ -787,6 +801,70 @@ class ExecutionEngine:
             logger.warning("Order dedup lookup failed (%s); allowing order", exc)
             return None
 
+    async def _cancel_in_flight_order(
+        self,
+        session_factory,
+        existing: Any,
+        signal: Signal,
+    ) -> bool:
+        """Cancel a working same-side order before replacing an operator flatten."""
+        broker_order_id = str(getattr(existing, "broker_order_id", "") or "").strip()
+        broker_name = (
+            str(getattr(existing, "broker", "") or signal.broker or "")
+            .strip()
+            .lower()
+        )
+        if not broker_order_id or not broker_name:
+            return False
+        broker = await self._get_broker(broker_name)
+        if broker is None:
+            return False
+        try:
+            ok = await broker.cancel_order(broker_order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "FLATTEN REPLACE cancel failed | %s %s broker=%s id=%s | %s",
+                signal.symbol,
+                signal.side,
+                broker_name,
+                broker_order_id,
+                exc,
+            )
+            return False
+        if not ok:
+            logger.warning(
+                "FLATTEN REPLACE cancel rejected | %s %s broker=%s id=%s",
+                signal.symbol,
+                signal.side,
+                broker_name,
+                broker_order_id,
+            )
+            return False
+        if session_factory is not None:
+            try:
+                from sqlalchemy import update
+                from storage.models import OrderLog
+
+                async with session_factory() as session:
+                    await session.execute(
+                        update(OrderLog)
+                        .where(OrderLog.id == existing.id)
+                        .values(status="cancelled")
+                    )
+                    await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "FLATTEN REPLACE local cancel mark failed | order=%s | %s",
+                    getattr(existing, "id", "?"),
+                    exc,
+                )
+        logger.warning(
+            "FLATTEN REPLACE | cancelled existing order %s on %s before market close",
+            broker_order_id,
+            broker_name,
+        )
+        return True
+
     def _build_order(self, signal: Signal) -> Order:
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
         inst_meta = None
@@ -811,12 +889,16 @@ class ExecutionEngine:
             side = OrderSide.SELL
         else:
             side = OrderSide.BUY if signal.side in {"buy", "long"} else OrderSide.SELL
+        force_market = bool(
+            meta.get("force_market_order")
+            or meta.get("flatten_all")
+        )
         return Order(
             symbol=sym,
             side=side,
-            order_type=OrderType.MARKET if signal.suggested_price is None else OrderType.LIMIT,
+            order_type=OrderType.MARKET if force_market or signal.suggested_price is None else OrderType.LIMIT,
             quantity=signal.suggested_quantity,
-            limit_price=signal.suggested_price,
+            limit_price=None if force_market else signal.suggested_price,
             client_order_id=str(uuid.uuid4()),  # idempotency key
             instrument_metadata=inst_meta,
         )

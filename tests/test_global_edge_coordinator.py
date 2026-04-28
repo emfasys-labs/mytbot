@@ -80,6 +80,48 @@ def test_propose_emits_trim_then_open_incremental() -> None:
     assert a.capital == Decimal("5000")
 
 
+def test_zero_allocation_flatten_emits_reduce_only_closes_largest_first() -> None:
+    cfg = {
+        "max_actions_per_tick": {"hunter": 2},
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="SMALL",
+            notional=Decimal("1000"),
+            expected_remaining_edge=Decimal("0.01"),
+            broker="alpaca",
+            metadata={"quantity": "10", "side": "long", "asset_class": "equity"},
+        ),
+        HeldPositionEdge(
+            symbol="LARGE",
+            notional=Decimal("250000"),
+            expected_remaining_edge=Decimal("0.20"),
+            broker="ibkr",
+            metadata={"quantity": "-500", "side": "short", "asset_class": "equity"},
+        ),
+        HeldPositionEdge(
+            symbol="MID",
+            notional=Decimal("50000"),
+            expected_remaining_edge=Decimal("0.02"),
+            broker="kraken",
+            metadata={"quantity": "2", "side": "long", "asset_class": "crypto"},
+        ),
+    ]
+
+    actions = coord.propose_flatten_actions(held, active_mode="hunter", max_actions=2)
+
+    assert [a.symbol for a in actions] == ["LARGE", "MID"]
+    assert all(a.kind == "trim_symbol" for a in actions)
+    assert all(a.strategy_name == "global_edge_flatten" for a in actions)
+    assert all(a.metadata["reduce_only"] is True for a in actions)
+    assert all(a.metadata["close_only"] is True for a in actions)
+    assert all(a.metadata["flatten_all"] is True for a in actions)
+    assert all(a.metadata["force_market_order"] is True for a in actions)
+    assert actions[0].metadata["broker"] == "ibkr"
+    assert actions[1].metadata["asset_class"] == "crypto"
+
+
 def test_propose_skips_open_when_same_symbol_and_side_already_held() -> None:
     cfg = {
         "edge_advantage": {"trader": "0.05"},

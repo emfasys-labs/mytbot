@@ -456,6 +456,10 @@ export type UniverseFunnelStage = {
 
 export type UniverseSymbolRow = {
   sym: string;
+  /** Human name when listed in `data/universe.py` curated catalogue; otherwise omitted. */
+  name?: string | null;
+  /** Short line for UI: name · class · sector, or ticker · class when unknown. */
+  description?: string | null;
   klass: string;
   stage: string;
   conviction: number;

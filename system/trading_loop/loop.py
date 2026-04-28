@@ -68,6 +68,7 @@ from system.funnel_telemetry import (
 from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
+from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from run_m3 import (
     _apply_signal_to_portfolio_state,
     _load_portfolio_state,
@@ -168,6 +169,8 @@ async def _load_working_order_keys(session_factory: Any) -> set[tuple[str, str]]
 async def _merge_live_broker_positions_into_portfolio_state(
     portfolio_state: dict[str, Any],
     broker_manager: Any,
+    *,
+    paper_mode: bool = True,
 ) -> None:
     """Overlay broker-authoritative positions onto a DB-derived portfolio state."""
     adapters = getattr(broker_manager, "adapters", None)
@@ -177,6 +180,12 @@ async def _merge_live_broker_positions_into_portfolio_state(
     for broker_name, adapter in list(adapters.items()):
         bname = str(broker_name or "").strip().lower()
         if not bname:
+            continue
+        if paper_mode and bname in NO_NATIVE_PAPER_POSITION_BROKERS:
+            # Kraken/Binance/Bybit do not have exchange-native paper position
+            # books in this project. In paper mode the DB snapshot from
+            # simulated fills is the book; overlaying live adapter positions
+            # reopens exposure that the paper engine has already closed.
             continue
         try:
             live_positions = await adapter.get_positions()
@@ -1502,7 +1511,11 @@ class TradingLoop:
 
                         generated = len(batch_candidates)
                         executed = 0
-                        if batch_candidates:
+                        if batch_candidates or (
+                            self._use_global_edge
+                            and not use_legacy
+                            and Decimal(str(self.capital_pct)) <= 0
+                        ):
                             portfolio_dict = await _load_portfolio_state(
                                 session_factory,
                                 fallback_portfolio_value=total_equity,
@@ -1907,6 +1920,7 @@ class TradingLoop:
             await _merge_live_broker_positions_into_portfolio_state(
                 portfolio_dict,
                 self._broker_manager,
+                paper_mode=self.paper_mode,
             )
 
         # D031: the hard per-position ceiling is ``nav * max_position_pct``
@@ -1948,7 +1962,7 @@ class TradingLoop:
         boost_x = Decimal(str(self._global_edge_cfg.get("arbitrage_edge_boost", {}).get("cross_exchange_arbitrage", "0.015")))
         notional = Decimal(str(fcfg.get("min_liquidity_notional", "5000")))
 
-        if self._enable_arbitrage and fcfg.get("enabled"):
+        if tradable > 0 and self._enable_arbitrage and fcfg.get("enabled"):
             funding = stack.get("funding")
             if funding is not None:
                 for sym in fcfg.get("symbols") or []:
@@ -1957,7 +1971,7 @@ class TradingLoop:
                         new_opps.append(funding_arb_signal_to_strategy_opportunity(fs, capital=notional, edge_boost=boost_f))
                         log_arb_event("detect", strategy="funding_rate_arbitrage", symbol=sym)
 
-        if self._enable_arbitrage and ccfg.get("enabled"):
+        if tradable > 0 and self._enable_arbitrage and ccfg.get("enabled"):
             cross = stack.get("cross")
             if cross is not None:
                 for sym in ccfg.get("symbols") or []:
@@ -2047,12 +2061,28 @@ class TradingLoop:
 
         coord = GlobalEdgeCoordinator(self._global_edge_cfg, logger=logger)
         repl_ctx = await load_replacement_context_from_bus(bus)
-        actions = coord.propose_actions(
-            held,
-            new_opps_dedup,
-            active_mode=mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader",
-            replacement_context=repl_ctx,
-        )
+        mode_for_coord = mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader"
+        if tradable <= 0:
+            actions = coord.propose_flatten_actions(
+                held,
+                active_mode=mode_for_coord,
+            )
+            actions = sorted(
+                actions,
+                key=lambda a: (
+                    str((a.metadata or {}).get("asset_class", "")).strip().lower() != "crypto",
+                    str((a.metadata or {}).get("broker", "")).strip().lower()
+                    not in NO_NATIVE_PAPER_POSITION_BROKERS,
+                    -abs(Decimal(str(getattr(a, "capital", "0") or "0"))),
+                ),
+            )
+        else:
+            actions = coord.propose_actions(
+                held,
+                new_opps_dedup,
+                active_mode=mode_for_coord,
+                replacement_context=repl_ctx,
+            )
         if buf is not None and actions:
             for act in actions:
                 try:

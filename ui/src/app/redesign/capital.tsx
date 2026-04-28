@@ -18,10 +18,9 @@
  *     is lowered (same endpoint); the engine unwinds on its own signals —
  *     no force-close, and the UI says so.
  *   • Drag to 0% (below `FLATTEN_THRESHOLD`) → hold-to-flatten confirm.
- *     `POST /positions/flatten` is not shipped yet; the component is
- *     honest about that — it lowers the ceiling to 0 (prevents new
- *     deploys) and shows a "backend pending" banner. When the endpoint
- *     ships, only `confirmFlatten` needs rewiring.
+ *     This lowers the ceiling to 0; the backend treats zero allocation as
+ *     a flatten request and emits reduce-only close intents through the
+ *     normal risk/execution path.
  *
  * The landmark line is gauged against **capital at work** = filled
  * position notional + reserved notional of still-open orders. That's
@@ -257,9 +256,8 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
   }, [stagedPct, commitCeiling]);
 
   const confirmFlatten = useCallback(async () => {
-    // UI-side: lower the ceiling to 0 so no new positions open. Per-symbol
-    // close lives in the Book screen; we cannot force-close from here
-    // until the backend exposes `POST /positions/flatten`.
+    // Lower the ceiling to 0. The trading loop interprets zero allocation
+    // as "flatten held exposure" and emits reduce-only close intents.
     await commitCeiling(0);
     setStagedPct(null);
   }, [commitCeiling]);
@@ -1050,11 +1048,9 @@ function FlattenConfirm({
           lineHeight: 1.5,
         }}
       >
-        <span style={{ color: TOKENS.danger, fontWeight: 500 }}>Backend pending.</span> This lowers
-        the ceiling to 0% so no new positions open. Force-close across venues needs{' '}
-        <code style={{ fontFamily: TOKENS.mono, color: TOKENS.ink1 }}>POST /positions/flatten</code>{' '}
-        — not yet shipped. For now, close per-symbol in Book, or stop the engine via the Power
-        control.
+        This lowers the ceiling to 0% and tells the engine to flatten held exposure using
+        reduce-only close orders. Broker session hours and already-working orders can delay fills;
+        use Book for per-symbol intervention if an order sits.
       </div>
 
       <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>

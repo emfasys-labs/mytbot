@@ -9,6 +9,7 @@ from storage.models import ControlCommand, ControlState
 
 DASHBOARD_EVENTS_KEY = "dashboard.events"
 RISK_OVERRIDES_STATE_KEY = "risk.parameters.override"
+CAPITAL_ALLOCATION_STATE_KEY = "system.capital_allocation"
 
 
 class CommandBus:

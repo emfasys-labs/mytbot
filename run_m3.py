@@ -16,7 +16,7 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 
 from ai.news_classifier import NewsClassifier
 from ai.pipeline import AIPipeline
@@ -260,15 +260,31 @@ async def _load_portfolio_state(
         hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
         hwm_raw = hwm_q.scalar_one_or_none()
 
-        latest_pos_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
-        latest_pos_ts = latest_pos_ts_q.scalar_one_or_none()
-        if latest_pos_ts is not None:
-            rows_q = await session.execute(
-                select(PositionLog).where(PositionLog.timestamp == latest_pos_ts)
+        latest_by_key = (
+            select(
+                PositionLog.broker.label("broker"),
+                PositionLog.symbol.label("symbol"),
+                func.max(PositionLog.timestamp).label("max_ts"),
             )
-            rows = list(rows_q.scalars().all())
+            .group_by(PositionLog.broker, PositionLog.symbol)
+            .subquery()
+        )
+        latest_rows_q = await session.execute(
+            select(PositionLog).join(
+                latest_by_key,
+                and_(
+                    PositionLog.broker == latest_by_key.c.broker,
+                    PositionLog.symbol == latest_by_key.c.symbol,
+                    PositionLog.timestamp == latest_by_key.c.max_ts,
+                ),
+            )
+        )
+        rows = list(latest_rows_q.scalars().all())
+        if rows:
             for row in rows:
                 qty = Decimal(str(row.quantity))
+                if qty == 0:
+                    continue
                 px = Decimal(str(row.current_price or signal_price_fallback or "0"))
                 notional, is_option_row = _position_log_notional(row, signal_price_fallback)
                 current_gross_exposure += notional
@@ -276,18 +292,24 @@ async def _load_portfolio_state(
                     option_premium_exposure += notional
                 symbol = (row.symbol or "").strip()
                 if symbol:
+                    broker_key = (row.broker or "").strip()[:20]
+                    position_key = symbol
+                    existing = positions.get(position_key)
+                    if existing is not None and str(existing.get("broker", "")).strip().lower() != broker_key.lower():
+                        position_key = f"{broker_key}:{symbol}"
                     symbol_exposure[symbol] = symbol_exposure.get(symbol, Decimal("0")) + notional
                     entry: dict[str, Any] = {
+                        "symbol": symbol,
                         "quantity": qty,
                         "avg_entry_price": Decimal(str(row.avg_entry_price or px)),
                         "current_price": px,
                         "asset_class": (row.asset_class or "").strip().lower(),
-                        "broker": (row.broker or "").strip()[:20],
+                        "broker": broker_key,
                     }
                     im = getattr(row, "instrument_metadata", None)
                     if isinstance(im, dict):
                         entry["instrument_metadata"] = im
-                    positions[symbol] = entry
+                    positions[position_key] = entry
                 asset = (row.asset_class or "").strip().lower()
                 if asset:
                     asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
@@ -368,12 +390,25 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
     meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
     spec = parse_option_contract_from_metadata(meta)
     symbol = spec.position_key() if spec is not None else signal.symbol
+    position_key = str(meta.get("position_key") or symbol)
     side_mult = Decimal("1") if signal.side == "buy" else Decimal("-1")
     qty_delta = Decimal(str(signal.suggested_quantity)) * side_mult
 
-    row = positions.get(symbol)
+    row = positions.get(position_key)
+    if row is None and bool(meta.get("reduce_only") or meta.get("close_only")):
+        broker = str(getattr(signal, "broker", "") or "").strip().lower()
+        for k, candidate in positions.items():
+            if not isinstance(candidate, dict):
+                continue
+            candidate_symbol = str(candidate.get("symbol") or k).strip()
+            candidate_broker = str(candidate.get("broker", "")).strip().lower()
+            if candidate_symbol == symbol and (not broker or candidate_broker == broker):
+                position_key = str(k)
+                row = candidate
+                break
     if row is None:
         row = {
+            "symbol": symbol,
             "quantity": Decimal("0"),
             "avg_entry_price": price,
             "current_price": price,
@@ -389,7 +424,19 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
         row["instrument_metadata"] = spec.to_dict()
         row["asset_class"] = "option"
     if new_qty == 0:
-        positions.pop(symbol, None)
+        closed = list(portfolio_state.get("_closed_position_tombstones") or [])
+        closed.append(
+            {
+                "symbol": symbol,
+                "broker": str(row.get("broker", signal.broker or "ibkr"))[:20] or "ibkr",
+                "avg_entry_price": Decimal(str(row.get("avg_entry_price", price) or price)),
+                "current_price": price,
+                "asset_class": str(row.get("asset_class", signal.asset_class or ""))[:20],
+                "instrument_metadata": row.get("instrument_metadata") if isinstance(row.get("instrument_metadata"), dict) else None,
+            }
+        )
+        portfolio_state["_closed_position_tombstones"] = closed
+        positions.pop(position_key, None)
     else:
         row["quantity"] = new_qty
         row["current_price"] = price
@@ -419,7 +466,8 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
                     if mult > 0:
                         avg /= mult
                 row["avg_entry_price"] = avg
-        positions[symbol] = row
+        row["symbol"] = symbol
+        positions[position_key] = row
 
     symbol_exposure: dict[str, Decimal] = {}
     asset_class_exposure: dict[str, Decimal] = {}
@@ -445,15 +493,17 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
 
 async def _persist_position_snapshot(session_factory, portfolio_state: dict[str, Any]) -> None:
     positions = portfolio_state.get("positions", {})
-    if not positions:
+    tombstones = list(portfolio_state.get("_closed_position_tombstones") or [])
+    if not positions and not tombstones:
         return
     ts = datetime.now(timezone.utc)
     async with session_factory() as session:
         for symbol, p in positions.items():
             im = p.get("instrument_metadata") if isinstance(p.get("instrument_metadata"), dict) else None
+            persisted_symbol = str(p.get("symbol") or symbol)
             row = PositionLog(
                 timestamp=ts,
-                symbol=symbol[:72],
+                symbol=persisted_symbol[:72],
                 broker=str(p.get("broker", "ibkr"))[:20] or "ibkr",
                 quantity=Decimal(str(p.get("quantity", "0"))),
                 avg_entry_price=Decimal(str(p.get("avg_entry_price", "0"))),
@@ -463,6 +513,21 @@ async def _persist_position_snapshot(session_factory, portfolio_state: dict[str,
                 instrument_metadata=im,
             )
             session.add(row)
+        for p in tombstones:
+            im = p.get("instrument_metadata") if isinstance(p.get("instrument_metadata"), dict) else None
+            row = PositionLog(
+                timestamp=ts,
+                symbol=str(p.get("symbol", ""))[:72],
+                broker=str(p.get("broker", "ibkr"))[:20] or "ibkr",
+                quantity=Decimal("0"),
+                avg_entry_price=Decimal(str(p.get("avg_entry_price", "0") or "0")),
+                current_price=Decimal(str(p.get("current_price", "0") or "0")),
+                unrealised_pnl=Decimal("0"),
+                asset_class=str(p.get("asset_class", ""))[:20],
+                instrument_metadata=im,
+            )
+            if row.symbol:
+                session.add(row)
         await session.commit()
 
 
