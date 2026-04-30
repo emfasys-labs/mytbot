@@ -5,6 +5,7 @@ Emits incremental actions only; does not bypass risk or execution.
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -115,6 +116,13 @@ def signal_candidate_to_strategy_opportunity(
         return None
     if price <= 0 or nav <= 0:
         return None
+    # TEMP filter — yfinance continuous-futures symbols (NQ=F, ES=F, ...) have no
+    # tradeable broker route in the current paper setup, so they appear in plans
+    # but never become orders. Suppress them so the next-best opportunity surfaces.
+    if os.environ.get("SKIP_CONTINUOUS_FUTURES", "0") == "1":
+        _sym = str(getattr(cand, "symbol", "") or "")
+        if _sym.endswith("=F"):
+            return None
 
     cand_meta = dict(getattr(cand, "metadata", {}) or {})
     cand_ac = getattr(cand, "asset_class", None)
@@ -142,6 +150,16 @@ def signal_candidate_to_strategy_opportunity(
 
     if proposed_base <= 0:
         return None
+
+    # TEMP book-build multiplier — read once from env, applied before hard cap.
+    # Set BOOK_BUILD_NOTIONAL_MULTIPLIER=1.0 (or unset) to disable.
+    try:
+        _bbm = Decimal(str(os.environ.get("BOOK_BUILD_NOTIONAL_MULTIPLIER", "1.0")))
+        if _bbm > 0 and _bbm != Decimal("1.0"):
+            proposed_base = proposed_base * _bbm
+            cand_meta["sizing_buildup_multiplier"] = str(_bbm)
+    except Exception:  # noqa: BLE001
+        pass
 
     hard_cap = nav * max_position_pct
     if hard_cap > 0 and proposed_base > hard_cap:

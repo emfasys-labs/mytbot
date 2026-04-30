@@ -3,7 +3,7 @@
  * All screens are wired to live system data via `LiveData`.
  */
 
-import { useMemo } from 'react';
+import { Fragment, useMemo } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
@@ -193,6 +193,13 @@ function minutesAgo(ts: number): string {
 export function BookScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const totalPnl = live.positions.reduce((s, p) => s + p.pnl, 0);
+  const recentFills = live.orders
+    .filter((o) => {
+      const status = String(o.status ?? '').toLowerCase();
+      const filled = Number(o.filled_quantity ?? 0);
+      return status === 'filled' && Number.isFinite(filled) && Math.abs(filled) > 0;
+    })
+    .slice(0, 8);
   const nav = live.nav > 0 ? live.nav : 0;
   // Shared helper — same computation the dashboard's capital-allocation
   // slider uses, so the two surfaces can never disagree. Sums filled
@@ -210,9 +217,14 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
       padding: 20, display: 'grid', gap: 14,
       gridTemplateColumns: '1fr 320px', height: '100%', minHeight: 0, overflow: 'hidden',
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 0, overflow: 'hidden' }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateRows: 'minmax(0, 1fr) 300px',
+        gap: 14,
+        minHeight: 0,
+        overflow: 'hidden',
+      }}>
         <Card style={{
-          flex: 1,
           minHeight: 0,
           display: 'flex',
           flexDirection: 'column',
@@ -251,7 +263,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <div style={{ display: 'grid', gap: 2 }}>
                   {live.positions.map((p) => (
-                    <div key={p.sym} style={{
+                    <div key={`${p.broker ?? 'broker'}:${p.sym}`} style={{
                       display: 'grid',
                       gridTemplateColumns: bookGridCols,
                       gap: 12, alignItems: 'center', padding: '10px 0',
@@ -283,6 +295,70 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                       <Spark values={[p.avg * 0.99 || 0, p.avg || 0, p.avg * 1.01 || 0, p.last || p.avg || 0]} width={72} height={24} accent={accentColor} />
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+        <Card style={{
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}>
+          <Label style={{ marginBottom: 10 }}>Recent position changes</Label>
+          {recentFills.length === 0 ? (
+            <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>No filled orders</div>
+          ) : (
+            <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column', fontFamily: TOKENS.mono, fontSize: 11 }}>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '90px 70px 80px 80px minmax(0, 1fr)',
+                gap: 12,
+                alignItems: 'center',
+                paddingBottom: 8,
+                borderBottom: `1px solid ${TOKENS.line}`,
+                flexShrink: 0,
+              }}>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>symbol</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>side</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>qty</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>price</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>when</span>
+              </div>
+              <div style={{
+                minHeight: 0,
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                WebkitOverflowScrolling: 'touch',
+              }}>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '90px 70px 80px 80px minmax(0, 1fr)',
+                  gap: 12,
+                  alignItems: 'center',
+                  paddingTop: 8,
+                }}>
+                  {recentFills.map((o) => {
+                    const side = String(o.side ?? '').toLowerCase();
+                    const qty = Number(o.filled_quantity ?? o.quantity ?? 0);
+                    const px = Number(o.avg_fill_price ?? o.limit_price ?? 0);
+                    const ts = o.timestamp ? Date.parse(o.timestamp) : NaN;
+                    const sideColor = side === 'buy' ? TOKENS.profit : side === 'sell' ? TOKENS.loss : TOKENS.ink2;
+                    return (
+                      <Fragment key={o.id}>
+                        <span title={String(o.symbol ?? '')} style={{ color: TOKENS.ink1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {String(o.symbol ?? '').toUpperCase()}
+                        </span>
+                        <span style={{ color: sideColor }}>{side || 'fill'}</span>
+                        <span style={{ color: TOKENS.ink2 }}>{Number.isFinite(qty) ? qty.toFixed(qty >= 100 ? 0 : 2) : '—'}</span>
+                        <span style={{ color: TOKENS.ink2 }}>{fmtPrice(px)}</span>
+                        <span title={o.timestamp ?? undefined} style={{ color: TOKENS.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {Number.isFinite(ts) ? `${minutesAgo(ts)} · ${o.broker ?? ''}` : o.broker ?? ''}
+                        </span>
+                      </Fragment>
+                    );
+                  })}
                 </div>
               </div>
             </div>

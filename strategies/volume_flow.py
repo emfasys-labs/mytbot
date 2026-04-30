@@ -22,8 +22,9 @@ class VolumeFlowStrategy(Strategy):
     name = "volume_flow"
 
     def _compute_target_notional(self, *, confidence: float, flow_strength: float) -> dict[str, str]:
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "4000")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "4000")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("4000")
         if base_notional <= 0:
@@ -52,10 +53,11 @@ class VolumeFlowStrategy(Strategy):
             return out
         n = len(features)
         out["rows_available"] = n
-        lookback = int(self.config.get("volume_lookback", 20))
-        z_open = float(self.config.get("zscore_open_threshold", 1.8))
-        z_exhaust = float(self.config.get("zscore_exhaust_threshold", 3.4))
-        min_ret = float(self.config.get("min_bar_return", 0.0015))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("volume_lookback", 20))
+        z_open = float(cfg.get("zscore_open_threshold", 1.8))
+        z_exhaust = float(cfg.get("zscore_exhaust_threshold", 3.4))
+        min_ret = float(cfg.get("min_bar_return", 0.0015))
         out["zscore_open_threshold"] = z_open
         out["zscore_exhaust_threshold"] = z_exhaust
         out["min_bar_return"] = min_ret
@@ -121,10 +123,11 @@ class VolumeFlowStrategy(Strategy):
         if "close" not in features.columns or "volume" not in features.columns:
             return None
 
-        lookback = int(self.config.get("volume_lookback", 20))
-        z_open = float(self.config.get("zscore_open_threshold", 1.8))
-        z_exhaust = float(self.config.get("zscore_exhaust_threshold", 3.4))
-        min_ret = float(self.config.get("min_bar_return", 0.0015))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("volume_lookback", 20))
+        z_open = float(cfg.get("zscore_open_threshold", 1.8))
+        z_exhaust = float(cfg.get("zscore_exhaust_threshold", 3.4))
+        min_ret = float(cfg.get("min_bar_return", 0.0015))
 
         latest = features.iloc[-1]
         prev = features.iloc[:-1]

@@ -525,6 +525,8 @@ class SignalEngine:
         self,
         raw: RawSignal,
         news_score: Optional[float] = None,
+        *,
+        profile_mode: Optional[str] = None,
     ) -> Optional[SignalCandidate]:
         """
         D015 path: same news gating and confidence adjustment as ``process``, without legacy sizing.
@@ -554,6 +556,8 @@ class SignalEngine:
             ac = "other"
         side: Side = "long" if (raw.side or "").lower() in ("buy", "long") else "short"
         md = dict(raw.metadata or {})
+        if profile_mode:
+            md["profile_mode"] = str(profile_mode)
         self._enrich_metadata_with_net(md, net, news_score)
         if not self._apply_trained_meta_label(
             raw,
@@ -570,6 +574,7 @@ class SignalEngine:
                 md.get("meta_label_probability"),
                 md.get("meta_label_threshold"),
             )
+            raw.metadata = md
             return None
         return SignalCandidate(
             symbol=raw.symbol,

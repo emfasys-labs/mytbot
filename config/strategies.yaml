@@ -74,6 +74,17 @@ strategies:
     zscore_exhaust_threshold: 3.4
     min_bar_return: 0.0015
     base_target_notional: 4000
+    mode_calibration:
+      defender:
+        zscore_open_threshold: 2.2
+        min_bar_return: 0.0020
+      trader:
+        zscore_open_threshold: 1.8
+        min_bar_return: 0.0015
+      hunter:
+        zscore_open_threshold: 0.95
+        min_bar_return: 0.0006
+        base_target_notional: 5000
 
   event_driven_news:
     enabled: true
@@ -99,6 +110,20 @@ strategies:
     atr_compression_ratio: 0.85
     min_bar_return: 0.0015
     base_target_notional: 4500
+    mode_calibration:
+      defender:
+        atr_expansion_ratio: 1.30
+        atr_compression_ratio: 0.78
+        min_bar_return: 0.0020
+      trader:
+        atr_expansion_ratio: 1.20
+        atr_compression_ratio: 0.85
+        min_bar_return: 0.0015
+      hunter:
+        atr_expansion_ratio: 1.08
+        atr_compression_ratio: 0.95
+        min_bar_return: 0.0006
+        base_target_notional: 5500
 
   regime_rotation:
     enabled: true

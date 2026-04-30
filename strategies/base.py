@@ -59,6 +59,17 @@ class Strategy(ABC):
             return False
         return str(asset_class).strip().lower() in self.supported_asset_classes
 
+    def effective_config(self) -> dict:
+        """Return config with optional active profile-mode overrides applied."""
+        cfg = dict(self.config or {})
+        mode = str(cfg.get("_active_profile_mode") or "").strip().lower()
+        mode_cfg = cfg.get("mode_calibration", {}) or {}
+        if mode and isinstance(mode_cfg, dict):
+            override = mode_cfg.get(mode)
+            if isinstance(override, dict):
+                cfg.update(override)
+        return cfg
+
     @abstractmethod
     def generate_signal(
         self,

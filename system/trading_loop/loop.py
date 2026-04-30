@@ -1055,6 +1055,12 @@ class TradingLoop:
                             mode_raw = str(_json.loads(_mf.read_text(encoding="utf-8")).get("mode", "trader"))
                     except Exception:  # noqa: BLE001
                         pass
+                    for strategy in strategies.values():
+                        try:
+                            if isinstance(getattr(strategy, "config", None), dict):
+                                strategy.config["_active_profile_mode"] = mode_raw
+                        except Exception:  # noqa: BLE001
+                            pass
 
                     async def _resolve_price_for_symbol(sym: str) -> Decimal:
                         df_p, _ = await _load_recent_features(
@@ -1385,6 +1391,7 @@ class TradingLoop:
                                 cand = self.sig_engine.raw_to_signal_candidate(
                                     raw,
                                     news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
+                                    profile_mode=mode_raw,
                                 )
                                 if cand is None:
                                     sc_log_rows.append(
@@ -1396,6 +1403,7 @@ class TradingLoop:
                                             status="filtered_signal_engine",
                                             reason="news_veto_or_gate",
                                             loop_iteration=self.iterations,
+                                            metadata=dict(getattr(raw, "metadata", {}) or {}) or None,
                                         )
                                     )
                                     continue
@@ -1435,6 +1443,7 @@ class TradingLoop:
                                     if ai_result is not None
                                     else None
                                 ),
+                                profile_mode=mode_raw,
                             )
                             if pair_cand is not None:
                                 batch_candidates.append(pair_cand)

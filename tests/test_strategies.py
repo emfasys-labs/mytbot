@@ -117,6 +117,33 @@ def test_volume_flow_generates_continuation_signal() -> None:
     assert Decimal(str(sig.metadata["target_notional"])) > 0
 
 
+def test_volume_flow_hunter_mode_relaxes_open_gate() -> None:
+    df = _base_df()
+    df.iloc[-2, df.columns.get_loc("close")] = 100.0
+    df.iloc[-1, df.columns.get_loc("close")] = 100.12
+    df.iloc[-1, df.columns.get_loc("volume")] = 1_040_000.0
+    strat = VolumeFlowStrategy(
+        {
+            "enabled": True,
+            "zscore_open_threshold": 1.8,
+            "min_bar_return": 0.0015,
+            "base_target_notional": 4000,
+            "mode_calibration": {
+                "hunter": {
+                    "zscore_open_threshold": 0.5,
+                    "min_bar_return": 0.0005,
+                    "base_target_notional": 5000,
+                }
+            },
+        }
+    )
+    assert strat.generate_signal("SPY", df) is None
+    strat.config["_active_profile_mode"] = "hunter"
+    sig = strat.generate_signal("SPY", df)
+    assert sig is not None
+    assert Decimal(str(sig.metadata["sizing_base_notional"])) == Decimal("5000.00")
+
+
 def test_event_driven_news_generates_on_shock() -> None:
     strat = EventDrivenNewsStrategy({"enabled": True, "shock_threshold": 0.4})
     sig = strat.generate_from_context(
@@ -174,6 +201,35 @@ def test_volatility_regime_generates_breakout_signal() -> None:
     assert sig.strategy == "volatility_regime"
     assert sig.metadata.get("vol_mode") == "vol_breakout"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
+
+
+def test_volatility_regime_hunter_mode_relaxes_breakout_gate() -> None:
+    df = _base_df(120)
+    df.iloc[-2, df.columns.get_loc("close")] = 100.0
+    df.iloc[-1, df.columns.get_loc("close")] = 100.08
+    df.iloc[-1, df.columns.get_loc("high")] = 102.0
+    df.iloc[-1, df.columns.get_loc("low")] = 98.0
+    strat = VolatilityRegimeStrategy(
+        {
+            "enabled": True,
+            "atr_lookback": 10,
+            "atr_expansion_ratio": 1.50,
+            "min_bar_return": 0.0015,
+            "base_target_notional": 4500,
+            "mode_calibration": {
+                "hunter": {
+                    "atr_expansion_ratio": 1.05,
+                    "min_bar_return": 0.0005,
+                    "base_target_notional": 5500,
+                }
+            },
+        }
+    )
+    assert strat.generate_signal("SPY", df) is None
+    strat.config["_active_profile_mode"] = "hunter"
+    sig = strat.generate_signal("SPY", df)
+    assert sig is not None
+    assert Decimal(str(sig.metadata["sizing_base_notional"])) == Decimal("5500.00")
 
 
 def test_volatility_regime_compression_mean_revert_branch() -> None:
@@ -269,4 +325,3 @@ def test_regime_rotation_disabled_returns_none() -> None:
         )
         is None
     )
-

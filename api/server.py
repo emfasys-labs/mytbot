@@ -355,6 +355,7 @@ async def _startup() -> None:
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.command_bus = CommandBus(session_factory) if session_factory is not None else None
+    app.state.db_rebind_lock = asyncio.Lock()
     bind_app_database(engine, session_factory)
 
 
@@ -371,19 +372,50 @@ def _require_mutation_token(x_control_token: str | None = Header(default=None, a
         raise HTTPException(status_code=401, detail="Invalid control token")
 
 
-def _session_factory():
+async def _ensure_database_bind() -> None:
+    """
+    Re-bind the API database lazily if startup ran before Docker/Postgres was ready.
+
+    ``python run.py`` starts the API before the operator presses Start, while the
+    orchestrator starts Docker later. A one-shot DB bind at FastAPI startup can
+    therefore leave ``command_bus`` permanently unavailable even after Postgres
+    is healthy. Dashboard reads call this helper before failing so late
+    infrastructure comes online without requiring a full app restart.
+    """
+    if getattr(app.state, "db_session_factory", None) is not None:
+        return
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    lock = getattr(app.state, "db_rebind_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.db_rebind_lock = lock
+    async with lock:
+        if getattr(app.state, "db_session_factory", None) is not None:
+            return
+        engine, session_factory = await init_async_database()
+        app.state.db_engine = engine
+        app.state.db_session_factory = session_factory
+        app.state.command_bus = CommandBus(session_factory) if session_factory is not None else None
+        bind_app_database(engine, session_factory)
+
+
+async def _session_factory():
+    await _ensure_database_bind()
     sf = getattr(app.state, "db_session_factory", None)
     if sf is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     return sf
 
 
-def _optional_session_factory():
+async def _optional_session_factory():
     """DB session factory when present; None if app has no database (e.g. light tests)."""
+    await _ensure_database_bind()
     return getattr(app.state, "db_session_factory", None)
 
 
-def _command_bus() -> CommandBus:
+async def _command_bus() -> CommandBus:
+    await _ensure_database_bind()
     bus = getattr(app.state, "command_bus", None)
     if bus is None:
         raise HTTPException(status_code=503, detail="Command bus unavailable")
@@ -490,6 +522,65 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     return out
 
 
+async def _latest_position_log_rows(
+    session,
+    *,
+    limit: int | None = None,
+    open_only: bool = False,
+) -> list[PositionLog]:
+    """
+    Return the latest ledger row per broker-symbol.
+
+    ``positions`` is append-only. A zero-quantity tombstone is a meaningful
+    latest row and must suppress older non-zero rows for that same broker-symbol,
+    but it should not appear in the open-position book.
+    """
+    ranked = (
+        select(
+            PositionLog.id.label("id"),
+            func.row_number()
+            .over(
+                partition_by=(PositionLog.broker, PositionLog.symbol),
+                order_by=(PositionLog.timestamp.desc(), PositionLog.id.desc()),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+    stmt = (
+        select(PositionLog)
+        .join(ranked, PositionLog.id == ranked.c.id)
+        .where(ranked.c.rn == 1)
+        .order_by(PositionLog.symbol.asc(), PositionLog.broker.asc())
+    )
+    if open_only:
+        stmt = stmt.where(func.abs(PositionLog.quantity) > Decimal("0.00000001"))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    q = await session.execute(stmt)
+    return list(q.scalars().all())
+
+
+def _position_log_payload(
+    r: PositionLog,
+    *,
+    current_price: Decimal | None = None,
+) -> dict[str, Any]:
+    qty = Decimal(str(r.quantity or 0))
+    avg = Decimal(str(r.avg_entry_price or 0))
+    current = current_price if current_price is not None else Decimal(str(r.current_price or 0))
+    return {
+        "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        "symbol": r.symbol,
+        "broker": r.broker,
+        "quantity": _decimal_str(qty),
+        "avg_entry_price": _decimal_str(avg),
+        "current_price": _decimal_str(current),
+        "unrealised_pnl": _decimal_str((current - avg) * qty),
+        "asset_class": r.asset_class,
+    }
+
+
 async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
     """Return current positions directly from connected broker adapters.
 
@@ -569,16 +660,9 @@ async def _merge_synthetic_paper_positions_from_log(
             continue
 
     async with session_factory() as session:
-        latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
-        latest_ts = latest_ts_q.scalar_one_or_none()
-        if latest_ts is None:
+        pl_rows = await _latest_position_log_rows(session, open_only=True)
+        if not pl_rows:
             return live_rows
-        q = await session.execute(
-            select(PositionLog)
-            .where(PositionLog.timestamp == latest_ts)
-            .order_by(PositionLog.symbol.asc())
-        )
-        pl_rows = list(q.scalars().all())
         sym_list = [str(r.symbol).strip().upper() for r in pl_rows if r.symbol]
         prices = await _latest_feature_prices(session, sym_list)
     live_px = await _live_broker_prices(pl_rows)
@@ -647,12 +731,7 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         return live_total
 
     async with session_factory() as session:
-        latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
-        latest_ts = latest_ts_q.scalar_one_or_none()
-        if latest_ts is None:
-            return Decimal(0)
-        q = await session.execute(select(PositionLog).where(PositionLog.timestamp == latest_ts))
-        rows = list(q.scalars().all())
+        rows = await _latest_position_log_rows(session, open_only=True)
         if not rows:
             return Decimal(0)
         feature_prices = await _latest_feature_prices(session, [r.symbol for r in rows])
@@ -690,6 +769,7 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
+    await _ensure_database_bind()
     sf = getattr(app.state, "db_session_factory", None)
     return {"ok": sf is not None, "db": sf is not None}
 
@@ -739,33 +819,15 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
         return {"positions": live_rows, "source": src}
 
     async with session_factory() as session:
-        latest_ts_q = await session.execute(select(func.max(PositionLog.timestamp)))
-        latest_ts = latest_ts_q.scalar_one_or_none()
-        if latest_ts is None:
+        rows = await _latest_position_log_rows(session, limit=limit, open_only=True)
+        if not rows:
             return {"positions": [], "source": "position_log"}
-        q = await session.execute(
-            select(PositionLog)
-            .where(PositionLog.timestamp == latest_ts)
-            .order_by(PositionLog.symbol.asc())
-            .limit(limit)
-        )
-        rows = list(q.scalars().all())
         prices = await _latest_feature_prices(session, [r.symbol for r in rows])
     return {
         "positions": [
-            (lambda qty, avg, current: {
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-                "symbol": r.symbol,
-                "broker": r.broker,
-                "quantity": _decimal_str(qty),
-                "avg_entry_price": _decimal_str(avg),
-                "current_price": _decimal_str(current),
-                "unrealised_pnl": _decimal_str((current - avg) * qty),
-                "asset_class": r.asset_class,
-            })(
-                Decimal(str(r.quantity or 0)),
-                Decimal(str(r.avg_entry_price or 0)),
-                prices.get(r.symbol, Decimal(str(r.current_price or 0))),
+            _position_log_payload(
+                r,
+                current_price=prices.get(r.symbol, Decimal(str(r.current_price or 0))),
             )
             for r in rows
         ],

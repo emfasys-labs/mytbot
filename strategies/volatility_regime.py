@@ -20,8 +20,9 @@ class VolatilityRegimeStrategy(Strategy):
     name = "volatility_regime"
 
     def _compute_target_notional(self, confidence: float, atr_ratio: float) -> dict[str, str]:
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "4500")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "4500")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("4500")
         if base_notional <= 0:
@@ -48,10 +49,11 @@ class VolatilityRegimeStrategy(Strategy):
             return out
         n = len(features)
         out["rows_available"] = n
-        lookback = int(self.config.get("atr_lookback", 14))
-        atr_expansion = float(self.config.get("atr_expansion_ratio", 1.2))
-        atr_compression = float(self.config.get("atr_compression_ratio", 0.85))
-        min_bar_return = float(self.config.get("min_bar_return", 0.0015))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("atr_lookback", 14))
+        atr_expansion = float(cfg.get("atr_expansion_ratio", 1.2))
+        atr_compression = float(cfg.get("atr_compression_ratio", 0.85))
+        min_bar_return = float(cfg.get("min_bar_return", 0.0015))
         out["expansion_threshold"] = atr_expansion
         out["compression_threshold"] = atr_compression
         out["min_bar_return"] = min_bar_return
@@ -110,10 +112,11 @@ class VolatilityRegimeStrategy(Strategy):
         if "high" not in features.columns or "low" not in features.columns or "close" not in features.columns:
             return None
 
-        lookback = int(self.config.get("atr_lookback", 14))
-        atr_expansion = float(self.config.get("atr_expansion_ratio", 1.2))
-        atr_compression = float(self.config.get("atr_compression_ratio", 0.85))
-        min_bar_return = float(self.config.get("min_bar_return", 0.0015))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("atr_lookback", 14))
+        atr_expansion = float(cfg.get("atr_expansion_ratio", 1.2))
+        atr_compression = float(cfg.get("atr_compression_ratio", 0.85))
+        min_bar_return = float(cfg.get("min_bar_return", 0.0015))
 
         df = features
         close = pd.to_numeric(df["close"], errors="coerce")
