@@ -78,6 +78,144 @@ def _canonical_position_side(raw: Any) -> str:
     return s
 
 
+# Cash-deployment factor per asset class — what fraction of the position's
+# notional actually consumes operator capital (margin / cash). Forex at 5%
+# (~20x leverage) inflates notional but barely uses cash; equity/crypto spot
+# consume their full cost. The slider's intent is "cash deployed", not
+# "notional gross", so this lookup converts between the two views.
+#
+# These defaults can be overridden via ``config/global_edge.yaml::cash_factors``
+# (mapping asset_class → fraction). Unknown classes fall back to 1.0
+# (treat as fully-funded, conservative).
+_DEFAULT_CASH_FACTORS: dict[str, Decimal] = {
+    "equity": Decimal("1.0"),
+    "etf": Decimal("1.0"),
+    "stock": Decimal("1.0"),
+    "crypto": Decimal("1.0"),
+    "bond": Decimal("0.20"),
+    "forex": Decimal("0.05"),
+    "fx": Decimal("0.05"),
+    "future": Decimal("0.15"),
+    "option": Decimal("1.0"),
+}
+
+
+_FOREX_PAIRS = {
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
+    "EURJPY", "GBPJPY", "EURGBP", "EURCHF", "AUDJPY", "EURAUD", "EURCAD",
+    "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD", "AUDCAD", "AUDCHF", "AUDNZD",
+    "CADJPY", "CHFJPY", "NZDJPY", "USDSEK", "USDNOK", "USDDKK", "USDZAR",
+    "USDMXN", "USDTRY", "USDHKD", "USDSGD", "USDCNH",
+}
+
+
+def _infer_asset_class_from_symbol(symbol: str) -> str | None:
+    """Infer asset class from yfinance / IBKR / Kraken symbol conventions.
+
+    Returns one of: ``forex``, ``future``, ``crypto``, or ``None`` (caller
+    keeps whatever upstream classification it had — typically ``equity``).
+    """
+    if not symbol:
+        return None
+    s = symbol.strip().upper()
+    if s.endswith("=X"):
+        return "forex"
+    if s.endswith("=F"):
+        return "future"
+    if s.endswith("-USD") or s.endswith("-USDT") or s.endswith("USDT"):
+        return "crypto"
+    # 6-char FX pairs (USDCHF, USDJPY, EURUSD, ...) often arrive without a
+    # suffix from broker reconciliation.
+    if len(s) == 6 and s in _FOREX_PAIRS:
+        return "forex"
+    return None
+
+
+_DEFAULT_MIN_ORDER_USD: dict[str, Decimal] = {
+    # Approximate USD minimums derived from the GBP scale in
+    # ``config/risk_limits.yaml::minimum_order_sizes_gbp`` (~1.27 GBP/USD).
+    # The adaptive coordinator drops opps whose softmax-allocated notional
+    # falls below this floor and redistributes their cash to higher-priority
+    # peers. This prevents the cycle-by-cycle "min_order_size" risk-engine
+    # rejections that left cash undeployed when the budget was sliced thin.
+    "equity": Decimal("65"),
+    "etf": Decimal("65"),
+    "stock": Decimal("65"),
+    "crypto": Decimal("15"),
+    "bond": Decimal("1300"),
+    "forex": Decimal("1300"),
+    "fx": Decimal("1300"),
+    "future": Decimal("6500"),
+    "option": Decimal("650"),
+}
+
+
+def _min_order_notional(
+    asset_class: str | None,
+    *,
+    symbol: str | None = None,
+    cfg_overrides: dict[str, Any] | None = None,
+) -> Decimal:
+    """Look up the minimum order notional (USD) for an asset class.
+
+    Falls back to symbol-pattern inference when the explicit asset class is
+    missing or generically ``equity`` but the symbol pattern says otherwise
+    (USDCHF → forex, BTC-USD → crypto, NQ=F → future).
+    """
+    key = (asset_class or "").strip().lower() or "equity"
+    if symbol and (not key or key in ("", "equity", "stock")):
+        inferred = _infer_asset_class_from_symbol(symbol)
+        if inferred is not None:
+            key = inferred
+    if cfg_overrides:
+        v = cfg_overrides.get(key)
+        if v is not None:
+            try:
+                return Decimal(str(v))
+            except Exception:  # noqa: BLE001
+                pass
+    return _DEFAULT_MIN_ORDER_USD.get(key, Decimal("65"))
+
+
+def cash_factor_for_asset_class(
+    asset_class: str | None,
+    overrides: dict[str, Any] | None = None,
+    *,
+    symbol: str | None = None,
+) -> Decimal:
+    """Return the cash-deployment factor for an asset class.
+
+    ``factor = cash_used / notional`` — multiply notional by this to get the
+    operator-capital impact. Forex returns 0.05 (5% margin), equity/crypto
+    return 1.0, etc.
+
+    Falls back to ``_infer_asset_class_from_symbol(symbol)`` when the
+    asset_class metadata is missing or generically ``equity`` but the symbol
+    pattern strongly suggests otherwise (USDCHF → forex, BTC-USD → crypto,
+    NQ=F → future). This rescues operator capital from being mis-counted as
+    1:1 when an upstream pipeline stripped the asset_class.
+
+    ``overrides`` may be a ``config/global_edge.yaml::cash_factors`` mapping
+    that supersedes the built-in defaults for any class.
+    """
+    key = (asset_class or "").strip().lower() or "equity"
+    # If asset_class is missing or the generic ``equity`` default, try to
+    # infer from the symbol — this catches the case where forex/crypto
+    # positions arrive with asset_class hard-coded to ``equity``.
+    if symbol and (not key or key in ("", "equity", "stock")):
+        inferred = _infer_asset_class_from_symbol(symbol)
+        if inferred is not None:
+            key = inferred
+    if overrides:
+        v = overrides.get(key)
+        if v is not None:
+            try:
+                return Decimal(str(v))
+            except Exception:  # noqa: BLE001
+                pass
+    return _DEFAULT_CASH_FACTORS.get(key, Decimal("1.0"))
+
+
 def _adaptive_sizing_enabled() -> bool:
     """Feature flag for the adaptive-sizing rewrite (Phase 1+).
 
@@ -609,6 +747,7 @@ class GlobalEdgeCoordinator:
         max_actions: int | None = None,
         gross_target_capital: Decimal | None = None,
         concentration_exponent: Decimal | None = None,
+        max_position_notional: Decimal | None = None,
     ) -> list[CoordinatorAction]:
         """Rank new opportunities vs weakest held edge and emit replacement actions.
 
@@ -637,6 +776,7 @@ class GlobalEdgeCoordinator:
                     if concentration_exponent is not None
                     else Decimal("1.0")
                 ),
+                max_position_notional=max_position_notional,
             )
 
         thresh = self._threshold(active_mode)
@@ -770,6 +910,7 @@ class GlobalEdgeCoordinator:
         replacement_context: ReplacementContext | None,
         gross_target_capital: Decimal,
         concentration_exponent: Decimal,
+        max_position_notional: Decimal | None = None,
     ) -> list[CoordinatorAction]:
         """Adaptive book sizing — no fixed action count, no fixed notional fraction.
 
@@ -818,23 +959,31 @@ class GlobalEdgeCoordinator:
         ranked = sorted(new_opportunities, key=lambda o: o.priority_score, reverse=True)
         available_held = sorted(held, key=lambda h: h.expected_remaining_edge)
 
-        # ---- Build-up vs. displacement mode ---------------------------------
-        # ``gross_target_capital`` is the *remaining* gap to fill (the loop
-        # passes ``absolute_target - held_total``). The absolute target is
-        # therefore ``held_total + gross_target_capital``. Trims only fire
-        # when held is over 105% of the absolute target — i.e. genuinely
-        # overshooting and needing to make room. During build-up
-        # (held < absolute_target) trims are suppressed so opens fill the
-        # gap net-positive instead of cycle-collapsing the book.
+        # ---- Build-up vs. displacement mode (CASH-DEPLOYED basis) ----------
+        # The slider's intent is "cash deployed", not "notional gross". Forex
+        # positions show large notionals but consume only their margin (≈5%);
+        # equity/crypto positions consume their full cost. Both the
+        # build-up gate and the per-opp sizing therefore work in *cash* space.
         #
-        # Bug history: an earlier version compared held_total to
-        # ``gross_target_capital`` directly, which evaluated to ``held >
-        # (target - held) * 1.05`` ⇒ ``held > target * 0.512``, falsely
-        # triggering displacement around 50% deployed and capping the book
-        # there.
-        held_total = sum((h.notional for h in held), Decimal("0"))
-        absolute_target = held_total + gross_target_capital
-        displacement_mode = held_total > absolute_target * Decimal("1.05")
+        # ``gross_target_capital`` is the *remaining cash budget* (the loop
+        # passes ``absolute_cash_target - held_cash_used``). Absolute cash
+        # target is reconstructed as ``held_cash_used + gross_target_capital``.
+        # Trims only fire when cash usage exceeds 105% of target.
+        cash_overrides = self._cfg.get("cash_factors") or None
+        held_cash_used = sum(
+            (
+                h.notional
+                * cash_factor_for_asset_class(
+                    str((h.metadata or {}).get("asset_class") or ""),
+                    cash_overrides,
+                    symbol=h.symbol,
+                )
+                for h in held
+            ),
+            Decimal("0"),
+        )
+        absolute_cash_target = held_cash_used + gross_target_capital
+        displacement_mode = held_cash_used > absolute_cash_target * Decimal("1.05")
 
         # ---- Filter to qualifying opportunities --------------------------
         qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None]] = []
@@ -881,29 +1030,118 @@ class GlobalEdgeCoordinator:
         if not qualifying:
             return []
 
-        # ---- Softmax weights ---------------------------------------------
+        # ---- Softmax weights with minimum-order enforcement --------------
         # raw_i = lam_eff * priority_i, then standard exp-normalise. Subtract
         # max for numerical stability. With lam_eff = lam * concentration,
         # Hunter (high ce) sharpens; Defender (low ce) stays softer.
-        raws: list[float] = []
-        for opp, _ in qualifying:
-            try:
-                p = float(opp.priority_score)
-            except (TypeError, ValueError):
-                p = 0.0
-            p = max(0.0, p)
-            raws.append(lam_eff * p)
-        max_raw = max(raws) if raws else 0.0
-        exps = [math.exp(r - max_raw) for r in raws]
-        total = sum(exps) or 1.0
-        weights = [e / total for e in exps]
+        #
+        # If the resulting per-opp notional falls below its asset-class
+        # minimum order size, drop the lowest-priority opp and recompute the
+        # softmax across the survivors. This prevents the risk engine from
+        # silently rejecting tiny slices and keeps the cash budget fully
+        # deployed across fewer, bigger positions.
+        min_overrides = self._cfg.get("minimum_order_sizes_usd") or None
+
+        def _softmax(opps: list[tuple[StrategyOpportunity, HeldPositionEdge | None]]) -> list[float]:
+            raws: list[float] = []
+            for opp, _ in opps:
+                try:
+                    p = float(opp.priority_score)
+                except (TypeError, ValueError):
+                    p = 0.0
+                raws.append(lam_eff * max(0.0, p))
+            mx = max(raws) if raws else 0.0
+            exps = [math.exp(r - mx) for r in raws]
+            tot = sum(exps) or 1.0
+            return [e / tot for e in exps]
+
+        # Iteratively shrink the qualifying set until every survivor's
+        # softmax-allocated notional clears its asset-class minimum.
+        while qualifying:
+            weights = _softmax(qualifying)
+            below_min: list[int] = []
+            for idx, ((opp, _trim), w) in enumerate(zip(qualifying, weights, strict=True)):
+                opp_md = opp.metadata or {}
+                ac = str(opp_md.get("asset_class") or "").strip().lower()
+                cf = cash_factor_for_asset_class(ac, cash_overrides, symbol=opp.symbol)
+                if cf <= 0:
+                    cf = Decimal("1.0")
+                cash_share = gross_target_capital * Decimal(str(w))
+                notional = cash_share / cf
+                # Apply the same per-symbol concentration cap as the emit
+                # loop so we don't fail-and-drop opps that would have been
+                # legitimately clipped (and still clear the minimum).
+                if max_position_notional is not None and max_position_notional > 0:
+                    if notional > max_position_notional:
+                        notional = max_position_notional
+                min_n = _min_order_notional(ac, symbol=opp.symbol, cfg_overrides=min_overrides)
+                if notional < min_n:
+                    below_min.append(idx)
+            if not below_min:
+                break
+            # Drop the LOWEST-priority below-minimum opp (last in the
+            # priority-sorted list). Its cash mass redistributes via softmax
+            # to the survivors. Repeat until nothing is below min or the
+            # qualifying set is empty.
+            drop_idx = max(below_min, key=lambda i: i)  # last (lowest priority)
+            del qualifying[drop_idx]
+
+        if not qualifying:
+            return []
+        weights = _softmax(qualifying)
 
         # ---- Emit actions -------------------------------------------------
+        # ``gross_target_capital`` is the remaining CASH budget. Each opp's
+        # cash share is ``w_i * cash_budget``; we then convert to notional
+        # via the asset-class cash factor (forex 5% → ~20x leverage on
+        # notional, equity 1.0 → notional == cash).
         out: list[CoordinatorAction] = []
         for (opp, trim_edge), w in zip(qualifying, weights, strict=True):
-            cap_i = gross_target_capital * Decimal(str(w))
-            # Round to 2dp to avoid Decimal-precision noise in downstream logs.
+            opp_meta = opp.metadata or {}
+            opp_ac = str(opp_meta.get("asset_class") or "").strip().lower()
+            cf = cash_factor_for_asset_class(opp_ac, cash_overrides, symbol=opp.symbol)
+            cash_i = gross_target_capital * Decimal(str(w))
+            # Convert cash to notional. Avoid div-by-zero for misconfigured
+            # cash_factor; fall back to cash == notional (factor 1.0).
+            if cf <= 0:
+                cf = Decimal("1.0")
+            cap_i = cash_i / cf
+            # Per-position concentration cap — the risk engine will reject
+            # any position whose new+existing notional exceeds NAV ×
+            # max_concentration_pct. Account for existing held exposure on
+            # this symbol so the new open lands inside the remaining cap.
+            if max_position_notional is not None and max_position_notional > 0:
+                # Risk engine concentration aggregates across symbol variants
+                # (USDCHF and USDCHF=X both map to the same forex pair). Strip
+                # common yfinance suffixes when matching existing exposure so
+                # we don't propose a new opp at the full cap when the same
+                # asset is already deployed under a different ticker form.
+                def _norm_sym(s: str) -> str:
+                    s = s.strip().upper()
+                    for suf in ("=X", "=F"):
+                        if s.endswith(suf):
+                            s = s[: -len(suf)]
+                            break
+                    if s.endswith("-USD") and len(s) > 4:
+                        # crypto: CAKE-USD ≡ CAKEUSDT for some reconciliation
+                        s = s[:-4]
+                    return s
+
+                opp_norm = _norm_sym(opp.symbol)
+                existing_sym_notional = sum(
+                    (h.notional for h in held if _norm_sym(h.symbol) == opp_norm),
+                    Decimal("0"),
+                )
+                # Add a small safety buffer (1%) so we land just inside the
+                # cap rather than exactly at it (avoids float-edge rejects).
+                room = (max_position_notional - existing_sym_notional) * Decimal("0.99")
+                if room <= 0:
+                    continue  # this symbol is already at-cap; skip
+                if cap_i > room:
+                    cap_i = room
+                    cash_i = cap_i * cf
             cap_i = cap_i.quantize(Decimal("0.01"))
+            cash_i = cash_i.quantize(Decimal("0.01"))
             if cap_i <= 0:
                 continue
 
@@ -938,6 +1176,16 @@ class GlobalEdgeCoordinator:
             action_meta["sizing_softmax_lambda"] = str(lam)
             action_meta["sizing_softmax_lambda_effective"] = str(lam_eff)
             action_meta["sizing_concentration_exponent"] = str(ce)
+            action_meta["sizing_cash_used"] = str(cash_i)
+            action_meta["sizing_cash_factor"] = str(cf)
+            action_meta["sizing_held_cash_used"] = str(held_cash_used)
+            action_meta["sizing_cash_target_absolute"] = str(absolute_cash_target)
+            # Boundary guard (execution/engine.py::_passes_sizing_boundary_guard)
+            # reads ``sizing_final_capital_required`` to validate that the
+            # actual order notional matches coordinator intent within 1.25×.
+            # Set it here so the adaptive path participates in the same audit
+            # contract as the legacy directional path.
+            action_meta["sizing_final_capital_required"] = str(cap_i)
             action_meta["sizing_gross_target_capital"] = str(gross_target_capital)
             action_meta["sizing_qualifying_count"] = str(len(qualifying))
             action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
@@ -954,6 +1202,91 @@ class GlobalEdgeCoordinator:
                 )
             )
 
+        return out
+
+    def propose_shed_actions(
+        self,
+        held: list[HeldPositionEdge],
+        *,
+        cash_target_absolute: Decimal,
+        active_mode: str = DEFAULT_MODE,
+    ) -> list[CoordinatorAction]:
+        """Emit reduce-only ``trim_symbol`` actions to bring held cash usage
+        down to ``cash_target_absolute``.
+
+        Used when the operator slides the capital allocation DOWN — instead
+        of waiting for natural displacement to roll positions off, the loop
+        immediately closes the largest cash-using positions until the book
+        fits inside the new sleeve. Closes happen via the same execution
+        path as normal trims; risk_engine re-validates each close intent.
+
+        Selection order: largest cash-used first, breaking ties by weakest
+        expected_remaining_edge (so we shed the least-promising holdings).
+        """
+        if not held:
+            return []
+        cash_overrides = self._cfg.get("cash_factors") or None
+
+        def _cash_used(h: HeldPositionEdge) -> Decimal:
+            ac = str((h.metadata or {}).get("asset_class") or "")
+            cf = cash_factor_for_asset_class(ac, cash_overrides, symbol=h.symbol)
+            return h.notional * cf
+
+        held_cash_total = sum((_cash_used(h) for h in held), Decimal("0"))
+        if held_cash_total <= cash_target_absolute:
+            return []
+
+        excess = held_cash_total - cash_target_absolute
+        # Largest-cash-first, tie-break weakest-edge.
+        ranked = sorted(
+            held,
+            key=lambda h: (-float(_cash_used(h)), float(h.expected_remaining_edge)),
+        )
+        out: list[CoordinatorAction] = []
+        shed_so_far = Decimal("0")
+        for h in ranked:
+            if shed_so_far >= excess:
+                break
+            cu = _cash_used(h)
+            if cu <= 0:
+                continue
+            ac = str((h.metadata or {}).get("asset_class") or "")
+            cf = cash_factor_for_asset_class(ac, cash_overrides, symbol=h.symbol)
+            if cf <= 0:
+                cf = Decimal("1.0")
+            remaining_excess = max(Decimal("0"), excess - shed_so_far)
+            trim_notional = min(h.notional, remaining_excess / cf)
+            if trim_notional <= 0:
+                continue
+            trim_cash = trim_notional * cf
+            meta = dict(h.metadata or {})
+            meta["coordinator_kind"] = "trim_symbol"
+            meta["reduce_only"] = True
+            if trim_notional < h.notional:
+                meta["partial_reduce_only"] = True
+                meta["close_only"] = False
+            else:
+                meta["close_only"] = True
+            meta["target_notional"] = str(trim_notional)
+            meta["risk_notional_override"] = str(trim_notional)
+            meta["sizing_path"] = "adaptive_shed_to_target"
+            meta["sizing_cash_used"] = str(trim_cash)
+            meta["sizing_cash_target_absolute"] = str(cash_target_absolute)
+            meta["sizing_held_cash_total_pre"] = str(held_cash_total)
+            meta["sizing_final_capital_required"] = str(trim_notional)
+            if h.broker:
+                meta["broker"] = h.broker
+            out.append(
+                CoordinatorAction(
+                    kind="trim_symbol",
+                    symbol=h.symbol,
+                    strategy_name="adaptive_shed",
+                    capital=trim_notional,
+                    priority_score=Decimal("0"),
+                    metadata=meta,
+                )
+            )
+            shed_so_far += trim_cash
         return out
 
     def propose_flatten_actions(

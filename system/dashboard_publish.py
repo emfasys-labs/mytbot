@@ -24,6 +24,7 @@ from core.models_runtime import (
     ReplacementCandidate,
 )
 from portfolio.strategy_opportunity import StrategyOpportunity
+from portfolio.global_edge_coordinator import cash_factor_for_asset_class
 from signals.accumulator import SignalAccumulator
 
 DASHBOARD_SNAPSHOT_KEY = "dashboard.snapshot"
@@ -231,10 +232,22 @@ def serialize_held_positions(portfolio: PortfolioState, *, limit: int = 12) -> d
                 "tags": list(h.tags)[:8],
             }
         )
+    cash_deployed = sum(
+        (
+            _dec(h.market_value)
+            * cash_factor_for_asset_class(
+                str(h.asset_class),
+                symbol=str(h.symbol),
+            )
+        )
+        for h in positions
+    )
     return {
         "nav": _d(portfolio.nav),
         "gross_exposure": _d(portfolio.gross_exposure),
         "net_exposure": _d(portfolio.net_exposure),
+        "cash_deployed": _d(cash_deployed),
+        "cash_deployed_pct": _d((cash_deployed / portfolio.nav) if portfolio.nav > 0 else Decimal("0")),
         "drawdown_from_hwm_pct": _d(portfolio.drawdown_from_hwm_pct),
         "positions_sample": rows,
         "weakest_by_hold_score": [

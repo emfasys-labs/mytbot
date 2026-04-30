@@ -32,6 +32,8 @@ export interface Position {
   notional: number;
   /** Originating broker (``ibkr``, ``alpaca``, ``binance``, …). */
   broker?: string;
+  /** Backend asset class (equity, crypto, forex, ...), used for cash-at-work math. */
+  assetClass?: string;
 }
 
 export type EventKind = 'fill' | 'signal' | 'tick';

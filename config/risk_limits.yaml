@@ -34,6 +34,9 @@ mode_overrides:
     max_gross_exposure_pct: 1.00
     max_single_stock_pct: 1.00
     max_crypto_pct: 1.00
+    max_equity_pct: 1.00
+    max_bond_pct: 1.00
+    max_option_pct: 1.00
 
 # ── Loss limits ───────────────────────────────────────────────────────────────
 max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio

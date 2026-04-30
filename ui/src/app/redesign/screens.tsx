@@ -385,7 +385,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 [
                   ['gross', live.exposure.gross],
                   ['net', live.exposure.net],
-                  ['cash', live.exposure.cash],
+                  ['gross free', live.exposure.cash],
                 ] as const
               ).map(([k, v]) => (
                 <div key={k} style={{

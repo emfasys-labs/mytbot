@@ -32,6 +32,7 @@ import {
   mapBrokers,
   mapConviction,
   mapCoverage,
+  capitalAtWork,
   mapExecutionRejections,
   mapExposure,
   mapNews,
@@ -685,6 +686,7 @@ export function useLiveSystem(): LiveData {
   const exposure = useMemo(() => {
     const mapped = mapExposure(snapshot, pnl);
     if (nav <= 0 || positions.length === 0) return mapped;
+    const { working: capitalAtWorkValue } = capitalAtWork(positions, orders);
     const grossNotional = positions.reduce((sum, p) => sum + Math.abs(p.notional || 0), 0);
     const netNotional = Math.abs(
       positions.reduce((sum, p) => {
@@ -692,16 +694,21 @@ export function useLiveSystem(): LiveData {
         return sum + sign * Math.abs(p.notional || 0);
       }, 0),
     );
-    if (grossNotional <= 0) return mapped;
+    if (capitalAtWorkValue <= 0 && grossNotional <= 0) return mapped;
+    // Exposure is raw notional / NAV. It is deliberately different from
+    // Book "capital at work", which is cash/margin deployed after asset-class
+    // factors. Keep both visible, but do not blend the accounting bases.
     const gross = grossNotional / nav;
     const net = netNotional / nav;
+    const grossClamped = Math.max(0, gross);
+    const netClamped = Math.max(0, Math.min(grossClamped, net));
     return {
       ...mapped,
-      gross: Math.max(mapped.gross, gross),
-      net: Math.max(mapped.net, net),
-      cash: Math.max(0, 1 - Math.max(mapped.gross, gross)),
+      gross: grossClamped,
+      net: netClamped,
+      cash: Math.max(0, 1 - grossClamped),
     };
-  }, [snapshot, pnl, positions, nav]);
+  }, [snapshot, pnl, positions, orders, nav]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(
     () => mapPnlRollups(pnl, nav, equitySeries),

@@ -40,6 +40,7 @@ from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
+from portfolio.global_edge_coordinator import cash_factor_for_asset_class
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
@@ -726,9 +727,10 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
       3. PositionLog.current_price (last persisted snapshot)
       4. Average entry price (no movement — effectively zero unrealised)
     """
-    live_total = await _live_broker_unrealised_total()
-    if live_total != 0:
-        return live_total
+    if APP_ENV == "live":
+        live_total = await _live_broker_unrealised_total()
+        if live_total != 0:
+            return live_total
 
     async with session_factory() as session:
         rows = await _latest_position_log_rows(session, open_only=True)
@@ -823,11 +825,15 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
         if not rows:
             return {"positions": [], "source": "position_log"}
         prices = await _latest_feature_prices(session, [r.symbol for r in rows])
+    live_prices = await _live_broker_prices(rows)
     return {
         "positions": [
             _position_log_payload(
                 r,
-                current_price=prices.get(r.symbol, Decimal(str(r.current_price or 0))),
+                current_price=live_prices.get(
+                    r.symbol,
+                    prices.get(r.symbol, Decimal(str(r.current_price or 0))),
+                ),
             )
             for r in rows
         ],
@@ -1619,6 +1625,7 @@ async def get_dashboard_snapshot(
         nav = await _live_portfolio_value()
         gross = Decimal(0)
         net = Decimal(0)
+        cash_deployed = Decimal(0)
         total_unrealised = Decimal(0)
         sample: list[dict[str, Any]] = []
         for p in position_rows:
@@ -1629,13 +1636,16 @@ async def get_dashboard_snapshot(
             except Exception:  # noqa: BLE001
                 continue
             mv = qty * px
+            asset_class = str(p.get("asset_class") or "")
+            symbol = str(p.get("symbol") or "")
             gross += abs(mv)
             net += mv
+            cash_deployed += abs(mv) * cash_factor_for_asset_class(asset_class, symbol=symbol)
             total_unrealised += pnl
             sample.append(
                 {
-                    "symbol": p.get("symbol"),
-                    "asset_class": p.get("asset_class"),
+                    "symbol": symbol,
+                    "asset_class": asset_class,
                     "side": "short" if qty < 0 else "long",
                     "market_value": _decimal_str(abs(mv)),
                     "unrealised_pnl": _decimal_str(pnl),
@@ -1648,6 +1658,8 @@ async def get_dashboard_snapshot(
             portfolio["nav"] = _decimal_str(nav)
         portfolio["gross_exposure"] = _decimal_str(gross)
         portfolio["net_exposure"] = _decimal_str(net)
+        portfolio["cash_deployed"] = _decimal_str(cash_deployed)
+        portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
         portfolio["positions_sample"] = sample[:24]
         portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
         portfolio["source"] = position_source

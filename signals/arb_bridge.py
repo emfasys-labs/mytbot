@@ -58,7 +58,8 @@ def coordinator_action_to_raw_signal(action: CoordinatorAction, *, nav: Decimal)
 
     if action.kind == "trim_symbol":
         md["reduce_only"] = True
-        md["close_only"] = True
+        if not bool(md.get("partial_reduce_only")):
+            md["close_only"] = True
         return RawSignal(
             strategy=action.strategy_name,
             symbol=action.symbol,

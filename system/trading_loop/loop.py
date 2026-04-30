@@ -309,6 +309,9 @@ class TradingLoop:
         # cancel/grow/trim plan against the new target gross.
         self._capital_change_pending: bool = False
         self._last_capital_pct_seen: float | None = None
+        # Cash-target memory for the shed-to-target branch.
+        self._last_adaptive_cash_target: Decimal | None = None
+        self._last_adaptive_held_cash_used: Decimal | None = None
 
         self.risk_engine: RiskEngine | None = None
         self.execution_engine: ExecutionEngine | None = None
@@ -2231,34 +2234,111 @@ class TradingLoop:
                     mode_for_coord,
                 )
             if adaptive_on and tradable > 0:
+                adaptive_budget_active = True
                 # Adaptive gross fraction: hunter deploys the slider-allocated
                 # capital fully; trader/defender progressively conservative.
                 # Concentration exponent — higher means sharper softmax (more
                 # winner-take-all). These are the only mode-aware multipliers
                 # in the adaptive path; they are NOT hard caps on size or count.
-                adaptive_mode_cfg = {
-                    "hunter": {"gross_fraction": Decimal("1.00"), "concentration": Decimal("2.5")},
-                    "trader": {"gross_fraction": Decimal("0.70"), "concentration": Decimal("1.5")},
-                    "defender": {"gross_fraction": Decimal("0.40"), "concentration": Decimal("1.0")},
-                }
-                _amc = adaptive_mode_cfg.get(mode_for_coord, adaptive_mode_cfg["trader"])
-                gross_target = tradable * _amc["gross_fraction"]
-                # Subtract already-deployed gross so the new opens fill toward
-                # the target without double-counting held capital.
-                held_notional_total = sum(
-                    (h.notional for h in held), Decimal("0")
+                adaptive_mode_cfg = (
+                    (self._global_edge_cfg.get("adaptive") or {}).get("mode") or {}
                 )
-                remaining_target = gross_target - held_notional_total
-                if remaining_target > 0:
-                    adaptive_kwargs["gross_target_capital"] = remaining_target
-                    adaptive_kwargs["concentration_exponent"] = _amc["concentration"]
-            actions = coord.propose_actions(
-                held,
-                new_opps_dedup,
-                active_mode=mode_for_coord,
-                replacement_context=repl_ctx,
-                **adaptive_kwargs,
-            )
+                _mode_raw_cfg = adaptive_mode_cfg.get(mode_for_coord) or adaptive_mode_cfg.get("trader") or {}
+                try:
+                    _gross_fraction = Decimal(str(_mode_raw_cfg.get("gross_fraction", "1.0")))
+                except Exception:  # noqa: BLE001
+                    _gross_fraction = Decimal("1.0")
+                try:
+                    _concentration = Decimal(str(_mode_raw_cfg.get("concentration", "1.0")))
+                except Exception:  # noqa: BLE001
+                    _concentration = Decimal("1.0")
+                # Sizing in CASH-DEPLOYED space, not notional. The slider
+                # represents the share of NAV the operator is willing to
+                # actually tie up; forex notionals (~5% margin) inflate
+                # gross without consuming much cash, so we measure budgets
+                # in cash and convert to notional per asset class downstream.
+                cash_target = tradable * _gross_fraction
+                from portfolio.global_edge_coordinator import (
+                    cash_factor_for_asset_class as _cf,
+                )
+                _ge_cf_overrides = (
+                    self._global_edge_cfg.get("cash_factors") or None
+                )
+                held_cash_used = sum(
+                    (
+                        h.notional
+                        * _cf(
+                            str((h.metadata or {}).get("asset_class") or ""),
+                            _ge_cf_overrides,
+                            symbol=h.symbol,
+                        )
+                        for h in held
+                    ),
+                    Decimal("0"),
+                )
+                remaining_cash = cash_target - held_cash_used
+                # Stash the absolute cash target so a downstream shed-to-target
+                # branch (slider down) can read it without recomputing.
+                self._last_adaptive_cash_target = cash_target
+                self._last_adaptive_held_cash_used = held_cash_used
+                if remaining_cash > 0:
+                    adaptive_kwargs["gross_target_capital"] = remaining_cash
+                    adaptive_kwargs["concentration_exponent"] = _concentration
+                    # Pass per-position notional cap so the coordinator
+                    # clips forex notionals (which can be 20× cash) to the
+                    # risk engine's concentration limit. Without this, a
+                    # cash budget routed to forex produces a notional larger
+                    # than NAV × max_concentration_pct and gets rejected.
+                    adaptive_kwargs["max_position_notional"] = total_equity * max_pos_pct
+            else:
+                adaptive_budget_active = False
+            # Shed-to-target: when held cash exceeds the slider's new cash
+            # target by > 5%, immediately emit reduce-only trims so the book
+            # converges to the operator's target without waiting for natural
+            # displacement. This is the slider-down counterpart to the
+            # adaptive build-up path.
+            shed_actions: list = []
+            if (
+                adaptive_on
+                and tradable > 0
+                and getattr(self, "_last_adaptive_cash_target", None) is not None
+            ):
+                _ct = self._last_adaptive_cash_target
+                _hc = self._last_adaptive_held_cash_used
+                try:
+                    _tol = Decimal(str((self._global_edge_cfg.get("adaptive") or {}).get("target_tolerance_pct", "0.0025")))
+                except Exception:  # noqa: BLE001
+                    _tol = Decimal("0.0025")
+                if _hc > _ct * (Decimal("1") + max(Decimal("0"), _tol)):
+                    shed_actions = coord.propose_shed_actions(
+                        held,
+                        cash_target_absolute=_ct,
+                        active_mode=mode_for_coord,
+                    )
+                    if shed_actions:
+                        logger.info(
+                            "trading_loop | adaptive shed-to-target | held_cash={} > target={} | actions={}",
+                            _hc,
+                            _ct,
+                            len(shed_actions),
+                        )
+            if adaptive_budget_active and not adaptive_kwargs:
+                # Adaptive mode is already at/above the slider cash target.
+                # Do not fall back to the legacy replacement opener here; the
+                # only valid work is shed-to-target if we are above tolerance.
+                actions = []
+            else:
+                actions = coord.propose_actions(
+                    held,
+                    new_opps_dedup,
+                    active_mode=mode_for_coord,
+                    replacement_context=repl_ctx,
+                    **adaptive_kwargs,
+                )
+            if shed_actions:
+                # Run shed first (close oversized positions), then any new
+                # opens. Together they bring cash to target.
+                actions = list(shed_actions) + list(actions)
         if buf is not None and actions:
             for act in actions:
                 try:

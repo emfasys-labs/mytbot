@@ -168,3 +168,41 @@ def test_timeout_does_not_leak(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("X")]))
     assert out == {"X": Decimal("2.0")}
+
+
+def test_paper_mtm_ignores_native_broker_unrealised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paper mode uses the paper ledger as the book of record for P&L."""
+    import api.server as server
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(server, "APP_ENV", "paper")
+    monkeypatch.setattr(server, "_live_broker_unrealised_total", lambda: _async_decimal("999"))
+    monkeypatch.setattr(server, "_latest_position_log_rows", lambda *_a, **_kw: _async_value([]))
+
+    out = asyncio.run(server._compute_live_unrealised_mtm(lambda: _Session()))
+    assert out == Decimal("0")
+
+
+def test_live_mtm_can_use_native_broker_unrealised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live mode still trusts broker-native unrealised P&L when available."""
+    import api.server as server
+
+    monkeypatch.setattr(server, "APP_ENV", "live")
+    monkeypatch.setattr(server, "_live_broker_unrealised_total", lambda: _async_decimal("123.45"))
+
+    out = asyncio.run(server._compute_live_unrealised_mtm(lambda: None))
+    assert out == Decimal("123.45")
+
+
+async def _async_decimal(value: str) -> Decimal:
+    return Decimal(value)
+
+
+async def _async_value(value):
+    return value

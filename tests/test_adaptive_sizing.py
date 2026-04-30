@@ -29,6 +29,7 @@ from portfolio.global_edge_coordinator import (
     HeldPositionEdge,
     _adaptive_priority_components,
     _adaptive_sizing_enabled,
+    cash_factor_for_asset_class,
 )
 from portfolio.strategy_opportunity import StrategyOpportunity, compute_priority_score
 
@@ -45,6 +46,7 @@ def _opp(
     cap: str = "10000",
     priority: str | None = None,
     meta: dict | None = None,
+    asset_class: str = "equity",
 ) -> StrategyOpportunity:
     e = Decimal(edge)
     conf = Decimal("0.9")
@@ -52,6 +54,8 @@ def _opp(
     exe = Decimal("0.8")
     risk = Decimal("0.05")
     ps = Decimal(priority) if priority is not None else compute_priority_score(e, conf, reg, exe, risk)
+    md = dict(meta or {})
+    md.setdefault("asset_class", asset_class)
     return StrategyOpportunity(
         strategy_name="momentum_breakout",
         symbol=symbol,
@@ -66,7 +70,7 @@ def _opp(
         regime_fit_score=reg,
         risk_cost_score=risk,
         priority_score=ps,
-        metadata=dict(meta or {}),
+        metadata=md,
     )
 
 
@@ -150,35 +154,39 @@ def test_adaptive_no_integer_action_cap(adaptive_on):
 
 
 def test_adaptive_dominant_opportunity_absorbs_almost_all_capital(adaptive_on):
-    """One dominant opp + several weak ones → dominant gets ~all the capital."""
+    """One dominant opp + several weak ones → dominant gets ~all the capital.
+
+    All-crypto basket so cash_factor=1.0 and BTC's notional == cash share.
+    """
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
-    # BTC with a much higher priority_score; alts with low scores.
     opps = [
-        _opp("BTC-USD", "0.95", priority="0.95"),
-        _opp("ALT1", "0.21", priority="0.21"),
-        _opp("ALT2", "0.21", priority="0.21"),
-        _opp("ALT3", "0.21", priority="0.21"),
+        _opp("BTC-USD", "0.95", priority="0.95", asset_class="crypto"),
+        _opp("ALT1", "0.21", priority="0.21", asset_class="crypto"),
+        _opp("ALT2", "0.21", priority="0.21", asset_class="crypto"),
+        _opp("ALT3", "0.21", priority="0.21", asset_class="crypto"),
     ]
     actions = coord.propose_actions(
         held=[],
         new_opportunities=opps,
         active_mode="hunter",
         gross_target_capital=Decimal("1000000"),
-        concentration_exponent=Decimal("4.0"),  # sharp softmax
+        concentration_exponent=Decimal("4.0"),
     )
     by_sym = {a.symbol: a for a in actions if a.kind == "open_strategy"}
     btc_share = by_sym["BTC-USD"].capital / Decimal("1000000")
-    # With concentration_exponent=4 and priority gap of 0.74, BTC should
-    # dominate. We don't pin a tight bound (math is sensitive to exact
-    # softmax constants); we just require >= 70%.
     assert btc_share > Decimal("0.70"), f"BTC share was {btc_share}"
 
 
-def test_adaptive_capital_sums_to_target(adaptive_on):
+def test_adaptive_capital_sums_to_target_for_equity(adaptive_on):
+    """All-equity opps: cash_factor=1.0, so notional sum == cash budget."""
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
-    opps = [_opp("A", "0.50"), _opp("B", "0.50"), _opp("C", "0.50")]
+    opps = [
+        _opp("A", "0.50", asset_class="equity"),
+        _opp("B", "0.50", asset_class="equity"),
+        _opp("C", "0.50", asset_class="equity"),
+    ]
     actions = coord.propose_actions(
         held=[],
         new_opportunities=opps,
@@ -188,8 +196,62 @@ def test_adaptive_capital_sums_to_target(adaptive_on):
     )
     opens = [a for a in actions if a.kind == "open_strategy"]
     total = sum((a.capital for a in opens), Decimal("0"))
-    # Allow tiny rounding (we quantize to 2dp per action).
+    # All equity, factor 1.0 → cash == notional.
     assert abs(total - Decimal("90000")) < Decimal("1"), f"total={total}"
+
+
+def test_adaptive_forex_inflates_notional_via_cash_factor(adaptive_on):
+    """Forex (cash_factor 0.05) gets a notional ≈ 20× its cash share so the
+    operator's cash-deployed budget is honoured even when the position uses
+    leverage. This is the fix for the slider-says-50%-but-cash-only-31% issue.
+    """
+    cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
+    coord = GlobalEdgeCoordinator(cfg)
+    opps = [_opp("USDCHF=X", "0.50", asset_class="forex")]
+    actions = coord.propose_actions(
+        held=[],
+        new_opportunities=opps,
+        active_mode="hunter",
+        gross_target_capital=Decimal("50000"),  # cash budget
+        concentration_exponent=Decimal("1.0"),
+    )
+    opens = [a for a in actions if a.kind == "open_strategy"]
+    assert len(opens) == 1
+    # cash_share = 50000 (single opp); notional = 50000 / 0.05 = 1_000_000.
+    assert abs(opens[0].capital - Decimal("1000000")) < Decimal("1")
+    md = opens[0].metadata
+    assert md["sizing_cash_used"] == "50000.00"
+    assert md["sizing_cash_factor"] == "0.05"
+
+
+def test_adaptive_mixed_assets_size_per_cash_factor(adaptive_on):
+    """Equity + forex with equal softmax weights: equity gets cash 1:1 in
+    notional, forex gets cash * (1/0.05) = 20× cash in notional. Cash
+    budget is fully deployed."""
+    cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
+    coord = GlobalEdgeCoordinator(cfg)
+    opps = [
+        _opp("AAPL", "0.50", priority="0.50", asset_class="equity"),
+        _opp("USDCHF=X", "0.50", priority="0.50", asset_class="forex"),
+    ]
+    actions = coord.propose_actions(
+        held=[],
+        new_opportunities=opps,
+        active_mode="hunter",
+        gross_target_capital=Decimal("100000"),
+        concentration_exponent=Decimal("1.0"),
+    )
+    opens = {a.symbol: a for a in actions if a.kind == "open_strategy"}
+    # Equal priority + lam_eff=5 → equal weights → 50k cash each
+    # equity: notional=50000/1.0=50000; forex: 50000/0.05=1_000_000
+    assert abs(opens["AAPL"].capital - Decimal("50000")) < Decimal("1")
+    assert abs(opens["USDCHF=X"].capital - Decimal("1000000")) < Decimal("1")
+    # Cash sum across both = 100k = budget.
+    cash_sum = sum(
+        (Decimal(str(a.metadata["sizing_cash_used"])) for a in opens.values()),
+        Decimal("0"),
+    )
+    assert abs(cash_sum - Decimal("100000")) < Decimal("1")
 
 
 def test_adaptive_falls_back_to_legacy_when_target_missing(adaptive_on):
@@ -256,9 +318,8 @@ def test_adaptive_records_softmax_audit_metadata(adaptive_on):
 
 def test_adaptive_buildup_emits_no_trims_when_under_target(adaptive_on):
     """Bug fix: during book build-up the adaptive path must NOT pair every
-    open with a trim — that caused cycle-by-cycle collapse (each open's
-    notional shrank as remaining_target shrank, but trims kept closing full
-    held positions). Trims only fire when held_total > gross_target."""
+    open with a trim — that caused cycle-by-cycle collapse. Trims only fire
+    when held_cash_used > absolute_cash_target * 1.05."""
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": True}
     coord = GlobalEdgeCoordinator(cfg)
     held = [
@@ -266,16 +327,17 @@ def test_adaptive_buildup_emits_no_trims_when_under_target(adaptive_on):
             symbol="OLD1",
             notional=Decimal("30000"),
             expected_remaining_edge=Decimal("0.05"),
-            metadata={"side": "long"},
+            metadata={"side": "long", "asset_class": "equity"},
         ),
         HeldPositionEdge(
             symbol="OLD2",
             notional=Decimal("30000"),
             expected_remaining_edge=Decimal("0.05"),
-            metadata={"side": "long"},
+            metadata={"side": "long", "asset_class": "equity"},
         ),
     ]
-    # held_total = 60k; gross_target = 500k → under-target; should not trim.
+    # held_cash = 60k (both equity, factor 1.0); remaining=500k → absolute=560k.
+    # Under target → no trim.
     actions = coord.propose_actions(
         held=held,
         new_opportunities=[_opp("NEW1", "0.50"), _opp("NEW2", "0.50")],
@@ -366,6 +428,146 @@ def test_adaptive_buildup_does_not_trigger_displacement_mid_growth(adaptive_on):
     opens = [a for a in actions if a.kind == "open_strategy"]
     assert trims == [], f"build-up at 60% of target must not trim, got {trims}"
     assert len(opens) == 2
+
+
+def test_adaptive_clips_forex_notional_at_concentration_cap(adaptive_on):
+    """Forex's 20× cash-to-notional inflation can produce a notional larger
+    than the risk engine's per-symbol concentration cap (NAV ×
+    max_concentration_pct). The coordinator must clip notional at the cap so
+    risk doesn't reject every adaptive open."""
+    cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
+    coord = GlobalEdgeCoordinator(cfg)
+    opps = [_opp("USDCHF=X", "0.50", asset_class="forex")]
+    # Cash budget would imply 200000 / 0.05 = 4_000_000 notional, but the
+    # risk concentration cap is only 1_000_000 (NAV 1M × max_conc 1.0).
+    actions = coord.propose_actions(
+        held=[],
+        new_opportunities=opps,
+        active_mode="hunter",
+        gross_target_capital=Decimal("200000"),  # cash budget
+        concentration_exponent=Decimal("1.0"),
+        max_position_notional=Decimal("1000000"),
+    )
+    opens = [a for a in actions if a.kind == "open_strategy"]
+    assert len(opens) == 1
+    # Coordinator applies a 1% safety buffer below the cap to avoid float-edge
+    # rejects in the risk engine, so we expect ≈ 0.99 × 1_000_000.
+    assert Decimal("980000") <= opens[0].capital <= Decimal("1000000"), (
+        f"forex notional must be clipped near concentration cap, got {opens[0].capital}"
+    )
+
+
+def test_adaptive_drops_below_minimum_opps_and_redistributes(adaptive_on):
+    """When the cash budget split would produce a sub-minimum notional for
+    one or more opps, the coordinator drops the lowest-priority offender
+    and re-runs softmax across survivors. End result: every emitted open
+    clears the asset-class minimum (≈$65 equity, $1300 forex)."""
+    cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
+    coord = GlobalEdgeCoordinator(cfg)
+    # Tiny budget + many low-priority opps: many would slice below the
+    # equity minimum if we naively split. The coordinator should keep
+    # only as many as fit above the floor.
+    opps = [
+        _opp(f"S{i:02d}", "0.50", priority=str(0.5 - i * 0.001), asset_class="equity")
+        for i in range(20)
+    ]
+    actions = coord.propose_actions(
+        held=[],
+        new_opportunities=opps,
+        active_mode="hunter",
+        gross_target_capital=Decimal("400"),  # 4 × equity-min ≈ 4 opps tops
+        concentration_exponent=Decimal("1.0"),
+    )
+    opens = [a for a in actions if a.kind == "open_strategy"]
+    # Every survivor must clear the equity minimum (~$65).
+    for a in opens:
+        assert a.capital >= Decimal("65"), f"{a.symbol} below min: {a.capital}"
+
+
+def test_adaptive_shed_to_target_emits_largest_first(adaptive_on):
+    """``propose_shed_actions`` closes the largest-cash-using positions
+    first until held cash drops to the new target. This is the slider-down
+    counterpart to the build-up adaptive softmax."""
+    cfg = {"emit_trim_actions": True}
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="USDCHF",
+            notional=Decimal("1000000"),  # forex factor 0.05 → $50k cash
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long", "asset_class": "forex"},
+        ),
+        HeldPositionEdge(
+            symbol="BBDC",
+            notional=Decimal("125000"),  # equity factor 1.0 → $125k cash
+            expected_remaining_edge=Decimal("0.08"),
+            metadata={"side": "long", "asset_class": "equity"},
+        ),
+        HeldPositionEdge(
+            symbol="COF",
+            notional=Decimal("25000"),  # $25k cash
+            expected_remaining_edge=Decimal("0.05"),
+            metadata={"side": "long", "asset_class": "equity"},
+        ),
+    ]
+    # held_cash = 50 + 125 + 25 = 200k. Target the new sleeve at 80k → shed 120k.
+    actions = coord.propose_shed_actions(
+        held=held,
+        cash_target_absolute=Decimal("80000"),
+        active_mode="trader",
+    )
+    syms = [a.symbol for a in actions]
+    # BBDC (125k cash) should be first — largest. It is trimmed partially
+    # by exactly the 120k excess rather than closed in full.
+    assert actions[0].symbol == "BBDC"
+    assert actions[0].capital == Decimal("120000")
+    assert actions[0].metadata.get("partial_reduce_only") is True
+    assert actions[0].metadata.get("close_only") is False
+    assert "COF" not in syms
+    # All shed actions must be reduce-only.
+    for a in actions:
+        assert a.metadata.get("reduce_only") is True
+        assert a.metadata.get("sizing_path") == "adaptive_shed_to_target"
+
+
+def test_adaptive_shed_to_target_noop_when_under_target(adaptive_on):
+    """If held cash is already at-or-below target, no shed actions emit."""
+    cfg = {"emit_trim_actions": True}
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="AAPL",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+    actions = coord.propose_shed_actions(
+        held=held,
+        cash_target_absolute=Decimal("50000"),
+    )
+    assert actions == []
+
+
+def test_cash_factor_inference_from_symbol():
+    """When asset_class metadata is missing or generically 'equity' the
+    cash_factor lookup must infer from symbol patterns. This rescues the
+    common case where reconciliation pipelines hard-code asset_class='equity'
+    on every held position even when they are forex / crypto / futures."""
+    # Forex pair without =X suffix (common from IBKR reconciliation)
+    assert cash_factor_for_asset_class("equity", symbol="USDCHF") == Decimal("0.05")
+    assert cash_factor_for_asset_class("", symbol="USDJPY") == Decimal("0.05")
+    # Forex with =X suffix (yfinance convention)
+    assert cash_factor_for_asset_class(None, symbol="EURUSD=X") == Decimal("0.05")
+    # Crypto with -USD suffix
+    assert cash_factor_for_asset_class("equity", symbol="BTC-USD") == Decimal("1.0")
+    assert cash_factor_for_asset_class("equity", symbol="CAKE-USD") == Decimal("1.0")
+    # Futures with =F suffix
+    assert cash_factor_for_asset_class("equity", symbol="NQ=F") == Decimal("0.15")
+    # Plain equity stays equity
+    assert cash_factor_for_asset_class("equity", symbol="AAPL") == Decimal("1.0")
+    # Explicit asset_class is NOT overridden when it is non-equity (forex)
+    assert cash_factor_for_asset_class("forex", symbol="AAPL") == Decimal("0.05")
 
 
 def test_adaptive_skips_already_held_same_side(adaptive_on):

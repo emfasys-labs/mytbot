@@ -42,5 +42,44 @@ arbitrage_edge_boost:
   funding_rate_arbitrage: "0.01"
   cross_exchange_arbitrage: "0.015"
 
+# Adaptive cash-deployed sizing. The loop treats the capital slider as the
+# cash budget, then the coordinator converts that cash to asset-class notional
+# (forex margin, futures margin, fully-funded equity/crypto, etc.).
+adaptive:
+  softmax_lambda: "5.0"
+  target_tolerance_pct: "0.0025"
+  mode:
+    hunter:
+      gross_fraction: "1.00"
+      concentration: "2.5"
+    trader:
+      gross_fraction: "0.70"
+      concentration: "1.5"
+    defender:
+      gross_fraction: "0.40"
+      concentration: "1.0"
+
+cash_factors:
+  equity: "1.0"
+  etf: "1.0"
+  stock: "1.0"
+  crypto: "1.0"
+  bond: "0.20"
+  forex: "0.05"
+  fx: "0.05"
+  future: "0.15"
+  option: "1.0"
+
+minimum_order_sizes_usd:
+  equity: "65"
+  etf: "65"
+  stock: "65"
+  crypto: "15"
+  bond: "1300"
+  forex: "1300"
+  fx: "1300"
+  future: "6500"
+  option: "650"
+
 # Held position: decay applied to opportunity_score proxy for expected_remaining_edge (0-1).
 held_edge_decay_per_day: "0.08"

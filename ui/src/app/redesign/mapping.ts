@@ -240,6 +240,44 @@ function _orderFinite(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const FOREX_PAIRS = new Set([
+  'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'NZDUSD', 'USDCAD',
+  'EURJPY', 'GBPJPY', 'EURGBP', 'EURCHF', 'AUDJPY', 'EURAUD', 'EURCAD',
+  'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPNZD', 'AUDCAD', 'AUDCHF', 'AUDNZD',
+  'CADJPY', 'CHFJPY', 'NZDJPY', 'USDSEK', 'USDNOK', 'USDDKK', 'USDZAR',
+  'USDMXN', 'USDTRY', 'USDHKD', 'USDSGD', 'USDCNH',
+]);
+
+function inferAssetClass(assetClass: string | null | undefined, symbol: string | null | undefined): string {
+  let key = String(assetClass ?? '').trim().toLowerCase() || 'equity';
+  const sym = String(symbol ?? '').trim().toUpperCase();
+  if (key === 'equity' || key === 'stock' || key === '') {
+    if (sym.endsWith('=X') || (sym.length === 6 && FOREX_PAIRS.has(sym))) key = 'forex';
+    else if (sym.endsWith('=F')) key = 'future';
+    else if (sym.endsWith('-USD') || sym.endsWith('-USDT') || sym.endsWith('USDT')) key = 'crypto';
+  }
+  return key;
+}
+
+function cashFactor(assetClass: string | null | undefined, symbol: string | null | undefined): number {
+  switch (inferAssetClass(assetClass, symbol)) {
+    case 'forex':
+    case 'fx':
+      return 0.05;
+    case 'future':
+      return 0.15;
+    case 'bond':
+      return 0.20;
+    default:
+      return 1.0;
+  }
+}
+
+function cashNotional(notional: number, assetClass: string | null | undefined, symbol: string | null | undefined): number {
+  if (!Number.isFinite(notional) || notional <= 0) return 0;
+  return notional * cashFactor(assetClass, symbol);
+}
+
 /**
  * Notional reserved by unfilled exposure-increasing orders.
  *
@@ -268,7 +306,7 @@ export function pendingOrderNotional(orders: ApiOrderRow[], positions: Position[
     const posQty = pos?.qty ?? 0;
     if (side === 'sell' && posQty > 0) continue;
     if (side === 'buy' && posQty < 0) continue;
-    sum += qty * px;
+    sum += cashNotional(qty * px, pos?.assetClass, sym);
   }
   return sum;
 }
@@ -292,7 +330,10 @@ export function capitalAtWork(
   positions: Position[],
   orders: ApiOrderRow[],
 ): { deployed: number; pending: number; working: number } {
-  const deployed = (positions ?? []).reduce((s, p) => s + (p.notional || 0), 0);
+  const deployed = (positions ?? []).reduce(
+    (s, p) => s + cashNotional(p.notional || 0, p.assetClass, p.sym),
+    0,
+  );
   const pending = pendingOrderNotional(orders, positions);
   return { deployed, pending, working: deployed + pending };
 }
@@ -331,8 +372,11 @@ export function mapPositions(
       w: 0,
       notional: Number.isFinite(notional) ? notional : 0,
       broker: typeof p.broker === 'string' && p.broker.trim() ? p.broker.trim() : undefined,
+      assetClass: typeof p.asset_class === 'string' && p.asset_class.trim()
+        ? p.asset_class.trim().toLowerCase()
+        : undefined,
     };
-  }).filter((p): p is Position => p !== null).slice(0, 24);
+  }).filter((p): p is Position => p !== null);
   const sumNot = mapped.reduce((a, p) => a + (Number.isFinite(p.notional) && p.notional > 0 ? p.notional : 0), 0);
   const wDenom = sumNot > 0 ? sumNot : totalNav;
   return mapped.map((p) => ({
