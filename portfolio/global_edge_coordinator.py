@@ -819,16 +819,22 @@ class GlobalEdgeCoordinator:
         available_held = sorted(held, key=lambda h: h.expected_remaining_edge)
 
         # ---- Build-up vs. displacement mode ---------------------------------
-        # If held_total < gross_target_capital, the book is under-deployed and
-        # we should ADD net capital (no trims). Trims only emit when we are
-        # at-or-above target and a new opportunity displaces the weakest held
-        # position. This is the fix for the cycle-by-cycle book-collapse bug
-        # where every adaptive open paired with a full-notional trim, causing
-        # opens to shrink (remaining_target → 0) while trims kept closing
-        # full positions.
+        # ``gross_target_capital`` is the *remaining* gap to fill (the loop
+        # passes ``absolute_target - held_total``). The absolute target is
+        # therefore ``held_total + gross_target_capital``. Trims only fire
+        # when held is over 105% of the absolute target — i.e. genuinely
+        # overshooting and needing to make room. During build-up
+        # (held < absolute_target) trims are suppressed so opens fill the
+        # gap net-positive instead of cycle-collapsing the book.
+        #
+        # Bug history: an earlier version compared held_total to
+        # ``gross_target_capital`` directly, which evaluated to ``held >
+        # (target - held) * 1.05`` ⇒ ``held > target * 0.512``, falsely
+        # triggering displacement around 50% deployed and capping the book
+        # there.
         held_total = sum((h.notional for h in held), Decimal("0"))
-        # 5% tolerance above target before we start trimming weakest edges.
-        displacement_mode = held_total > gross_target_capital * Decimal("1.05")
+        absolute_target = held_total + gross_target_capital
+        displacement_mode = held_total > absolute_target * Decimal("1.05")
 
         # ---- Filter to qualifying opportunities --------------------------
         qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None]] = []
