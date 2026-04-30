@@ -28,8 +28,9 @@ class MeanReversionStrategy(Strategy):
 
     def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> dict[str, str]:
         """D032: emit per-signal sizing intent for coordinator consumption."""
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "5000")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("5000")
         if base_notional <= 0:
@@ -71,7 +72,8 @@ class MeanReversionStrategy(Strategy):
             return None
 
     def _evaluate(self, symbol: str, df: pd.DataFrame) -> Optional[RawSignal]:
-        lookback = int(self.config.get("lookback_periods", 30))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("lookback_periods", 30))
         if len(df) < lookback:
             return None
 
@@ -83,9 +85,9 @@ class MeanReversionStrategy(Strategy):
         if rsi is None or bb_lower is None or bb_upper is None:
             return None
 
-        rsi_buy = float(self.config.get("rsi_buy_threshold", 30.0))
-        rsi_sell = float(self.config.get("rsi_sell_threshold", 70.0))
-        band_epsilon = float(self.config.get("band_epsilon", 0.0))
+        rsi_buy = float(cfg.get("rsi_buy_threshold", 30.0))
+        rsi_sell = float(cfg.get("rsi_sell_threshold", 70.0))
+        band_epsilon = float(cfg.get("band_epsilon", 0.0))
 
         buy_setup = rsi <= rsi_buy and close <= bb_lower * (1.0 + band_epsilon)
         sell_setup = rsi >= rsi_sell and close >= bb_upper * (1.0 - band_epsilon)
@@ -165,4 +167,3 @@ class MeanReversionStrategy(Strategy):
         if pd.isna(out):
             return None
         return out
-

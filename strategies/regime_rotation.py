@@ -22,9 +22,20 @@ class RegimeRotationStrategy:
         self.config = dict(config or {})
         self.enabled = bool(self.config.get("enabled", False))
 
+    def effective_config(self) -> dict[str, Any]:
+        cfg = dict(self.config or {})
+        mode = str(cfg.get("_active_profile_mode") or "").strip().lower()
+        mode_cfg = cfg.get("mode_calibration", {}) or {}
+        if mode and isinstance(mode_cfg, dict):
+            override = mode_cfg.get(mode)
+            if isinstance(override, dict):
+                cfg.update(override)
+        return cfg
+
     def _compute_target_notional(self, confidence: float) -> dict[str, str]:
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "5500")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "5500")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("5500")
         if base_notional <= 0:
@@ -50,10 +61,11 @@ class RegimeRotationStrategy:
         if not self.enabled:
             return None
 
+        cfg = self.effective_config()
         s = symbol.strip().upper()
-        risk_on = {x.strip().upper() for x in self.config.get("risk_on_symbols", ["SPY", "QQQ", "XLE", "BTC-USD"])}
-        risk_off = {x.strip().upper() for x in self.config.get("risk_off_symbols", ["TLT", "GLD", "UUP"])}
-        trigger = float(self.config.get("score_trigger", 0.35))
+        risk_on = {x.strip().upper() for x in cfg.get("risk_on_symbols", ["SPY", "QQQ", "XLE", "BTC-USD"])}
+        risk_off = {x.strip().upper() for x in cfg.get("risk_off_symbols", ["TLT", "GLD", "UUP"])}
+        trigger = float(cfg.get("score_trigger", 0.35))
         if abs(demand_score) < trigger:
             return None
 

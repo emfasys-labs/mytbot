@@ -18,9 +18,20 @@ class EventDrivenNewsStrategy:
         self.config = dict(config or {})
         self.enabled = bool(self.config.get("enabled", False))
 
+    def effective_config(self) -> dict[str, Any]:
+        cfg = dict(self.config or {})
+        mode = str(cfg.get("_active_profile_mode") or "").strip().lower()
+        mode_cfg = cfg.get("mode_calibration", {}) or {}
+        if mode and isinstance(mode_cfg, dict):
+            override = mode_cfg.get(mode)
+            if isinstance(override, dict):
+                cfg.update(override)
+        return cfg
+
     def _compute_target_notional(self, confidence: float, shock: float) -> dict[str, str]:
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "6000")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "6000")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("6000")
         if base_notional <= 0:
@@ -49,7 +60,8 @@ class EventDrivenNewsStrategy:
         if not self.enabled or news_score is None:
             return None
 
-        shock_threshold = float(self.config.get("shock_threshold", 0.45))
+        cfg = self.effective_config()
+        shock_threshold = float(cfg.get("shock_threshold", 0.45))
         score = float(news_score)
         if abs(score) < shock_threshold:
             return None

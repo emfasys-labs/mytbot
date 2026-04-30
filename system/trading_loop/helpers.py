@@ -129,30 +129,70 @@ def enrich_signal_volume_z(signal: Any, df: Any) -> None:
 
 
 def apply_saved_mode_to_risk_cfg(risk_engine: Any) -> None:
+    """Mutate ``risk_engine.config`` to reflect the saved profile mode.
+
+    Sources, in priority order:
+      1. ``config/risk_modes.yaml`` per-mode block (legacy / D015-secondary path).
+      2. ``config/risk_limits.yaml`` ``mode_overrides`` block — applied only
+         when ``USE_ADAPTIVE_SIZING=1``. Lets Hunter raise per-position and
+         concentration ceilings without permanently mutating the on-disk
+         scalar caps. Defender narrows them.
+
+    The mode_overrides path lets the operator pivot mode at runtime and have
+    the risk engine immediately honour the new ceilings (e.g. Hunter's
+    ``max_position_pct: 1.00``) without restarting.
+    """
     import json as _json
 
     mode_file = Path("data/runtime/active_mode.json")
-    if not mode_file.is_file():
-        return
-    try:
-        mode = _json.loads(mode_file.read_text(encoding="utf-8")).get("mode", "trader")
-    except Exception:  # noqa: BLE001
-        return
+    mode = "trader"
+    if mode_file.is_file():
+        try:
+            mode = _json.loads(mode_file.read_text(encoding="utf-8")).get("mode", "trader")
+        except Exception:  # noqa: BLE001
+            mode = "trader"
+
     modes = load_yaml("config/risk_modes.yaml")
     profile = modes.get(mode, {})
-    if risk_engine.config.get("allocator_d015_primary"):
+    d015_primary = bool(risk_engine.config.get("allocator_d015_primary"))
+    if d015_primary:
         for key in ("label", "description"):
             if key in profile:
                 risk_engine.config[key] = profile[key]
         if profile:
             logger.info("trading_loop | applied mode labels only (D015 primary) | mode={}", mode)
+    else:
+        for key, value in profile.items():
+            if key in ("label", "description"):
+                continue
+            risk_engine.config[key] = value
+        if profile:
+            logger.info("trading_loop | applied mode profile | mode={}", mode)
+
+    # Adaptive mode overrides — applied AFTER the legacy profile so they win
+    # for the keys they specify (max_position_pct, max_concentration_pct,
+    # max_gross_exposure_pct, asset-class buckets).
+    adaptive_on = os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not adaptive_on:
         return
-    for key, value in profile.items():
-        if key in ("label", "description"):
-            continue
+    overrides = (risk_engine.config.get("mode_overrides") or {}).get(mode) or {}
+    if not isinstance(overrides, dict) or not overrides:
+        return
+    applied: list[str] = []
+    for key, value in overrides.items():
         risk_engine.config[key] = value
-    if profile:
-        logger.info("trading_loop | applied mode profile | mode={}", mode)
+        applied.append(key)
+    if applied:
+        logger.info(
+            "trading_loop | applied adaptive mode_overrides | mode={} keys={}",
+            mode,
+            applied,
+        )
 
 
 def d015_legacy_fallback() -> bool:

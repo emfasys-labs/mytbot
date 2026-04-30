@@ -79,6 +79,7 @@ class ExecutionEngine:
         except (TypeError, ValueError):
             self.dedup_window_sec = 604800.0
         self.dedup_skipped = 0  # observability counter
+        self.last_skip_reason: str | None = None
         # Marketable-limit slippage buffer. Every LIMIT order's price is
         # rewritten just before placement so BUYs sit at or above the current
         # ask (and SELLs at or below the current bid), making them likely to
@@ -170,9 +171,11 @@ class ExecutionEngine:
         In paper mode: simulates a fill if the broker is unavailable or
         execution pre-checks fail, so the signal still produces a visible order.
         """
+        self.last_skip_reason = None
 
         if risk_decision.verdict != RiskVerdict.APPROVED:
             logger.warning(f"Attempted to execute rejected signal {signal.signal_id}")
+            self.last_skip_reason = "risk_not_approved"
             return None
 
         if (signal.side or "").strip().upper().startswith("ARBITRAGE_"):
@@ -197,6 +200,7 @@ class ExecutionEngine:
                             existing.id,
                             existing.status,
                         )
+                        self.last_skip_reason = "dedup_flatten_replace_blocked"
                         return None
                 else:
                     self.dedup_skipped += 1
@@ -211,6 +215,7 @@ class ExecutionEngine:
                         int((datetime.now(timezone.utc) - existing.timestamp).total_seconds())
                         if existing.timestamp else -1,
                     )
+                    self.last_skip_reason = "dedup_existing_in_flight_order"
                     return None
 
         # Wave 9 — pre-flight cost-aware gate. When enabled, computes the
@@ -256,6 +261,7 @@ class ExecutionEngine:
                     gate.reason,
                     gate.expected_cost_bps,
                 )
+                self.last_skip_reason = f"wave9_gate:{gate.reason}"
                 return None
             if gate.used and gate.allow:
                 self.wave9_gate_passed += 1
@@ -293,11 +299,15 @@ class ExecutionEngine:
         # Auto-disable broker if a recent rejection signaled "insufficient
         # balance" — keeps the allocator from looping rejects against an
         # exhausted paper account. Cleared on next successful fill.
-        if self._is_broker_balance_exhausted(broker_name_l):
+        if (
+            not (self.paper_mode and not self._use_native_paper_orders())
+            and self._is_broker_balance_exhausted(broker_name_l)
+        ):
             logger.warning(
                 "EXEC SKIP (broker balance exhausted) | %s %s broker=%s",
                 signal.symbol, signal.side, signal.broker,
             )
+            self.last_skip_reason = "broker_balance_exhausted"
             return None
 
         broker = await self._get_broker(signal.broker)
@@ -314,6 +324,7 @@ class ExecutionEngine:
             await self._send_critical_alert(
                 f"Broker unavailable for signal {signal.signal_id} ({signal.symbol}) on {signal.broker}"
             )
+            self.last_skip_reason = "broker_unavailable"
             return None
 
         order = await self._apply_marketable_limit(order, signal, broker)
@@ -326,6 +337,7 @@ class ExecutionEngine:
                 signal.broker,
                 order.quantity,
             )
+            self.last_skip_reason = "invalid_quantity_after_normalization"
             return None
 
         # D031C — execution-boundary sanity guard. Reject loudly if the order
@@ -336,6 +348,7 @@ class ExecutionEngine:
         # per-signal across a batch and would spam the channel. Operators watch
         # the `SIZING GUARD REJECT` CRITICAL logs instead.
         if not self._passes_sizing_boundary_guard(order, signal):
+            self.last_skip_reason = "sizing_boundary_guard"
             return None
 
         await self._publish_symbol_constraints(signal, broker)
@@ -359,6 +372,7 @@ class ExecutionEngine:
                 "Execution pre-check rejected | signal_id=%s symbol=%s broker=%s",
                 signal.signal_id, signal.symbol, signal.broker,
             )
+            self.last_skip_reason = "execution_precheck_rejected"
             return None
 
         if self.paper_mode and not self._use_native_paper_orders():
@@ -413,9 +427,11 @@ class ExecutionEngine:
                 await self._send_critical_alert(
                     f"Order placement failed for signal {signal.signal_id} ({signal.symbol})"
                 )
+                self.last_skip_reason = "broker_place_order_failed"
                 return None
 
         if result is None:
+            self.last_skip_reason = "broker_returned_no_result"
             return None
 
         self._open_orders[order.client_order_id] = result

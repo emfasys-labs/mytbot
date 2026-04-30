@@ -52,6 +52,13 @@ strategies:
     momentum_threshold: 0.001
     # D032 sizing intent: strategy emits per-signal absolute target_notional.
     base_target_notional: 5000
+    mode_calibration:
+      defender:
+        base_target_notional: 5000
+      trader:
+        base_target_notional: 10000
+      hunter:
+        base_target_notional: 25000
 
   mean_reversion:
     enabled: true
@@ -64,6 +71,13 @@ strategies:
     band_epsilon: 0.003
     # D032 sizing intent: strategy emits per-signal absolute target_notional.
     base_target_notional: 5000
+    mode_calibration:
+      defender:
+        base_target_notional: 5000
+      trader:
+        base_target_notional: 9000
+      hunter:
+        base_target_notional: 20000
 
   volume_flow:
     enabled: true
@@ -84,18 +98,32 @@ strategies:
       hunter:
         zscore_open_threshold: 0.95
         min_bar_return: 0.0006
-        base_target_notional: 5000
+        base_target_notional: 25000
 
   event_driven_news:
     enabled: true
     shock_threshold: 0.45
     base_target_notional: 6000
+    mode_calibration:
+      defender:
+        base_target_notional: 6000
+      trader:
+        base_target_notional: 12000
+      hunter:
+        base_target_notional: 25000
 
   pairs_trading:
     enabled: true
     lookback_bars: 90
     zscore_open: 2.0
     base_target_notional: 5000
+    mode_calibration:
+      defender:
+        base_target_notional: 5000
+      trader:
+        base_target_notional: 8000
+      hunter:
+        base_target_notional: 15000
     pairs:
       - [SPY, QQQ]
       - [XLE, USO]
@@ -123,12 +151,19 @@ strategies:
         atr_expansion_ratio: 1.08
         atr_compression_ratio: 0.95
         min_bar_return: 0.0006
-        base_target_notional: 5500
+        base_target_notional: 25000
 
   regime_rotation:
     enabled: true
     score_trigger: 0.35
     base_target_notional: 5500
+    mode_calibration:
+      defender:
+        base_target_notional: 5500
+      trader:
+        base_target_notional: 10000
+      hunter:
+        base_target_notional: 25000
     risk_on_symbols: [SPY, QQQ, XLE, BTC-USD]
     risk_off_symbols: [TLT, GLD, UUP]
 
@@ -166,7 +201,7 @@ strategies:
       trader:
         probability_threshold: 0.54
       hunter:
-        probability_threshold: 0.48
+        probability_threshold: 0.40
     ml_weights:
       bias: -0.15
       confidence: 1.80

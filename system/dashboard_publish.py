@@ -298,9 +298,38 @@ def serialize_held_edges(edges: list[Any], *, limit: int = 12) -> list[dict[str,
 
 
 def serialize_coordinator_actions(actions: list[Any], *, limit: int = 20) -> list[dict[str, Any]]:
+    """Serialize CoordinatorAction list for the dashboard.
+
+    Exposes the *sizing audit trail* fields from action.metadata so the
+    operator can see whether the adaptive softmax path fired and how each
+    position's capital was derived. Includes:
+      ``sizing_path`` ("adaptive_softmax" or absent for legacy),
+      ``sizing_softmax_weight``, ``sizing_concentration_exponent``,
+      ``sizing_softmax_lambda_effective``, ``sizing_qualifying_count``,
+      ``sizing_gross_target_capital``, ``sizing_mode``,
+      ``sizing_final_action_capital``.
+    Other metadata keys are kept under a ``metadata_extra`` summary for debug.
+    """
+    sizing_keys = {
+        "sizing_path",
+        "sizing_mode",
+        "sizing_softmax_weight",
+        "sizing_softmax_lambda",
+        "sizing_softmax_lambda_effective",
+        "sizing_concentration_exponent",
+        "sizing_qualifying_count",
+        "sizing_gross_target_capital",
+        "sizing_final_action_capital",
+        "sizing_pre_mode_capital",
+        "sizing_mode_fraction",
+        "sizing_buildup_multiplier",
+        "allocation_selected",
+    }
     out: list[dict[str, Any]] = []
     for a in actions[:limit]:
         kind = getattr(a, "kind", "")
+        meta = getattr(a, "metadata", None) or {}
+        sizing = {k: meta[k] for k in sizing_keys if k in meta}
         out.append(
             {
                 "kind": kind,
@@ -309,6 +338,7 @@ def serialize_coordinator_actions(actions: list[Any], *, limit: int = 20) -> lis
                 "strategy_name": getattr(a, "strategy_name", ""),
                 "capital": _d(getattr(a, "capital", None)),
                 "priority_score": _d(getattr(a, "priority_score", None)),
+                "metadata": sizing,
             }
         )
     return out

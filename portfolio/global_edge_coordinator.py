@@ -78,6 +78,141 @@ def _canonical_position_side(raw: Any) -> str:
     return s
 
 
+def _adaptive_sizing_enabled() -> bool:
+    """Feature flag for the adaptive-sizing rewrite (Phase 1+).
+
+    When OFF (default), the coordinator falls back to the legacy static
+    priority-score stubs. When ON, ``_adaptive_priority_components`` derives
+    liquidity / execution / regime_fit / risk_cost from candidate features so
+    the coordinator's softmax ranking can actually differentiate opportunities.
+    """
+    return os.environ.get("USE_ADAPTIVE_SIZING", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _clip01(value: Any, *, lo: str = "0", hi: str = "1") -> Decimal:
+    """Coerce *value* to ``Decimal`` and clip to ``[lo, hi]``. Safe on bad input."""
+    try:
+        d = Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return Decimal(lo)
+    lo_d = Decimal(lo)
+    hi_d = Decimal(hi)
+    if d < lo_d:
+        return lo_d
+    if d > hi_d:
+        return hi_d
+    return d
+
+
+def _adaptive_priority_components(
+    cand_meta: dict[str, Any],
+    *,
+    side: str = "long",
+    asset_class: str = "",
+    legacy_liq: Decimal = Decimal("0.7"),
+    legacy_exe: Decimal = Decimal("0.75"),
+    legacy_reg: Decimal = Decimal("0.8"),
+    legacy_risk: Decimal = Decimal("0.05"),
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Derive (liquidity, execution, regime_fit, risk_cost) from candidate features.
+
+    All scores are in ``[0, 1]`` (risk_cost is "lower is better" per
+    :func:`compute_priority_score` convention). When a feature is missing the
+    function falls back to the supplied legacy value, so swapping to adaptive
+    mode never *worsens* the ranking — it can only sharpen it where features
+    are present. When :func:`_adaptive_sizing_enabled` is False, the legacy
+    quad is returned unchanged.
+
+    Sources consulted (all optional):
+      * ``spread_bps`` / ``spread_pct``           → liquidity penalty
+      * ``depth_score`` / ``volume_z_score``      → liquidity boost
+      * ``broker_quality`` / ``execution_quality``→ execution score (router feedback)
+      * ``demand_score`` + ``side`` (long/short)  → regime alignment
+      * ``atr_pct`` / ``realised_vol``            → risk_cost
+    """
+    if not _adaptive_sizing_enabled():
+        return legacy_liq, legacy_exe, legacy_reg, legacy_risk
+
+    # ---- Liquidity ---------------------------------------------------------
+    liq = legacy_liq
+    spread_bps = cand_meta.get("spread_bps")
+    if spread_bps is None and cand_meta.get("spread_pct") is not None:
+        try:
+            spread_bps = float(cand_meta.get("spread_pct")) * 10000.0
+        except Exception:  # noqa: BLE001
+            spread_bps = None
+    if spread_bps is not None:
+        try:
+            sb = float(spread_bps)
+            # 0 bps spread → 1.0, 50+ bps → 0.0, linear in between
+            liq_from_spread = max(0.0, min(1.0, 1.0 - sb / 50.0))
+            liq = Decimal(str(liq_from_spread))
+        except Exception:  # noqa: BLE001
+            pass
+    # Volume / depth boost — high z-score adds liquidity confidence
+    vz = cand_meta.get("volume_z_score") or cand_meta.get("volume_z")
+    if vz is not None:
+        try:
+            boost = max(0.0, min(0.20, float(vz) * 0.05))
+            liq = _clip01(liq + Decimal(str(boost)))
+        except Exception:  # noqa: BLE001
+            pass
+    depth = cand_meta.get("depth_score")
+    if depth is not None:
+        try:
+            liq = _clip01((liq + Decimal(str(float(depth)))) / Decimal("2"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- Execution ---------------------------------------------------------
+    # Routing quality is normalised by the router into roughly [-1, 1]; map
+    # to [0, 1] with 0 → ~0.5 (neutral) so unseen broker/symbol pairs default
+    # to the legacy value.
+    exe = legacy_exe
+    bq = cand_meta.get("execution_quality")
+    if bq is None:
+        bq = cand_meta.get("broker_quality")
+    if bq is not None:
+        try:
+            v = float(bq)
+            mapped = max(0.0, min(1.0, 0.5 + v * 0.5))
+            exe = Decimal(str(mapped))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- Regime alignment --------------------------------------------------
+    # Keep the existing demand-alignment derivation; it's already adaptive.
+    reg = legacy_reg
+    try:
+        demand_score = float(cand_meta.get("demand_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        demand_score = 0.0
+    side_sign = 1.0 if side.strip().lower() in ("long", "buy") else -1.0
+    align = max(-1.0, min(1.0, demand_score * side_sign))
+    reg = Decimal(str(max(0.55, min(0.95, 0.8 + align * 0.12))))
+    cand_meta["demand_alignment"] = round(align, 6)
+
+    # ---- Risk cost (lower is better) --------------------------------------
+    risk = legacy_risk
+    atr_pct = cand_meta.get("atr_pct")
+    if atr_pct is None:
+        atr_pct = cand_meta.get("realised_vol")
+    if atr_pct is not None:
+        try:
+            v = float(atr_pct)
+            # 1% atr → 0.02, 5% atr → 0.10, capped
+            risk = Decimal(str(max(0.01, min(0.30, v * 2.0))))
+        except Exception:  # noqa: BLE001
+            pass
+
+    return liq, exe, reg, risk
+
+
 def signal_candidate_to_strategy_opportunity(
     cand: Any,
     *,
@@ -116,13 +251,24 @@ def signal_candidate_to_strategy_opportunity(
         return None
     if price <= 0 or nav <= 0:
         return None
-    # TEMP filter — yfinance continuous-futures symbols (NQ=F, ES=F, ...) have no
-    # tradeable broker route in the current paper setup, so they appear in plans
-    # but never become orders. Suppress them so the next-best opportunity surfaces.
-    if os.environ.get("SKIP_CONTINUOUS_FUTURES", "0") == "1":
-        _sym = str(getattr(cand, "symbol", "") or "")
-        if _sym.endswith("=F"):
-            return None
+    # YFinance continuous futures (NQ=F, ES=F, ...) are data-only until the
+    # runtime futures contract resolver is enabled. Suppress them before global
+    # edge ranking so executable equity/crypto/FX opportunities can surface.
+    _sym = str(getattr(cand, "symbol", "") or "")
+    futures_enabled = os.environ.get("FUTURES_EXECUTION_ENABLED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    skip_futures = os.environ.get("SKIP_CONTINUOUS_FUTURES", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if _sym.endswith("=F") and (skip_futures or not futures_enabled):
+        return None
 
     cand_meta = dict(getattr(cand, "metadata", {}) or {})
     cand_ac = getattr(cand, "asset_class", None)
@@ -190,19 +336,31 @@ def signal_candidate_to_strategy_opportunity(
     cand_meta["sizing_nav_at_decision"] = str(nav)
     cand_meta["sizing_max_position_pct"] = str(max_position_pct)
 
-    liq = Decimal("0.7")
-    exe = Decimal("0.75")
-    reg = Decimal("0.8")
-    try:
-        demand_score = float(cand_meta.get("demand_score", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        demand_score = 0.0
     side_txt = str(getattr(cand, "side", "long")).strip().lower()
-    side_sign = 1.0 if side_txt in ("long", "buy") else -1.0
-    align = max(-1.0, min(1.0, demand_score * side_sign))
-    reg = Decimal(str(max(0.55, min(0.95, 0.8 + align * 0.12))))
-    cand_meta["demand_alignment"] = round(align, 6)
-    risk = Decimal("0.05")
+    asset_class_txt = str(cand_meta.get("asset_class", "")).strip().lower()
+    liq, exe, reg, risk = _adaptive_priority_components(
+        cand_meta,
+        side=side_txt,
+        asset_class=asset_class_txt,
+    )
+    if not _adaptive_sizing_enabled():
+        # Preserve legacy behaviour: keep the existing demand_alignment side-
+        # effect on cand_meta even when adaptive helper is disabled.
+        try:
+            demand_score = float(cand_meta.get("demand_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            demand_score = 0.0
+        side_sign = 1.0 if side_txt in ("long", "buy") else -1.0
+        align = max(-1.0, min(1.0, demand_score * side_sign))
+        reg = Decimal(str(max(0.55, min(0.95, 0.8 + align * 0.12))))
+        cand_meta["demand_alignment"] = round(align, 6)
+    cand_meta["priority_components"] = {
+        "liquidity_score": str(liq),
+        "execution_score": str(exe),
+        "regime_fit_score": str(reg),
+        "risk_cost_score": str(risk),
+        "adaptive": _adaptive_sizing_enabled(),
+    }
     ps = compute_priority_score(edge, conf, reg, exe, risk)
     return StrategyOpportunity(
         strategy_name=str(getattr(cand, "strategy_name", "unknown")),
@@ -236,7 +394,6 @@ def funding_arb_signal_to_strategy_opportunity(
     ann = sig.annualised_net_yield
     edge = min(Decimal("1"), ann + edge_boost)
     conf = sig.confidence
-    ps = compute_priority_score(edge, conf, Decimal("0.85"), Decimal("0.9"), Decimal("0.04"))
     meta = {
         "arbitrage_kind": "funding_rate",
         "spot_venue": sig.spot_venue,
@@ -245,6 +402,16 @@ def funding_arb_signal_to_strategy_opportunity(
         "basis_bps": str(sig.basis_bps),
         **dict(sig.metadata or {}),
     }
+    liq, exe, reg, risk = _adaptive_priority_components(
+        meta,
+        side=str(sig.side or "long"),
+        asset_class="crypto",
+        legacy_liq=Decimal("0.9"),
+        legacy_exe=Decimal("0.85"),
+        legacy_reg=Decimal("0.9"),
+        legacy_risk=Decimal("0.03"),
+    )
+    ps = compute_priority_score(edge, conf, reg, exe, risk)
     return StrategyOpportunity(
         strategy_name=sig.strategy_name,
         symbol=sig.symbol,
@@ -254,10 +421,10 @@ def funding_arb_signal_to_strategy_opportunity(
         confidence=conf,
         capital_required=capital,
         expected_holding_hours=sig.expected_hold_hours,
-        liquidity_score=Decimal("0.9"),
-        execution_score=Decimal("0.85"),
-        regime_fit_score=Decimal("0.9"),
-        risk_cost_score=Decimal("0.03"),
+        liquidity_score=liq,
+        execution_score=exe,
+        regime_fit_score=reg,
+        risk_cost_score=risk,
         priority_score=ps,
         metadata=meta,
     )
@@ -273,7 +440,6 @@ def funding_arb_to_strategy_opportunity(
     ann = getattr(opp, "annualised_net_yield", Decimal("0"))
     edge = min(Decimal("1"), ann + edge_boost)
     conf = getattr(opp, "confidence", Decimal("0.8"))
-    ps = compute_priority_score(edge, conf, Decimal("0.85"), Decimal("0.9"), Decimal("0.04"))
     snap = getattr(opp, "snapshot", None)
     meta = {
         "arbitrage_kind": "funding_rate",
@@ -281,6 +447,16 @@ def funding_arb_to_strategy_opportunity(
         "perp_venue": getattr(opp, "perp_venue", ""),
         "annualised_net_yield": str(ann),
     }
+    liq, exe, reg, risk = _adaptive_priority_components(
+        meta,
+        side="long",
+        asset_class="crypto",
+        legacy_liq=Decimal("0.9"),
+        legacy_exe=Decimal("0.85"),
+        legacy_reg=Decimal("0.9"),
+        legacy_risk=Decimal("0.03"),
+    )
+    ps = compute_priority_score(edge, conf, reg, exe, risk)
     return StrategyOpportunity(
         strategy_name="funding_rate_arbitrage",
         symbol=str(getattr(opp, "symbol", "")),
@@ -290,10 +466,10 @@ def funding_arb_to_strategy_opportunity(
         confidence=conf,
         capital_required=capital,
         expected_holding_hours=int(getattr(opp, "expected_hold_hours", 72)),
-        liquidity_score=Decimal("0.9"),
-        execution_score=Decimal("0.85"),
-        regime_fit_score=Decimal("0.9"),
-        risk_cost_score=Decimal("0.03"),
+        liquidity_score=liq,
+        execution_score=exe,
+        regime_fit_score=reg,
+        risk_cost_score=risk,
         priority_score=ps,
         metadata=meta,
     )
@@ -316,7 +492,16 @@ def cross_exchange_dict_to_strategy_opportunity(
         edge = edge_boost
     edge = min(Decimal("1"), max(Decimal("0"), edge))
     conf = Decimal(str(d.get("confidence", "0.75")))
-    ps = compute_priority_score(edge, conf, Decimal("0.85"), Decimal("0.7"), Decimal("0.06"))
+    liq, exe, reg, risk = _adaptive_priority_components(
+        meta,
+        side=str(d.get("side", "long")),
+        asset_class="crypto",
+        legacy_liq=Decimal("0.75"),
+        legacy_exe=Decimal("0.65"),
+        legacy_reg=Decimal("0.85"),
+        legacy_risk=Decimal("0.06"),
+    )
+    ps = compute_priority_score(edge, conf, reg, exe, risk)
     return StrategyOpportunity(
         strategy_name="cross_exchange_arbitrage",
         symbol=str(d.get("symbol", "")),
@@ -326,10 +511,10 @@ def cross_exchange_dict_to_strategy_opportunity(
         confidence=conf,
         capital_required=capital,
         expected_holding_hours=1,
-        liquidity_score=Decimal("0.75"),
-        execution_score=Decimal("0.65"),
-        regime_fit_score=Decimal("0.85"),
-        risk_cost_score=Decimal("0.06"),
+        liquidity_score=liq,
+        execution_score=exe,
+        regime_fit_score=reg,
+        risk_cost_score=risk,
         priority_score=ps,
         metadata=meta,
     )
@@ -422,8 +607,38 @@ class GlobalEdgeCoordinator:
         active_mode: str = DEFAULT_MODE,
         replacement_context: ReplacementContext | None = None,
         max_actions: int | None = None,
+        gross_target_capital: Decimal | None = None,
+        concentration_exponent: Decimal | None = None,
     ) -> list[CoordinatorAction]:
-        """Rank new opportunities vs weakest held edge and emit replacement actions."""
+        """Rank new opportunities vs weakest held edge and emit replacement actions.
+
+        **Adaptive sizing path (Phase 2+3, behind ``USE_ADAPTIVE_SIZING``):**
+        when both ``gross_target_capital`` and ``concentration_exponent`` are
+        supplied AND the feature flag is on, the per-mode integer action cap
+        and the per-mode notional fraction are *both* removed. Capital is
+        allocated across the qualifying opportunities via a priority-weighted
+        softmax against ``gross_target_capital``. With one dominant opportunity
+        and high concentration, a single position can absorb ~100% of the
+        target — this is the design intent for Hunter aggressive deployment.
+        """
+        if (
+            _adaptive_sizing_enabled()
+            and gross_target_capital is not None
+            and gross_target_capital > 0
+        ):
+            return self._propose_actions_adaptive(
+                held,
+                new_opportunities,
+                active_mode=active_mode,
+                replacement_context=replacement_context,
+                gross_target_capital=gross_target_capital,
+                concentration_exponent=(
+                    concentration_exponent
+                    if concentration_exponent is not None
+                    else Decimal("1.0")
+                ),
+            )
+
         thresh = self._threshold(active_mode)
         cap_n = (
             max_actions
@@ -539,6 +754,195 @@ class GlobalEdgeCoordinator:
                     symbol=opp.symbol,
                     strategy_name=opp.strategy_name,
                     capital=final_capital,
+                    priority_score=opp.priority_score,
+                    metadata=action_meta,
+                )
+            )
+
+        return out
+
+    def _propose_actions_adaptive(
+        self,
+        held: list[HeldPositionEdge],
+        new_opportunities: list[StrategyOpportunity],
+        *,
+        active_mode: str,
+        replacement_context: ReplacementContext | None,
+        gross_target_capital: Decimal,
+        concentration_exponent: Decimal,
+    ) -> list[CoordinatorAction]:
+        """Adaptive book sizing — no fixed action count, no fixed notional fraction.
+
+        Algorithm:
+          1. Filter ``new_opportunities`` by the same dedup / churn / already-held
+             rules as the legacy path.
+          2. Compute the displacement gate: ``opp.expected_edge > weakest_held_edge
+             + edge_advantage(mode)``. Surviving opps are *qualifying*.
+          3. Softmax weights ``w_i ∝ exp(lambda * priority_score_i ^
+             concentration_exponent)`` across qualifying opps. ``lambda`` is
+             pulled from cfg ``adaptive.softmax_lambda`` (default ``1.0``).
+          4. Allocate ``capital_i = gross_target_capital * w_i``.
+          5. Emit one ``open_strategy`` per qualifying opp + matching ``trim_symbol``
+             when ``emit_trim_actions`` is True and a held position is being
+             displaced.
+
+        With a single dominant opportunity, the softmax collapses to ~1.0 on
+        the winner — Hunter naturally goes ~100% into the rocketing name.
+        """
+        import math
+
+        thresh = self._threshold(active_mode)
+        emit_trim = bool(self._cfg.get("emit_trim_actions", True))
+        adaptive_cfg = self._cfg.get("adaptive") or {}
+        # ``softmax_lambda`` is the base sharpness — bigger ⇒ more
+        # winner-take-all. Default 5.0 makes a priority gap of ~0.7 produce a
+        # ≈95% softmax mass on the leader (with concentration_exponent=1).
+        # ``concentration_exponent`` (passed in by the loop, mode-derived)
+        # multiplies that sharpness so Hunter (ce≈2.5) goes essentially 100%
+        # on a dominant opp; Defender (ce≈1.0) keeps softer concentration.
+        try:
+            lam = float(adaptive_cfg.get("softmax_lambda", 5.0))
+        except (TypeError, ValueError):
+            lam = 5.0
+        try:
+            ce = float(concentration_exponent)
+        except (TypeError, ValueError):
+            ce = 1.0
+        # Effective sharpness — ce acts as a temperature scale.
+        lam_eff = lam * max(0.1, ce)
+
+        weakest_edge = Decimal("0")
+        if held:
+            weakest_edge = min(h.expected_remaining_edge for h in held)
+
+        ranked = sorted(new_opportunities, key=lambda o: o.priority_score, reverse=True)
+        available_held = sorted(held, key=lambda h: h.expected_remaining_edge)
+
+        # ---- Build-up vs. displacement mode ---------------------------------
+        # If held_total < gross_target_capital, the book is under-deployed and
+        # we should ADD net capital (no trims). Trims only emit when we are
+        # at-or-above target and a new opportunity displaces the weakest held
+        # position. This is the fix for the cycle-by-cycle book-collapse bug
+        # where every adaptive open paired with a full-notional trim, causing
+        # opens to shrink (remaining_target → 0) while trims kept closing
+        # full positions.
+        held_total = sum((h.notional for h in held), Decimal("0"))
+        # 5% tolerance above target before we start trimming weakest edges.
+        displacement_mode = held_total > gross_target_capital * Decimal("1.05")
+
+        # ---- Filter to qualifying opportunities --------------------------
+        qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None]] = []
+        for opp in ranked:
+            if opp.expected_edge <= weakest_edge + thresh:
+                continue
+            opp_side = _canonical_position_side(getattr(opp, "side", None))
+            if any(
+                h.symbol.strip().upper() == opp.symbol.strip().upper()
+                and _canonical_position_side((h.metadata or {}).get("side")) == opp_side
+                for h in held
+            ):
+                continue
+            # Churn skip
+            skip_churn = False
+            if replacement_context is not None and held:
+                for h in held:
+                    if h.symbol.strip().upper() == opp.symbol.strip().upper():
+                        continue
+                    pen = churn_penalty_for_pair(
+                        h.symbol,
+                        opp.symbol,
+                        recent_events=replacement_context.recent_events,
+                        max_events=10,
+                        penalty_per_event=Decimal("0.02"),
+                    )
+                    if pen > Decimal("0.15"):
+                        skip_churn = True
+                        break
+            if skip_churn:
+                continue
+            # Reserve a trim partner ONLY when we are above target — i.e. the
+            # new open must displace an existing position to fit. During
+            # build-up we never pop a trim_edge so no trims are emitted.
+            trim_edge: HeldPositionEdge | None = None
+            if displacement_mode and available_held:
+                for i, h in enumerate(available_held):
+                    if h.symbol.strip().upper() == opp.symbol.strip().upper():
+                        continue
+                    trim_edge = available_held.pop(i)
+                    break
+            qualifying.append((opp, trim_edge))
+
+        if not qualifying:
+            return []
+
+        # ---- Softmax weights ---------------------------------------------
+        # raw_i = lam_eff * priority_i, then standard exp-normalise. Subtract
+        # max for numerical stability. With lam_eff = lam * concentration,
+        # Hunter (high ce) sharpens; Defender (low ce) stays softer.
+        raws: list[float] = []
+        for opp, _ in qualifying:
+            try:
+                p = float(opp.priority_score)
+            except (TypeError, ValueError):
+                p = 0.0
+            p = max(0.0, p)
+            raws.append(lam_eff * p)
+        max_raw = max(raws) if raws else 0.0
+        exps = [math.exp(r - max_raw) for r in raws]
+        total = sum(exps) or 1.0
+        weights = [e / total for e in exps]
+
+        # ---- Emit actions -------------------------------------------------
+        out: list[CoordinatorAction] = []
+        for (opp, trim_edge), w in zip(qualifying, weights, strict=True):
+            cap_i = gross_target_capital * Decimal(str(w))
+            # Round to 2dp to avoid Decimal-precision noise in downstream logs.
+            cap_i = cap_i.quantize(Decimal("0.01"))
+            if cap_i <= 0:
+                continue
+
+            if emit_trim and trim_edge is not None:
+                trim_meta = dict(trim_edge.metadata or {})
+                trim_meta["coordinator_kind"] = "trim_symbol"
+                trim_meta["reduce_only"] = True
+                trim_meta["close_only"] = True
+                trim_meta["target_notional"] = str(trim_edge.notional)
+                trim_meta["risk_notional_override"] = str(trim_edge.notional)
+                if trim_edge.broker:
+                    trim_meta["broker"] = trim_edge.broker
+                out.append(
+                    CoordinatorAction(
+                        kind="trim_symbol",
+                        symbol=trim_edge.symbol,
+                        strategy_name="global_edge_trim",
+                        capital=trim_edge.notional,
+                        priority_score=opp.priority_score,
+                        metadata=trim_meta,
+                    )
+                )
+
+            action_meta = dict(opp.metadata)
+            action_meta.setdefault("confidence", str(opp.confidence))
+            action_meta.setdefault("expected_edge", str(opp.expected_edge))
+            action_meta.setdefault("side", str(opp.side))
+            action_meta["allocation_selected"] = True
+            action_meta["sizing_mode"] = (active_mode or DEFAULT_MODE).strip().lower()
+            action_meta["sizing_path"] = "adaptive_softmax"
+            action_meta["sizing_softmax_weight"] = f"{w:.6f}"
+            action_meta["sizing_softmax_lambda"] = str(lam)
+            action_meta["sizing_softmax_lambda_effective"] = str(lam_eff)
+            action_meta["sizing_concentration_exponent"] = str(ce)
+            action_meta["sizing_gross_target_capital"] = str(gross_target_capital)
+            action_meta["sizing_qualifying_count"] = str(len(qualifying))
+            action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
+            action_meta["sizing_final_action_capital"] = str(cap_i)
+
+            out.append(
+                CoordinatorAction(
+                    kind="open_strategy",
+                    symbol=opp.symbol,
+                    strategy_name=opp.strategy_name,
+                    capital=cap_i,
                     priority_score=opp.priority_score,
                     metadata=action_meta,
                 )

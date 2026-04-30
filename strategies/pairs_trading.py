@@ -25,9 +25,20 @@ class PairsTradingStrategy:
         self.config = dict(config or {})
         self.enabled = bool(self.config.get("enabled", False))
 
+    def effective_config(self) -> dict[str, Any]:
+        cfg = dict(self.config or {})
+        mode = str(cfg.get("_active_profile_mode") or "").strip().lower()
+        mode_cfg = cfg.get("mode_calibration", {}) or {}
+        if mode and isinstance(mode_cfg, dict):
+            override = mode_cfg.get(mode)
+            if isinstance(override, dict):
+                cfg.update(override)
+        return cfg
+
     def _compute_target_notional(self, confidence: float, z_abs: float) -> dict[str, str]:
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "5000")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("5000")
         if base_notional <= 0:
@@ -46,10 +57,11 @@ class PairsTradingStrategy:
     def generate_signals(self, feature_map: dict[str, pd.DataFrame]) -> list[RawSignal]:
         if not self.enabled:
             return []
-        pairs = self.config.get("pairs") or []
+        cfg = self.effective_config()
+        pairs = cfg.get("pairs") or []
         out: list[RawSignal] = []
-        lookback = int(self.config.get("lookback_bars", 90))
-        z_open = float(self.config.get("zscore_open", 2.0))
+        lookback = int(cfg.get("lookback_bars", 90))
+        z_open = float(cfg.get("zscore_open", 2.0))
 
         for pair in pairs:
             if not isinstance(pair, (list, tuple)) or len(pair) != 2:

@@ -818,3 +818,83 @@ members remain available for relative-value and event-driven promotion.
 `scripts/build_universe_tiers.py`, and `docs/UNIVERSE_INTELLIGENCE.md`, with
 coverage in `tests/test_universe_intelligence.py`. No risk/execution path was
 changed.
+
+---
+
+## D061 — Adaptive sizing rewrite (supersedes D015 / D030 / D031 / D032)
+
+**Date:** 2026-04-30
+**Decision:** Remove discretionary hard-coded numerical knobs from the sizing
+pipeline (per-strategy notionals, integer action caps, per-action notional
+fraction, flat per-position percentage ceiling). Replace them with a single
+adaptive coordinator path that:
+
+1. Filters opportunities by the existing displacement gate
+   (`expected_edge > weakest_held_edge + edge_advantage(mode)`) and the
+   churn / already-held / dedup rules — unchanged from D015.
+2. Allocates capital across qualifying opportunities via softmax weights
+   `w_i ∝ exp(λ_eff · priority_score_i)` where
+   `λ_eff = softmax_lambda · concentration_exponent(mode)`.
+3. Sizes each `CoordinatorAction` as `gross_target_capital * w_i` where
+   `gross_target_capital = tradable_capital * gross_fraction(mode)` and
+   `tradable_capital = NAV * capital_pct` is the operator's slider.
+4. Enforces no fixed integer cap on the number of emitted opens — Hunter
+   may emit 1 (winner-take-all) or 50 (broad book) depending purely on how
+   many opps clear the displacement gate.
+5. Reads per-position / concentration / asset-class ceilings from
+   `config/risk_limits.yaml::mode_overrides[active_mode]` so Hunter can
+   take 100% of the deployable sleeve in one symbol when the edge
+   dominates; Defender keeps 20% / Trader 40%.
+6. Cancels working orders and forces a fresh plan on the next tick whenever
+   the operator moves the capital slider (orchestrator publishes
+   `capital_allocation_changed`; loop drains working orders before
+   re-running the iteration body against the new `tradable`).
+
+**Reason:** Operator intent: "no hard-coded values — the slider is the only
+operator-set capital cap; size, count, concentration, cadence emerge from
+market state". Pre-D061 the system was bottlenecked by:
+
+* `base_target_notional: 5000` (and per-mode 25k) on every strategy, which
+  caused tiny $5–7k positions even when NAV was $1.07M.
+* `max_position_pct: 0.10` flat cap, preventing Hunter from concentrating
+  on a dominating opportunity.
+* `max_actions_per_tick.hunter: 20` integer cap forcing the coordinator to
+  slice gross target into N equal slots even when one opp deserved most.
+* Static `liquidity_score=0.7 / execution_score=0.75 / risk_cost=0.05`
+  literals in `signal_candidate_to_strategy_opportunity` flattening the
+  priority softmax so concentration could not emerge.
+
+**Status:** Implemented behind `USE_ADAPTIVE_SIZING=1` so the legacy path
+remains intact. Touched files:
+
+* `portfolio/global_edge_coordinator.py` — `_adaptive_priority_components`,
+  `_propose_actions_adaptive`, env-flag gating; static stubs replaced at
+  all four call sites (directional + 3 arb wrappers).
+* `system/trading_loop/loop.py` — adaptive kwargs passed to
+  `propose_actions`; per-mode `max_position_pct` from `mode_overrides`;
+  slider event handler cancels working orders before next iter.
+* `system/trading_loop/helpers.py` — `apply_saved_mode_to_risk_cfg`
+  applies `mode_overrides` from `risk_limits.yaml`.
+* `system/trading_loop/loop.py` `_capital_change_pending` flag plumbed via
+  `request_iteration("capital_allocation_changed")`.
+* `config/risk_limits.yaml` — `mode_overrides` block (defender / trader /
+  hunter ceilings; hunter = 1.00 across the board).
+* Tests: `tests/test_adaptive_sizing.py` (12 cases — priority components,
+  no-integer-cap, dominant-opportunity-100%, capital-sums-to-target,
+  legacy-fallback, audit metadata, already-held skip).
+
+**Supersedes:** D015 (allocator) — concentration is now softmax-driven, no
+fixed `max_actions_per_tick`. D030 (mode-aware capital fraction) — the
+per-mode `max_notional_fraction_per_action` is bypassed; `gross_fraction(mode)`
+applied at the loop / coordinator boundary. D031 (respect strategy sizing) —
+strategies' `target_notional` is no longer the source of truth; the coordinator
+sizes from gross_target × softmax_weight. D032 (per-signal `target_notional`
+field) — the metadata field is preserved for audit but not used for sizing
+decisions in the adaptive path.
+
+**Migration:** When `USE_ADAPTIVE_SIZING` is unset (default), every legacy
+behaviour is preserved bit-for-bit (verified: 50 pre-D061 tests pass
+unchanged). To enable, set `USE_ADAPTIVE_SIZING=1` before launching
+`python run.py`. To disable mid-flight, unset and restart the Python
+process — `/system/stop` + `/system/start` does not reload module-level
+imports.

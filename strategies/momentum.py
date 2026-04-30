@@ -45,8 +45,9 @@ class MomentumBreakoutStrategy(Strategy):
         Emits an absolute ``target_notional`` so downstream coordinator/execution
         layers can respect strategy intent without falling back to NAV defaults.
         """
+        cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(self.config.get("base_target_notional", "5000")))
+            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
         except (InvalidOperation, TypeError, ValueError):
             base_notional = Decimal("5000")
         if base_notional <= 0:
@@ -94,7 +95,8 @@ class MomentumBreakoutStrategy(Strategy):
         if not self.enabled:
             return None
 
-        if len(features) < self.config.get("lookback_periods", 20) + 1:
+        cfg = self.effective_config()
+        if len(features) < cfg.get("lookback_periods", 20) + 1:
             logger.debug(f"{symbol}: not enough data ({len(features)} rows)")
             return None
 
@@ -116,17 +118,18 @@ class MomentumBreakoutStrategy(Strategy):
         if not self.enabled:
             out["near_miss_primary"] = "strategy_disabled"
             return out
-        lookback = int(self.config.get("lookback_periods", 20))
+        cfg = self.effective_config()
+        lookback = int(cfg.get("lookback_periods", 20))
         if df is None or len(df) < lookback + 1:
             out["near_miss_primary"] = "insufficient_rows"
             out["rows_available"] = 0 if df is None or df.empty else len(df)
             out["min_rows"] = lookback + 1
             return out
         try:
-            vol_mult = self.config.get("volume_multiplier", 1.5)
-            atr_min = self.config.get("atr_min", 0.005)
-            atr_max = self.config.get("atr_max", 0.05)
-            mom_thresh = self.config.get("momentum_threshold", 0.002)
+            vol_mult = cfg.get("volume_multiplier", 1.5)
+            atr_min = cfg.get("atr_min", 0.005)
+            atr_max = cfg.get("atr_max", 0.05)
+            mom_thresh = cfg.get("momentum_threshold", 0.002)
             latest = df.iloc[-1]
             prev = df.iloc[:-1]
             close = float(latest["close"])
@@ -170,11 +173,12 @@ class MomentumBreakoutStrategy(Strategy):
 
     def _evaluate(self, symbol: str, df: pd.DataFrame) -> Optional[RawSignal]:
 
-        lookback   = self.config.get("lookback_periods", 20)
-        vol_mult   = self.config.get("volume_multiplier", 1.5)
-        atr_min    = self.config.get("atr_min", 0.005)
-        atr_max    = self.config.get("atr_max", 0.05)
-        mom_thresh = self.config.get("momentum_threshold", 0.002)
+        cfg = self.effective_config()
+        lookback   = cfg.get("lookback_periods", 20)
+        vol_mult   = cfg.get("volume_multiplier", 1.5)
+        atr_min    = cfg.get("atr_min", 0.005)
+        atr_max    = cfg.get("atr_max", 0.05)
+        mom_thresh = cfg.get("momentum_threshold", 0.002)
 
         latest       = df.iloc[-1]
         prev         = df.iloc[:-1]

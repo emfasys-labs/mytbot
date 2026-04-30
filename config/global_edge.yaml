@@ -17,7 +17,7 @@ edge_advantage:
 #   * ``defender`` → defensive, at most one new opening per cycle
 # A scalar value is still honoured (back-compat) and used for every mode.
 max_actions_per_tick:
-  hunter: 10
+  hunter: 20
   trader: 3
   defender: 1
 

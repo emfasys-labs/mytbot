@@ -5,9 +5,35 @@
 # Risk engine reads this at startup and on reload.
 
 # ── Position limits ───────────────────────────────────────────────────────────
-max_position_pct: 0.10          # Max 10% of portfolio in any single position
-max_concentration_pct: 0.20     # Max 20% in any single asset across all positions
-max_gross_exposure_pct: 0.80    # Max 80% of portfolio deployed at once
+# Scalar values are the legacy / fallback caps. When ``mode_overrides`` is
+# present and ``USE_ADAPTIVE_SIZING=1`` is on, the per-mode value replaces the
+# scalar for the active profile mode. Hunter's per-position cap of 1.00 means
+# a single rocketing opportunity can absorb the full slider-allocated capital
+# (the operator's ``capital_pct`` slider remains the only authoritative cap).
+max_position_pct: 0.10          # Max 10% of portfolio in any single position (legacy/fallback)
+max_concentration_pct: 0.20     # Max 20% in any single asset across all positions (legacy/fallback)
+max_gross_exposure_pct: 0.80    # Max 80% of portfolio deployed at once (legacy/fallback)
+
+mode_overrides:
+  # Per-mode adaptive ceilings. Unused when USE_ADAPTIVE_SIZING is off.
+  defender:
+    max_position_pct: 0.20      # conservative — at most 20% in one name
+    max_concentration_pct: 0.30
+    max_gross_exposure_pct: 0.60
+    max_single_stock_pct: 0.15
+    max_crypto_pct: 0.20
+  trader:
+    max_position_pct: 0.40      # balanced
+    max_concentration_pct: 0.50
+    max_gross_exposure_pct: 0.85
+    max_single_stock_pct: 0.30
+    max_crypto_pct: 0.40
+  hunter:
+    max_position_pct: 1.00      # 100% in one name allowed when the edge dominates
+    max_concentration_pct: 1.00
+    max_gross_exposure_pct: 1.00
+    max_single_stock_pct: 1.00
+    max_crypto_pct: 1.00
 
 # ── Loss limits ───────────────────────────────────────────────────────────────
 max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio

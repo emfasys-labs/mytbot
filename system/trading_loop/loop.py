@@ -138,6 +138,14 @@ _DIRECTIONAL_SIDES = {"long", "short", "buy", "sell"}
 _SIDE_TO_ORDER_SIDE = {"long": "buy", "short": "sell", "buy": "buy", "sell": "sell"}
 
 
+def _decimal_state_value(state: dict[str, Any], key: str, fallback: Decimal) -> Decimal:
+    try:
+        value = Decimal(str(state.get(key, fallback)))
+    except Exception:  # noqa: BLE001
+        return fallback
+    return value if value >= 0 else fallback
+
+
 async def _load_working_order_keys(session_factory: Any) -> set[tuple[str, str]]:
     """Return {(SYMBOL, order_side)} for every order still working at a broker.
 
@@ -296,6 +304,11 @@ class TradingLoop:
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
         self._running = False
+        # Slider-event signal — when set by ``request_iteration("capital_allocation_changed")``,
+        # the next iteration body cancels working orders + forces a fresh
+        # cancel/grow/trim plan against the new target gross.
+        self._capital_change_pending: bool = False
+        self._last_capital_pct_seen: float | None = None
 
         self.risk_engine: RiskEngine | None = None
         self.execution_engine: ExecutionEngine | None = None
@@ -334,6 +347,11 @@ class TradingLoop:
     def request_iteration(self, reason: str = "operator_request") -> None:
         """Wake the loop so operator control changes take effect promptly."""
         self._wake_event.set()
+        # Slider-driven wakes (capital_allocation_changed) require an
+        # additional cancel-and-replan beyond a normal wake; flag it so the
+        # iteration body knows to honour the new target gross immediately.
+        if reason == "capital_allocation_changed":
+            self._capital_change_pending = True
         logger.info("trading_loop | wake requested | {}", reason)
 
     async def _wait_for_next_iteration(self, timeout_sec: float) -> bool:
@@ -771,6 +789,9 @@ class TradingLoop:
                 )
                 if result is None:
                     funnel.record_execution_blocked(strategy_key)
+                    engine_reason = str(
+                        getattr(self.execution_engine, "last_skip_reason", "") or "execution_no_result"
+                    )
                     if sc_log_buffer is not None:
                         sc_log_buffer.append(
                             strategy_candidate_row(
@@ -779,9 +800,12 @@ class TradingLoop:
                                 side=str(getattr(signal, "side", "") or ""),
                                 confidence=float(getattr(signal, "confidence", 0) or 0),
                                 status="execution_incomplete",
-                                reason="execution_no_result",
+                                reason=engine_reason,
                                 loop_iteration=self.iterations,
-                                metadata={"execution_stage": "no_order_from_engine"},
+                                metadata={
+                                    "execution_stage": "no_order_from_engine",
+                                    "execution_skip_reason": engine_reason,
+                                },
                             )
                         )
                     try:
@@ -960,6 +984,32 @@ class TradingLoop:
                 if self.iterations == 0:
                     logger.info("trading_loop | startup flush — first iteration running immediately")
                 self._check_late_brokers()
+                # ── Slider-event handler ────────────────────────────────
+                # When the operator moves the capital slider, immediately
+                # cancel any working orders sized to the prior tradable so
+                # the upcoming iteration's adaptive coordinator can resize
+                # against the new target. Trim of oversized positions on
+                # slider-down happens inside the iteration body via the
+                # propose_flatten/propose_actions paths driven by the new
+                # ``tradable`` value.
+                if self._capital_change_pending:
+                    self._capital_change_pending = False
+                    try:
+                        if self.execution_engine is not None:
+                            cancelled = await self.execution_engine.cancel_working_orders(
+                                session_factory=session_factory,
+                                reason="capital_allocation_changed",
+                            )
+                            if cancelled:
+                                logger.info(
+                                    "trading_loop | slider event cancelled {} working order(s)",
+                                    cancelled,
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("trading_loop | slider-event cancel failed | {}", exc)
+                    self._last_capital_pct_seen = self.capital_pct
+                elif self._last_capital_pct_seen is None:
+                    self._last_capital_pct_seen = self.capital_pct
                 if universe_mode == "dynamic" and (self.iterations % 5 == 0):
                     try:
                         db_symbols = await _refresh_symbols_from_db(limit=500)
@@ -1575,7 +1625,16 @@ class TradingLoop:
                                 mode=mode_raw,
                                 capital_pct=float(self.capital_pct),
                             )
-                            tradable_nav = total_equity * Decimal(str(self.capital_pct))
+                            state_equity = _decimal_state_value(
+                                portfolio_dict,
+                                "portfolio_value",
+                                total_equity,
+                            )
+                            tradable_nav = _decimal_state_value(
+                                portfolio_dict,
+                                "tradable_capital",
+                                state_equity * Decimal(str(self.capital_pct)),
+                            )
                             if zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
                                     batch_candidates=[] if zero_allocation else batch_candidates,
@@ -1592,7 +1651,7 @@ class TradingLoop:
                                     session_factory=session_factory,
                                     strategies_cfg=strategies_cfg,
                                     symbols=list(symbols),
-                                    total_equity=total_equity,
+                                    total_equity=state_equity,
                                     resolve_price=_resolve_price_for_symbol,
                                     strat_cfg=strat_cfg,
                                     sc_log_buffer=sc_log_rows,
@@ -1977,11 +2036,22 @@ class TradingLoop:
         # D031: the hard per-position ceiling is ``nav * max_position_pct``
         # (default 10 % from ``config/risk_limits.yaml``). Strategy-requested
         # notionals above this are clipped; smaller requests are honoured.
+        # Adaptive (USE_ADAPTIVE_SIZING=1): per-mode ceiling from
+        # ``risk_cfg["mode_overrides"][active_mode]["max_position_pct"]`` —
+        # Hunter unlocks 100%, Defender keeps a conservative 20%.
         risk_cfg = getattr(self.risk_engine, "config", {}) or {}
         try:
             max_pos_pct = Decimal(str(risk_cfg.get("max_position_pct", "0.10")))
         except Exception:  # noqa: BLE001
             max_pos_pct = Decimal("0.10")
+        if os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                _mo = (risk_cfg.get("mode_overrides") or {}).get(mode_raw or "trader") or {}
+                _override = _mo.get("max_position_pct")
+                if _override is not None:
+                    max_pos_pct = Decimal(str(_override))
+            except Exception:  # noqa: BLE001
+                pass
 
         held = held_positions_from_portfolio(
             portfolio_dict,
@@ -2140,11 +2210,54 @@ class TradingLoop:
                 ),
             )
         else:
+            # Adaptive sizing path (USE_ADAPTIVE_SIZING=1) — coordinator drives
+            # sizing from a tradable-derived gross target + softmax over
+            # priority_score, so a single dominant opportunity in Hunter mode
+            # can absorb ~100% of the deployable capital. Falls back to legacy
+            # per-mode fixed action count + notional fraction when off.
+            adaptive_on = os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            adaptive_kwargs: dict[str, Any] = {}
+            if self.iterations <= 1:
+                logger.info(
+                    "trading_loop | adaptive_sizing flag={} env={!r} tradable={} mode={}",
+                    adaptive_on,
+                    os.environ.get("USE_ADAPTIVE_SIZING"),
+                    tradable,
+                    mode_for_coord,
+                )
+            if adaptive_on and tradable > 0:
+                # Adaptive gross fraction: hunter deploys the slider-allocated
+                # capital fully; trader/defender progressively conservative.
+                # Concentration exponent — higher means sharper softmax (more
+                # winner-take-all). These are the only mode-aware multipliers
+                # in the adaptive path; they are NOT hard caps on size or count.
+                adaptive_mode_cfg = {
+                    "hunter": {"gross_fraction": Decimal("1.00"), "concentration": Decimal("2.5")},
+                    "trader": {"gross_fraction": Decimal("0.70"), "concentration": Decimal("1.5")},
+                    "defender": {"gross_fraction": Decimal("0.40"), "concentration": Decimal("1.0")},
+                }
+                _amc = adaptive_mode_cfg.get(mode_for_coord, adaptive_mode_cfg["trader"])
+                gross_target = tradable * _amc["gross_fraction"]
+                # Subtract already-deployed gross so the new opens fill toward
+                # the target without double-counting held capital.
+                held_notional_total = sum(
+                    (h.notional for h in held), Decimal("0")
+                )
+                remaining_target = gross_target - held_notional_total
+                if remaining_target > 0:
+                    adaptive_kwargs["gross_target_capital"] = remaining_target
+                    adaptive_kwargs["concentration_exponent"] = _amc["concentration"]
             actions = coord.propose_actions(
                 held,
                 new_opps_dedup,
                 active_mode=mode_for_coord,
                 replacement_context=repl_ctx,
+                **adaptive_kwargs,
             )
         if buf is not None and actions:
             for act in actions:
@@ -2389,6 +2502,9 @@ class TradingLoop:
         )
         if result is None:
             funnel.record_execution_blocked(strategy_key)
+            engine_reason = str(
+                getattr(self.execution_engine, "last_skip_reason", "") or "execution_no_result"
+            )
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -2397,9 +2513,12 @@ class TradingLoop:
                         side=str(getattr(signal, "side", "") or ""),
                         confidence=float(getattr(signal, "confidence", 0) or 0),
                         status="execution_incomplete",
-                        reason="execution_no_result",
+                        reason=engine_reason,
                         loop_iteration=self.iterations,
-                        metadata={"execution_stage": "no_order_from_engine"},
+                        metadata={
+                            "execution_stage": "no_order_from_engine",
+                            "execution_skip_reason": engine_reason,
+                        },
                     )
                 )
             try:

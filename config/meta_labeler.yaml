@@ -34,7 +34,7 @@ trained_meta_labeler:
     by_mode:
       defender: 0.45
       trader: 0.42
-      hunter: 0.40
+      hunter: 0.35
     by_regime:
       crash: 0.60
       volatile: 0.45
