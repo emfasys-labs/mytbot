@@ -21,7 +21,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Respon
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -426,7 +426,10 @@ async def _command_bus() -> CommandBus:
 def _decimal_str(v: Any) -> str:
     if v is None:
         return "0"
-    return str(Decimal(str(v)))
+    d = Decimal(str(v))
+    if d == 0:
+        return "0"
+    return str(d)
 
 
 async def _latest_feature_prices(session, symbols: list[str]) -> dict[str, Decimal]:
@@ -1469,7 +1472,10 @@ def _configured_paper_nav() -> Decimal:
 
 
 @app.get("/pnl")
-async def get_pnl(session_factory=Depends(_session_factory)):
+async def get_pnl(
+    session_factory=Depends(_session_factory),
+    bus: CommandBus = Depends(_command_bus),
+):
     today_d = date.today()
     today = today_d.isoformat()
     async with session_factory() as session:
@@ -1538,6 +1544,12 @@ async def get_pnl(session_factory=Depends(_session_factory)):
             cap_pct = float(getattr(orch, "capital_pct", 1.0))
         except (TypeError, ValueError):
             cap_pct = 1.0
+    try:
+        cap_raw = await bus.get_state(CAPITAL_ALLOCATION_STATE_KEY, None)
+        if isinstance(cap_raw, dict) and "pct" in cap_raw:
+            cap_pct = float(cap_raw.get("pct", cap_pct))
+    except Exception:  # noqa: BLE001
+        pass
     cap_pct = max(0.0, min(1.0, cap_pct))
     tradable_value = display_value * Decimal(str(cap_pct))
 
@@ -1621,49 +1633,64 @@ async def get_dashboard_snapshot(
     else:
         position_rows = await _live_broker_positions(500)
         position_source = "live_broker"
-    if position_rows:
-        nav = await _live_portfolio_value()
-        gross = Decimal(0)
-        net = Decimal(0)
-        cash_deployed = Decimal(0)
-        total_unrealised = Decimal(0)
-        sample: list[dict[str, Any]] = []
-        for p in position_rows:
-            try:
-                qty = Decimal(str(p.get("quantity", "0") or "0"))
-                px = Decimal(str(p.get("current_price", "0") or "0"))
-                pnl = Decimal(str(p.get("unrealised_pnl", "0") or "0"))
-            except Exception:  # noqa: BLE001
-                continue
-            mv = qty * px
-            asset_class = str(p.get("asset_class") or "")
-            symbol = str(p.get("symbol") or "")
-            gross += abs(mv)
-            net += mv
-            cash_deployed += abs(mv) * cash_factor_for_asset_class(asset_class, symbol=symbol)
-            total_unrealised += pnl
-            sample.append(
-                {
-                    "symbol": symbol,
-                    "asset_class": asset_class,
-                    "side": "short" if qty < 0 else "long",
-                    "market_value": _decimal_str(abs(mv)),
-                    "unrealised_pnl": _decimal_str(pnl),
-                    "broker": p.get("broker"),
-                    "tags": [],
-                }
-            )
-        portfolio = dict(out.get("portfolio") or {})
-        if nav > 0:
-            portfolio["nav"] = _decimal_str(nav)
-        portfolio["gross_exposure"] = _decimal_str(gross)
-        portfolio["net_exposure"] = _decimal_str(net)
-        portfolio["cash_deployed"] = _decimal_str(cash_deployed)
-        portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
-        portfolio["positions_sample"] = sample[:24]
-        portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
-        portfolio["source"] = position_source
-        out["portfolio"] = portfolio
+    nav = await _live_portfolio_value()
+    gross = Decimal(0)
+    net = Decimal(0)
+    cash_deployed = Decimal(0)
+    total_unrealised = Decimal(0)
+    sample: list[dict[str, Any]] = []
+    held_edges: list[dict[str, Any]] = []
+    for p in position_rows:
+        try:
+            qty = Decimal(str(p.get("quantity", "0") or "0"))
+            px = Decimal(str(p.get("current_price", "0") or "0"))
+            pnl = Decimal(str(p.get("unrealised_pnl", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            continue
+        mv = qty * px
+        asset_class = str(p.get("asset_class") or "")
+        symbol = str(p.get("symbol") or "")
+        gross += abs(mv)
+        net += mv
+        abs_mv = abs(mv)
+        cash_deployed += abs_mv * cash_factor_for_asset_class(asset_class, symbol=symbol)
+        total_unrealised += pnl
+        sample.append(
+            {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "side": "short" if qty < 0 else "long",
+                "market_value": _decimal_str(abs_mv),
+                "unrealised_pnl": _decimal_str(pnl),
+                "broker": p.get("broker"),
+                "tags": [],
+            }
+        )
+        held_edges.append(
+            {
+                "symbol": symbol,
+                "notional": _decimal_str(abs_mv),
+                "expected_remaining_edge": "0",
+                "strategy_name": "held_position",
+                "broker": p.get("broker"),
+            }
+        )
+    portfolio = dict(out.get("portfolio") or {})
+    if nav > 0:
+        portfolio["nav"] = _decimal_str(nav)
+    portfolio["gross_exposure"] = _decimal_str(gross)
+    portfolio["net_exposure"] = _decimal_str(net)
+    portfolio["cash_deployed"] = _decimal_str(cash_deployed)
+    portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
+    portfolio["positions_sample"] = sample[:24]
+    portfolio["weakest_by_hold_score"] = []
+    portfolio["highest_exit_pressure"] = []
+    portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
+    portfolio["source"] = position_source
+    out["portfolio"] = portfolio
+    ge = dict(out.get("global_edge") or {})
+    ge["held_edges"] = held_edges
+    out["global_edge"] = ge
     return out
 
 
@@ -1896,6 +1923,123 @@ async def diagnostics_strategy_candidates(
     from system.strategy_candidate_log import fetch_strategy_mix_diagnostics
 
     return await fetch_strategy_mix_diagnostics(session_factory, since_hours=since_hours)
+
+
+@app.get("/diagnostics/accounting")
+async def diagnostics_accounting(
+    session_factory=Depends(_session_factory),
+):
+    """Accounting health checks for paper/live book consistency."""
+    if session_factory is None:
+        return {"ok": False, "error": "no_database", "warnings": ["database_unavailable"]}
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    async with session_factory() as session:
+        latest_q = await session.execute(
+            text(
+                """
+                WITH latest AS (
+                  SELECT DISTINCT ON (broker, symbol)
+                    broker, symbol, quantity, current_price, avg_entry_price,
+                    unrealised_pnl, timestamp
+                  FROM positions
+                  ORDER BY broker, symbol, timestamp DESC, id DESC
+                )
+                SELECT broker, symbol, quantity, current_price, avg_entry_price,
+                       unrealised_pnl, timestamp
+                FROM latest
+                ORDER BY broker, symbol
+                """
+            )
+        )
+        latest_rows = list(latest_q.mappings().all())
+
+        shock_q = await session.execute(
+            text(
+                """
+                WITH ordered AS (
+                  SELECT
+                    broker,
+                    symbol,
+                    quantity,
+                    timestamp,
+                    lag(quantity) OVER (
+                      PARTITION BY broker, symbol
+                      ORDER BY timestamp, id
+                    ) AS prev_quantity,
+                    lag(timestamp) OVER (
+                      PARTITION BY broker, symbol
+                      ORDER BY timestamp, id
+                    ) AS prev_timestamp
+                  FROM positions
+                  WHERE timestamp >= now() - interval '48 hours'
+                )
+                SELECT broker, symbol, quantity, timestamp,
+                       prev_quantity, prev_timestamp
+                FROM ordered
+                WHERE abs(quantity) <= 0.00000001
+                  AND abs(coalesce(prev_quantity, 0)) > 0.00000001
+                ORDER BY timestamp DESC, broker, symbol
+                LIMIT 100
+                """
+            )
+        )
+        shocks = list(shock_q.mappings().all())
+
+        today_q = await session.execute(
+            select(DailyPnL).where(DailyPnL.date == date.today().isoformat())
+        )
+        today = today_q.scalars().first()
+
+    open_rows = [r for r in latest_rows if abs(Decimal(str(r["quantity"] or 0))) > Decimal("0.00000001")]
+    open_by_broker: dict[str, int] = {}
+    exposure_by_broker: dict[str, Decimal] = {}
+    current_unrealised = Decimal(0)
+    for r in open_rows:
+        broker = str(r["broker"] or "").strip().lower()
+        open_by_broker[broker] = open_by_broker.get(broker, 0) + 1
+        qty = Decimal(str(r["quantity"] or 0))
+        px = Decimal(str(r["current_price"] or 0))
+        pnl = Decimal(str(r["unrealised_pnl"] or 0))
+        exposure_by_broker[broker] = exposure_by_broker.get(broker, Decimal(0)) + abs(qty * px)
+        current_unrealised += pnl
+
+    if shocks:
+        warnings.append("recent_position_tombstone_shock")
+
+    persisted_unrealised = Decimal(str(today.unrealised_pnl or 0)) if today is not None else Decimal(0)
+    pnl_delta = current_unrealised - persisted_unrealised
+    if abs(pnl_delta) > Decimal("1"):
+        errors.append("daily_pnl_unrealised_differs_from_open_book")
+
+    return {
+        "ok": not errors,
+        "paper_mode": APP_ENV != "live",
+        "warnings": warnings,
+        "errors": errors,
+        "open_positions": {
+            "count": len(open_rows),
+            "by_broker": open_by_broker,
+            "exposure_by_broker": {k: _decimal_str(v) for k, v in exposure_by_broker.items()},
+            "unrealised_pnl": _decimal_str(current_unrealised),
+        },
+        "daily_pnl": {
+            "date": date.today().isoformat(),
+            "unrealised_pnl": _decimal_str(persisted_unrealised),
+            "open_book_delta": _decimal_str(pnl_delta),
+        },
+        "recent_tombstone_shocks": [
+            {
+                "broker": str(r["broker"]),
+                "symbol": str(r["symbol"]),
+                "timestamp": r["timestamp"].isoformat() if r["timestamp"] else None,
+                "previous_quantity": _decimal_str(Decimal(str(r["prev_quantity"] or 0))),
+                "previous_timestamp": r["prev_timestamp"].isoformat() if r["prev_timestamp"] else None,
+            }
+            for r in shocks
+        ],
+    }
 
 
 @app.get("/diagnostics/routing-quality")

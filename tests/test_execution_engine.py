@@ -698,6 +698,76 @@ async def test_paper_reconcile_preserves_local_simulated_position() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_reconcile_preserves_local_position_when_broker_absent() -> None:
+    """Late-joining paper brokers must not cause local simulated positions to vanish."""
+
+    latest_row = SimpleNamespace(
+        broker="ibkr",
+        symbol="SPY",
+        quantity=Decimal("2"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("101"),
+        unrealised_pnl=Decimal("2"),
+        asset_class="equity",
+        instrument_metadata=None,
+    )
+
+    class _FakeResult:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+    added_rows: list = []
+    commits: list[int] = []
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            return _FakeResult(rows=[latest_row])
+
+        def add(self, obj) -> None:
+            added_rows.append(obj)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    class _FakeFactory:
+        def __call__(self):
+            s = _FakeSession()
+
+            class _CM:
+                async def __aenter__(self_inner):
+                    return s
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _CM()
+
+    engine = ExecutionEngine(
+        broker_configs={},
+        paper_mode=True,
+        allowed_brokers=[],
+    )
+
+    ok = await engine.reconcile_positions(
+        session_factory=_FakeFactory(),
+        max_quantity_diff=Decimal("0.000001"),
+    )
+
+    assert ok is True
+    assert len(added_rows) == 1
+    assert added_rows[0].broker == "ibkr"
+    assert added_rows[0].symbol == "SPY"
+    assert added_rows[0].quantity == Decimal("2")
+    assert len(commits) == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_exhaustion_returns_none(monkeypatch) -> None:
     risk = _FakeRiskEngine({"auto_kill_on_api_failure": False})
     set_risk_engine(risk)

@@ -12,6 +12,7 @@ Keys live in ``ControlState`` under ``data.ingest.telemetry`` as a JSON object:
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -59,6 +60,38 @@ def _age_label_from_iso(iso: str | None) -> str:
         return f"{int(secs // 86400)}d ago"
     except Exception:  # noqa: BLE001
         return "—"
+
+
+def _sanitize_provider_error(error: str | None) -> str | None:
+    """
+    Redact key-like fragments from provider error text before surfacing in UI.
+    """
+    if not error:
+        return None
+    txt = str(error).strip()
+    if not txt:
+        return None
+    txt = re.sub(r"(api key(?:\s+is|\s+as)\s+)([A-Za-z0-9_-]{6,})", r"\1***", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"(apikey=)([^&\s]+)", r"\1***", txt, flags=re.IGNORECASE)
+    return txt[:2000]
+
+
+def _is_nonfatal_provider_error(error: str | None) -> bool:
+    """
+    True when provider reports quota/rate limits but stale data is still usable.
+    """
+    if not error:
+        return False
+    msg = str(error).lower()
+    markers = (
+        "rate limit",
+        "daily rate limit",
+        "too many requests",
+        "429",
+        "quota",
+        "limit reached",
+    )
+    return any(m in msg for m in markers)
 
 
 def _state_from_last_at(
@@ -110,7 +143,7 @@ async def record_provider_ingest(
             "rows": int(max(0, rows)),
         }
         if error:
-            entry["error"] = str(error)[:2000]
+            entry["error"] = _sanitize_provider_error(error)
         else:
             entry["error"] = None
         blob[pid] = entry
@@ -240,7 +273,7 @@ async def build_news_data_provider_status(
         telem_at: str | None = raw.get("last_at") if isinstance(raw.get("last_at"), str) else None
         if telem_at and not str(telem_at).strip():
             telem_at = None
-        err: str | None = (str(raw.get("error"))[:2000] if raw.get("error") else None) or None
+        err: str | None = _sanitize_provider_error(raw.get("error"))
 
         last_iso: str | None
         if pid == "fred":
@@ -255,7 +288,7 @@ async def build_news_data_provider_status(
         has_rows = last_iso is not None
         state = _state_from_last_at(last_iso, configured=configured, has_rows=has_rows)
         if configured and has_rows and raw and raw.get("ok") is False and err:
-            state = "error"
+            state = "stale" if _is_nonfatal_provider_error(err) else "error"
         ok_flag = bool(raw.get("ok", True)) if raw else True
         out.append(
             {

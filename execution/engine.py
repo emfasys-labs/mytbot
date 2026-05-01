@@ -1710,13 +1710,12 @@ class ExecutionEngine:
 
             remote: dict[tuple[str, str], Decimal] = {}
             remote_snapshots: list[tuple[str, Position]] = []
-            for broker_name, broker in self._brokers.items():
-                bname = broker_name.strip().lower()
-                if self.paper_mode:
-                    # Paper execution is a local simulated ledger. Broker paper
-                    # APIs can be empty, delayed, or session-dependent, so they
-                    # must not tombstone locally simulated paper positions.
-                    for row in paper_position_rows.get(bname, []):
+            if self.paper_mode and not self._use_native_paper_orders():
+                # Local paper fills live in PositionLog. A broker can be late to
+                # join during startup/reconnect, but that must not make the
+                # reconciler tombstone simulated positions for that broker.
+                for bname, broker_rows in paper_position_rows.items():
+                    for row in broker_rows:
                         asset_raw = str(row.asset_class or "equity").strip().lower()
                         try:
                             asset = AssetClass(asset_raw)
@@ -1730,11 +1729,22 @@ class ExecutionEngine:
                             current_price=Decimal(str(row.current_price)),
                             unrealised_pnl=Decimal(str(row.unrealised_pnl)),
                             broker=bname,
-                            instrument_metadata=row.instrument_metadata if isinstance(row.instrument_metadata, dict) else None,
+                            instrument_metadata=(
+                                row.instrument_metadata
+                                if isinstance(row.instrument_metadata, dict)
+                                else None
+                            ),
                         )
                         key = (bname, p.symbol)
                         remote[key] = remote.get(key, Decimal("0")) + Decimal(str(p.quantity))
                         remote_snapshots.append((bname, p))
+
+            for broker_name, broker in self._brokers.items():
+                bname = broker_name.strip().lower()
+                if self.paper_mode and not self._use_native_paper_orders():
+                    # Paper execution is a local simulated ledger. Broker paper
+                    # APIs can be empty, delayed, or session-dependent, so they
+                    # must not tombstone locally simulated paper positions.
                     continue
                 try:
                     positions: list[Position] = await broker.get_positions()
