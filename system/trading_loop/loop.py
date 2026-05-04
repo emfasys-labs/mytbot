@@ -914,20 +914,23 @@ class TradingLoop:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("trading_loop | realised pnl est failed: {}", exc)
                     realised_delta = Decimal("0")
+                fee_dec = Decimal("0")
+                fee_raw = getattr(result, "fee", None)
+                if fee_raw is not None:
+                    try:
+                        fee_dec = Decimal(str(fee_raw))
+                    except Exception:  # noqa: BLE001
+                        fee_dec = Decimal("0")
+                # Fees apply to every filled execution, not only realised closes.
+                # Persist this delta unconditionally so daily_pnl.total_fees
+                # includes opening/add flows as well as closes.
+                post_trade_state["fees_today_delta"] = fee_dec
                 if realised_delta and realised_delta != Decimal("0"):
                     try:
                         prev = Decimal(str(post_trade_state.get("daily_realized_pnl", "0")))
                     except Exception:  # noqa: BLE001
                         prev = Decimal("0")
                     post_trade_state["daily_realized_pnl"] = prev + realised_delta
-                    fee_dec = Decimal("0")
-                    fee_raw = getattr(result, "fee", None)
-                    if fee_raw is not None:
-                        try:
-                            fee_dec = Decimal(str(fee_raw))
-                        except Exception:  # noqa: BLE001
-                            fee_dec = Decimal("0")
-                    post_trade_state["fees_today_delta"] = fee_dec
                     if realised_delta < 0:
                         try:
                             self.risk_engine.record_loss(abs(realised_delta))

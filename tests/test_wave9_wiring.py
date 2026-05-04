@@ -7,15 +7,15 @@ behaviour.
 
 Coverage:
 
-1. Default off: a normal approved signal flows to a paper fill; gate
-   counters are zero; no ``wave9_*`` metadata appears.
+1. Default on: a normal approved signal flows to a paper fill; gate
+   pass counter increments from the shipping config.
 2. Gate enabled with cheap cost: the order proceeds, ``wave9_gate_passed``
    increments, and the engine simulates a paper fill normally.
 3. Gate enabled with prohibitive cost (edge dwarfed by cost): execute
    returns ``None`` and ``wave9_gate_blocked`` increments.
 4. Gate exception is swallowed defensively — engine still fills.
 5. ``Wave9RuntimeConfig.from_dict`` round-trips the YAML knobs.
-6. The shipping ``config/execution_models.yaml`` loads as disabled.
+6. The shipping ``config/execution_models.yaml`` loads as enabled.
 """
 
 from __future__ import annotations
@@ -62,21 +62,21 @@ def _signal(metadata: dict | None = None, broker: str = "ibkr") -> Signal:
     )
 
 
-# ── 1. default off: nothing changes ─────────────────────────────────────────
+# ── 1. shipping config on: gate is active ───────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_default_off_engine_unchanged(monkeypatch) -> None:
+async def test_default_config_enables_wave9_gate(monkeypatch) -> None:
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
-    # Force fresh load of (disabled) shipping YAML.
+    # Force fresh load of shipping YAML.
     eng.reload_wave9_config()
-    assert eng._wave9_cfg is None or eng._wave9_cfg.enabled is False
+    assert eng._wave9_cfg is not None and eng._wave9_cfg.enabled is True
     monkeypatch.setattr("execution.engine.get_broker", lambda *a, **kw: None)
     result = await eng.execute(_signal(), _approved())
-    # Paper fallback path produces a simulated fill.
+    # Paper fallback path still produces a simulated fill.
     assert result is not None
     assert eng.wave9_gate_blocked == 0
-    assert eng.wave9_gate_passed == 0
+    assert eng.wave9_gate_passed == 1
 
 
 # ── 2. gate enabled with cheap cost: order passes ───────────────────────────
@@ -207,9 +207,9 @@ def test_config_from_dict_overrides() -> None:
     assert cfg.venue_priors.spread_for("ibkr", "equity") == 0.9
 
 
-def test_default_yaml_loads_disabled() -> None:
+def test_default_yaml_loads_enabled() -> None:
     cfg = Wave9RuntimeConfig.load(Path("config/execution_models.yaml"))
-    assert cfg.enabled is False
+    assert cfg.enabled is True
     # Sanity: per-broker priors loaded.
     assert cfg.venue_priors.fee_for("ibkr") > 0
 

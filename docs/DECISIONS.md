@@ -14,6 +14,14 @@
 
 ---
 
+## D067 — Fee-first execution gating and accounting
+**Date:** 2026-05-01
+**Decision:** Transaction costs are treated as mandatory execution constraints across all strategy flows. The Wave 9 pre-flight cost gate is enabled by default, and per-fill fees are always persisted into daily P&L accumulation (including opening/add flows, not only realised closes).
+**Reason:** Frequent churn can harvest gross unrealised moves while destroying net returns after commissions/fees/spread/slippage. Cost-awareness must be universal and strategy-agnostic at the execution boundary.
+**Status:** Implemented in `config/execution_models.yaml`, `system/trading_loop/loop.py`, and `run_m5.py`.
+
+---
+
 ## D001 — Adapter pattern for all brokers
 **Date:** 2026-04-04
 **Decision:** Every broker implements a single abstract interface (`brokers/base.py`).

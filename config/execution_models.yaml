@@ -17,7 +17,7 @@
 #      execution/router.py + execution/engine.py.
 
 execution_models:
-  enabled: false
+  enabled: true
 
   # ── Square-root impact coefficients (Almgren / Kissell) ──────────────
   impact:

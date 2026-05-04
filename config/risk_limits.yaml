@@ -43,6 +43,77 @@ max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio
 max_drawdown_pct: 0.10          # Stop trading if drawdown from HWM > 10%
 max_loss_per_trade_pct: 0.01    # Max 1% loss per individual trade
 
+# ── Profit harvesting ────────────────────────────────────────────────────────
+# Post-open profit banking. Runtime emits reduce-only closes through the normal
+# risk/execution path; AI never places orders.
+#
+# Thresholds are NOT hard-coded numbers. They are resolved per-position at
+# every tick from:
+#   * ``base``  — operator-set floors / starting points.
+#   * ``volatility`` — scales thresholds to the asset's recent realised
+#     volatility (calm names trim earlier; volatile names get more room).
+#   * ``mode_bias`` — defender tightens, hunter loosens, trader is neutral.
+#   * Per-position overrides set by the entry strategy via
+#     ``Order.instrument_metadata["profit_harvest"]`` (always win).
+profit_harvest:
+  enabled: true
+  monitor_interval_sec: 20      # Fallback cadence; overridden by mode_interval_sec.
+  close_cooldown_sec: 90
+
+  # Mode-aware cadence — hunter must react fast or runners round-trip into the
+  # red before the next tick fires. Defender can be slower; the trade thesis
+  # there is calmer.
+  mode_interval_sec:
+    defender: 30
+    trader: 20
+    hunter: 8
+
+  # Operator-set floors / fallbacks (used when volatility cannot be measured
+  # and as a lower bound under the dynamic resolver).
+  base:
+    min_profit_pct: "0.012"
+    min_profit_nav_pct: "0.001"
+    trim_fraction: "0.50"
+    full_close_profit_pct: "0.035"
+    trailing_giveback_pct: "0.35"
+    # Trailing-lock fires even after the position rolls back through zero,
+    # provided the prior peak was at least this fraction of NAV (defends
+    # against locking on noise on tiny positions).
+    peak_lock_min_nav_pct: "0.0005"
+
+  volatility:
+    fallback_vol: "0.015"        # Used when no feature snapshot is available
+    vol_low: "0.005"             # ≤ this is "calm"
+    vol_high: "0.05"             # ≥ this is "wild"
+    min_profit_k: "1.5"          # Partial-trim trigger ≈ 1.5x daily vol
+    min_profit_floor: "0.004"
+    min_profit_ceil: "0.05"
+    full_close_k: "4.0"          # Full-close trigger ≈ 4x daily vol
+    full_close_floor: "0.012"
+    full_close_ceil: "0.20"
+    giveback_vol_low: "0.25"     # In calm regimes, lock with 25% giveback
+    giveback_vol_high: "0.55"    # In wild regimes, allow 55% giveback
+
+  mode_bias:
+    defender:
+      threshold_mult: "0.70"     # Bank earlier
+      giveback_mult: "0.70"      # Protect peaks harder
+      trim_fraction_mult: "1.20" # Take more off the table
+    trader:
+      threshold_mult: "1.00"
+      giveback_mult: "1.00"
+      trim_fraction_mult: "1.00"
+    hunter:
+      threshold_mult: "1.50"     # Let winners run
+      giveback_mult: "1.40"      # Tolerate retracement
+      trim_fraction_mult: "0.70" # Leave a runner
+
+  bounds:
+    trim_fraction_min: "0.10"
+    trim_fraction_max: "0.95"
+    giveback_min: "0.10"
+    giveback_max: "0.80"
+
 # ── Consecutive losses ────────────────────────────────────────────────────────
 max_consecutive_losses: 3       # Enter cooldown after 3 losses in a row
 cooldown_minutes: 60            # Wait 60 minutes before trading again

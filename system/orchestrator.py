@@ -29,6 +29,7 @@ from loguru import logger
 
 from risk.engine import Signal as RiskSignal
 from risk.engine import RiskVerdict
+from risk.profit_harvest import evaluate_profit_harvest, resolve_harvest_thresholds
 from risk.stop_loss import evaluate_stop_loss
 from system.broker_manager import BrokerManager, BrokerReport
 from system.dependency_manager import DependencyManager, DependencyReport
@@ -97,10 +98,13 @@ class Orchestrator:
         self._coverage_sync_task: asyncio.Task | None = None
         self._nav_heartbeat_task: asyncio.Task | None = None
         self._stop_loss_task: asyncio.Task | None = None
+        self._profit_harvest_task: asyncio.Task | None = None
         self._order_reconcile_task: asyncio.Task | None = None
         # Per-position close throttle to avoid re-emitting closes every monitor tick
         # while broker/order status is still settling.
         self._stop_loss_last_close_ts: dict[str, float] = {}
+        self._profit_harvest_last_action_ts: dict[str, float] = {}
+        self._profit_harvest_peak_pnl: dict[str, Decimal] = {}
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
@@ -126,6 +130,82 @@ class Orchestrator:
             step = min(ch, remaining)
             await asyncio.sleep(step)
             remaining -= step
+
+    PROFIT_HARVEST_PEAKS_STATE_KEY = "risk.profit_harvest.peaks"
+
+    async def _persist_profit_harvest_peaks(self) -> None:
+        """Persist current peak P&L per position so an orchestrator restart
+        does not silently reset trailing-lock memory back to zero. Without
+        this, a +$3K → −$4K round-trip can survive across a restart with no
+        record of the prior peak, leaving the trailing lock unable to fire."""
+        try:
+            from control.command_bus import CommandBus
+            from storage.db import init_async_database, dispose_engine as _dispose
+        except Exception:  # noqa: BLE001
+            return
+        if not self._profit_harvest_peak_pnl and not self._profit_harvest_last_action_ts:
+            return
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            payload = {
+                "peaks": {k: str(v) for k, v in self._profit_harvest_peak_pnl.items()},
+                "last_action_ts": dict(self._profit_harvest_last_action_ts),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await CommandBus(sf).set_state(self.PROFIT_HARVEST_PEAKS_STATE_KEY, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | profit-harvest peak persist failed: {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
+    async def _load_persisted_profit_harvest_peaks(self) -> None:
+        try:
+            from control.command_bus import CommandBus
+            from storage.db import init_async_database, dispose_engine as _dispose
+        except Exception:  # noqa: BLE001
+            return
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            raw = await CommandBus(sf).get_state(self.PROFIT_HARVEST_PEAKS_STATE_KEY, None)
+            if not isinstance(raw, dict):
+                return
+            peaks = raw.get("peaks") or {}
+            if isinstance(peaks, dict):
+                for k, v in peaks.items():
+                    try:
+                        self._profit_harvest_peak_pnl[str(k)] = Decimal(str(v))
+                    except Exception:  # noqa: BLE001
+                        continue
+            last_ts = raw.get("last_action_ts") or {}
+            if isinstance(last_ts, dict):
+                for k, v in last_ts.items():
+                    try:
+                        self._profit_harvest_last_action_ts[str(k)] = float(v)
+                    except Exception:  # noqa: BLE001
+                        continue
+            if self._profit_harvest_peak_pnl:
+                logger.info(
+                    "orchestrator | restored profit-harvest peaks for {} positions",
+                    len(self._profit_harvest_peak_pnl),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | profit-harvest peak restore failed: {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
 
     async def _load_persisted_capital_pct(self) -> None:
         """Restore operator capital allocation from durable control state."""
@@ -192,6 +272,7 @@ class Orchestrator:
                 # 2. Database migrations
                 await self._run_migrations()
                 await self._load_persisted_capital_pct()
+                await self._load_persisted_profit_harvest_peaks()
 
                 # 3. Brokers
                 logger.info("orchestrator | discovering brokers...")
@@ -205,6 +286,7 @@ class Orchestrator:
                 self._start_coverage_sync_loop()
                 self._start_nav_heartbeat_loop()
                 self._start_stop_loss_loop()
+                self._start_profit_harvest_loop()
                 self._start_order_reconcile_loop()
 
                 # 4. Data pipeline (background, non-blocking)
@@ -353,6 +435,16 @@ class Orchestrator:
                     pass
                 self._stop_loss_task = None
             self._stop_loss_last_close_ts.clear()
+
+            if self._profit_harvest_task is not None and not self._profit_harvest_task.done():
+                self._profit_harvest_task.cancel()
+                try:
+                    await self._profit_harvest_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._profit_harvest_task = None
+            self._profit_harvest_last_action_ts.clear()
+            self._profit_harvest_peak_pnl.clear()
 
             if self._order_reconcile_task is not None and not self._order_reconcile_task.done():
                 self._order_reconcile_task.cancel()
@@ -610,12 +702,36 @@ class Orchestrator:
             except asyncio.CancelledError:
                 return
 
+    @staticmethod
+    def _read_active_profile_mode() -> str:
+        """Mirror ``TradingLoop._read_active_mode`` so the harvester sees the
+        same operator-selected mode (defender / trader / hunter) without
+        depending on the loop instance."""
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            p = _Path("data/runtime/active_mode.json")
+            if p.is_file():
+                return str(_json.loads(p.read_text(encoding="utf-8")).get("mode", "trader")).strip().lower()
+        except Exception:  # noqa: BLE001
+            pass
+        return "trader"
+
     def _start_stop_loss_loop(self) -> None:
         """Start post-open stop-loss monitor task (D031E runtime wiring)."""
         if self._stop_loss_task is not None and not self._stop_loss_task.done():
             return
         self._stop_loss_task = asyncio.create_task(
             self._stop_loss_loop(), name="stop-loss-monitor"
+        )
+
+    def _start_profit_harvest_loop(self) -> None:
+        """Start post-open profit harvesting monitor task."""
+        if self._profit_harvest_task is not None and not self._profit_harvest_task.done():
+            return
+        self._profit_harvest_task = asyncio.create_task(
+            self._profit_harvest_loop(), name="profit-harvest-monitor"
         )
 
     def _start_order_reconcile_loop(self) -> None:
@@ -1044,6 +1160,281 @@ class Orchestrator:
                 await self._run_stop_loss_tick()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("orchestrator | stop-loss monitor error: {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    async def _run_profit_harvest_tick(self) -> None:
+        """Evaluate open positions for profit banking and submit reduce-only trims."""
+        tl = self._trading_loop
+        if tl is None:
+            return
+        risk_engine = getattr(tl, "risk_engine", None)
+        execution_engine = getattr(tl, "execution_engine", None)
+        if risk_engine is None or execution_engine is None:
+            return
+
+        cfg = getattr(risk_engine, "config", {}) or {}
+        ph_cfg = cfg.get("profit_harvest", {}) if isinstance(cfg.get("profit_harvest", {}), dict) else {}
+        if not bool(ph_cfg.get("enabled", True)):
+            return
+
+        try:
+            close_cooldown_sec = max(5.0, float(ph_cfg.get("close_cooldown_sec", 90)))
+        except (TypeError, ValueError):
+            close_cooldown_sec = 90.0
+
+        # Backwards-compat: a flat (legacy) config still maps to ``base``.
+        if "base" not in ph_cfg and any(
+            k in ph_cfg for k in ("min_profit_pct", "full_close_profit_pct")
+        ):
+            ph_cfg = {
+                **ph_cfg,
+                "base": {
+                    "min_profit_pct": ph_cfg.get("min_profit_pct"),
+                    "min_profit_nav_pct": ph_cfg.get("min_profit_nav_pct"),
+                    "trim_fraction": ph_cfg.get("trim_fraction"),
+                    "full_close_profit_pct": ph_cfg.get("full_close_profit_pct"),
+                    "trailing_giveback_pct": ph_cfg.get("trailing_giveback_pct"),
+                },
+            }
+
+        active_mode = self._read_active_profile_mode()
+        timeframe = os.getenv("TIMEFRAME", "1h")
+
+        try:
+            from storage.db import init_async_database, dispose_engine as _dispose
+            from run_m3 import _load_portfolio_state
+            from system.portfolio_equity import live_portfolio_value
+            from data.feature_lookup import load_latest_feature_json
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | profit-harvest tick imports unavailable: {}", exc)
+            return
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            nav = await live_portfolio_value(self._broker_manager)
+            if nav <= 0:
+                return
+            portfolio_state = await _load_portfolio_state(
+                sf,
+                fallback_portfolio_value=nav,
+                capital_pct=Decimal(str(self.capital_pct)),
+            )
+            positions = dict(portfolio_state.get("positions") or {})
+            if not positions:
+                self._profit_harvest_peak_pnl.clear()
+                return
+
+            now_ts = datetime.now(timezone.utc).timestamp()
+            active_keys: set[str] = set()
+            for pos_key, row in positions.items():
+                try:
+                    qty = Decimal(str(row.get("quantity", "0") or "0"))
+                    entry = Decimal(str(row.get("avg_entry_price", "0") or "0"))
+                    current = Decimal(str(row.get("current_price", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if qty == 0 or entry <= 0 or current <= 0:
+                    continue
+                sym = str(row.get("symbol") or pos_key).split(":", 1)[-1].strip().upper()
+                broker = str(row.get("broker") or "").strip().lower()
+                asset_class = str(row.get("asset_class") or "equity").strip().lower()
+                if not sym or not broker:
+                    continue
+                side = "sell" if qty > 0 else "buy"
+                harvest_key = f"{broker}:{sym}:{'long' if qty > 0 else 'short'}"
+                active_keys.add(harvest_key)
+                last_ts = self._profit_harvest_last_action_ts.get(harvest_key, 0.0)
+                if now_ts - last_ts < close_cooldown_sec:
+                    continue
+
+                direction = Decimal("1") if qty > 0 else Decimal("-1")
+                current_profit = direction * (current - entry) * abs(qty)
+                prev_peak = self._profit_harvest_peak_pnl.get(harvest_key, Decimal("0"))
+                peak = max(prev_peak, current_profit)
+                self._profit_harvest_peak_pnl[harvest_key] = peak
+
+                # Per-position vol from latest feature snapshot (atr / close).
+                vol_pct: Decimal | None = None
+                try:
+                    async with sf() as feat_sess:
+                        feat = await load_latest_feature_json(feat_sess, sym, timeframe)
+                    if feat:
+                        atr = feat.get("atr_14")
+                        last_close = feat.get("close")
+                        if atr is not None and last_close not in (None, 0):
+                            cp = Decimal(str(last_close))
+                            if cp > 0:
+                                vol_pct = abs(Decimal(str(atr))) / cp
+                except Exception:  # noqa: BLE001
+                    vol_pct = None
+
+                im = row.get("instrument_metadata") if isinstance(row, dict) else None
+                overrides = (
+                    im.get("profit_harvest")
+                    if isinstance(im, dict) and isinstance(im.get("profit_harvest"), dict)
+                    else None
+                )
+
+                thresholds = resolve_harvest_thresholds(
+                    config=ph_cfg,
+                    profile_mode=active_mode,
+                    volatility_pct=vol_pct,
+                    overrides=overrides,
+                )
+
+                decision = evaluate_profit_harvest(
+                    quantity=qty,
+                    avg_entry_price=entry,
+                    current_price=current,
+                    nav=nav,
+                    peak_profit_absolute=peak,
+                    min_profit_pct=thresholds.min_profit_pct,
+                    min_profit_nav_pct=thresholds.min_profit_nav_pct,
+                    trim_fraction=thresholds.trim_fraction,
+                    full_close_profit_pct=thresholds.full_close_profit_pct,
+                    trailing_giveback_pct=thresholds.trailing_giveback_pct,
+                    peak_lock_min_nav_pct=thresholds.peak_lock_min_nav_pct,
+                )
+                if not decision.should_reduce:
+                    continue
+
+                reduce_qty = (abs(qty) * decision.reduce_fraction).quantize(Decimal("0.00000001"))
+                if reduce_qty <= 0:
+                    continue
+                signal = RiskSignal(
+                    signal_id=f"profitharvest-{sym}-{int(now_ts)}",
+                    symbol=sym,
+                    side=side,
+                    strategy="profit_harvest_monitor",
+                    confidence=1.0,
+                    suggested_quantity=reduce_qty,
+                    suggested_price=current,
+                    broker=broker,
+                    asset_class=asset_class,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    metadata={
+                        "reduce_only": True,
+                        "profit_harvest_monitor": True,
+                        "profit_harvest_reason": decision.reason,
+                        "profit_harvest_reduce_fraction": str(decision.reduce_fraction),
+                        "profit_harvest_profit_absolute": str(decision.profit_absolute),
+                        "profit_harvest_profit_pct": str(decision.profit_pct),
+                        "profit_harvest_profit_pct_of_nav": str(decision.profit_pct_of_nav),
+                        "profit_harvest_peak_profit_absolute": str(decision.peak_profit_absolute),
+                        "profit_harvest_giveback_fraction": str(decision.giveback_fraction),
+                        "profit_harvest_thresholds": {
+                            "min_profit_pct": str(thresholds.min_profit_pct),
+                            "min_profit_nav_pct": str(thresholds.min_profit_nav_pct),
+                            "full_close_profit_pct": str(thresholds.full_close_profit_pct),
+                            "trim_fraction": str(thresholds.trim_fraction),
+                            "trailing_giveback_pct": str(thresholds.trailing_giveback_pct),
+                        },
+                        "profit_harvest_inputs": thresholds.inputs,
+                    },
+                )
+
+                risk_engine.update_high_watermark(
+                    Decimal(str(portfolio_state.get("high_watermark_value", nav)))
+                )
+                risk_engine.restore_runtime_state(portfolio_state)
+                risk_decision = await risk_engine.evaluate_and_persist(sf, signal, portfolio_state)
+                if risk_decision.verdict != RiskVerdict.APPROVED:
+                    logger.warning(
+                        "orchestrator | profit-harvest rejected by risk | broker={} symbol={} reason={}",
+                        broker,
+                        sym,
+                        risk_decision.reason,
+                    )
+                    self._profit_harvest_last_action_ts[harvest_key] = now_ts
+                    continue
+
+                result = await execution_engine.execute(signal, risk_decision, session_factory=sf)
+                self._profit_harvest_last_action_ts[harvest_key] = now_ts
+                if result is None:
+                    logger.warning(
+                        "orchestrator | profit-harvest did not execute | broker={} symbol={} reason={}",
+                        broker,
+                        sym,
+                        decision.reason,
+                    )
+                    continue
+                logger.warning(
+                    "orchestrator | profit-harvest submitted | broker={} symbol={} side={} qty={} reason={} profit={}",
+                    broker,
+                    sym,
+                    side,
+                    reduce_qty,
+                    decision.reason,
+                    decision.profit_absolute,
+                )
+
+            for key in list(self._profit_harvest_peak_pnl.keys()):
+                if key not in active_keys:
+                    self._profit_harvest_peak_pnl.pop(key, None)
+                    self._profit_harvest_last_action_ts.pop(key, None)
+
+            # Persist peaks so trailing-lock memory survives orchestrator restarts.
+            try:
+                await self._persist_profit_harvest_peaks()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | profit-harvest peak persist tick error: {}", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | profit-harvest tick error (non-fatal): {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
+    def _resolve_profit_harvest_interval(self) -> float:
+        """Mode-aware monitor cadence. Hunter reacts fast; defender is patient."""
+        env_raw = os.getenv("PROFIT_HARVEST_MONITOR_INTERVAL_SEC", "").strip()
+        if env_raw:
+            try:
+                v = float(env_raw)
+                if v > 0:
+                    return max(2.0, v)
+            except ValueError:
+                pass
+
+        tl = self._trading_loop
+        cfg = getattr(getattr(tl, "risk_engine", None), "config", {}) if tl is not None else {}
+        ph_cfg = cfg.get("profit_harvest", {}) if isinstance(cfg.get("profit_harvest", {}), dict) else {}
+        mode = self._read_active_profile_mode()
+        mode_intervals = ph_cfg.get("mode_interval_sec", {}) if isinstance(ph_cfg.get("mode_interval_sec", {}), dict) else {}
+        if mode in mode_intervals:
+            try:
+                return max(2.0, float(mode_intervals[mode]))
+            except (TypeError, ValueError):
+                pass
+        try:
+            return max(2.0, float(ph_cfg.get("monitor_interval_sec", 20.0)))
+        except (TypeError, ValueError):
+            return 20.0
+
+    async def _profit_harvest_loop(self) -> None:
+        """Periodic post-open profit harvesting monitor loop."""
+        interval = self._resolve_profit_harvest_interval()
+
+        try:
+            await self._sleep_cancellable(min(5.0, interval))
+        except asyncio.CancelledError:
+            return
+
+        while True:
+            try:
+                await self._run_profit_harvest_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | profit-harvest monitor error: {}", exc)
+            # Re-resolve every iteration so a runtime mode switch takes effect immediately.
+            interval = self._resolve_profit_harvest_interval()
             try:
                 await self._sleep_cancellable(interval)
             except asyncio.CancelledError:

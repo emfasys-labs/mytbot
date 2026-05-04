@@ -358,6 +358,22 @@ async def _run_loop(args: argparse.Namespace) -> int:
             return False
 
         realized = _estimate_realized_pnl_from_fill(portfolio_state, signal, result)
+        try:
+            prev_realized = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
+        except Exception:  # noqa: BLE001
+            prev_realized = Decimal("0")
+        portfolio_state["daily_realized_pnl"] = prev_realized + realized
+
+        fee_dec = Decimal("0")
+        fee_raw = getattr(result, "fee", None)
+        if fee_raw is not None:
+            try:
+                fee_dec = Decimal(str(fee_raw))
+            except Exception:  # noqa: BLE001
+                fee_dec = Decimal("0")
+        # Always push per-fill fee deltas into daily PnL accumulation.
+        portfolio_state["fees_today_delta"] = fee_dec
+
         if realized < 0:
             risk_engine.record_loss(abs(realized))
         elif realized > 0:
