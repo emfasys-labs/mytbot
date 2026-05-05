@@ -231,6 +231,7 @@ export type PnlPeriodRollup = {
   trades?: number;
   period_start?: string;
   period_end?: string;
+  partial_coverage?: boolean;
 };
 
 export type ApiPnlResponse = {
@@ -245,12 +246,16 @@ export type ApiPnlResponse = {
     capital_allocation_pct?: number;
     nav_status?: {
       complete?: boolean;
+      coverage_full?: boolean;
       included?: string[];
       missing?: string[];
+      configured?: string[];
+      excluded?: Array<{ name?: string; connected?: boolean; balance_ready?: boolean; reason?: string }>;
     };
   };
   week?: PnlPeriodRollup;
   month?: PnlPeriodRollup;
+  all_time?: PnlPeriodRollup;
   metrics?: {
     win_rate_days?: number | null;
     max_drawdown_pct?: number | null;

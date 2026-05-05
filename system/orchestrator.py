@@ -31,6 +31,7 @@ from risk.engine import Signal as RiskSignal
 from risk.engine import RiskVerdict
 from risk.profit_harvest import evaluate_profit_harvest, resolve_harvest_thresholds
 from risk.stop_loss import evaluate_stop_loss
+from system.local_paper_flatten import flatten_local_paper_book
 from system.broker_manager import BrokerManager, BrokerReport
 from system.dependency_manager import DependencyManager, DependencyReport
 from system.telegram_notify import send_lifecycle_notification
@@ -100,11 +101,13 @@ class Orchestrator:
         self._stop_loss_task: asyncio.Task | None = None
         self._profit_harvest_task: asyncio.Task | None = None
         self._order_reconcile_task: asyncio.Task | None = None
+        self._zero_alloc_flatten_task: asyncio.Task | None = None
         # Per-position close throttle to avoid re-emitting closes every monitor tick
         # while broker/order status is still settling.
         self._stop_loss_last_close_ts: dict[str, float] = {}
         self._profit_harvest_last_action_ts: dict[str, float] = {}
         self._profit_harvest_peak_pnl: dict[str, Decimal] = {}
+        self._zero_alloc_flatten_last_ts: float = 0.0
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
@@ -288,6 +291,7 @@ class Orchestrator:
                 self._start_stop_loss_loop()
                 self._start_profit_harvest_loop()
                 self._start_order_reconcile_loop()
+                self._start_zero_alloc_flatten_watchdog()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -453,6 +457,15 @@ class Orchestrator:
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._order_reconcile_task = None
+
+            if self._zero_alloc_flatten_task is not None and not self._zero_alloc_flatten_task.done():
+                self._zero_alloc_flatten_task.cancel()
+                try:
+                    await self._zero_alloc_flatten_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._zero_alloc_flatten_task = None
+            self._zero_alloc_flatten_last_ts = 0.0
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
@@ -750,6 +763,109 @@ class Orchestrator:
         self._order_reconcile_task = asyncio.create_task(
             self._order_reconcile_loop(), name="order-reconcile"
         )
+
+    def _start_zero_alloc_flatten_watchdog(self) -> None:
+        """Start a paper-mode guard for zero-allocation flatten.
+
+        The normal flatten path lives in the trading-loop iteration body. If
+        that loop wedges while the operator has already dragged allocation to
+        0%, the safest paper-mode fallback is to flatten the local simulated
+        book directly rather than waiting for another strategy tick.
+        """
+        raw = os.getenv("ZERO_ALLOC_FLATTEN_WATCHDOG_ENABLED", "1").strip().lower()
+        if raw in {"0", "false", "no", "off"}:
+            return
+        if os.getenv("APP_ENV", "paper").strip().lower() == "live":
+            return
+        if self._zero_alloc_flatten_task is not None and not self._zero_alloc_flatten_task.done():
+            return
+        self._zero_alloc_flatten_task = asyncio.create_task(
+            self._zero_alloc_flatten_watchdog_loop(), name="zero-alloc-flatten-watchdog"
+        )
+
+    async def _zero_alloc_flatten_watchdog_loop(self) -> None:
+        try:
+            interval = max(5.0, float(os.getenv("ZERO_ALLOC_FLATTEN_WATCHDOG_INTERVAL_SEC", "15")))
+        except (TypeError, ValueError):
+            interval = 15.0
+        while True:
+            try:
+                await self._run_zero_alloc_flatten_watchdog_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("orchestrator | zero-allocation flatten watchdog error: {}", exc)
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    def _zero_alloc_loop_is_stale(self) -> tuple[bool, float | None]:
+        tl = self._trading_loop
+        if tl is None:
+            return False, None
+        if not getattr(tl, "is_running", False):
+            return True, None
+
+        now = datetime.now(timezone.utc)
+        last = getattr(tl, "last_iteration_at", None)
+        if last is None:
+            try:
+                startup_grace = max(
+                    0.0,
+                    float(os.getenv("ZERO_ALLOC_FLATTEN_STARTUP_GRACE_SEC", "45")),
+                )
+            except (TypeError, ValueError):
+                startup_grace = 45.0
+            age = (now - self.state_changed_at).total_seconds()
+            return age >= startup_grace, age
+
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age = (now - last.astimezone(timezone.utc)).total_seconds()
+        try:
+            configured = float(os.getenv("ZERO_ALLOC_FLATTEN_STALE_SEC", "0"))
+        except (TypeError, ValueError):
+            configured = 0.0
+        loop_interval = float(getattr(tl, "loop_interval_sec", 120) or 120)
+        stale_sec = configured if configured > 0 else max(180.0, loop_interval * 2.5)
+        return age >= stale_sec, age
+
+    async def _run_zero_alloc_flatten_watchdog_tick(self) -> None:
+        if self.state != SystemState.RUNNING:
+            return
+        if os.getenv("APP_ENV", "paper").strip().lower() == "live":
+            return
+        if Decimal(str(self.capital_pct)) > Decimal("0.000001"):
+            return
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        try:
+            cooldown = max(30.0, float(os.getenv("ZERO_ALLOC_FLATTEN_COOLDOWN_SEC", "120")))
+        except (TypeError, ValueError):
+            cooldown = 120.0
+        if now_ts - self._zero_alloc_flatten_last_ts < cooldown:
+            return
+
+        stale, age = self._zero_alloc_loop_is_stale()
+        if not stale:
+            return
+
+        self._zero_alloc_flatten_last_ts = now_ts
+        result = await flatten_local_paper_book(
+            apply=True,
+            reason="zero_allocation_watchdog",
+        )
+        if result.count <= 0:
+            return
+
+        logger.warning(
+            "orchestrator | zero-allocation watchdog flattened {} local paper position(s) | loop_age_sec={}",
+            result.count,
+            f"{age:.1f}" if age is not None else "unknown",
+        )
+        # Leave a clear wake behind; if the loop is merely slow rather than
+        # dead, its next tick will republish a zero-exposure dashboard.
+        if self._trading_loop is not None:
+            self._trading_loop.request_iteration("zero_allocation_watchdog_flattened")
 
     async def _order_reconcile_loop(self) -> None:
         try:

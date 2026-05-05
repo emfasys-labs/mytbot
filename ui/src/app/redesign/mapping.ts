@@ -497,6 +497,14 @@ function janFirstLocalYmd(d: Date): string {
   return ymdLocal(new Date(d.getFullYear(), 0, 1));
 }
 
+function hasPartialBrokerCoverage(pnl: ApiPnlResponse | null): boolean {
+  const status = pnl?.today?.nav_status;
+  if (!status) return false;
+  if (status.coverage_full === false) return true;
+  const excluded = status.excluded;
+  return Array.isArray(excluded) && excluded.length > 0;
+}
+
 /**
  * Intraday baseline NAV: last persisted end-of-day ``portfolio_value`` before **today**; otherwise a coarse fallback.
  * Used for the hero day-change and ``mapPnlRollups`` **d** (unused in the shell but kept consistent).
@@ -514,6 +522,10 @@ export function navOpenFromHistory(
     .sort((a, b) => a.date.localeCompare(b.date));
   const before = sorted.filter((h) => h.date < today);
   const todayPnl = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
+  if (hasPartialBrokerCoverage(pnl)) {
+    const open = navNow - todayPnl;
+    return Number.isFinite(open) && open > 0 ? open : navNow;
+  }
   if (before.length) {
     const last = before[before.length - 1];
     if (last && Number.isFinite(last.value)) {
@@ -581,6 +593,10 @@ export function mapPnlRollups(
   const wApi = toNumber(pnl?.week?.realised, 0) + toNumber(pnl?.week?.unrealised, 0);
   const mApi = toNumber(pnl?.month?.realised, 0) + toNumber(pnl?.month?.unrealised, 0);
   const yApi = toNumber(pnl?.all_time?.realised, 0) + toNumber(pnl?.all_time?.unrealised, 0);
+  const todayApi = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
+  if (hasPartialBrokerCoverage(pnl)) {
+    return { d: todayApi, w: 0, m: 0, y: 0 };
+  }
   const now = new Date();
   const weekStart = mondayLocalYmd(now);
   const monthStart = firstOfMonthLocalYmd(now);

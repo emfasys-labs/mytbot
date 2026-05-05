@@ -276,3 +276,36 @@ async def test_pnl_and_dashboard_agree_on_same_data() -> None:
 
     loop_value = await live_portfolio_value(orch._broker_manager)
     assert api_value == loop_value == Decimal("1105000")
+
+
+def test_api_filters_position_rows_to_connected_nav_brokers_when_coverage_partial() -> None:
+    from api import server as api_server
+
+    class _Report:
+        def coverage(self) -> dict[str, Any]:
+            return {
+                "full": False,
+                "configured": ["ibkr", "alpaca"],
+                "included": ["alpaca"],
+                "excluded": [{"name": "ibkr", "connected": False, "balance_ready": False, "reason": "offline"}],
+            }
+
+    orch = SimpleNamespace(_broker_manager=SimpleNamespace(report=_Report()))
+    original_get = api_server._get_orchestrator
+    api_server._get_orchestrator = lambda: orch  # type: ignore[assignment]
+    try:
+        rows = api_server._filter_rows_to_current_nav_brokers(
+            [
+                {"broker": "ibkr", "symbol": "AAPL", "unrealised_pnl": "10"},
+                {"broker": "alpaca", "symbol": "MSFT", "unrealised_pnl": "2"},
+            ]
+        )
+        status = api_server._nav_status_from_snapshot(
+            SimpleNamespace(complete=True, included=("alpaca",), missing=())
+        )
+    finally:
+        api_server._get_orchestrator = original_get  # type: ignore[assignment]
+
+    assert rows == [{"broker": "alpaca", "symbol": "MSFT", "unrealised_pnl": "2"}]
+    assert status["coverage_full"] is False
+    assert status["excluded"][0]["name"] == "ibkr"

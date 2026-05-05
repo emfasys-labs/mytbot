@@ -665,6 +665,7 @@ async def _merge_synthetic_paper_positions_from_log(
 
     async with session_factory() as session:
         pl_rows = await _latest_position_log_rows(session, open_only=True)
+        pl_rows = _filter_position_logs_to_current_nav_brokers(pl_rows)
         if not pl_rows:
             return live_rows
         sym_list = [str(r.symbol).strip().upper() for r in pl_rows if r.symbol]
@@ -712,6 +713,7 @@ async def _merge_synthetic_paper_positions_from_log(
 
 async def _live_broker_unrealised_total() -> Decimal:
     rows = await _live_broker_positions(500)
+    rows = _filter_rows_to_current_nav_brokers(rows)
     total = Decimal(0)
     for row in rows:
         try:
@@ -737,6 +739,7 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
 
     async with session_factory() as session:
         rows = await _latest_position_log_rows(session, open_only=True)
+        rows = _filter_position_logs_to_current_nav_brokers(rows)
         if not rows:
             return Decimal(0)
         feature_prices = await _latest_feature_prices(session, [r.symbol for r in rows])
@@ -765,6 +768,50 @@ def _get_orchestrator():
         return Orchestrator.get_instance()
     except Exception:
         return None
+
+
+def _current_broker_coverage() -> dict[str, Any] | None:
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch is not None else None
+    report = getattr(bm, "report", None) if bm is not None else None
+    if report is None:
+        return None
+    try:
+        cov = report.coverage()
+    except Exception:  # noqa: BLE001
+        return None
+    return cov if isinstance(cov, dict) else None
+
+
+def _current_nav_broker_filter() -> set[str] | None:
+    """Return current connected/balance-ready broker names when coverage is partial.
+
+    ``None`` means no filtering is needed or coverage is unavailable. When a
+    configured broker is missing, all dashboard/accounting numbers must switch
+    to the same current-coverage universe; otherwise a partial NAV can be
+    divided into a full historical/position book and produce nonsense leverage.
+    """
+    cov = _current_broker_coverage()
+    if not cov or bool(cov.get("full")):
+        return None
+    included = cov.get("included")
+    if not isinstance(included, list):
+        return set()
+    return {str(n).strip().lower() for n in included if str(n).strip()}
+
+
+def _filter_rows_to_current_nav_brokers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    allowed = _current_nav_broker_filter()
+    if allowed is None:
+        return rows
+    return [r for r in rows if str(r.get("broker") or "").strip().lower() in allowed]
+
+
+def _filter_position_logs_to_current_nav_brokers(rows: list[PositionLog]) -> list[PositionLog]:
+    allowed = _current_nav_broker_filter()
+    if allowed is None:
+        return rows
+    return [r for r in rows if str(getattr(r, "broker", "") or "").strip().lower() in allowed]
 
 
 @app.get("/healthz")
@@ -815,6 +862,7 @@ async def get_status():
 @app.get("/positions")
 async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=Depends(_session_factory)):
     live_rows = await _live_broker_positions(limit)
+    live_rows = _filter_rows_to_current_nav_brokers(live_rows)
     if APP_ENV != "live" and live_rows:
         live_rows = await _merge_synthetic_paper_positions_from_log(
             session_factory, live_rows, limit=limit
@@ -825,6 +873,7 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
 
     async with session_factory() as session:
         rows = await _latest_position_log_rows(session, limit=limit, open_only=True)
+        rows = _filter_position_logs_to_current_nav_brokers(rows)
         if not rows:
             return {"positions": [], "source": "position_log"}
         prices = await _latest_feature_prices(session, [r.symbol for r in rows])
@@ -1449,11 +1498,29 @@ async def _live_portfolio_nav_status() -> dict[str, Any]:
 
 
 def _nav_status_from_snapshot(snap: Any) -> dict[str, Any]:
-    return {
+    cov = _current_broker_coverage()
+    coverage_full = bool(cov.get("full")) if isinstance(cov, dict) else bool(getattr(snap, "complete", False))
+    status = {
         "complete": bool(getattr(snap, "complete", False)),
         "included": list(getattr(snap, "included", ()) or ()),
         "missing": list(getattr(snap, "missing", ()) or ()),
+        "coverage_full": coverage_full,
     }
+    if isinstance(cov, dict):
+        status["configured"] = list(cov.get("configured") or [])
+        status["excluded"] = list(cov.get("excluded") or [])
+    return status
+
+
+def _partial_coverage_period_rollup(period_agg: dict[str, Any]) -> dict[str, Any]:
+    """Keep period metadata but avoid full-book P&L on a partial broker NAV."""
+    out = dict(period_agg)
+    out["realised"] = "0"
+    out["unrealised"] = "0"
+    out["fees"] = "0"
+    out["trades"] = 0
+    out["partial_coverage"] = True
+    return out
 
 
 def _configured_paper_nav() -> Decimal:
@@ -1524,6 +1591,7 @@ async def get_pnl(
     live_snap = await live_portfolio_snapshot(bm) if bm is not None else None
     nav_status = _nav_status_from_snapshot(live_snap) if live_snap is not None else {"complete": False, "included": [], "missing": []}
     live_value = live_snap.value if live_snap is not None else Decimal(0)
+    coverage_full = bool(nav_status.get("coverage_full", nav_status.get("complete", False)))
     configured_nav = _configured_paper_nav()
     # When brokers report a positive live sum, that figure wins — do not `max` with
     # `daily_pnl` or older persisted rows that were written while an excluded/buggy
@@ -1565,23 +1633,36 @@ async def get_pnl(
                 live_today_unrealised=today_unrealised,
             )
         )
+    if not coverage_full:
+        # DailyPnL/history rows are whole-book aggregates. When the live NAV is
+        # intentionally partial (for example IBKR is offline and excluded), do
+        # not compare that partial denominator with full-book historical P&L.
+        week_agg = _partial_coverage_period_rollup(week_agg)
+        month_agg = _partial_coverage_period_rollup(month_agg)
+        max_dd = None
+    all_time_unrealised = (
+        today_unrealised
+        if coverage_full and today_unrealised != 0
+        else (latest_unrealised_db if coverage_full else Decimal(0))
+    )
 
     return {
         "today": {
-            "realised": _decimal_str(today_row.realised_pnl if today_row else 0),
+            "realised": _decimal_str(today_row.realised_pnl if (coverage_full and today_row) else 0),
             "unrealised": _decimal_str(today_unrealised),
-            "fees": _decimal_str(today_row.total_fees if today_row else 0),
-            "trades": int(today_row.trade_count if today_row else 0),
+            "fees": _decimal_str(today_row.total_fees if (coverage_full and today_row) else 0),
+            "trades": int(today_row.trade_count if (coverage_full and today_row) else 0),
             "portfolio_value": _decimal_str(display_value),
             "tradable_capital": _decimal_str(tradable_value),
             "capital_allocation_pct": cap_pct,
             "nav_status": nav_status,
         },
         "all_time": {
-            "realised": _decimal_str(agg[0]),
-            "unrealised": _decimal_str(today_unrealised if today_unrealised != 0 else latest_unrealised_db),
-            "fees": _decimal_str(agg[1]),
-            "trades": int(agg[2] or 0),
+            "realised": _decimal_str(0 if not coverage_full else agg[0]),
+            "unrealised": _decimal_str(all_time_unrealised),
+            "fees": _decimal_str(0 if not coverage_full else agg[1]),
+            "trades": int(agg[2] or 0) if coverage_full else 0,
+            "partial_coverage": not coverage_full,
         },
         "week": week_agg,
         "month": month_agg,
