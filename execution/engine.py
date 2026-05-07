@@ -1329,24 +1329,14 @@ class ExecutionEngine:
             return True
         actual_notional = abs(Decimal(str(order.quantity))) * Decimal(str(px))
 
-        # Absolute fallback cap when no upstream sizing audit is attached.
-        # Without this, the original guard was a no-op for any signal that
-        # bypassed the global-edge coordinator (legacy strategies, external
-        # signals, batch overrides). EXECUTION_MAX_ORDER_NOTIONAL_USD bounds
-        # the worst-case order notional regardless of metadata.
-        #
-        # D061 — adaptive cash-based sizing produces large forex notionals
-        # (a $50k cash budget on a forex pair → $1M notional via 5% margin)
-        # which legitimately exceed the legacy $50k bound. Default raised to
-        # $10M and treated as a runaway-prevention safety net rather than a
-        # primary sizing limit. The real per-position ceiling is enforced
-        # upstream at the coordinator (NAV × max_concentration_pct) and at
-        # the risk engine (concentration check). Operators can still tighten
-        # via env var if desired.
+        # Optional legacy absolute fallback cap when no upstream sizing audit
+        # is attached. Disabled by default because the operator's capital
+        # allocation slider is the authoritative deployment target; set
+        # EXECUTION_MAX_ORDER_NOTIONAL_USD explicitly to re-enable.
         try:
-            absolute_cap = Decimal(os.getenv("EXECUTION_MAX_ORDER_NOTIONAL_USD", "10000000") or "0")
+            absolute_cap = Decimal(os.getenv("EXECUTION_MAX_ORDER_NOTIONAL_USD", "0") or "0")
         except Exception:  # noqa: BLE001
-            absolute_cap = Decimal("10000000")
+            absolute_cap = Decimal("0")
         if (
             not is_reduce_only
             and absolute_cap > 0
@@ -1381,8 +1371,13 @@ class ExecutionEngine:
             )
             return False
 
+        enforce_metadata_hard_cap = os.getenv(
+            "EXECUTION_ENFORCE_SIZING_HARD_CAP",
+            "0",
+        ).strip().lower() in ("1", "true", "yes", "on")
         if (
-            not is_reduce_only
+            enforce_metadata_hard_cap
+            and not is_reduce_only
             and hard_cap is not None
             and hard_cap > 0
             and actual_notional > hard_cap

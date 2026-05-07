@@ -12,12 +12,16 @@ from risk.engine import RiskEngine, RiskVerdict, Signal
 def _risk_cfg() -> dict:
     return {
         "fundamentals_path": "config/fundamentals.yaml",
+        "enforce_static_exposure_caps": True,
+        "enforce_static_order_caps": True,
         "max_position_pct": 0.10,
         "max_concentration_pct": 0.20,
         "max_gross_exposure_pct": 0.80,
         "max_daily_loss_pct": 0.02,
         "max_drawdown_pct": 0.10,
         "max_crypto_pct": 0.30,
+        "max_forex_pct": 0.20,
+        "max_future_pct": 0.0,
         "max_single_stock_pct": 0.10,
         "max_bond_pct": 0.50,
         "max_consecutive_losses": 3,
@@ -367,7 +371,7 @@ def test_approves_when_all_checks_pass() -> None:
     assert not decision.checks_failed
 
 
-def test_allocator_d015_primary_skips_duplicate_checks() -> None:
+def test_allocator_d015_primary_keeps_hard_exposure_checks() -> None:
     cfg = _risk_cfg()
     cfg["allocator_d015_primary"] = True
     cfg["max_gross_exposure_pct"] = Decimal("0.01")
@@ -383,11 +387,11 @@ def test_allocator_d015_primary_skips_duplicate_checks() -> None:
             "asset_class_exposure": {},
         },
     )
-    assert decision.verdict == RiskVerdict.APPROVED
-    assert "max_exposure" not in decision.checks_passed
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_exposure"]
 
 
-def test_allocator_d015_skips_duplicate_checks() -> None:
+def test_allocator_d015_keeps_hard_exposure_checks() -> None:
     cfg = _risk_cfg()
     cfg["allocator_d015_enabled"] = True
     cfg["max_gross_exposure_pct"] = Decimal("0.01")
@@ -403,8 +407,101 @@ def test_allocator_d015_skips_duplicate_checks() -> None:
             "asset_class_exposure": {},
         },
     )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_exposure"]
+
+
+def test_rejects_order_above_absolute_notional_cap() -> None:
+    cfg = _risk_cfg()
+    cfg["max_order_notional_usd"] = "100000"
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(qty="1200", price="100"),
+        {
+            "portfolio_value": Decimal("1000000"),
+            "high_watermark_value": Decimal("1000000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["max_order_notional"]
+
+
+def test_rejects_allocator_notional_far_above_strategy_intent() -> None:
+    cfg = _risk_cfg()
+    cfg["max_position_pct"] = Decimal("1.0")
+    cfg["max_concentration_pct"] = Decimal("1.0")
+    cfg["max_gross_exposure_pct"] = Decimal("2.0")
+    cfg["max_forex_pct"] = Decimal("2.0")
+    cfg["max_allocator_notional_multiple"] = "3"
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(
+            symbol="USDCHF",
+            asset_class="forex",
+            qty="1363399.15586220",
+            price="0.77921582",
+            metadata={"sizing_strategy_target_notional": "26991.91"},
+        ),
+        {
+            "portfolio_value": Decimal("1072898.74361650"),
+            "high_watermark_value": Decimal("1072898.74361650"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["allocator_amplification"]
+
+
+def test_static_order_caps_are_opt_in_legacy_guardrails() -> None:
+    cfg = _risk_cfg()
+    cfg["enforce_static_exposure_caps"] = False
+    cfg["enforce_static_order_caps"] = False
+    cfg["max_order_notional_usd"] = "100000"
+    cfg["max_allocator_notional_multiple"] = "3"
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(
+            symbol="USDCHF",
+            asset_class="forex",
+            qty="1363399.15586220",
+            price="0.77921582",
+            metadata={"sizing_strategy_target_notional": "26991.91"},
+        ),
+        {
+            "portfolio_value": Decimal("1072898.74361650"),
+            "high_watermark_value": Decimal("1072898.74361650"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
     assert decision.verdict == RiskVerdict.APPROVED
-    assert "max_exposure" not in decision.checks_passed
+
+
+def test_static_exposure_caps_are_opt_in_legacy_guardrails() -> None:
+    cfg = _risk_cfg()
+    cfg["enforce_static_exposure_caps"] = False
+    engine = RiskEngine(cfg)
+    decision = engine.evaluate(
+        _signal(qty="1200", price="100"),
+        {
+            "portfolio_value": Decimal("100000"),
+            "high_watermark_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("500000"),
+            "symbol_exposure": {"SPY": Decimal("500000")},
+            "asset_class_exposure": {"equity": Decimal("500000")},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
 
 
 @pytest.mark.skip(reason="RiskEngine has no max_trades_per_day check wired yet (config key unused).")
@@ -547,4 +644,3 @@ def test_cooldown_expires_after_elapsed_time() -> None:
         },
     )
     assert decision.verdict == RiskVerdict.APPROVED
-

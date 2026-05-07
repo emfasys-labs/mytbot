@@ -51,12 +51,12 @@ adaptive:
   mode:
     hunter:
       gross_fraction: "1.00"
-      concentration: "2.5"
+      concentration: "1.2"
     trader:
-      gross_fraction: "0.70"
+      gross_fraction: "1.00"
       concentration: "1.5"
     defender:
-      gross_fraction: "0.40"
+      gross_fraction: "1.00"
       concentration: "1.0"
 
 cash_factors:
@@ -65,8 +65,8 @@ cash_factors:
   stock: "1.0"
   crypto: "1.0"
   bond: "0.20"
-  forex: "0.05"
-  fx: "0.05"
+  forex: "0.20"
+  fx: "0.20"
   future: "0.15"
   option: "1.0"
 

@@ -2039,25 +2039,25 @@ class TradingLoop:
                 paper_mode=self.paper_mode,
             )
 
-        # D031: the hard per-position ceiling is ``nav * max_position_pct``
-        # (default 10 % from ``config/risk_limits.yaml``). Strategy-requested
-        # notionals above this are clipped; smaller requests are honoured.
-        # Adaptive (USE_ADAPTIVE_SIZING=1): per-mode ceiling from
-        # ``risk_cfg["mode_overrides"][active_mode]["max_position_pct"]`` —
-        # Hunter unlocks 100%, Defender keeps a conservative 20%.
+        # The operator's capital allocation slider is the deployment target.
+        # Static position ceilings are legacy rails and are only applied when
+        # ``enforce_static_exposure_caps`` is explicitly enabled.
         risk_cfg = getattr(self.risk_engine, "config", {}) or {}
-        try:
-            max_pos_pct = Decimal(str(risk_cfg.get("max_position_pct", "0.10")))
-        except Exception:  # noqa: BLE001
-            max_pos_pct = Decimal("0.10")
-        if os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in ("1", "true", "yes", "on"):
+        enforce_static_exposure_caps = bool(risk_cfg.get("enforce_static_exposure_caps", False))
+        max_pos_pct = Decimal("1.0")
+        if enforce_static_exposure_caps:
             try:
-                _mo = (risk_cfg.get("mode_overrides") or {}).get(mode_raw or "trader") or {}
-                _override = _mo.get("max_position_pct")
-                if _override is not None:
-                    max_pos_pct = Decimal(str(_override))
+                max_pos_pct = Decimal(str(risk_cfg.get("max_position_pct", "1.0")))
             except Exception:  # noqa: BLE001
-                pass
+                max_pos_pct = Decimal("1.0")
+            if os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in ("1", "true", "yes", "on"):
+                try:
+                    _mo = (risk_cfg.get("mode_overrides") or {}).get(mode_raw or "trader") or {}
+                    _override = _mo.get("max_position_pct")
+                    if _override is not None:
+                        max_pos_pct = Decimal(str(_override))
+                except Exception:  # noqa: BLE001
+                    pass
 
         held = held_positions_from_portfolio(
             portfolio_dict,
@@ -2257,7 +2257,7 @@ class TradingLoop:
                     _concentration = Decimal("1.0")
                 # Sizing in CASH-DEPLOYED space, not notional. The slider
                 # represents the share of NAV the operator is willing to
-                # actually tie up; forex notionals (~5% margin) inflate
+                # actually tie up; forex notionals use a bounded margin factor
                 # gross without consuming much cash, so we measure budgets
                 # in cash and convert to notional per asset class downstream.
                 cash_target = tradable * _gross_fraction
@@ -2287,12 +2287,10 @@ class TradingLoop:
                 if remaining_cash > 0:
                     adaptive_kwargs["gross_target_capital"] = remaining_cash
                     adaptive_kwargs["concentration_exponent"] = _concentration
-                    # Pass per-position notional cap so the coordinator
-                    # clips forex notionals (which can be 20× cash) to the
-                    # risk engine's concentration limit. Without this, a
-                    # cash budget routed to forex produces a notional larger
-                    # than NAV × max_concentration_pct and gets rejected.
-                    adaptive_kwargs["max_position_notional"] = total_equity * max_pos_pct
+                    if enforce_static_exposure_caps:
+                        # Legacy compatibility: only clip to per-position
+                        # notional when static caps are explicitly enabled.
+                        adaptive_kwargs["max_position_notional"] = total_equity * max_pos_pct
             else:
                 adaptive_budget_active = False
             # Shed-to-target: when held cash exceeds the slider's new cash
@@ -2684,6 +2682,14 @@ class TradingLoop:
             signal_price_fallback=signal.suggested_price,
             capital_pct=Decimal(str(self.capital_pct)),
         )
+        fee_dec = Decimal("0")
+        fee_raw = getattr(result, "fee", None)
+        if fee_raw is not None:
+            try:
+                fee_dec = Decimal(str(fee_raw))
+            except Exception:  # noqa: BLE001
+                fee_dec = Decimal("0")
+        post_trade_state["fees_today_delta"] = fee_dec
         signal.suggested_quantity = filled_qty
         avg_fill = getattr(result, "avg_fill_price", None)
         if avg_fill is not None:

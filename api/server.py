@@ -783,6 +783,14 @@ def _current_broker_coverage() -> dict[str, Any] | None:
     return cov if isinstance(cov, dict) else None
 
 
+def _is_paper_system_off() -> bool:
+    if APP_ENV == "live":
+        return False
+    orch = _get_orchestrator()
+    state = getattr(getattr(orch, "state", None), "value", None) if orch is not None else None
+    return str(state or "off").strip().lower() == "off"
+
+
 def _current_nav_broker_filter() -> set[str] | None:
     """Return current connected/balance-ready broker names when coverage is partial.
 
@@ -790,6 +798,9 @@ def _current_nav_broker_filter() -> set[str] | None:
     configured broker is missing, all dashboard/accounting numbers must switch
     to the same current-coverage universe; otherwise a partial NAV can be
     divided into a full historical/position book and produce nonsense leverage.
+    In paper mode while the system is off, there is intentionally no connected
+    NAV broker set; keep the local paper ledger visible rather than showing a
+    false flat book.
     """
     cov = _current_broker_coverage()
     if not cov or bool(cov.get("full")):
@@ -797,6 +808,8 @@ def _current_nav_broker_filter() -> set[str] | None:
     included = cov.get("included")
     if not isinstance(included, list):
         return set()
+    if not included and _is_paper_system_off():
+        return None
     return {str(n).strip().lower() for n in included if str(n).strip()}
 
 
@@ -2072,6 +2085,14 @@ async def diagnostics_accounting(
             select(DailyPnL).where(DailyPnL.date == date.today().isoformat())
         )
         today = today_q.scalars().first()
+        fee_q = await session.execute(
+            select(func.coalesce(func.sum(OrderLog.fee), 0))
+            .where(
+                func.date(OrderLog.timestamp) == date.today(),
+                OrderLog.status == "filled",
+            )
+        )
+        order_fee_total = Decimal(str(fee_q.scalar_one() or 0))
 
     open_rows = [r for r in latest_rows if abs(Decimal(str(r["quantity"] or 0))) > Decimal("0.00000001")]
     open_by_broker: dict[str, int] = {}
@@ -2093,6 +2114,10 @@ async def diagnostics_accounting(
     pnl_delta = current_unrealised - persisted_unrealised
     if abs(pnl_delta) > Decimal("1"):
         errors.append("daily_pnl_unrealised_differs_from_open_book")
+    persisted_fees = Decimal(str(today.total_fees or 0)) if today is not None else Decimal(0)
+    fee_delta = order_fee_total - persisted_fees
+    if abs(fee_delta) > Decimal("1"):
+        warnings.append("daily_pnl_fees_differ_from_filled_orders")
 
     return {
         "ok": not errors,
@@ -2109,6 +2134,9 @@ async def diagnostics_accounting(
             "date": date.today().isoformat(),
             "unrealised_pnl": _decimal_str(persisted_unrealised),
             "open_book_delta": _decimal_str(pnl_delta),
+            "fees": _decimal_str(persisted_fees),
+            "filled_order_fees": _decimal_str(order_fee_total),
+            "fee_delta": _decimal_str(fee_delta),
         },
         "recent_tombstone_shocks": [
             {

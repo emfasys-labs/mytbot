@@ -309,3 +309,40 @@ def test_api_filters_position_rows_to_connected_nav_brokers_when_coverage_partia
     assert rows == [{"broker": "alpaca", "symbol": "MSFT", "unrealised_pnl": "2"}]
     assert status["coverage_full"] is False
     assert status["excluded"][0]["name"] == "ibkr"
+
+
+def test_api_keeps_paper_position_rows_visible_when_system_is_off() -> None:
+    from api import server as api_server
+
+    class _Report:
+        def coverage(self) -> dict[str, Any]:
+            return {
+                "full": False,
+                "configured": ["ibkr", "alpaca"],
+                "included": [],
+                "excluded": [
+                    {"name": "ibkr", "connected": False, "balance_ready": False, "reason": "not ready"},
+                    {"name": "alpaca", "connected": False, "balance_ready": False, "reason": "not ready"},
+                ],
+            }
+
+    orch = SimpleNamespace(
+        state=SimpleNamespace(value="off"),
+        _broker_manager=SimpleNamespace(report=_Report()),
+    )
+    original_get = api_server._get_orchestrator
+    api_server._get_orchestrator = lambda: orch  # type: ignore[assignment]
+    try:
+        rows = api_server._filter_rows_to_current_nav_brokers(
+            [
+                {"broker": "ibkr", "symbol": "BIL", "unrealised_pnl": "1"},
+                {"broker": "kraken", "symbol": "XRP/USD", "unrealised_pnl": "2"},
+            ]
+        )
+    finally:
+        api_server._get_orchestrator = original_get  # type: ignore[assignment]
+
+    assert rows == [
+        {"broker": "ibkr", "symbol": "BIL", "unrealised_pnl": "1"},
+        {"broker": "kraken", "symbol": "XRP/USD", "unrealised_pnl": "2"},
+    ]

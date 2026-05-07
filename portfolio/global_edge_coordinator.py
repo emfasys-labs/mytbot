@@ -79,8 +79,9 @@ def _canonical_position_side(raw: Any) -> str:
 
 
 # Cash-deployment factor per asset class — what fraction of the position's
-# notional actually consumes operator capital (margin / cash). Forex at 5%
-# (~20x leverage) inflates notional but barely uses cash; equity/crypto spot
+# notional actually consumes operator capital (margin / cash). Forex defaults
+# to 20% (~5x notional-to-cash) so paper/live rehearsal cannot quietly create
+# extreme FX notionals; equity/crypto spot
 # consume their full cost. The slider's intent is "cash deployed", not
 # "notional gross", so this lookup converts between the two views.
 #
@@ -93,8 +94,8 @@ _DEFAULT_CASH_FACTORS: dict[str, Decimal] = {
     "stock": Decimal("1.0"),
     "crypto": Decimal("1.0"),
     "bond": Decimal("0.20"),
-    "forex": Decimal("0.05"),
-    "fx": Decimal("0.05"),
+    "forex": Decimal("0.20"),
+    "fx": Decimal("0.20"),
     "future": Decimal("0.15"),
     "option": Decimal("1.0"),
 }
@@ -186,7 +187,7 @@ def cash_factor_for_asset_class(
     """Return the cash-deployment factor for an asset class.
 
     ``factor = cash_used / notional`` — multiply notional by this to get the
-    operator-capital impact. Forex returns 0.05 (5% margin), equity/crypto
+    operator-capital impact. Forex defaults to 0.20, equity/crypto
     return 1.0, etc.
 
     Falls back to ``_infer_asset_class_from_symbol(symbol)`` when the
@@ -961,7 +962,7 @@ class GlobalEdgeCoordinator:
 
         # ---- Build-up vs. displacement mode (CASH-DEPLOYED basis) ----------
         # The slider's intent is "cash deployed", not "notional gross". Forex
-        # positions show large notionals but consume only their margin (≈5%);
+        # positions show larger notionals but consume only their margin factor;
         # equity/crypto positions consume their full cost. Both the
         # build-up gate and the per-opp sizing therefore work in *cash* space.
         #
@@ -1093,7 +1094,7 @@ class GlobalEdgeCoordinator:
         # ---- Emit actions -------------------------------------------------
         # ``gross_target_capital`` is the remaining CASH budget. Each opp's
         # cash share is ``w_i * cash_budget``; we then convert to notional
-        # via the asset-class cash factor (forex 5% → ~20x leverage on
+        # via the asset-class cash factor (forex default 20% → ~5x on
         # notional, equity 1.0 → notional == cash).
         out: list[CoordinatorAction] = []
         for (opp, trim_edge), w in zip(qualifying, weights, strict=True):

@@ -134,13 +134,12 @@ def apply_saved_mode_to_risk_cfg(risk_engine: Any) -> None:
     Sources, in priority order:
       1. ``config/risk_modes.yaml`` per-mode block (legacy / D015-secondary path).
       2. ``config/risk_limits.yaml`` ``mode_overrides`` block — applied only
-         when ``USE_ADAPTIVE_SIZING=1``. Lets Hunter raise per-position and
-         concentration ceilings without permanently mutating the on-disk
-         scalar caps. Defender narrows them.
+         when ``USE_ADAPTIVE_SIZING=1``. Lets runtime mode adjust ceilings
+         without bypassing the risk engine's final vetoes.
 
     The mode_overrides path lets the operator pivot mode at runtime and have
-    the risk engine immediately honour the new ceilings (e.g. Hunter's
-    ``max_position_pct: 1.00``) without restarting.
+    the risk engine immediately honour the current business ceilings without
+    restarting.
     """
     import json as _json
 

@@ -106,6 +106,8 @@ class RiskEngine:
             self._check_m8_strategy_whitelist,
             self._check_m8_max_notional,
             self._check_m8_strategy_sleeve_cap,
+            self._check_max_order_notional,
+            self._check_allocator_amplification,
             self._check_cooldown,
             self._check_asset_proportionality,
             self._check_minimum_order_size,
@@ -123,19 +125,10 @@ class RiskEngine:
             self._check_trade_quality_score,
         ]
 
-        d015 = bool(self.config.get("allocator_d015_enabled")) or bool(
-            self.config.get("allocator_d015_primary")
-        )
-        if d015:
-            skip = {
-                self._check_max_exposure,
-                self._check_position_size,
-                self._check_m8_strategy_sleeve_cap,
-                self._check_catalyst_present,
-                self._check_trade_quality_score,
-                self._check_theme_uniqueness,
-            }
-            checks = [c for c in checks if c not in skip]
+        # D015/global-edge allocation may rank and size candidates, but it is
+        # not a substitute for final risk vetoes. Keep the hard business rails
+        # live here so an aggressive allocator cannot turn a weak candidate
+        # into an oversized order.
 
         # Reduce-only signals (stop-loss closes, coordinator-driven flatten,
         # explicit reduce_only metadata) must always be allowed to exit a
@@ -524,6 +517,63 @@ class RiskEngine:
         n = self._requested_notional(signal)
         return (n <= limit, "m8_strategy_sleeve_cap")
 
+    def _check_max_order_notional(self, signal, portfolio) -> tuple[bool, str]:
+        """Optional legacy fixed per-order notional cap."""
+        if not bool(self.config.get("enforce_static_order_caps", False)):
+            return (True, "max_order_notional")
+        if self._is_option_signal(signal):
+            return (True, "max_order_notional")
+        n = self._requested_notional(signal)
+        caps: list[Decimal] = []
+        raw_abs = self.config.get("max_order_notional_usd")
+        if raw_abs is not None:
+            try:
+                d = Decimal(str(raw_abs))
+                if d > 0:
+                    caps.append(d)
+            except Exception:  # noqa: BLE001
+                pass
+        raw_pct = self.config.get("max_order_notional_pct")
+        if raw_pct is not None:
+            try:
+                p = Decimal(str(raw_pct))
+                base = self._sizing_nav(portfolio)
+                if p > 0 and base > 0:
+                    caps.append(base * p)
+            except Exception:  # noqa: BLE001
+                pass
+        if not caps:
+            return (True, "max_order_notional")
+        return (n <= min(caps), "max_order_notional")
+
+    def _check_allocator_amplification(self, signal, portfolio) -> tuple[bool, str]:
+        """Optional legacy cap on allocator redistribution vs strategy intent."""
+        if not bool(self.config.get("enforce_static_order_caps", False)):
+            return (True, "allocator_amplification")
+        if self._is_option_signal(signal) or self._is_reduce_only_signal(signal):
+            return (True, "allocator_amplification")
+        try:
+            max_mult = Decimal(str(self.config.get("max_allocator_notional_multiple", "0")))
+        except Exception:  # noqa: BLE001
+            max_mult = Decimal("0")
+        if max_mult <= 0:
+            return (True, "allocator_amplification")
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        raw_base = (
+            meta.get("sizing_strategy_target_notional")
+            or meta.get("sizing_pre_mode_capital")
+            or meta.get("strategy_target_notional")
+        )
+        if raw_base is None:
+            return (True, "allocator_amplification")
+        try:
+            base = Decimal(str(raw_base))
+        except Exception:  # noqa: BLE001
+            return (True, "allocator_amplification")
+        if base <= 0:
+            return (True, "allocator_amplification")
+        return (self._requested_notional(signal) <= base * max_mult, "allocator_amplification")
+
     def _check_cooldown(self, signal, portfolio) -> tuple[bool, str]:
         if self._cooldown_until is None:
             return (True, "cooldown")
@@ -545,6 +595,8 @@ class RiskEngine:
         return (observed_loss <= allowed_loss, "daily_loss_limit")
 
     def _check_position_size(self, signal, portfolio) -> tuple[bool, str]:
+        if not bool(self.config.get("enforce_static_exposure_caps", False)):
+            return (True, "position_size")
         sizing_base = self._sizing_nav(portfolio)
         if sizing_base <= 0:
             return (False, "position_size")
@@ -615,6 +667,8 @@ class RiskEngine:
         return (expected_loss <= allowed_loss, "max_loss_per_trade_pct")
 
     def _check_max_exposure(self, signal, portfolio) -> tuple[bool, str]:
+        if not bool(self.config.get("enforce_static_exposure_caps", False)):
+            return (True, "max_exposure")
         sizing_base = self._sizing_nav(portfolio)
         if sizing_base <= 0:
             return (False, "max_exposure")
@@ -625,6 +679,8 @@ class RiskEngine:
         return (projected_gross <= allowed_gross, "max_exposure")
 
     def _check_concentration(self, signal, portfolio) -> tuple[bool, str]:
+        if not bool(self.config.get("enforce_static_exposure_caps", False)):
+            return (True, "concentration")
         sizing_base = self._sizing_nav(portfolio)
         if sizing_base <= 0:
             return (False, "concentration")
@@ -641,6 +697,8 @@ class RiskEngine:
         return (projected_symbol_exposure <= allowed_symbol_exposure, "concentration")
 
     def _check_asset_class_limits(self, signal, portfolio) -> tuple[bool, str]:
+        if not bool(self.config.get("enforce_static_exposure_caps", False)):
+            return (True, "asset_class_limit")
         sizing_base = self._sizing_nav(portfolio)
         if sizing_base <= 0:
             return (False, "asset_class_limit")
@@ -657,6 +715,9 @@ class RiskEngine:
             "bond": "max_bond_pct",
             # Portfolio-level cap for all equity exposure combined.
             "equity": "max_equity_pct",
+            "forex": "max_forex_pct",
+            "fx": "max_forex_pct",
+            "future": "max_future_pct",
             "option": "max_option_pct",
         }
         config_key = key_by_class.get(asset_class)

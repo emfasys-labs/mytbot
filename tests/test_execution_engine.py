@@ -1097,8 +1097,9 @@ def test_d031c_boundary_guard_rejects_gross_over_sizing() -> None:
     assert eng._passes_sizing_boundary_guard(order, sig) is False
 
 
-def test_d031c_boundary_guard_rejects_over_hard_cap() -> None:
-    """Opening above the hard cap is rejected even without intended size."""
+def test_d031c_boundary_guard_rejects_over_hard_cap_when_legacy_env_enabled(monkeypatch) -> None:
+    """Legacy metadata hard cap is opt-in; slider allocation is authoritative by default."""
+    monkeypatch.setenv("EXECUTION_ENFORCE_SIZING_HARD_CAP", "1")
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
@@ -1109,14 +1110,9 @@ def test_d031c_boundary_guard_rejects_over_hard_cap() -> None:
     assert eng._passes_sizing_boundary_guard(order, sig) is False
 
 
-def test_d031c_boundary_guard_absolute_cap_when_no_sizing_metadata(monkeypatch) -> None:
-    """Without sizing audit metadata the guard falls back to an absolute cap.
-
-    The pre-fix guard was a no-op for legacy signals — that's what allowed
-    $130M-notional orders to slip through to Alpaca. With the fix, missing
-    audit metadata triggers ``EXECUTION_MAX_ORDER_NOTIONAL_USD`` (default
-    50,000) as a hard backstop.
-    """
+def test_d031c_boundary_guard_absolute_cap_when_legacy_env_enabled(monkeypatch) -> None:
+    """Legacy absolute fallback cap is opt-in via env."""
+    monkeypatch.setenv("EXECUTION_MAX_ORDER_NOTIONAL_USD", "50000")
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
     eng = ExecutionEngine(broker_configs={}, paper_mode=True)
@@ -1129,6 +1125,16 @@ def test_d031c_boundary_guard_absolute_cap_when_no_sizing_metadata(monkeypatch) 
     # allowed when it stays under the absolute cap.
     small_order = _sizing_order("COHR", Decimal("10"), Decimal("355"))  # 3,550
     assert eng._passes_sizing_boundary_guard(small_order, sig) is True
+
+
+def test_d031c_boundary_guard_has_no_default_absolute_cap_for_unsized_signal(monkeypatch) -> None:
+    monkeypatch.delenv("EXECUTION_MAX_ORDER_NOTIONAL_USD", raising=False)
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    order = _sizing_order("COHR", Decimal("10000"), Decimal("355"))
+    sig = _sizing_signal({})
+    assert eng._passes_sizing_boundary_guard(order, sig) is True
 
 
 def test_d031c_boundary_guard_absolute_cap_skipped_for_reduce_only() -> None:

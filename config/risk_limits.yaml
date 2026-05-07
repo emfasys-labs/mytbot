@@ -5,37 +5,40 @@
 # Risk engine reads this at startup and on reload.
 
 # ── Position limits ───────────────────────────────────────────────────────────
-# Scalar values are the legacy / fallback caps. When ``mode_overrides`` is
-# present and ``USE_ADAPTIVE_SIZING=1`` is on, the per-mode value replaces the
-# scalar for the active profile mode. Hunter's per-position cap of 1.00 means
-# a single rocketing opportunity can absorb the full slider-allocated capital
-# (the operator's ``capital_pct`` slider remains the only authoritative cap).
-max_position_pct: 0.10          # Max 10% of portfolio in any single position (legacy/fallback)
-max_concentration_pct: 0.20     # Max 20% in any single asset across all positions (legacy/fallback)
-max_gross_exposure_pct: 0.80    # Max 80% of portfolio deployed at once (legacy/fallback)
+# The operator's capital allocation slider is the authoritative deployment
+# target. Static per-order / per-asset / per-class caps are legacy guardrails
+# and are disabled by default; market/regime/risk scoring should shape the
+# book, not fixed ceilings.
+enforce_static_exposure_caps: false
+enforce_static_order_caps: false
+max_position_pct: 1.00          # Legacy/fallback only when enforce_static_exposure_caps=true
+max_concentration_pct: 1.00     # Legacy/fallback only when enforce_static_exposure_caps=true
+max_gross_exposure_pct: 1.00    # Legacy/fallback only when enforce_static_exposure_caps=true
 
 mode_overrides:
   # Per-mode adaptive ceilings. Unused when USE_ADAPTIVE_SIZING is off.
   defender:
-    max_position_pct: 0.20      # conservative — at most 20% in one name
-    max_concentration_pct: 0.30
-    max_gross_exposure_pct: 0.60
-    max_single_stock_pct: 0.15
-    max_crypto_pct: 0.20
+    max_position_pct: 1.00
+    max_concentration_pct: 1.00
+    max_gross_exposure_pct: 1.00
+    max_single_stock_pct: 1.00
+    max_crypto_pct: 1.00
   trader:
-    max_position_pct: 0.40      # balanced
-    max_concentration_pct: 0.50
-    max_gross_exposure_pct: 0.85
-    max_single_stock_pct: 0.30
-    max_crypto_pct: 0.40
+    max_position_pct: 1.00
+    max_concentration_pct: 1.00
+    max_gross_exposure_pct: 1.00
+    max_single_stock_pct: 1.00
+    max_crypto_pct: 1.00
   hunter:
-    max_position_pct: 1.00      # 100% in one name allowed when the edge dominates
+    max_position_pct: 1.00
     max_concentration_pct: 1.00
     max_gross_exposure_pct: 1.00
     max_single_stock_pct: 1.00
     max_crypto_pct: 1.00
     max_equity_pct: 1.00
     max_bond_pct: 1.00
+    max_forex_pct: 1.00
+    max_future_pct: 1.00
     max_option_pct: 1.00
 
 # ── Loss limits ───────────────────────────────────────────────────────────────
@@ -141,11 +144,18 @@ catalyst_news_score_min: 0.15   # |news_score| threshold for "news confirms"
 theme_uniqueness_check: true
 
 # ── Asset class limits ────────────────────────────────────────────────────────
-max_crypto_pct: 0.30            # Max 30% of portfolio in crypto
-max_equity_pct: 0.80            # Max 80% total in equities/ETFs combined
-max_single_stock_pct: 0.10      # Max 10% in any single stock
-max_bond_pct: 0.50              # Max 50% in bonds
+max_crypto_pct: 1.00            # Legacy only when enforce_static_exposure_caps=true
+max_forex_pct: 1.00             # Legacy only when enforce_static_exposure_caps=true
+max_future_pct: 1.00            # Execution resolver still gates unsupported futures.
+max_equity_pct: 1.00            # Legacy only when enforce_static_exposure_caps=true
+max_single_stock_pct: 1.00      # Legacy only when enforce_static_exposure_caps=true
+max_bond_pct: 1.00              # Legacy only when enforce_static_exposure_caps=true
 max_option_pct: 1.00            # Cap on option premium notional vs portfolio (1.0 = use options_trading caps only)
+
+# Legacy static order caps. Disabled unless enforce_static_order_caps=true.
+max_order_notional_pct: 0
+max_order_notional_usd: 0
+max_allocator_notional_multiple: 0
 
 # ── IBKR single-leg options (see also ENABLE_OPTIONS env to override) ──
 options_trading:

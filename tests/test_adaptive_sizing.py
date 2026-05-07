@@ -201,9 +201,9 @@ def test_adaptive_capital_sums_to_target_for_equity(adaptive_on):
 
 
 def test_adaptive_forex_inflates_notional_via_cash_factor(adaptive_on):
-    """Forex (cash_factor 0.05) gets a notional ≈ 20× its cash share so the
+    """Forex (cash_factor 0.20) gets a notional ≈ 5× its cash share so the
     operator's cash-deployed budget is honoured even when the position uses
-    leverage. This is the fix for the slider-says-50%-but-cash-only-31% issue.
+    bounded leverage.
     """
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
@@ -217,16 +217,16 @@ def test_adaptive_forex_inflates_notional_via_cash_factor(adaptive_on):
     )
     opens = [a for a in actions if a.kind == "open_strategy"]
     assert len(opens) == 1
-    # cash_share = 50000 (single opp); notional = 50000 / 0.05 = 1_000_000.
-    assert abs(opens[0].capital - Decimal("1000000")) < Decimal("1")
+    # cash_share = 50000 (single opp); notional = 50000 / 0.20 = 250_000.
+    assert abs(opens[0].capital - Decimal("250000")) < Decimal("1")
     md = opens[0].metadata
     assert md["sizing_cash_used"] == "50000.00"
-    assert md["sizing_cash_factor"] == "0.05"
+    assert md["sizing_cash_factor"] == "0.20"
 
 
 def test_adaptive_mixed_assets_size_per_cash_factor(adaptive_on):
     """Equity + forex with equal softmax weights: equity gets cash 1:1 in
-    notional, forex gets cash * (1/0.05) = 20× cash in notional. Cash
+    notional, forex gets cash * (1/0.20) = 5× cash in notional. Cash
     budget is fully deployed."""
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
@@ -243,9 +243,9 @@ def test_adaptive_mixed_assets_size_per_cash_factor(adaptive_on):
     )
     opens = {a.symbol: a for a in actions if a.kind == "open_strategy"}
     # Equal priority + lam_eff=5 → equal weights → 50k cash each
-    # equity: notional=50000/1.0=50000; forex: 50000/0.05=1_000_000
+    # equity: notional=50000/1.0=50000; forex: 50000/0.20=250_000
     assert abs(opens["AAPL"].capital - Decimal("50000")) < Decimal("1")
-    assert abs(opens["USDCHF=X"].capital - Decimal("1000000")) < Decimal("1")
+    assert abs(opens["USDCHF=X"].capital - Decimal("250000")) < Decimal("1")
     # Cash sum across both = 100k = budget.
     cash_sum = sum(
         (Decimal(str(a.metadata["sizing_cash_used"])) for a in opens.values()),
@@ -431,14 +431,14 @@ def test_adaptive_buildup_does_not_trigger_displacement_mid_growth(adaptive_on):
 
 
 def test_adaptive_clips_forex_notional_at_concentration_cap(adaptive_on):
-    """Forex's 20× cash-to-notional inflation can produce a notional larger
+    """Forex's cash-to-notional inflation can produce a notional larger
     than the risk engine's per-symbol concentration cap (NAV ×
     max_concentration_pct). The coordinator must clip notional at the cap so
     risk doesn't reject every adaptive open."""
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
     opps = [_opp("USDCHF=X", "0.50", asset_class="forex")]
-    # Cash budget would imply 200000 / 0.05 = 4_000_000 notional, but the
+    # Cash budget would imply 200000 / 0.20 = 1_000_000 notional, and the
     # risk concentration cap is only 1_000_000 (NAV 1M × max_conc 1.0).
     actions = coord.propose_actions(
         held=[],
@@ -493,7 +493,7 @@ def test_adaptive_shed_to_target_emits_largest_first(adaptive_on):
     held = [
         HeldPositionEdge(
             symbol="USDCHF",
-            notional=Decimal("1000000"),  # forex factor 0.05 → $50k cash
+            notional=Decimal("1000000"),  # forex factor 0.20 → $200k cash
             expected_remaining_edge=Decimal("0.10"),
             metadata={"side": "long", "asset_class": "forex"},
         ),
@@ -510,19 +510,22 @@ def test_adaptive_shed_to_target_emits_largest_first(adaptive_on):
             metadata={"side": "long", "asset_class": "equity"},
         ),
     ]
-    # held_cash = 50 + 125 + 25 = 200k. Target the new sleeve at 80k → shed 120k.
+    # held_cash = 200 + 125 + 25 = 350k. Target the new sleeve at 80k → shed 270k.
     actions = coord.propose_shed_actions(
         held=held,
         cash_target_absolute=Decimal("80000"),
         active_mode="trader",
     )
     syms = [a.symbol for a in actions]
-    # BBDC (125k cash) should be first — largest. It is trimmed partially
-    # by exactly the 120k excess rather than closed in full.
-    assert actions[0].symbol == "BBDC"
-    assert actions[0].capital == Decimal("120000")
-    assert actions[0].metadata.get("partial_reduce_only") is True
-    assert actions[0].metadata.get("close_only") is False
+    # USDCHF (200k cash) is largest and closes first; BBDC is then partially
+    # trimmed for the remaining 70k cash excess.
+    assert actions[0].symbol == "USDCHF"
+    assert actions[0].capital == Decimal("1000000")
+    assert actions[0].metadata.get("close_only") is True
+    assert actions[1].symbol == "BBDC"
+    assert actions[1].capital == Decimal("70000")
+    assert actions[1].metadata.get("partial_reduce_only") is True
+    assert actions[1].metadata.get("close_only") is False
     assert "COF" not in syms
     # All shed actions must be reduce-only.
     for a in actions:
@@ -555,10 +558,10 @@ def test_cash_factor_inference_from_symbol():
     common case where reconciliation pipelines hard-code asset_class='equity'
     on every held position even when they are forex / crypto / futures."""
     # Forex pair without =X suffix (common from IBKR reconciliation)
-    assert cash_factor_for_asset_class("equity", symbol="USDCHF") == Decimal("0.05")
-    assert cash_factor_for_asset_class("", symbol="USDJPY") == Decimal("0.05")
+    assert cash_factor_for_asset_class("equity", symbol="USDCHF") == Decimal("0.20")
+    assert cash_factor_for_asset_class("", symbol="USDJPY") == Decimal("0.20")
     # Forex with =X suffix (yfinance convention)
-    assert cash_factor_for_asset_class(None, symbol="EURUSD=X") == Decimal("0.05")
+    assert cash_factor_for_asset_class(None, symbol="EURUSD=X") == Decimal("0.20")
     # Crypto with -USD suffix
     assert cash_factor_for_asset_class("equity", symbol="BTC-USD") == Decimal("1.0")
     assert cash_factor_for_asset_class("equity", symbol="CAKE-USD") == Decimal("1.0")
@@ -567,7 +570,7 @@ def test_cash_factor_inference_from_symbol():
     # Plain equity stays equity
     assert cash_factor_for_asset_class("equity", symbol="AAPL") == Decimal("1.0")
     # Explicit asset_class is NOT overridden when it is non-equity (forex)
-    assert cash_factor_for_asset_class("forex", symbol="AAPL") == Decimal("0.05")
+    assert cash_factor_for_asset_class("forex", symbol="AAPL") == Decimal("0.20")
 
 
 def test_adaptive_skips_already_held_same_side(adaptive_on):
