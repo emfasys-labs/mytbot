@@ -58,7 +58,7 @@ export function DashboardScreen({
 
   const pad = density === 'compact' ? 12 : 20;
   const gap = density === 'compact' ? 10 : 14;
-  const dayChange = navValue - live.navOpen;
+  const dayChange = Number.isFinite(live.pnlRollups.d) ? live.pnlRollups.d : navValue - live.navOpen;
   const dayPct = live.navOpen > 0 ? (dayChange / live.navOpen) * 100 : 0;
 
   const topConviction = live.conviction[0];

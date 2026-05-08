@@ -910,7 +910,10 @@ class TradingLoop:
                 # to a position is just rebasing the average entry.
                 try:
                     from run_m5 import _estimate_realized_pnl_from_fill as _est_realised
-                    realised_delta = _est_realised(post_trade_state, signal, result)
+                    # Estimate against the pre-trade book. The freshly loaded
+                    # post-trade state may already have removed/rebased the
+                    # position, which makes closes look like zero realised P&L.
+                    realised_delta = _est_realised(portfolio_state, signal, result)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("trading_loop | realised pnl est failed: {}", exc)
                     realised_delta = Decimal("0")
@@ -1035,7 +1038,14 @@ class TradingLoop:
                     picked = _symbols_for_tiered_iteration(tiered, db_symbol_cache, self.iterations)
                     if picked is not None:
                         symbols = list(dict.fromkeys(base_symbols + picked))
-                total_equity = await live_portfolio_value(self._broker_manager)
+                try:
+                    total_equity = await asyncio.wait_for(
+                        live_portfolio_value(self._broker_manager),
+                        timeout=float(os.getenv("BROKER_NAV_TIMEOUT_SEC", "20")),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("trading_loop | live NAV timeout/error | {}", exc)
+                    total_equity = Decimal(str(self.portfolio_value))
                 if total_equity <= 0:
                     total_equity = Decimal(str(self.portfolio_value))
                 tradable = total_equity * Decimal(str(self.capital_pct))
@@ -2030,14 +2040,26 @@ class TradingLoop:
         assert self.execution_engine is not None
 
         if self._broker_manager:
-            await self._treasury.refresh(self._broker_manager)
+            try:
+                await asyncio.wait_for(
+                    self._treasury.refresh(self._broker_manager),
+                    timeout=float(os.getenv("TREASURY_REFRESH_TIMEOUT_SEC", "20")),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("global_edge | treasury refresh timeout/error | {}", exc)
         merge_treasury_into_portfolio_state(portfolio_dict, self._treasury)
         if self._broker_manager:
-            await _merge_live_broker_positions_into_portfolio_state(
-                portfolio_dict,
-                self._broker_manager,
-                paper_mode=self.paper_mode,
-            )
+            try:
+                await asyncio.wait_for(
+                    _merge_live_broker_positions_into_portfolio_state(
+                        portfolio_dict,
+                        self._broker_manager,
+                        paper_mode=self.paper_mode,
+                    ),
+                    timeout=float(os.getenv("BROKER_POSITION_MERGE_TIMEOUT_SEC", "20")),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("global_edge | broker position merge timeout/error | {}", exc)
 
         # The operator's capital allocation slider is the deployment target.
         # Static position ceilings are legacy rails and are only applied when
@@ -2284,7 +2306,12 @@ class TradingLoop:
                 # branch (slider down) can read it without recomputing.
                 self._last_adaptive_cash_target = cash_target
                 self._last_adaptive_held_cash_used = held_cash_used
-                if remaining_cash > 0:
+                try:
+                    _build_tol = Decimal(str((self._global_edge_cfg.get("adaptive") or {}).get("target_tolerance_pct", "0.0025")))
+                except Exception:  # noqa: BLE001
+                    _build_tol = Decimal("0.0025")
+                build_threshold = cash_target * max(Decimal("0"), _build_tol)
+                if remaining_cash > build_threshold:
                     adaptive_kwargs["gross_target_capital"] = remaining_cash
                     adaptive_kwargs["concentration_exponent"] = _concentration
                     if enforce_static_exposure_caps:
@@ -2325,9 +2352,15 @@ class TradingLoop:
                         )
             if adaptive_budget_active and not adaptive_kwargs:
                 # Adaptive mode is already at/above the slider cash target.
-                # Do not fall back to the legacy replacement opener here; the
-                # only valid work is shed-to-target if we are above tolerance.
-                actions = []
+                # Keep Hunter alive by rotating weak held positions into
+                # stronger fresh opportunities when expected edge beats
+                # estimated round-trip costs.
+                actions = coord.propose_rotation_actions(
+                    held,
+                    new_opps_dedup,
+                    active_mode=mode_for_coord,
+                    replacement_context=repl_ctx,
+                )
             else:
                 actions = coord.propose_actions(
                     held,
@@ -2340,6 +2373,10 @@ class TradingLoop:
                 # Run shed first (close oversized positions), then any new
                 # opens. Together they bring cash to target.
                 actions = list(shed_actions) + list(actions)
+            try:
+                await save_replacement_context_to_bus(bus, repl_ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("trading_loop | save global-edge replacement context failed: {}", exc)
         if buf is not None and actions:
             for act in actions:
                 try:

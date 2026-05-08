@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from api.server import app
 from api.server import _command_bus, _session_factory
+from api.server import _apply_order_fill_to_position_state
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 
 
@@ -102,6 +104,57 @@ def test_healthz_unauthenticated_with_dashboard_token(monkeypatch, client: TestC
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "secret-read")
     r = client.get("/healthz")
     assert r.status_code == 200
+
+
+def test_order_fill_realised_pnl_long_close_after_fees():
+    new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+        position_qty=Decimal("10"),
+        position_avg=Decimal("100"),
+        side="sell",
+        fill_qty=Decimal("4"),
+        fill_price=Decimal("105"),
+        fee=Decimal("1.25"),
+    )
+    assert new_qty == Decimal("6")
+    assert new_avg == Decimal("100")
+    assert pnl["closes_position"] is True
+    assert pnl["realised_pnl_gross"] == Decimal("20")
+    assert pnl["realised_pnl_fee"] == Decimal("1.25")
+    assert pnl["realised_pnl_net"] == Decimal("18.75")
+
+
+def test_order_fill_realised_pnl_short_close_after_fees():
+    new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+        position_qty=Decimal("-8"),
+        position_avg=Decimal("50"),
+        side="buy",
+        fill_qty=Decimal("3"),
+        fill_price=Decimal("47"),
+        fee=Decimal("0.90"),
+    )
+    assert new_qty == Decimal("-5")
+    assert new_avg == Decimal("50")
+    assert pnl["closes_position"] is True
+    assert pnl["realised_pnl_gross"] == Decimal("9")
+    assert pnl["realised_pnl_fee"] == Decimal("0.90")
+    assert pnl["realised_pnl_net"] == Decimal("8.10")
+    assert pnl["trade_pnl_net"] == Decimal("8.10")
+
+
+def test_order_fill_trade_pnl_open_is_negative_fee():
+    new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+        position_qty=Decimal("0"),
+        position_avg=Decimal("0"),
+        side="buy",
+        fill_qty=Decimal("5"),
+        fill_price=Decimal("100"),
+        fee=Decimal("2.25"),
+    )
+    assert new_qty == Decimal("5")
+    assert new_avg == Decimal("100")
+    assert pnl["closes_position"] is False
+    assert pnl["realised_pnl_net"] is None
+    assert pnl["trade_pnl_net"] == Decimal("-2.25")
 
 
 class _FakeBusSnapshot:

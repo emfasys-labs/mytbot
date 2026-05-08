@@ -270,13 +270,24 @@ export type ApiPnlHistoryResponse = {
 };
 
 export type ApiOrderRow = {
-  id?: number;
+  id?: string | number;
   timestamp?: string | null;
   symbol?: string;
   side?: string;
   status?: string;
+  quantity?: string | null;
+  limit_price?: string | null;
   filled_quantity?: string | null;
   avg_fill_price?: string | null;
+  fee?: string | null;
+  closes_position?: boolean;
+  trade_pnl?: string | null;
+  trade_pnl_net?: string | null;
+  realised_pnl?: string | null;
+  realised_pnl_net?: string | null;
+  realised_pnl_gross?: string | null;
+  realised_pnl_fee?: string | null;
+  closed_quantity?: string | null;
   broker?: string | null;
 };
 

@@ -150,7 +150,18 @@ def _apply_filled_result_to_portfolio_state(portfolio_state: dict[str, Any], sig
 
 def _estimate_realized_pnl_from_fill(portfolio_state: dict[str, Any], signal, result) -> Decimal:
     positions = portfolio_state.get("positions", {})
-    row = positions.get(signal.symbol)
+    symbol = str(getattr(signal, "symbol", "") or "").strip()
+    broker = str(getattr(signal, "broker", "") or "").strip().lower()
+    row = positions.get(symbol)
+    if row is None:
+        for key, candidate in positions.items():
+            if not isinstance(candidate, dict):
+                continue
+            candidate_symbol = str(candidate.get("symbol") or key).strip()
+            candidate_broker = str(candidate.get("broker", "") or "").strip().lower()
+            if candidate_symbol == symbol and (not broker or not candidate_broker or candidate_broker == broker):
+                row = candidate
+                break
     if row is None:
         return Decimal("0")
     prev_qty = Decimal(str(row.get("quantity", "0")))
@@ -162,10 +173,11 @@ def _estimate_realized_pnl_from_fill(portfolio_state: dict[str, Any], signal, re
     if fill_qty <= 0:
         return Decimal("0")
     # Realized PnL only when reducing an existing position.
-    if signal.side == "sell" and prev_qty > 0:
+    side = str(getattr(signal, "side", "") or "").strip().lower()
+    if side == "sell" and prev_qty > 0:
         close_qty = min(fill_qty, prev_qty)
         return (fill_px - avg_entry) * close_qty
-    if signal.side == "buy" and prev_qty < 0:
+    if side == "buy" and prev_qty < 0:
         close_qty = min(fill_qty, abs(prev_qty))
         return (avg_entry - fill_px) * close_qty
     return Decimal("0")

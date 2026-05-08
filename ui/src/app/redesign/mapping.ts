@@ -597,6 +597,13 @@ export function mapPnlRollups(
   if (hasPartialBrokerCoverage(pnl)) {
     return { d: todayApi, w: 0, m: 0, y: 0 };
   }
+  // P&L rollups are trading-accounting figures, not pure NAV deltas. The
+  // backend now derives realised values directly from filled orders including
+  // opening/closing fees, so prefer those API rollups; paper NAV history can
+  // stay flat even when fees are being incurred locally.
+  if (pnl) {
+    return { d: todayApi, w: wApi, m: mApi, y: yApi };
+  }
   const now = new Date();
   const weekStart = mondayLocalYmd(now);
   const monthStart = firstOfMonthLocalYmd(now);

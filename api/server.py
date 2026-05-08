@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -462,12 +462,10 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
 
     Hourly FeatureSnapshot bars are far too stale to drive a live equity
     curve — brokers expose a real-time `get_last_price(symbol)` which is the
-    freshest source we have. We race *all* connected adapters per symbol in
-    parallel and take the first one that returns a positive price. This
-    avoids being pinned to a stale position's original broker (e.g. an IBKR
-    paper position whose delayed feed returns a 15-minute-old print while
-    Alpaca's IEX feed is live). A tight per-adapter timeout guarantees one
-    slow adapter can't block /pnl.
+    freshest source we have. Query all connected adapters per symbol and pick
+    a deterministic median positive quote. The old "first non-zero wins" race
+    made Book unrealised totals snap flat when a stale/default quote returned
+    a few milliseconds before the genuine market-data source.
     """
     orch = _get_orchestrator()
     if orch is None:
@@ -480,42 +478,51 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     if not adapters:
         return {}
 
-    async def _probe(adapter, sym: str) -> Decimal:
+    async def _probe(broker_name: str, adapter, sym: str) -> tuple[str, Decimal]:
         try:
             px = await asyncio.wait_for(adapter.get_last_price(sym), timeout=1.5)
         except Exception:  # noqa: BLE001
-            return Decimal(0)
+            return broker_name, Decimal(0)
         if px is None:
-            return Decimal(0)
+            return broker_name, Decimal(0)
         try:
             d = Decimal(str(px))
         except Exception:  # noqa: BLE001
-            return Decimal(0)
-        return d if d > 0 else Decimal(0)
+            return broker_name, Decimal(0)
+        return broker_name, d if d > 0 else Decimal(0)
+
+    symbol_rows: dict[str, list[PositionLog]] = {}
+    for r in rows:
+        sym = str(r.symbol or "").strip().upper()
+        if sym:
+            symbol_rows.setdefault(sym, []).append(r)
 
     async def _one(sym: str) -> tuple[str, Decimal]:
-        # Race every adapter; take the first non-zero result and cancel the
-        # rest. This lets the fastest real-time feed (typically Alpaca for
-        # US equities, Binance/Bybit/Kraken for crypto) win over slower or
-        # delayed feeds regardless of which broker the position was opened
-        # through.
-        tasks = {asyncio.create_task(_probe(a, sym)): name for name, a in adapters}
+        tasks = [asyncio.create_task(_probe(name, a, sym)) for name, a in adapters]
+        done: set[asyncio.Task] = set()
+        pending: set[asyncio.Task] = set(tasks)
         try:
-            while tasks:
-                done, _pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-                for t in done:
-                    tasks.pop(t, None)
-                    px = t.result()
-                    if px > 0:
-                        for other in tasks:
-                            other.cancel()
-                        return sym, px
+            done, pending = await asyncio.wait(tasks, timeout=1.8)
+            quotes: list[Decimal] = []
+            for t in done:
+                try:
+                    _broker, px = t.result()
+                except Exception:  # noqa: BLE001
+                    continue
+                if px > 0:
+                    quotes.append(px)
+            if quotes:
+                quotes.sort()
+                mid = len(quotes) // 2
+                if len(quotes) % 2 == 1:
+                    return sym, quotes[mid]
+                return sym, (quotes[mid - 1] + quotes[mid]) / Decimal("2")
         finally:
-            for t in tasks:
+            for t in pending:
                 t.cancel()
         return sym, Decimal(0)
 
-    results = await asyncio.gather(*(_one(r.symbol) for r in rows if r.symbol), return_exceptions=True)
+    results = await asyncio.gather(*(_one(sym) for sym in symbol_rows), return_exceptions=True)
     out: dict[str, Decimal] = {}
     for res in results:
         if isinstance(res, Exception):
@@ -940,12 +947,200 @@ def _order_log_to_dict(r: OrderLog) -> dict[str, Any]:
     }
 
 
+def _order_position_key(row: Any) -> tuple[str, str]:
+    return (
+        str(getattr(row, "broker", "") or "").strip().lower(),
+        str(getattr(row, "symbol", "") or "").strip().upper(),
+    )
+
+
+def _apply_order_fill_to_position_state(
+    *,
+    position_qty: Decimal,
+    position_avg: Decimal,
+    side: str,
+    fill_qty: Decimal,
+    fill_price: Decimal,
+    fee: Decimal,
+) -> tuple[Decimal, Decimal, dict[str, Decimal | bool | None]]:
+    """Apply a fill to a signed position and return realised close P&L.
+
+    Long closes are sells; short closes are buys. Fees are allocated
+    proportionally when a fill both closes an old leg and opens a flipped leg.
+    """
+    side_l = str(side or "").strip().lower()
+    if side_l not in {"buy", "sell"} or fill_qty <= 0 or fill_price <= 0:
+        return position_qty, position_avg, {
+            "closes_position": False,
+            "realised_pnl_gross": None,
+            "realised_pnl_fee": None,
+            "realised_pnl_net": None,
+            "trade_pnl_net": None,
+            "closed_quantity": Decimal("0"),
+        }
+
+    signed_fill = fill_qty if side_l == "buy" else -fill_qty
+    closing_qty = Decimal("0")
+    gross = Decimal("0")
+    if position_qty > 0 and signed_fill < 0:
+        closing_qty = min(position_qty, abs(signed_fill))
+        gross = (fill_price - position_avg) * closing_qty
+    elif position_qty < 0 and signed_fill > 0:
+        closing_qty = min(abs(position_qty), signed_fill)
+        gross = (position_avg - fill_price) * closing_qty
+
+    fee_alloc = (fee * (closing_qty / fill_qty)) if closing_qty > 0 else Decimal("0")
+    net = gross - fee_alloc
+
+    new_qty = position_qty + signed_fill
+    eps = Decimal("0.00000001")
+    if abs(new_qty) <= eps:
+        new_qty = Decimal("0")
+        new_avg = fill_price
+    elif position_qty == 0 or (position_qty > 0 and signed_fill > 0) or (position_qty < 0 and signed_fill < 0):
+        total_abs = abs(position_qty) + abs(signed_fill)
+        new_avg = (
+            ((abs(position_qty) * position_avg) + (abs(signed_fill) * fill_price)) / total_abs
+            if total_abs > 0
+            else fill_price
+        )
+    elif abs(signed_fill) < abs(position_qty):
+        new_avg = position_avg
+    else:
+        # Fill flipped direction; the leftover is a new position opened at the fill price.
+        new_avg = fill_price
+
+    return new_qty, new_avg, {
+        "closes_position": closing_qty > 0,
+        "realised_pnl_gross": gross if closing_qty > 0 else None,
+        "realised_pnl_fee": fee_alloc if closing_qty > 0 else None,
+        "realised_pnl_net": net if closing_qty > 0 else None,
+        "trade_pnl_net": (gross - fee) if closing_qty > 0 else -fee,
+        "closed_quantity": closing_qty,
+    }
+
+
+async def _order_realised_pnl_annotations(session, rows: list[OrderLog]) -> dict[str, dict[str, Any]]:
+    if not rows:
+        return {}
+    keys = {_order_position_key(r) for r in rows}
+    keys.discard(("", ""))
+    earliest = min((r.timestamp for r in rows if r.timestamp is not None), default=None)
+    state: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
+    if keys and earliest is not None:
+        brokers = sorted({b for b, _ in keys})
+        symbols = sorted({s for _, s in keys})
+        q = await session.execute(
+            select(PositionLog)
+            .where(
+                PositionLog.timestamp < earliest,
+                PositionLog.broker.in_(brokers),
+                PositionLog.symbol.in_(symbols),
+            )
+            .order_by(PositionLog.timestamp.desc(), PositionLog.id.desc())
+        )
+        for p in q.scalars().all():
+            key = _order_position_key(p)
+            if key in keys and key not in state:
+                state[key] = (
+                    Decimal(str(p.quantity or 0)),
+                    Decimal(str(p.avg_entry_price or 0)),
+                )
+
+    annotations: dict[str, dict[str, Any]] = {}
+    chronological = sorted(rows, key=lambda r: (r.timestamp or datetime.min.replace(tzinfo=timezone.utc), str(r.id)))
+    for r in chronological:
+        key = _order_position_key(r)
+        pos_qty, pos_avg = state.get(key, (Decimal("0"), Decimal("0")))
+        try:
+            fill_qty = Decimal(str(r.filled_quantity if r.filled_quantity is not None else r.quantity or 0))
+            fill_price = Decimal(str(r.avg_fill_price if r.avg_fill_price is not None else r.limit_price or 0))
+            fee = Decimal(str(r.fee or 0))
+        except Exception:  # noqa: BLE001
+            fill_qty = Decimal("0")
+            fill_price = Decimal("0")
+            fee = Decimal("0")
+
+        if str(r.status or "").strip().lower() not in {"filled", "partially_filled"}:
+            annotations[str(r.id)] = {
+                "closes_position": False,
+                "trade_pnl": None,
+                "trade_pnl_net": None,
+                "realised_pnl": None,
+                "realised_pnl_net": None,
+                "realised_pnl_gross": None,
+                "realised_pnl_fee": None,
+                "closed_quantity": None,
+            }
+            continue
+
+        new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+            position_qty=pos_qty,
+            position_avg=pos_avg,
+            side=str(r.side or ""),
+            fill_qty=fill_qty,
+            fill_price=fill_price,
+            fee=fee,
+        )
+        state[key] = (new_qty, new_avg)
+        annotations[str(r.id)] = {
+            "closes_position": bool(pnl["closes_position"]),
+            "trade_pnl": _decimal_str(pnl["trade_pnl_net"]) if pnl["trade_pnl_net"] is not None else None,
+            "trade_pnl_net": _decimal_str(pnl["trade_pnl_net"]) if pnl["trade_pnl_net"] is not None else None,
+            "realised_pnl": _decimal_str(pnl["realised_pnl_net"]) if pnl["realised_pnl_net"] is not None else None,
+            "realised_pnl_net": _decimal_str(pnl["realised_pnl_net"]) if pnl["realised_pnl_net"] is not None else None,
+            "realised_pnl_gross": _decimal_str(pnl["realised_pnl_gross"]) if pnl["realised_pnl_gross"] is not None else None,
+            "realised_pnl_fee": _decimal_str(pnl["realised_pnl_fee"]) if pnl["realised_pnl_fee"] is not None else None,
+            "closed_quantity": _decimal_str(pnl["closed_quantity"]) if pnl["closed_quantity"] else None,
+        }
+    return annotations
+
+
 @app.get("/orders")
 async def get_orders(limit: int = Query(50, ge=1, le=500), session_factory=Depends(_session_factory)):
     async with session_factory() as session:
         q = await session.execute(select(OrderLog).order_by(OrderLog.timestamp.desc()).limit(limit))
         rows = list(q.scalars().all())
-    return {"orders": [_order_log_to_dict(r) for r in rows]}
+        annotations = await _order_realised_pnl_annotations(session, rows)
+    orders = []
+    for r in rows:
+        row = _order_log_to_dict(r)
+        row.update(annotations.get(str(r.id), {}))
+        orders.append(row)
+    return {"orders": orders}
+
+
+async def _filled_order_net_pnl_for_period(
+    session,
+    start_day: date,
+    end_day: date,
+) -> tuple[Decimal, Decimal, int]:
+    start_dt = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
+    end_dt = datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=timezone.utc)
+    q = await session.execute(
+        select(OrderLog)
+        .where(
+            OrderLog.timestamp >= start_dt,
+            OrderLog.timestamp < end_dt,
+            OrderLog.status.in_(("filled", "partially_filled")),
+        )
+        .order_by(OrderLog.timestamp.desc(), OrderLog.id.desc())
+    )
+    rows = list(q.scalars().all())
+    annotations = await _order_realised_pnl_annotations(session, rows)
+    net = Decimal("0")
+    fees = Decimal("0")
+    for r in rows:
+        try:
+            fees += Decimal(str(r.fee or 0))
+        except Exception:  # noqa: BLE001
+            pass
+        ann = annotations.get(str(r.id), {})
+        try:
+            net += Decimal(str(ann.get("trade_pnl_net") or 0))
+        except Exception:  # noqa: BLE001
+            continue
+    return net, fees, len(rows)
 
 
 @app.get("/orders/rejections")
@@ -1575,8 +1770,21 @@ async def get_pnl(
         latest_unrealised_db = Decimal(str(latest_unrealised_q.scalar_one_or_none() or 0))
         ws, we = week_to_date_range(today_d)
         ms, me = month_to_date_range(today_d)
+        ys = date(today_d.year, 1, 1)
         week_agg = await aggregate_daily_pnl_range(session, ws, we)
         month_agg = await aggregate_daily_pnl_range(session, ms, me)
+        today_net_realised, today_order_fees, today_order_trades = await _filled_order_net_pnl_for_period(
+            session, today_d, today_d
+        )
+        week_net_realised, week_order_fees, week_order_trades = await _filled_order_net_pnl_for_period(
+            session, ws, we
+        )
+        month_net_realised, month_order_fees, month_order_trades = await _filled_order_net_pnl_for_period(
+            session, ms, me
+        )
+        ytd_net_realised, ytd_order_fees, ytd_order_trades = await _filled_order_net_pnl_for_period(
+            session, ys, today_d
+        )
         pv_q = await session.execute(select(DailyPnL.portfolio_value).order_by(DailyPnL.date.asc()).limit(400))
         pv_vals: list[Decimal] = []
         for x in pv_q.scalars().all():
@@ -1646,6 +1854,12 @@ async def get_pnl(
                 live_today_unrealised=today_unrealised,
             )
         )
+    week_agg["realised"] = _decimal_str(week_net_realised)
+    week_agg["fees"] = _decimal_str(week_order_fees)
+    week_agg["trades"] = int(week_order_trades)
+    month_agg["realised"] = _decimal_str(month_net_realised)
+    month_agg["fees"] = _decimal_str(month_order_fees)
+    month_agg["trades"] = int(month_order_trades)
     if not coverage_full:
         # DailyPnL/history rows are whole-book aggregates. When the live NAV is
         # intentionally partial (for example IBKR is offline and excluded), do
@@ -1661,20 +1875,20 @@ async def get_pnl(
 
     return {
         "today": {
-            "realised": _decimal_str(today_row.realised_pnl if (coverage_full and today_row) else 0),
+            "realised": _decimal_str(today_net_realised if coverage_full else 0),
             "unrealised": _decimal_str(today_unrealised),
-            "fees": _decimal_str(today_row.total_fees if (coverage_full and today_row) else 0),
-            "trades": int(today_row.trade_count if (coverage_full and today_row) else 0),
+            "fees": _decimal_str(today_order_fees if coverage_full else 0),
+            "trades": int(today_order_trades if coverage_full else 0),
             "portfolio_value": _decimal_str(display_value),
             "tradable_capital": _decimal_str(tradable_value),
             "capital_allocation_pct": cap_pct,
             "nav_status": nav_status,
         },
         "all_time": {
-            "realised": _decimal_str(0 if not coverage_full else agg[0]),
+            "realised": _decimal_str(0 if not coverage_full else ytd_net_realised),
             "unrealised": _decimal_str(all_time_unrealised),
-            "fees": _decimal_str(0 if not coverage_full else agg[1]),
-            "trades": int(agg[2] or 0) if coverage_full else 0,
+            "fees": _decimal_str(0 if not coverage_full else ytd_order_fees),
+            "trades": int(ytd_order_trades or 0) if coverage_full else 0,
             "partial_coverage": not coverage_full,
         },
         "week": week_agg,

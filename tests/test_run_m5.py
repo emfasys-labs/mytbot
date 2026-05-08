@@ -73,3 +73,20 @@ def test_estimate_realized_pnl_from_fill_for_partial_close():
     pnl = _estimate_realized_pnl_from_fill(state, signal, result)
     assert pnl == Decimal("12")
 
+
+def test_estimate_realized_pnl_uses_broker_symbol_position_key_and_case():
+    state = {
+        "positions": {
+            "ibkr:SPY": {
+                "symbol": "SPY",
+                "broker": "ibkr",
+                "quantity": Decimal("10"),
+                "avg_entry_price": Decimal("100"),
+                "current_price": Decimal("101"),
+            }
+        }
+    }
+    signal = SimpleNamespace(symbol="SPY", broker="ibkr", side="SELL", suggested_price=Decimal("102"))
+    result = SimpleNamespace(filled_quantity=Decimal("4"), avg_fill_price=Decimal("103"))
+    pnl = _estimate_realized_pnl_from_fill(state, signal, result)
+    assert pnl == Decimal("12")

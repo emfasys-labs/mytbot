@@ -10,6 +10,7 @@ from portfolio.global_edge_coordinator import (
     held_positions_from_portfolio,
     signal_candidate_to_strategy_opportunity,
 )
+from portfolio.d015_replacement_context import ReplacementContext
 from portfolio.strategy_opportunity import StrategyOpportunity, compute_priority_score
 
 
@@ -248,6 +249,142 @@ def test_replacement_emits_trim_symbol_not_close_all() -> None:
     assert any(x.kind == "trim_symbol" for x in actions)
     assert all(x.kind in {"trim_symbol", "open_strategy"} for x in actions)
     assert all(x.kind != "close_all" for x in actions)
+
+
+def test_hunter_rotation_replaces_weak_hold_when_edge_covers_fees() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "rotation": {
+                "enabled": True,
+                "max_replacements_per_tick": {"hunter": 1},
+                "min_edge_advantage": {"hunter": "0.01"},
+                "estimated_round_trip_fee_bps": "20",
+            },
+            "cash_factors": {"equity": "1.0", "forex": "0.20"},
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="OLD",
+            notional=Decimal("100000"),
+            expected_remaining_edge=Decimal("0.05"),
+            broker="ibkr",
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+    opp = StrategyOpportunity(
+        strategy_name="volume_flow",
+        symbol="NEW",
+        side="long",
+        created_at=datetime.now(timezone.utc),
+        expected_edge=Decimal("0.80"),
+        confidence=Decimal("0.80"),
+        capital_required=Decimal("25000"),
+        expected_holding_hours=6,
+        liquidity_score=Decimal("0.8"),
+        execution_score=Decimal("0.8"),
+        regime_fit_score=Decimal("0.8"),
+        risk_cost_score=Decimal("0.05"),
+        priority_score=Decimal("0.20"),
+        metadata={"asset_class": "equity"},
+    )
+
+    actions = coord.propose_rotation_actions(held, [opp], active_mode="hunter")
+
+    assert [a.kind for a in actions] == ["trim_symbol", "open_strategy"]
+    assert actions[0].symbol == "OLD"
+    assert actions[0].metadata["rotation_replacement_symbol"] == "NEW"
+    assert actions[1].symbol == "NEW"
+    assert actions[1].capital == Decimal("100000.00")
+    assert actions[1].metadata["sizing_path"] == "fee_aware_rotation"
+
+
+def test_hunter_rotation_does_not_replace_when_fee_adjusted_edge_is_too_small() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "rotation": {
+                "enabled": True,
+                "max_replacements_per_tick": {"hunter": 1},
+                "min_edge_advantage": {"hunter": "0.05"},
+                "estimated_round_trip_fee_bps": "200",
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="OLD",
+            notional=Decimal("100000"),
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+    opp = StrategyOpportunity(
+        strategy_name="volume_flow",
+        symbol="NEW",
+        side="long",
+        created_at=datetime.now(timezone.utc),
+        expected_edge=Decimal("0.50"),
+        confidence=Decimal("0.50"),
+        capital_required=Decimal("25000"),
+        expected_holding_hours=6,
+        liquidity_score=Decimal("0.8"),
+        execution_score=Decimal("0.8"),
+        regime_fit_score=Decimal("0.8"),
+        risk_cost_score=Decimal("0.05"),
+        priority_score=Decimal("0.12"),
+        metadata={"asset_class": "equity"},
+    )
+
+    assert coord.propose_rotation_actions(held, [opp], active_mode="hunter") == []
+
+
+def test_hunter_rotation_records_and_respects_symbol_cooldown() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "rotation": {
+                "enabled": True,
+                "max_replacements_per_tick": {"hunter": 1},
+                "min_edge_advantage": {"hunter": "0.01"},
+                "estimated_round_trip_fee_bps": "20",
+                "symbol_cooldown_sec": 900,
+                "min_hold_sec": 900,
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="OLD",
+            notional=Decimal("100000"),
+            expected_remaining_edge=Decimal("0.05"),
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+    opp = StrategyOpportunity(
+        strategy_name="volume_flow",
+        symbol="NEW",
+        side="long",
+        created_at=datetime.now(timezone.utc),
+        expected_edge=Decimal("0.80"),
+        confidence=Decimal("0.80"),
+        capital_required=Decimal("25000"),
+        expected_holding_hours=6,
+        liquidity_score=Decimal("0.8"),
+        execution_score=Decimal("0.8"),
+        regime_fit_score=Decimal("0.8"),
+        risk_cost_score=Decimal("0.05"),
+        priority_score=Decimal("0.20"),
+        metadata={"asset_class": "equity"},
+    )
+    ctx = ReplacementContext()
+
+    actions = coord.propose_rotation_actions(held, [opp], active_mode="hunter", replacement_context=ctx)
+    assert [a.kind for a in actions] == ["trim_symbol", "open_strategy"]
+    assert ctx.recent_events[-1]["old"] == "OLD"
+    assert ctx.recent_events[-1]["new"] == "NEW"
+    assert "OLD" in ctx.last_event_at_by_symbol
+    assert "NEW" in ctx.last_event_at_by_symbol
+
+    assert coord.propose_rotation_actions(held, [opp], active_mode="hunter", replacement_context=ctx) == []
 
 
 def test_max_actions_per_tick_scalar_is_mode_blind_backcompat() -> None:

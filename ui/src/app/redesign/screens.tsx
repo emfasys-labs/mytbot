@@ -313,7 +313,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
             <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column', fontFamily: TOKENS.mono, fontSize: 11 }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: '90px 70px 80px 80px minmax(0, 1fr)',
+                gridTemplateColumns: '86px 56px 72px 72px 86px minmax(0, 1fr)',
                 gap: 12,
                 alignItems: 'center',
                 paddingBottom: 8,
@@ -324,6 +324,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>side</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>qty</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>price</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>p&amp;l</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>when</span>
               </div>
               <div style={{
@@ -334,7 +335,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: '90px 70px 80px 80px minmax(0, 1fr)',
+                  gridTemplateColumns: '86px 56px 72px 72px 86px minmax(0, 1fr)',
                   gap: 12,
                   alignItems: 'center',
                   paddingTop: 8,
@@ -343,6 +344,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                     const side = String(o.side ?? '').toLowerCase();
                     const qty = Number(o.filled_quantity ?? o.quantity ?? 0);
                     const px = Number(o.avg_fill_price ?? o.limit_price ?? 0);
+                    const tradePnl = Number(o.trade_pnl_net ?? o.trade_pnl ?? o.realised_pnl_net ?? o.realised_pnl);
                     const ts = o.timestamp ? Date.parse(o.timestamp) : NaN;
                     const sideColor = side === 'buy' ? TOKENS.profit : side === 'sell' ? TOKENS.loss : TOKENS.ink2;
                     return (
@@ -353,6 +355,11 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                         <span style={{ color: sideColor }}>{side || 'fill'}</span>
                         <span style={{ color: TOKENS.ink2 }}>{Number.isFinite(qty) ? qty.toFixed(qty >= 100 ? 0 : 2) : '—'}</span>
                         <span style={{ color: TOKENS.ink2 }}>{fmtPrice(px)}</span>
+                        {Number.isFinite(tradePnl) ? (
+                          <Signed value={tradePnl} size={11} />
+                        ) : (
+                          <span style={{ color: TOKENS.ink3 }}>—</span>
+                        )}
                         <span title={o.timestamp ?? undefined} style={{ color: TOKENS.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {Number.isFinite(ts) ? `${minutesAgo(ts)} · ${o.broker ?? ''}` : o.broker ?? ''}
                         </span>

@@ -1290,6 +1290,224 @@ class GlobalEdgeCoordinator:
             shed_so_far += trim_cash
         return out
 
+    def propose_rotation_actions(
+        self,
+        held: list[HeldPositionEdge],
+        new_opportunities: list[StrategyOpportunity],
+        *,
+        active_mode: str = DEFAULT_MODE,
+        replacement_context: ReplacementContext | None = None,
+    ) -> list[CoordinatorAction]:
+        """Fee-aware close-and-replace actions when the book is already at target.
+
+        Adaptive build-up intentionally stops once the cash target is met. Hunter
+        still needs a pulse: if fresh opportunity quality beats weak held edge by
+        enough to pay estimated switching costs, rotate the cash into the better
+        instrument instead of standing still.
+        """
+        if not held or not new_opportunities:
+            return []
+        rot_cfg = self._cfg.get("rotation") or {}
+        if not bool(rot_cfg.get("enabled", True)):
+            return []
+        mode = (active_mode or DEFAULT_MODE).strip().lower()
+        raw_max = rot_cfg.get("max_replacements_per_tick", 0)
+        if isinstance(raw_max, dict):
+            raw_max = raw_max.get(mode, raw_max.get("trader", 0))
+        try:
+            max_repl = int(raw_max)
+        except Exception:  # noqa: BLE001
+            max_repl = 0
+        if max_repl <= 0:
+            return []
+
+        raw_adv = rot_cfg.get("min_edge_advantage", self._threshold(mode))
+        if isinstance(raw_adv, dict):
+            raw_adv = raw_adv.get(mode, raw_adv.get("trader", self._threshold(mode)))
+        try:
+            min_adv = Decimal(str(raw_adv))
+        except Exception:  # noqa: BLE001
+            min_adv = self._threshold(mode)
+        try:
+            fee_bps = Decimal(str(rot_cfg.get("estimated_round_trip_fee_bps", "20")))
+        except Exception:  # noqa: BLE001
+            fee_bps = Decimal("20")
+        try:
+            fee_mult = Decimal(str(rot_cfg.get("fee_edge_multiplier", "1.0")))
+        except Exception:  # noqa: BLE001
+            fee_mult = Decimal("1.0")
+        try:
+            symbol_cooldown_sec = int(rot_cfg.get("symbol_cooldown_sec", 900))
+        except Exception:  # noqa: BLE001
+            symbol_cooldown_sec = 900
+        try:
+            min_hold_sec = int(rot_cfg.get("min_hold_sec", symbol_cooldown_sec))
+        except Exception:  # noqa: BLE001
+            min_hold_sec = symbol_cooldown_sec
+        try:
+            churn_penalty = Decimal(str(rot_cfg.get("churn_penalty_per_event", "0.08")))
+        except Exception:  # noqa: BLE001
+            churn_penalty = Decimal("0.08")
+        try:
+            churn_block_threshold = Decimal(str(rot_cfg.get("churn_block_threshold", "0.16")))
+        except Exception:  # noqa: BLE001
+            churn_block_threshold = Decimal("0.16")
+        fee_edge_cost = max(Decimal("0"), fee_bps) / Decimal("10000") * max(Decimal("0"), fee_mult)
+        required_advantage = min_adv + fee_edge_cost
+
+        cash_overrides = self._cfg.get("cash_factors") or None
+
+        def _cash_used(h: HeldPositionEdge) -> Decimal:
+            ac = str((h.metadata or {}).get("asset_class") or "")
+            cf = cash_factor_for_asset_class(ac, cash_overrides, symbol=h.symbol)
+            if cf <= 0:
+                cf = Decimal("1.0")
+            return h.notional * cf
+
+        def _norm_sym(s: str) -> str:
+            x = s.strip().upper()
+            for suf in ("=X", "=F"):
+                if x.endswith(suf):
+                    return x[: -len(suf)]
+            if x.endswith("-USD") and len(x) > 4:
+                return x[:-4]
+            return x
+
+        ranked_held = sorted(held, key=lambda h: (h.expected_remaining_edge, -_cash_used(h)))
+        ranked_new = sorted(new_opportunities, key=lambda o: o.priority_score, reverse=True)
+        out: list[CoordinatorAction] = []
+        used_new: set[str] = set()
+        used_held: set[str] = set()
+        now = datetime.now(timezone.utc)
+
+        def _recently_touched(sym: str, seconds: int) -> bool:
+            if replacement_context is None or seconds <= 0:
+                return False
+            last = replacement_context.last_event_at_by_symbol.get(_norm_sym(sym))
+            if last is None:
+                last = replacement_context.last_event_at_by_symbol.get(str(sym).strip().upper())
+            if last is None:
+                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            age = (now - last.astimezone(timezone.utc)).total_seconds()
+            return age < seconds
+
+        for weak in ranked_held:
+            if len(out) // 2 >= max_repl:
+                break
+            weak_norm = _norm_sym(weak.symbol)
+            if weak_norm in used_held:
+                continue
+            if _recently_touched(weak.symbol, min_hold_sec):
+                continue
+            weak_side = _canonical_position_side((weak.metadata or {}).get("side"))
+            cash_budget = _cash_used(weak)
+            if cash_budget <= 0:
+                continue
+            for opp in ranked_new:
+                opp_norm = _norm_sym(opp.symbol)
+                if opp_norm == weak_norm or opp_norm in used_new:
+                    continue
+                if _recently_touched(opp.symbol, symbol_cooldown_sec):
+                    continue
+                opp_side = _canonical_position_side(getattr(opp, "side", None))
+                if any(
+                    _norm_sym(h.symbol) == opp_norm
+                    and _canonical_position_side((h.metadata or {}).get("side")) == opp_side
+                    for h in held
+                ):
+                    continue
+                if replacement_context is not None:
+                    pen = churn_penalty_for_pair(
+                        weak.symbol,
+                        opp.symbol,
+                        recent_events=replacement_context.recent_events,
+                        max_events=10,
+                        penalty_per_event=churn_penalty,
+                    )
+                    if pen >= churn_block_threshold:
+                        continue
+                advantage = Decimal(str(opp.priority_score)) - Decimal(str(weak.expected_remaining_edge))
+                if advantage <= required_advantage:
+                    continue
+
+                trim_meta = dict(weak.metadata or {})
+                trim_meta["coordinator_kind"] = "trim_symbol"
+                trim_meta["reduce_only"] = True
+                trim_meta["close_only"] = True
+                trim_meta["target_notional"] = str(weak.notional)
+                trim_meta["risk_notional_override"] = str(weak.notional)
+                trim_meta["rotation_reason"] = "hunter_fee_aware_replacement"
+                trim_meta["rotation_replacement_symbol"] = opp.symbol
+                trim_meta["rotation_advantage"] = str(advantage)
+                trim_meta["rotation_required_advantage"] = str(required_advantage)
+                trim_meta["rotation_estimated_round_trip_fee_bps"] = str(fee_bps)
+                if weak.broker:
+                    trim_meta["broker"] = weak.broker
+
+                opp_meta = dict(opp.metadata)
+                opp_ac = str(opp_meta.get("asset_class") or "").strip().lower()
+                cf = cash_factor_for_asset_class(opp_ac, cash_overrides, symbol=opp.symbol)
+                if cf <= 0:
+                    cf = Decimal("1.0")
+                open_notional = (cash_budget / cf).quantize(Decimal("0.01"))
+                open_cash = (open_notional * cf).quantize(Decimal("0.01"))
+                opp_meta.setdefault("confidence", str(opp.confidence))
+                opp_meta.setdefault("expected_edge", str(opp.expected_edge))
+                opp_meta.setdefault("side", str(opp.side))
+                opp_meta["allocation_selected"] = True
+                opp_meta["sizing_mode"] = mode
+                opp_meta["sizing_path"] = "fee_aware_rotation"
+                opp_meta["sizing_cash_used"] = str(open_cash)
+                opp_meta["sizing_cash_factor"] = str(cf)
+                opp_meta["sizing_final_capital_required"] = str(open_notional)
+                opp_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
+                opp_meta["sizing_final_action_capital"] = str(open_notional)
+                opp_meta["rotation_replaced_symbol"] = weak.symbol
+                opp_meta["rotation_advantage"] = str(advantage)
+                opp_meta["rotation_required_advantage"] = str(required_advantage)
+                opp_meta["rotation_estimated_round_trip_fee_bps"] = str(fee_bps)
+
+                out.append(
+                    CoordinatorAction(
+                        kind="trim_symbol",
+                        symbol=weak.symbol,
+                        strategy_name="global_edge_rotation",
+                        capital=weak.notional,
+                        priority_score=opp.priority_score,
+                        metadata=trim_meta,
+                    )
+                )
+                out.append(
+                    CoordinatorAction(
+                        kind="open_strategy",
+                        symbol=opp.symbol,
+                        strategy_name=opp.strategy_name,
+                        capital=open_notional,
+                        priority_score=opp.priority_score,
+                        metadata=opp_meta,
+                    )
+                )
+                used_new.add(opp_norm)
+                used_held.add(weak_norm)
+                if replacement_context is not None:
+                    ts = now.astimezone(timezone.utc)
+                    replacement_context.last_event_at_by_symbol[weak_norm] = ts
+                    replacement_context.last_event_at_by_symbol[opp_norm] = ts
+                    replacement_context.recent_events.append(
+                        {
+                            "old": weak.symbol,
+                            "new": opp.symbol,
+                            "ts": ts.isoformat(),
+                            "source": "global_edge_rotation",
+                        }
+                    )
+                    if len(replacement_context.recent_events) > 50:
+                        replacement_context.recent_events = replacement_context.recent_events[-50:]
+                break
+        return out
+
     def propose_flatten_actions(
         self,
         held: list[HeldPositionEdge],

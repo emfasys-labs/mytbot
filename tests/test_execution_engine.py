@@ -910,6 +910,31 @@ async def test_paper_simulate_fill_sell_limit_respects_floor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_reduce_only_close_uses_market_price_not_stale_signal_price() -> None:
+    risk = _FakeRiskEngine({"paper_fee_bps": 10, "paper_slippage_bps": 0})
+    set_risk_engine(risk)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    broker = _FakeBroker()
+    sig = _signal()
+    sig.side = "sell"
+    sig.suggested_price = Decimal("90")
+    sig.metadata = {"reduce_only": True, "close_only": True, "coordinator_kind": "trim_symbol"}
+    order = Order(
+        symbol="SPY",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("1"),
+        limit_price=Decimal("90"),
+        client_order_id="x",
+    )
+
+    res = await engine._simulate_fill(order, sig, broker=broker)
+
+    assert res.avg_fill_price == Decimal("100.25")
+    assert res.fee == Decimal("0.10025000")
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_invokes_cancel_for_each_open_order() -> None:
     now = datetime.now(timezone.utc).isoformat()
     o_a = OrderResult(

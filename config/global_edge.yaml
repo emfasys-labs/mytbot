@@ -59,6 +59,30 @@ adaptive:
       gross_fraction: "1.00"
       concentration: "1.0"
 
+# At/near the capital target, Hunter should keep hunting: close weak/flat
+# holdings and redeploy the same cash into stronger fresh opportunities when
+# the expected edge clears estimated round-trip costs.
+rotation:
+  enabled: true
+  max_replacements_per_tick:
+    hunter: 1
+    trader: 1
+    defender: 0
+  min_edge_advantage:
+    hunter: "0.01"
+    trader: "0.03"
+    defender: "0.08"
+  estimated_round_trip_fee_bps: "20"
+  fee_edge_multiplier: "1.0"
+  # Prevent fee-only churn: after a rotation touches a symbol, do not use that
+  # symbol as either the close leg or replacement leg again until the cooldown
+  # expires. This keeps Hunter alive without ping-ponging the same names.
+  symbol_cooldown_sec: 900
+  # Same protection as an age floor for recently opened replacement symbols.
+  min_hold_sec: 900
+  churn_penalty_per_event: "0.08"
+  churn_block_threshold: "0.16"
+
 cash_factors:
   equity: "1.0"
   etf: "1.0"

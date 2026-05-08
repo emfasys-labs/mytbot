@@ -516,26 +516,59 @@ class ExecutionEngine:
         slippage_bps = self._paper_slippage_bps()
         partial_fill_rate = self._paper_partial_fill_rate()
 
+        sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        reduce_only = bool(
+            getattr(order, "reduce_only", False)
+            or getattr(signal, "reduce_only", False)
+            or sig_md.get("reduce_only")
+            or sig_md.get("close_only")
+            or str(sig_md.get("coordinator_kind", "")).strip().lower() == "trim_symbol"
+        )
+
+        async def _broker_last_price() -> Decimal | None:
+            if broker is None:
+                return None
+            try:
+                px = await broker.get_last_price(order.symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Paper fill: get_last_price failed | symbol=%s | %s",
+                    order.symbol,
+                    exc,
+                )
+                return None
+            try:
+                d = Decimal(str(px))
+            except Exception:  # noqa: BLE001
+                return None
+            return d if d > 0 else None
+
         # ── 1. Determine base fill price ──────────────────────────────────────
         fill_price: Decimal | None = None
-        if signal.suggested_price is not None and signal.suggested_price > 0:
+        # For reduce-only paper closes, mark the fill at the current market
+        # price first. Otherwise closes can realise zero gross P&L simply
+        # because the allocator carried the stale entry/signal price.
+        if reduce_only:
+            fill_price = await _broker_last_price()
+            if fill_price is None:
+                for k in ("current_price", "close", "last_price", "price"):
+                    if k not in sig_md:
+                        continue
+                    try:
+                        px = Decimal(str(sig_md[k]))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if px > 0:
+                        fill_price = px
+                        break
+
+        if fill_price is None and signal.suggested_price is not None and signal.suggested_price > 0:
             fill_price = signal.suggested_price
-        elif order.limit_price is not None and order.limit_price > 0:
+        if fill_price is None and order.limit_price is not None and order.limit_price > 0:
             fill_price = order.limit_price
 
         if fill_price is None or fill_price <= 0:
-            if broker is not None:
-                try:
-                    fill_price = await broker.get_last_price(order.symbol)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Paper fill: get_last_price failed | symbol=%s | %s",
-                        order.symbol,
-                        exc,
-                    )
-                    fill_price = Decimal("0")
-            else:
-                fill_price = Decimal("0")
+            fill_price = await _broker_last_price() or Decimal("0")
 
         # ── 2. Apply directional slippage ─────────────────────────────────────
         if fill_price is not None and fill_price > 0 and slippage_bps > 0:
@@ -546,7 +579,12 @@ class ExecutionEngine:
                 fill_price = fill_price * (Decimal("1") - slip_factor)
 
         # ── 3. Enforce limit price bounds ─────────────────────────────────────
-        if order.order_type == OrderType.LIMIT and order.limit_price is not None and order.limit_price > 0:
+        if (
+            not reduce_only
+            and order.order_type == OrderType.LIMIT
+            and order.limit_price is not None
+            and order.limit_price > 0
+        ):
             lp = order.limit_price
             if fill_price is None or fill_price <= 0:
                 fill_price = lp
