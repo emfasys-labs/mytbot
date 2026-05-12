@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time as _time
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -915,6 +916,7 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
 
 def _order_log_to_dict(r: OrderLog) -> dict[str, Any]:
     meta = r.instrument_metadata if isinstance(r.instrument_metadata, dict) else None
+    avg_fill_price = _decimal_str(r.avg_fill_price) if r.avg_fill_price is not None else None
     reason: str | None = None
     if meta:
         for k in ("error_message", "reject_reason", "reason"):
@@ -939,7 +941,8 @@ def _order_log_to_dict(r: OrderLog) -> dict[str, Any]:
         "broker": r.broker,
         "status": r.status,
         "filled_quantity": _decimal_str(r.filled_quantity) if r.filled_quantity is not None else None,
-        "avg_fill_price": _decimal_str(r.avg_fill_price) if r.avg_fill_price is not None else None,
+        "avg_fill_price": avg_fill_price,
+        "filled_price": avg_fill_price,
         "fee": _decimal_str(r.fee) if r.fee is not None else None,
         "paper_mode": bool(r.paper_mode),
         "metadata": meta,
@@ -1374,23 +1377,56 @@ async def get_discovery_summary(session_factory=Depends(_session_factory)):
     }
 
 
+_UNIVERSE_SNAPSHOT_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+_UNIVERSE_SNAPSHOT_TTL_SEC: float = 15.0
+
+
 @app.get("/intelligence/universe")
 async def get_intelligence_universe(response: Response):
-    """Universe Intelligence snapshot for the dashboard (tiers, funnel, clusters)."""
+    """Universe Intelligence snapshot for the dashboard (tiers, funnel, clusters).
+
+    The heavy work here is asking every connected broker for its full
+    supported-symbol catalogue. Two optimizations keep the Universe tab
+    snappy:
+
+    * broker queries run **in parallel** via ``asyncio.gather`` rather than
+      sequentially (so worst-case latency is one slow broker, not the sum
+      of all of them); and
+    * the assembled payload is cached for a short TTL so concurrent or
+      rapidly-repeated requests (tab switches, manual refresh) reuse the
+      previous result instead of repaying the catalogue cost.
+    """
     from universe.snapshot_service import build_universe_snapshot_dict
 
     response.headers["Cache-Control"] = "no-store, max-age=0"
+
+    now = _time.monotonic()
+    cached = _UNIVERSE_SNAPSHOT_CACHE.get("payload")
+    if cached is not None and now - float(_UNIVERSE_SNAPSHOT_CACHE.get("at") or 0.0) < _UNIVERSE_SNAPSHOT_TTL_SEC:
+        return cached
+
     orch = _get_orchestrator()
     bm = getattr(orch, "_broker_manager", None) if orch else None
     broker_total: dict[str, int] = {}
-    if bm is not None:
-        for name, adapter in bm.adapters.items():
+    if bm is not None and bm.adapters:
+        names = list(bm.adapters.keys())
+
+        async def _count(name: str) -> int:
             try:
-                syms = await asyncio.wait_for(adapter.get_supported_symbols(), timeout=5)
-                broker_total[name] = len(syms or [])
+                syms = await asyncio.wait_for(
+                    bm.adapters[name].get_supported_symbols(), timeout=5
+                )
+                return len(syms or [])
             except Exception:  # noqa: BLE001
-                broker_total[name] = 0
-    return build_universe_snapshot_dict(broker_symbol_totals=broker_total)
+                return 0
+
+        counts = await asyncio.gather(*(_count(n) for n in names), return_exceptions=False)
+        broker_total = {n: int(c) for n, c in zip(names, counts)}
+
+    payload = build_universe_snapshot_dict(broker_symbol_totals=broker_total)
+    _UNIVERSE_SNAPSHOT_CACHE["payload"] = payload
+    _UNIVERSE_SNAPSHOT_CACHE["at"] = now
+    return payload
 
 
 @app.get("/intelligence/regime")

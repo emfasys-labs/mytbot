@@ -2142,7 +2142,14 @@ class TradingLoop:
             if sym_key and qty != 0:
                 held_direction[sym_key] = "long" if qty > 0 else "short"
 
-        if held_direction:
+        adaptive_runtime_on = os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+        if held_direction and not (adaptive_runtime_on and tradable > 0):
             filtered_existing: list[Any] = []
             skipped_existing: list[str] = []
             for opp in new_opps:
@@ -2243,12 +2250,7 @@ class TradingLoop:
             # priority_score, so a single dominant opportunity in Hunter mode
             # can absorb ~100% of the deployable capital. Falls back to legacy
             # per-mode fixed action count + notional fraction when off.
-            adaptive_on = os.getenv("USE_ADAPTIVE_SIZING", "1").strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
+            adaptive_on = adaptive_runtime_on
             adaptive_kwargs: dict[str, Any] = {}
             if self.iterations <= 1:
                 logger.info(
@@ -2374,6 +2376,24 @@ class TradingLoop:
                 # opens. Together they bring cash to target.
                 actions = list(shed_actions) + list(actions)
             try:
+                if repl_ctx is not None and actions:
+                    ts = datetime.now(timezone.utc)
+
+                    def _ctx_sym(raw: str) -> str:
+                        s = str(raw or "").strip().upper()
+                        for suf in ("=X", "=F"):
+                            if s.endswith(suf):
+                                return s[: -len(suf)]
+                        if s.endswith("-USD") and len(s) > 4:
+                            return s[:-4]
+                        return s
+
+                    for act in actions:
+                        if str(getattr(act, "kind", "") or "") != "open_strategy":
+                            continue
+                        sym_key = _ctx_sym(str(getattr(act, "symbol", "") or ""))
+                        if sym_key:
+                            repl_ctx.last_event_at_by_symbol[sym_key] = ts
                 await save_replacement_context_to_bus(bus, repl_ctx)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("trading_loop | save global-edge replacement context failed: {}", exc)
@@ -2392,6 +2412,25 @@ class TradingLoop:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+        elif buf is not None and new_opps:
+            try:
+                buf.append(
+                    strategy_candidate_row(
+                        symbol="GLOBAL_EDGE",
+                        strategy="allocator",
+                        status="scanned_no_action",
+                        reason="insufficient_edge_or_budget",
+                        metadata={
+                            "opportunities_seen": str(len(new_opps)),
+                            "held_count": str(len(held)),
+                            "capital_pct": str(self.capital_pct),
+                            "adaptive_sizing": str(adaptive_runtime_on),
+                        },
+                        loop_iteration=self.iterations,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
         log_arb_event("rank", ranked=len(actions), opportunities=len(new_opps), held=len(held))
 
         dashboard_snapshot_written = False

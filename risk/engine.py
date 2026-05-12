@@ -755,6 +755,8 @@ class RiskEngine:
         if not positions:
             return (True, "theme_uniqueness")
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        if bool(meta.get("sizing_topup_existing")) and str(meta.get("coordinator_kind", "")).lower() == "open_strategy":
+            return (True, "theme_uniqueness")
         spec = parse_option_contract_from_metadata(meta)
         sym = spec.position_key() if spec is not None else (getattr(signal, "symbol", "") or "").strip().upper()
         for pos_sym, pos in positions.items():

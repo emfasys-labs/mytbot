@@ -69,11 +69,11 @@ rotation:
     trader: 1
     defender: 0
   min_edge_advantage:
-    hunter: "0.01"
+    hunter: "0.03"
     trader: "0.03"
     defender: "0.08"
-  estimated_round_trip_fee_bps: "20"
-  fee_edge_multiplier: "1.0"
+  estimated_round_trip_fee_bps: "40"
+  fee_edge_multiplier: "1.5"
   # Prevent fee-only churn: after a rotation touches a symbol, do not use that
   # symbol as either the close leg or replacement leg again until the cooldown
   # expires. This keeps Hunter alive without ping-ponging the same names.

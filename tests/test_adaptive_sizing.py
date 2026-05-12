@@ -573,7 +573,7 @@ def test_cash_factor_inference_from_symbol():
     assert cash_factor_for_asset_class("forex", symbol="AAPL") == Decimal("0.20")
 
 
-def test_adaptive_skips_already_held_same_side(adaptive_on):
+def test_adaptive_topups_already_held_same_side_when_under_target(adaptive_on):
     cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
     coord = GlobalEdgeCoordinator(cfg)
     held = [
@@ -592,4 +592,36 @@ def test_adaptive_skips_already_held_same_side(adaptive_on):
         concentration_exponent=Decimal("2.0"),
     )
     opens = [a for a in actions if a.kind == "open_strategy"]
-    assert opens == []
+    assert len(opens) == 1
+    assert opens[0].symbol == "BTC-USD"
+    assert opens[0].capital > 0
+    assert opens[0].metadata["sizing_topup_existing"] is True
+    assert opens[0].metadata["sizing_existing_notional"] == "50000"
+
+
+def test_adaptive_topups_from_held_edge_when_no_fresh_opportunity(adaptive_on):
+    cfg = {"edge_advantage": {"hunter": "0.02"}, "emit_trim_actions": False}
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="BBBS",
+            notional=Decimal("25000"),
+            expected_remaining_edge=Decimal("0.08"),
+            strategy_name="volatility_regime",
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+
+    actions = coord.propose_actions(
+        held=held,
+        new_opportunities=[],
+        active_mode="hunter",
+        gross_target_capital=Decimal("75000"),
+        concentration_exponent=Decimal("2.0"),
+    )
+
+    opens = [a for a in actions if a.kind == "open_strategy"]
+    assert len(opens) == 1
+    assert opens[0].symbol == "BBBS"
+    assert opens[0].metadata["sizing_topup_existing"] is True
+    assert opens[0].metadata["sizing_topup_source"] == "held_remaining_edge"

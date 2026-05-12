@@ -987,16 +987,25 @@ class GlobalEdgeCoordinator:
         displacement_mode = held_cash_used > absolute_cash_target * Decimal("1.05")
 
         # ---- Filter to qualifying opportunities --------------------------
-        qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None]] = []
+        qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None, HeldPositionEdge | None]] = []
         for opp in ranked:
-            if opp.expected_edge <= weakest_edge + thresh:
-                continue
             opp_side = _canonical_position_side(getattr(opp, "side", None))
-            if any(
-                h.symbol.strip().upper() == opp.symbol.strip().upper()
-                and _canonical_position_side((h.metadata or {}).get("side")) == opp_side
-                for h in held
-            ):
+            same_side_held = next(
+                (
+                    h
+                    for h in held
+                    if h.symbol.strip().upper() == opp.symbol.strip().upper()
+                    and _canonical_position_side((h.metadata or {}).get("side")) == opp_side
+                ),
+                None,
+            )
+            is_topup = same_side_held is not None and not displacement_mode
+            if is_topup:
+                if opp.expected_edge <= thresh:
+                    continue
+            elif opp.expected_edge <= weakest_edge + thresh:
+                continue
+            if same_side_held is not None and not is_topup:
                 continue
             # Churn skip
             skip_churn = False
@@ -1026,7 +1035,39 @@ class GlobalEdgeCoordinator:
                         continue
                     trim_edge = available_held.pop(i)
                     break
-            qualifying.append((opp, trim_edge))
+            qualifying.append((opp, trim_edge, same_side_held if is_topup else None))
+
+        if not qualifying and not displacement_mode and gross_target_capital > 0:
+            for h in sorted(held, key=lambda x: x.expected_remaining_edge, reverse=True):
+                if h.expected_remaining_edge <= thresh:
+                    continue
+                h_meta = dict(h.metadata or {})
+                h_side = _canonical_position_side(h_meta.get("side"))
+                qualifying.append(
+                    (
+                        StrategyOpportunity(
+                            strategy_name=str(h.strategy_name or "held_edge_topup"),
+                            symbol=h.symbol,
+                            side=h_side,
+                            created_at=datetime.now(timezone.utc),
+                            expected_edge=h.expected_remaining_edge,
+                            confidence=Decimal(str(h_meta.get("confidence", "0.65") or "0.65")),
+                            capital_required=gross_target_capital,
+                            expected_holding_hours=24,
+                            liquidity_score=Decimal("0.75"),
+                            execution_score=Decimal("0.75"),
+                            regime_fit_score=Decimal("0.75"),
+                            risk_cost_score=Decimal("0"),
+                            priority_score=max(h.expected_remaining_edge, Decimal("0")),
+                            metadata={
+                                **h_meta,
+                                "sizing_topup_source": "held_remaining_edge",
+                            },
+                        ),
+                        None,
+                        h,
+                    )
+                )
 
         if not qualifying:
             return []
@@ -1043,9 +1084,11 @@ class GlobalEdgeCoordinator:
         # deployed across fewer, bigger positions.
         min_overrides = self._cfg.get("minimum_order_sizes_usd") or None
 
-        def _softmax(opps: list[tuple[StrategyOpportunity, HeldPositionEdge | None]]) -> list[float]:
+        def _softmax(
+            opps: list[tuple[StrategyOpportunity, HeldPositionEdge | None, HeldPositionEdge | None]]
+        ) -> list[float]:
             raws: list[float] = []
-            for opp, _ in opps:
+            for opp, _, _ in opps:
                 try:
                     p = float(opp.priority_score)
                 except (TypeError, ValueError):
@@ -1061,7 +1104,7 @@ class GlobalEdgeCoordinator:
         while qualifying:
             weights = _softmax(qualifying)
             below_min: list[int] = []
-            for idx, ((opp, _trim), w) in enumerate(zip(qualifying, weights, strict=True)):
+            for idx, ((opp, _trim, _topup), w) in enumerate(zip(qualifying, weights, strict=True)):
                 opp_md = opp.metadata or {}
                 ac = str(opp_md.get("asset_class") or "").strip().lower()
                 cf = cash_factor_for_asset_class(ac, cash_overrides, symbol=opp.symbol)
@@ -1097,7 +1140,7 @@ class GlobalEdgeCoordinator:
         # via the asset-class cash factor (forex default 20% → ~5x on
         # notional, equity 1.0 → notional == cash).
         out: list[CoordinatorAction] = []
-        for (opp, trim_edge), w in zip(qualifying, weights, strict=True):
+        for (opp, trim_edge, topup_edge), w in zip(qualifying, weights, strict=True):
             opp_meta = opp.metadata or {}
             opp_ac = str(opp_meta.get("asset_class") or "").strip().lower()
             cf = cash_factor_for_asset_class(opp_ac, cash_overrides, symbol=opp.symbol)
@@ -1191,6 +1234,9 @@ class GlobalEdgeCoordinator:
             action_meta["sizing_qualifying_count"] = str(len(qualifying))
             action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)
             action_meta["sizing_final_action_capital"] = str(cap_i)
+            if topup_edge is not None:
+                action_meta["sizing_topup_existing"] = True
+                action_meta["sizing_existing_notional"] = str(topup_edge.notional)
 
             out.append(
                 CoordinatorAction(

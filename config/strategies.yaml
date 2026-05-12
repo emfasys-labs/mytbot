@@ -77,6 +77,9 @@ strategies:
       trader:
         base_target_notional: 9000
       hunter:
+        rsi_buy_threshold: 47
+        rsi_sell_threshold: 53
+        band_epsilon: 0.006
         base_target_notional: 20000
 
   volume_flow:
@@ -96,8 +99,8 @@ strategies:
         zscore_open_threshold: 1.8
         min_bar_return: 0.0015
       hunter:
-        zscore_open_threshold: 0.95
-        min_bar_return: 0.0006
+        zscore_open_threshold: 0.75
+        min_bar_return: 0.0004
         base_target_notional: 25000
 
   event_driven_news:
@@ -214,7 +217,7 @@ strategies:
       momentum_breakout: 0.06
       event_driven_news: 0.08
       pairs_trading: 0.03
-      mean_reversion: -0.02
+      mean_reversion: 0.04
 
   routing_learning:
     decay_every_n_iterations: 8

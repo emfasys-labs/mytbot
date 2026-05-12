@@ -18,6 +18,7 @@ import {
   type ApiPositionsResponse,
   type DashboardSnapshot,
   type IntelligenceSignalsResponse,
+  type IntelligenceUniverseResponse,
   type RoutingQualityResponse,
   type StrategyCandidateMixResponse,
   type SystemState as BackendSystemState,
@@ -62,6 +63,11 @@ import type { SystemState as DesignSystemState } from './tokens';
 
 const REFRESH_INTERVAL_MS = 10_000;
 const INTEL_THROTTLE_MS = 12_000;
+// /intelligence/universe is heavier than the dashboard read path (it
+// asks every connected broker for its full supported-symbol catalogue).
+// Prefetch it on a slower cadence so the Universe tab opens instantly
+// from the cached payload instead of paying a cold round-trip per visit.
+const UNIVERSE_THROTTLE_MS = 60_000;
 
 // Bundled at build time (see vite.config.ts). Surfaced in the console so a
 // stale cache can be spotted at a glance; also participates in the chunk
@@ -125,6 +131,8 @@ export interface LiveData {
   newsDataProviders: NewsDataProviderRow[];
   orders: ApiOrderRow[];
   intelligence: IntelligenceSignalsResponse | null;
+  /** Prefetched /intelligence/universe payload (background polled). */
+  universeIntel: IntelligenceUniverseResponse | null;
   runtimeDemand: Record<string, unknown> | null;
   runtimeMetaLabeling: Record<string, unknown> | null;
   routingQuality: RoutingQualityResponse | null;
@@ -184,6 +192,7 @@ export function useLiveSystem(): LiveData {
   );
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
+  const [universeIntel, setUniverseIntel] = useState<IntelligenceUniverseResponse | null>(null);
   const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
   const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
   const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
@@ -203,6 +212,7 @@ export function useLiveSystem(): LiveData {
   const refreshPending = useRef(false);
   const lastHttpRefresh = useRef(0);
   const lastIntelRefresh = useRef(0);
+  const lastUniverseRefresh = useRef(0);
   const stateRef = useRef(backendState);
   useEffect(() => { stateRef.current = backendState; }, [backendState]);
   const shutdownInFlight = useRef(false);
@@ -243,6 +253,7 @@ export function useLiveSystem(): LiveData {
     setNewsDataProviders(defaultNewsDataProviderRows());
     setOrders([]);
     setIntelligence(null);
+    setUniverseIntel(null);
     setRuntimeDemand(null);
     setRuntimeMetaLabeling(null);
     setRoutingQuality(null);
@@ -477,6 +488,19 @@ export function useLiveSystem(): LiveData {
         ]);
         if (sig.status === 'fulfilled') setIntelligence(sig.value);
         if (modeRes.status === 'fulfilled' && modeRes.value.mode) setModeState(modeRes.value.mode);
+      }
+
+      // Slow-cadence prefetch of the Universe snapshot. The endpoint is
+      // gated to running/starting on the UI, and the payload changes on
+      // the pipeline cadence — once per minute is plenty for the tab to
+      // feel instant on switch while keeping broker catalogue calls
+      // off the fast refresh path.
+      if (feedsLive && Date.now() - lastUniverseRefresh.current > UNIVERSE_THROTTLE_MS) {
+        lastUniverseRefresh.current = Date.now();
+        try {
+          const u = await api.getIntelligenceUniverse();
+          setUniverseIntel(u);
+        } catch { /* keep last known */ }
       }
     } catch {
       /* keep last-known state */
@@ -864,6 +888,7 @@ export function useLiveSystem(): LiveData {
     newsDataProviders,
     orders,
     intelligence,
+    universeIntel,
     runtimeDemand,
     runtimeMetaLabeling,
     routingQuality,

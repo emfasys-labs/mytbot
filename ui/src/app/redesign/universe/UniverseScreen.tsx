@@ -94,9 +94,19 @@ export function UniverseScreen({
   const pad = density === 'compact' ? 12 : 20;
   const [tab, setTab] = useState<UniTab>('overview');
   const [stageFilter, setStageFilter] = useState<string | null>(null);
-  const [data, setData] = useState<IntelligenceUniverseResponse | null>(null);
+  // Seed with the prefetched snapshot from useLiveSystem so the tab renders
+  // instantly on switch; subsequent refreshes flow through the same setter.
+  const [data, setData] = useState<IntelligenceUniverseResponse | null>(
+    live.universeIntel ?? null,
+  );
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+
+  // Keep local state in sync with the shared prefetched copy so periodic
+  // background refreshes in useLiveSystem propagate even while we're idle.
+  useEffect(() => {
+    if (live.universeIntel) setData(live.universeIntel);
+  }, [live.universeIntel]);
 
   const load = useCallback(async () => {
     try {
@@ -109,9 +119,12 @@ export function UniverseScreen({
   }, []);
 
   useEffect(() => {
-    void load();
+    // If we already have a warm snapshot from useLiveSystem, skip the
+    // immediate refetch — the shared background loop will keep it fresh.
+    if (!live.universeIntel) void load();
     const t = setInterval(() => void load(), 30_000);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 
   useEffect(() => {
@@ -387,7 +400,6 @@ function OverviewTab({
             const pct = Math.max(0.04, f.count / total);
             const w = Math.max(80, 100 * Math.sqrt(pct));
             const next = arr[i + 1];
-            const drop = next ? f.count - next.count : null;
             return (
               <div key={f.stage} style={{ display: 'flex', alignItems: 'stretch' }}>
                 <button
@@ -425,7 +437,6 @@ function OverviewTab({
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    position: 'relative',
                   }}
                   >
                     <svg width={32} height={48} style={{ overflow: 'visible' }}>
@@ -438,18 +449,6 @@ function OverviewTab({
                       />
                       <polygon points="32,24 26,20 26,28" fill={TOKENS.lineStrong} />
                     </svg>
-                    {drop != null && drop > 0 && (
-                      <span style={{
-                        position: 'absolute',
-                        top: -2,
-                        fontFamily: TOKENS.mono,
-                        fontSize: 9,
-                        color: TOKENS.ink3,
-                      }}
-                      >
-                        −{fmtNum(drop)}
-                      </span>
-                    )}
                   </div>
                 )}
               </div>

@@ -543,6 +543,47 @@ def test_rejects_on_max_loss_per_trade_pct() -> None:
     assert decision.checks_failed == ["max_loss_per_trade_pct"]
 
 
+def test_rejects_duplicate_same_direction_theme() -> None:
+    engine = RiskEngine(_risk_cfg())
+    decision = engine.evaluate(
+        _signal(symbol="SPY", side="buy", qty="1", price="100"),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "trades_today": 0,
+            "current_gross_exposure": Decimal("1000"),
+            "symbol_exposure": {"SPY": Decimal("1000")},
+            "asset_class_exposure": {"equity": Decimal("1000")},
+            "positions": {"SPY": {"quantity": 10}},
+        },
+    )
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["theme_uniqueness"]
+
+
+def test_allocator_topup_bypasses_duplicate_theme_only() -> None:
+    engine = RiskEngine(_risk_cfg())
+    decision = engine.evaluate(
+        _signal(
+            symbol="SPY",
+            side="buy",
+            qty="1",
+            price="100",
+            metadata={"coordinator_kind": "open_strategy", "sizing_topup_existing": True},
+        ),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "trades_today": 0,
+            "current_gross_exposure": Decimal("1000"),
+            "symbol_exposure": {"SPY": Decimal("1000")},
+            "asset_class_exposure": {"equity": Decimal("1000")},
+            "positions": {"SPY": {"quantity": 10}},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
+
+
 def test_options_rejected_when_disabled() -> None:
     cfg = _risk_cfg()
     cfg["options_trading"] = {"enabled": False}

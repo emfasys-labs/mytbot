@@ -74,22 +74,22 @@ profit_harvest:
   # Operator-set floors / fallbacks (used when volatility cannot be measured
   # and as a lower bound under the dynamic resolver).
   base:
-    min_profit_pct: "0.012"
-    min_profit_nav_pct: "0.001"
+    min_profit_pct: "0.002"
+    min_profit_nav_pct: "0.00025"
     trim_fraction: "0.50"
     full_close_profit_pct: "0.035"
-    trailing_giveback_pct: "0.35"
+    trailing_giveback_pct: "0.25"
     # Trailing-lock fires even after the position rolls back through zero,
     # provided the prior peak was at least this fraction of NAV (defends
     # against locking on noise on tiny positions).
-    peak_lock_min_nav_pct: "0.0005"
+    peak_lock_min_nav_pct: "0.0002"
 
   volatility:
     fallback_vol: "0.015"        # Used when no feature snapshot is available
     vol_low: "0.005"             # ≤ this is "calm"
     vol_high: "0.05"             # ≥ this is "wild"
-    min_profit_k: "1.5"          # Partial-trim trigger ≈ 1.5x daily vol
-    min_profit_floor: "0.004"
+    min_profit_k: "0.20"         # Hunter needs to bank small intraday paper edges
+    min_profit_floor: "0.001"
     min_profit_ceil: "0.05"
     full_close_k: "4.0"          # Full-close trigger ≈ 4x daily vol
     full_close_floor: "0.012"
@@ -107,9 +107,9 @@ profit_harvest:
       giveback_mult: "1.00"
       trim_fraction_mult: "1.00"
     hunter:
-      threshold_mult: "1.50"     # Let winners run
-      giveback_mult: "1.40"      # Tolerate retracement
-      trim_fraction_mult: "0.70" # Leave a runner
+      threshold_mult: "0.50"     # Bank quicker in fast Hunter paper cycles
+      giveback_mult: "0.50"      # Protect small intraday peaks
+      trim_fraction_mult: "1.00" # Bank enough to offset fees
 
   bounds:
     trim_fraction_min: "0.10"
@@ -174,8 +174,8 @@ max_slippage_pct: 0.005         # Reject if expected slippage > 0.5%
 min_liquidity_usd: 1000000      # Only trade assets with > $1M daily volume
 max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
 # Synthetic paper fills (ExecutionEngine)
-paper_fee_bps: 10            # Fee as bps of filled notional (default 10 bps ≈ typical taker)
-paper_slippage_bps: 2        # One-way directional slippage in bps (BUY fills higher, SELL lower)
+paper_fee_bps: 0.5           # Blended liquid-paper fee bps; visible without swamping edge tests
+paper_slippage_bps: 0.5      # One-way liquid-paper slippage bps (BUY higher, SELL lower)
 paper_partial_fill_rate: 0.0 # Probability [0.0–1.0] that a paper fill is partial; 0 = always full
 
 # ── Kill switch ───────────────────────────────────────────────────────────────

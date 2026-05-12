@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from api.server import app
 from api.server import _command_bus, _session_factory
 from api.server import _apply_order_fill_to_position_state
+from api.server import _order_log_to_dict
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 
 
@@ -104,6 +105,32 @@ def test_healthz_unauthenticated_with_dashboard_token(monkeypatch, client: TestC
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "secret-read")
     r = client.get("/healthz")
     assert r.status_code == 200
+
+
+def test_order_log_dict_exposes_filled_price_alias():
+    row = SimpleNamespace(
+        id="o1",
+        signal_id="s1",
+        broker_order_id="b1",
+        timestamp=datetime(2026, 5, 12, tzinfo=timezone.utc),
+        symbol="SPY",
+        side="buy",
+        order_type="market",
+        quantity=Decimal("2"),
+        limit_price=None,
+        broker="ibkr",
+        status="filled",
+        filled_quantity=Decimal("2"),
+        avg_fill_price=Decimal("101.25"),
+        fee=Decimal("0.41"),
+        paper_mode=True,
+        instrument_metadata={},
+    )
+
+    data = _order_log_to_dict(row)
+
+    assert data["avg_fill_price"] == "101.25"
+    assert data["filled_price"] == "101.25"
 
 
 def test_order_fill_realised_pnl_long_close_after_fees():
