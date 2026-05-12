@@ -3,7 +3,7 @@
 # `data/runtime/universe_intelligence.json`. Pipeline symbols remain authoritative
 # when disabled or on build failure.
 
-enabled: false
+enabled: true
 fallback_to_pipeline: true
 
 candidate_pool_default: 0
@@ -51,6 +51,8 @@ rebuild:
 
 correlation_cluster_threshold: 0.88
 cluster_max_symbols: 120
+cluster_yf_concurrency: 8
+min_cluster_price_series: 5
 
 persistence:
   intelligence_json: data/runtime/universe_intelligence.json

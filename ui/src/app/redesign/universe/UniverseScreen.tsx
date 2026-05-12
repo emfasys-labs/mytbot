@@ -58,6 +58,11 @@ function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
+function buildState(data: IntelligenceUniverseResponse | null): string {
+  const raw = data?.build?.state;
+  return typeof raw === 'string' && raw ? raw : data?.fallback ? 'fallback' : 'unknown';
+}
+
 function classGlyph(klass: string, size = 12) {
   const c =
     klass === 'crypto' ? TOKENS.profit :
@@ -322,6 +327,12 @@ function OverviewTab({
 }) {
   const total = funnel[0]?.count ?? 1;
   const banned = funnel.find((f) => f.stage === 'banned');
+  const state = buildState(data);
+  const statusColor =
+    state === 'fresh' && !data?.fallback ? accentColor :
+    state === 'stale' ? TOKENS.caution :
+    TOKENS.danger;
+  const statusLabel = data?.fallback ? 'fallback' : state;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -334,7 +345,7 @@ function OverviewTab({
               fontFamily: TOKENS.sans,
               fontSize: 26,
               fontWeight: 300,
-              letterSpacing: '-0.03em',
+              letterSpacing: 0,
               color: TOKENS.ink0,
             }}>
               {heroLine}
@@ -344,16 +355,29 @@ function OverviewTab({
               {data?.fallback && ` (${data.fallback})`}
             </div>
           </div>
-          <div style={{
-            fontFamily: TOKENS.mono,
-            fontSize: 10,
-            color: TOKENS.ink3,
-            padding: '6px 10px',
-            border: `1px solid ${TOKENS.line}`,
-            borderRadius: 8,
-            height: 'fit-content',
-          }}>
-            {data?.generated_at?.replace('T', ' ').slice(0, 19) ?? '—'} UTC
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <div style={{
+              fontFamily: TOKENS.mono,
+              fontSize: 10,
+              color: statusColor,
+              padding: '6px 10px',
+              border: `1px solid ${statusColor}66`,
+              borderRadius: 8,
+              height: 'fit-content',
+            }}>
+              {statusLabel}
+            </div>
+            <div style={{
+              fontFamily: TOKENS.mono,
+              fontSize: 10,
+              color: TOKENS.ink3,
+              padding: '6px 10px',
+              border: `1px solid ${TOKENS.line}`,
+              borderRadius: 8,
+              height: 'fit-content',
+            }}>
+              {data?.generated_at?.replace('T', ' ').slice(0, 19) ?? '—'} UTC
+            </div>
           </div>
         </div>
 

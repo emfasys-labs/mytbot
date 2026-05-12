@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +85,15 @@ def _pipeline_caps() -> dict[str, int]:
     return out
 
 
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def build_universe_snapshot_dict(
     *,
     broker_symbol_totals: dict[str, int] | None = None,
@@ -158,12 +167,37 @@ def build_universe_snapshot_dict(
         }
 
     if intel is None:
-        intel = UniverseIntelligenceState(
-            candidate_count=max(source_pool, eligible_count, 0),
-            cold_scan=list(light_list),
-            active_eval=list(dict.fromkeys(scan_list + core_list)),
-            core=list(core_list),
+        symbols_ui = _symbols_fallback(
+            pipeline_syms, core_list + scan_list, scores, caps, cfg, intel_disabled=False, intel=None
         )
+        return {
+            "enabled": True,
+            "fallback": "universe intelligence enabled but no build artifact yet",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "funnel": [
+                {"stage": "source", "count": max(source_pool, eligible_count, 1), "fresh": True, "drops": None},
+                {"stage": "eligible", "count": max(eligible_count, 1), "fresh": True, "drops": drops_eligible},
+                {
+                    "stage": "watching",
+                    "count": max(watching_count, 1),
+                    "fresh": True,
+                    "drops": drops_watching,
+                },
+                {"stage": "promoted", "count": 0, "fresh": False, "drops": None},
+                {"stage": "active", "count": min(32, max(0, watching_count // 40)), "fresh": False, "drops": None},
+                {"stage": "banned", "count": 0, "fresh": True, "drops": None},
+            ],
+            "symbols": symbols_ui,
+            "clusters": [],
+            "promotions": [],
+            "stream": [],
+            "config_mirror": _config_mirror(cfg, caps),
+            "build": _build_info(tiers.updated_at if tiers else None, cfg, state="missing"),
+            "broker_totals": broker_totals,
+            "core_intel": [],
+            "cold_scan": [],
+            "active_eval": [],
+        }
 
     cold = list(intel.cold_scan)
     active_eval = list(intel.active_eval)
@@ -213,15 +247,27 @@ def build_universe_snapshot_dict(
     }
 
 
-def _build_info(last_at: str | None, cfg: dict[str, Any]) -> dict[str, Any]:
+def _build_info(last_at: str | None, cfg: dict[str, Any], *, state: str | None = None) -> dict[str, Any]:
     rb = cfg.get("rebuild") or {}
+    interval = int(rb.get("interval_sec", 120))
+    now = datetime.now(timezone.utc)
+    last_dt = _parse_dt(last_at)
+    if state is None:
+        if last_dt is None:
+            resolved_state = "missing"
+        else:
+            age = now - last_dt.astimezone(timezone.utc)
+            resolved_state = "stale" if age > timedelta(seconds=max(interval * 2, interval + 300)) else "fresh"
+    else:
+        resolved_state = state
+    next_dt = (last_dt.astimezone(timezone.utc) + timedelta(seconds=interval)) if last_dt else now
     return {
-        "state": "fresh",
-        "lastBuildAt": last_at or datetime.now(timezone.utc).isoformat(),
-        "nextBuildAt": datetime.now(timezone.utc).isoformat(),
+        "state": resolved_state,
+        "lastBuildAt": last_at,
+        "nextBuildAt": next_dt.isoformat(),
         "loopId": 0,
         "durationMs": int(rb.get("last_duration_ms", 0)),
-        "intervalSec": int(rb.get("interval_sec", 120)),
+        "intervalSec": interval,
     }
 
 
@@ -357,22 +403,4 @@ def _promotion_stream(symbols: list[dict[str, Any]], promotions: list[dict[str, 
         )
     if stream:
         return stream[:12]
-    for s in symbols:
-        if s.get("stage") == "promoted":
-            stream.append(
-                {
-                    "sym": s["sym"],
-                    "klass": s.get("klass", "equity"),
-                    "why": "scanner",
-                    "conviction": s.get("conviction", 50),
-                    "trend": s.get("trend", "steady"),
-                    "promotedAt": int(now * 1000),
-                    "spark": s.get("spark", []),
-                    "bookCorr": s.get("bookCorr", 0),
-                    "topFactors": [("liquidity", str(s.get("factors", {}).get("liquidity", 0)))],
-                    "relatedNews": [],
-                }
-            )
-        if len(stream) >= 12:
-            break
-    return stream
+    return []

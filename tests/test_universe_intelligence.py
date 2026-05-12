@@ -9,6 +9,8 @@ from universe.persistence import merge_cluster_payload
 from universe.promotion_engine import PromotionCandidate, evaluate_promotion
 from universe.representative_selector import select_representatives
 from data.universe import UniverseManager
+from data.universe_tiers import UniverseTiers
+from universe.intelligence_builder import build_universe_intelligence_state
 from universe.snapshot_service import _catalog_lookup, build_universe_snapshot_dict, load_universe_selection_config
 from universe.universe_tiers import UniverseIntelligenceState
 
@@ -89,14 +91,20 @@ def test_merge_cluster_payload():
     assert set(out[0]["members"]) == {"A", "B"}
 
 
-def test_snapshot_disabled_does_not_crash():
+def test_snapshot_disabled_does_not_crash(monkeypatch):
+    import universe.snapshot_service as ss
+
+    monkeypatch.setattr(ss, "load_universe_selection_config", lambda path=None: {"enabled": False})
     payload = build_universe_snapshot_dict(broker_symbol_totals={"ibkr": 100})
     assert payload["enabled"] is False
     assert "funnel" in payload
     assert isinstance(payload["symbols"], list)
 
 
-def test_snapshot_symbol_rows_include_description():
+def test_snapshot_symbol_rows_include_description(monkeypatch):
+    import universe.snapshot_service as ss
+
+    monkeypatch.setattr(ss, "load_universe_selection_config", lambda path=None: {"enabled": False})
     payload = build_universe_snapshot_dict(broker_symbol_totals={})
     assert payload["symbols"]
     for row in payload["symbols"]:
@@ -104,7 +112,24 @@ def test_snapshot_symbol_rows_include_description():
         assert row.get("sym")
 
 
-def test_catalog_lookup_resolves_aliases():
+def test_snapshot_enabled_missing_artifact_reports_fallback(monkeypatch, tmp_path):
+    import universe.snapshot_service as ss
+
+    monkeypatch.setattr(ss, "load_universe_selection_config", lambda path=None: {"enabled": True, "rebuild": {"interval_sec": 60}})
+    payload = build_universe_snapshot_dict(
+        broker_symbol_totals={"ibkr": 100},
+        intelligence_path=tmp_path / "missing.json",
+    )
+    assert payload["enabled"] is True
+    assert payload["fallback"]
+    assert payload["build"]["state"] == "missing"
+    assert payload["clusters"] == []
+
+
+def test_catalog_lookup_resolves_aliases(monkeypatch):
+    import universe.snapshot_service as ss
+
+    monkeypatch.setattr(ss, "load_universe_selection_config", lambda path=None: {"enabled": False})
     assert _catalog_lookup("SPY") == ("S&P 500 ETF", "broad_market")
     assert _catalog_lookup("BTC-USD")[0] == "Bitcoin"
     assert _catalog_lookup("EUR.USD")[0] == "Euro/Dollar"
@@ -128,3 +153,32 @@ def test_intelligence_state_roundtrip():
     s = UniverseIntelligenceState(candidate_count=10, cold_scan=["A"], core=["B"])
     s2 = UniverseIntelligenceState.from_json_obj(s.to_json_obj())
     assert s2.cold_scan == ["A"]
+
+
+def test_intelligence_builder_clusters_without_touching_disk():
+    tiers = UniverseTiers(
+        core=("AAA", "BBB", "CCC"),
+        scan=("DDD", "EEE"),
+        light=(),
+        scores={"AAA": 10, "BBB": 20, "CCC": 5, "DDD": 3, "EEE": 2},
+        updated_at="2026-05-12T18:00:00+00:00",
+    )
+
+    def history(sym: str) -> list[float]:
+        if sym in {"AAA", "BBB"}:
+            return [100 + i for i in range(30)]
+        return [100 + ((i * (idx + 1)) % 7) for idx, i in enumerate(range(30))]
+
+    import asyncio
+
+    state = asyncio.run(
+        build_universe_intelligence_state(
+            tiers,
+            cfg={"cluster_max_symbols": 5, "cluster_yf_concurrency": 2, "correlation_cluster_threshold": 0.85},
+            history_fetcher=history,
+        )
+    )
+    assert state is not None
+    assert state.clusters
+    assert any("AAA" in c["members"] and "BBB" in c["members"] for c in state.clusters)
+    assert "BBB" in state.core

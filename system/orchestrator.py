@@ -1562,6 +1562,8 @@ class Orchestrator:
             from data.universe_builder import UniverseBuilder
             from data.pipeline import run_once
             from storage.db import init_async_database, dispose_engine as _dispose
+            from universe.intelligence_builder import build_and_save_universe_intelligence
+            from universe.snapshot_service import load_universe_selection_config
         except ImportError:
             logger.info("orchestrator | data.pipeline not available — skipping pipeline")
             return
@@ -1584,6 +1586,8 @@ class Orchestrator:
         dynamic_cfg = pipeline_cfg.get("dynamic_universe", {}) or {}
         ranking_cfg = dynamic_cfg.get("ranking", {}) or {}
         ranking_on = universe_mode == "dynamic" and bool(ranking_cfg.get("enabled", False))
+        universe_intel_cfg = load_universe_selection_config()
+        universe_intel_on = bool(universe_intel_cfg.get("enabled", False))
         universe_builder = UniverseBuilder(
             max_symbols=int(dynamic_cfg.get("max_symbols", 300)),
             ranking=ranking_cfg if ranking_on else {},
@@ -1600,6 +1604,40 @@ class Orchestrator:
                     if universe_mode == "dynamic":
                         if ranking_on:
                             tiers = await universe_builder.build_tiered_universe(self._broker_manager)
+                            if universe_intel_on:
+                                try:
+                                    from pathlib import Path
+
+                                    out_path = Path(
+                                        str(
+                                            (universe_intel_cfg.get("persistence") or {}).get(
+                                                "intelligence_json",
+                                                "data/runtime/universe_intelligence.json",
+                                            )
+                                        )
+                                    )
+                                    intel_result = await build_and_save_universe_intelligence(
+                                        tiers,
+                                        cfg=universe_intel_cfg,
+                                        output_path=out_path,
+                                    )
+                                    if intel_result.wrote:
+                                        logger.info(
+                                            "orchestrator | universe intelligence | clusters={} scored={} path={}",
+                                            intel_result.clusters,
+                                            intel_result.symbols_scored,
+                                            intel_result.path,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "orchestrator | universe intelligence skipped | reason={}",
+                                            intel_result.reason,
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "orchestrator | universe intelligence error (non-fatal): {}",
+                                        exc,
+                                    )
                             scan_batch = max(1, int(ranking_cfg.get("scan_batch_size", 50)))
                             sl = list(tiers.scan)
                             start = self._pipeline_scan_idx % max(len(sl), 1)

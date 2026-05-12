@@ -1475,12 +1475,12 @@ async def get_intelligence_signals(
 
         # Collect risk verdicts so we can filter out legacy-only rejections
         legacy_signal_ids: set = set()
+        legacy_check = "max_trades_per_day"
         if sigs_raw:
             raw_ids = [s.id for s in sigs_raw]
             rl_q = await session.execute(
                 select(RiskLog).where(RiskLog.signal_id.in_(raw_ids))
             )
-            legacy_check = "max_trades_per_day"
             for rv in rl_q.scalars().all():
                 checks = rv.checks_failed or []
                 if checks and all(c == legacy_check for c in checks):
