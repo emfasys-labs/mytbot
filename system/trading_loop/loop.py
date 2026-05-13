@@ -2358,21 +2358,43 @@ class TradingLoop:
             ):
                 _ct = self._last_adaptive_cash_target
                 _hc = self._last_adaptive_held_cash_used
+                _adapt_cfg = (self._global_edge_cfg.get("adaptive") or {})
                 try:
-                    _tol = Decimal(str((self._global_edge_cfg.get("adaptive") or {}).get("target_tolerance_pct", "0.0025")))
+                    _tol = Decimal(str(_adapt_cfg.get("target_tolerance_pct", "0.0025")))
                 except Exception:  # noqa: BLE001
                     _tol = Decimal("0.0025")
                 if _hc > _ct * (Decimal("1") + max(Decimal("0"), _tol)):
+                    # Soft-shed: cap this iteration's forced reduction at
+                    # ``soft_shed_step_pct_of_nav`` × NAV. Pass an inflated
+                    # target to ``propose_shed_actions`` so it only trims
+                    # enough to hit the soft-step, not the full target.
+                    # Subsequent iterations carry the rest until convergence.
+                    try:
+                        _step_pct = Decimal(str(_adapt_cfg.get("soft_shed_step_pct_of_nav", "0.10")))
+                    except Exception:  # noqa: BLE001
+                        _step_pct = Decimal("0.10")
+                    _step_pct = max(Decimal("0"), _step_pct)
+                    soft_step_cash = total_equity * _step_pct
+                    full_excess = _hc - _ct
+                    if soft_step_cash > 0 and soft_step_cash < full_excess:
+                        soft_target = _hc - soft_step_cash
+                        logger.info(
+                            "trading_loop | soft-shed | held_cash={} target={} excess={} step={} (cap {}% of NAV)",
+                            _hc, _ct, full_excess, soft_step_cash,
+                            float(_step_pct) * 100,
+                        )
+                    else:
+                        soft_target = _ct
                     shed_actions = coord.propose_shed_actions(
                         held,
-                        cash_target_absolute=_ct,
+                        cash_target_absolute=soft_target,
                         active_mode=mode_for_coord,
                     )
                     if shed_actions:
                         logger.info(
                             "trading_loop | adaptive shed-to-target | held_cash={} > target={} | actions={}",
                             _hc,
-                            _ct,
+                            soft_target,
                             len(shed_actions),
                         )
             if adaptive_budget_active and not adaptive_kwargs:

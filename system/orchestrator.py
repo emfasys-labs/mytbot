@@ -84,7 +84,15 @@ class Orchestrator:
         self.state = SystemState.OFF
         self.state_changed_at = datetime.now(timezone.utc)
         self.errors: list[str] = []
-        self.capital_pct: float = 1.0
+        # Default to FLAT (0%) so a fresh boot never auto-deploys 100% of NAV
+        # before the persisted operator slider has been restored. Earlier
+        # default of 1.0 caused forced ``adaptive_shed`` exits after every
+        # restart: the system would briefly think it was 100% deployed,
+        # open positions to fill that target, then close the largest ones
+        # at market loss when the persisted 50% setting finally loaded.
+        # The persisted value is loaded eagerly in :meth:`start` BEFORE
+        # any allocator action — if loading fails we stay at 0%.
+        self.capital_pct: float = 0.0
 
         self._dep_manager = DependencyManager(compose_dir=os.getcwd())
         self._dep_report: DependencyReport | None = None
@@ -211,7 +219,17 @@ class Orchestrator:
                     pass
 
     async def _load_persisted_capital_pct(self) -> None:
-        """Restore operator capital allocation from durable control state."""
+        """Restore operator capital allocation from durable control state.
+
+        Strict semantics: when no persisted value exists the orchestrator
+        stays at its constructor default (0.0 = flat). Earlier versions
+        defaulted to 1.0 here, which meant a restart with an empty
+        ``control_state`` row briefly opened the book to 100% before the
+        operator's saved 50% setting could load. That triggered forced
+        ``adaptive_shed`` exits — closing the largest positions at market
+        loss to fit the shrunken cash sleeve. Default-flat plus eager-load
+        eliminates the window entirely.
+        """
         try:
             from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
             from storage.db import dispose_engine as _dispose
@@ -224,17 +242,28 @@ class Orchestrator:
         try:
             eng, sf = await init_async_database()
             if sf is None:
+                logger.warning(
+                    "orchestrator | capital allocation restore: no session factory — staying at {:.0%}",
+                    self.capital_pct,
+                )
                 return
             bus = CommandBus(sf)
             raw = await bus.get_state(CAPITAL_ALLOCATION_STATE_KEY, None)
             if isinstance(raw, dict):
                 raw = raw.get("pct")
             if raw is None:
+                logger.info(
+                    "orchestrator | no persisted capital_pct — staying at {:.0%} (operator must set via /system/capital-allocation)",
+                    self.capital_pct,
+                )
                 return
             self.set_capital_pct(float(raw))
             logger.info("orchestrator | restored capital_pct from control_state: {:.0%}", self.capital_pct)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("orchestrator | capital allocation restore failed: {}", exc)
+            logger.warning(
+                "orchestrator | capital allocation restore failed — staying at {:.0%} | {}",
+                self.capital_pct, exc,
+            )
         finally:
             if eng is not None:
                 try:

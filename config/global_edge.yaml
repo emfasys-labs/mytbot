@@ -48,6 +48,25 @@ arbitrage_edge_boost:
 adaptive:
   softmax_lambda: "5.0"
   target_tolerance_pct: "0.0025"
+  # Soft-shed: cap the per-iteration forced reduction at this fraction of NAV.
+  # When the operator drops the capital slider, the held-cash excess can
+  # exceed the new target by tens of percent of NAV. Dumping that all at
+  # market in one tick realises whatever entry-fee + adverse drift each
+  # position is sitting on, even if they would have recovered naturally.
+  # Spreading the shed over multiple iterations gives the market time to
+  # work in our favour and lets ``propose_rotation_actions`` take some
+  # symbols out on its own. 0.10 means: at most 10% of NAV is force-shed
+  # per loop iteration. A 100% → 50% slider change therefore spreads
+  # over ~5 iterations (~10 min) instead of dumping in one tick. Set to
+  # a large value (e.g. 1.0) to disable soft-shed and restore old behaviour.
+  soft_shed_step_pct_of_nav: "0.10"
+  # Loss-aware shed: when a position is sitting at an unrealised loss
+  # bigger than this fraction of its notional, defer its forced close
+  # for one iteration so natural recovery can happen before we realise
+  # the loss. Hard-shed kicks in regardless if the gap is still large
+  # after ``soft_shed_max_defer_iterations`` consecutive deferrals.
+  soft_shed_loss_defer_pct: "0.0010"
+  soft_shed_max_defer_iterations: 3
   mode:
     hunter:
       gross_fraction: "1.00"
