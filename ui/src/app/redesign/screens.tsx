@@ -313,7 +313,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
             <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column', fontFamily: TOKENS.mono, fontSize: 11 }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: '86px 56px 72px 72px 86px minmax(0, 1fr)',
+                gridTemplateColumns: '86px 56px 72px 72px 78px 66px minmax(0, 1fr)',
                 gap: 12,
                 alignItems: 'center',
                 paddingBottom: 8,
@@ -325,6 +325,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>qty</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>price</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>p&amp;l</span>
+                <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>fee</span>
                 <span style={{ color: TOKENS.ink3, textTransform: 'uppercase', fontSize: 10 }}>when</span>
               </div>
               <div style={{
@@ -335,7 +336,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: '86px 56px 72px 72px 86px minmax(0, 1fr)',
+                  gridTemplateColumns: '86px 56px 72px 72px 78px 66px minmax(0, 1fr)',
                   gap: 12,
                   alignItems: 'center',
                   paddingTop: 8,
@@ -344,7 +345,20 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                     const side = String(o.side ?? '').toLowerCase();
                     const qty = Number(o.filled_quantity ?? o.quantity ?? 0);
                     const px = Number(o.avg_fill_price ?? o.limit_price ?? 0);
-                    const tradePnl = Number(o.trade_pnl_net ?? o.trade_pnl ?? o.realised_pnl_net ?? o.realised_pnl);
+                    // ``Number(null) === 0`` so the chain below MUST short-circuit
+                    // before coercion — otherwise opening trades (where the API
+                    // returns ``trade_pnl_net = null``) render as "+$0", which
+                    // looks like a real zero-profit close instead of "no P&L
+                    // yet, this is an open". Read each candidate explicitly.
+                    const pnlRaw =
+                      o.trade_pnl_net ??
+                      o.trade_pnl ??
+                      o.realised_pnl_net ??
+                      o.realised_pnl;
+                    const tradePnl = pnlRaw != null ? Number(pnlRaw) : NaN;
+                    const closesPosition = o.closes_position === true;
+                    const feeRaw = o.trade_fee_net ?? o.fee;
+                    const feeNum = feeRaw != null ? Number(feeRaw) : NaN;
                     const ts = o.timestamp ? Date.parse(o.timestamp) : NaN;
                     const sideColor = side === 'buy' ? TOKENS.profit : side === 'sell' ? TOKENS.loss : TOKENS.ink2;
                     return (
@@ -355,8 +369,27 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                         <span style={{ color: sideColor }}>{side || 'fill'}</span>
                         <span style={{ color: TOKENS.ink2 }}>{Number.isFinite(qty) ? qty.toFixed(qty >= 100 ? 0 : 2) : '—'}</span>
                         <span style={{ color: TOKENS.ink2 }}>{fmtPrice(px)}</span>
-                        {Number.isFinite(tradePnl) ? (
+                        {closesPosition && Number.isFinite(tradePnl) ? (
                           <Signed value={tradePnl} size={11} />
+                        ) : (
+                          <span
+                            title={
+                              !closesPosition
+                                ? 'Opening trade — no realised P&L until the position is closed'
+                                : 'No P&L data available for this trade'
+                            }
+                            style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}
+                          >
+                            —
+                          </span>
+                        )}
+                        {Number.isFinite(feeNum) && feeNum > 0 ? (
+                          <span
+                            title={`Transaction fee: ${feeNum.toFixed(4)}`}
+                            style={{ color: TOKENS.ink2, fontFamily: TOKENS.mono, fontSize: 11 }}
+                          >
+                            {feeNum.toFixed(2)}
+                          </span>
                         ) : (
                           <span style={{ color: TOKENS.ink3 }}>—</span>
                         )}

@@ -1047,7 +1047,13 @@ def _apply_order_fill_to_position_state(
         "realised_pnl_gross": gross if closing_qty > 0 else None,
         "realised_pnl_fee": fee_alloc if closing_qty > 0 else None,
         "realised_pnl_net": net if closing_qty > 0 else None,
-        "trade_pnl_net": (gross - fee) if closing_qty > 0 else -fee,
+        # Opening trades realise no P&L — only a fee, which is reported on
+        # the order via the dedicated ``fee`` column. Conflating the two
+        # caused every new position to show as a tiny "loss" in the UI's
+        # P&L column equal to its transaction cost. The right answer for
+        # an opening trade is "no realised P&L yet" (None), not "-fee".
+        "trade_pnl_net": (gross - fee) if closing_qty > 0 else None,
+        "trade_fee_net": fee,
         "closed_quantity": closing_qty,
     }
 
@@ -1102,6 +1108,7 @@ async def _order_realised_pnl_annotations(session, rows: list[OrderLog]) -> dict
                 "realised_pnl_net": None,
                 "realised_pnl_gross": None,
                 "realised_pnl_fee": None,
+                "trade_fee_net": None,
                 "closed_quantity": None,
             }
             continue
@@ -1123,6 +1130,7 @@ async def _order_realised_pnl_annotations(session, rows: list[OrderLog]) -> dict
             "realised_pnl_net": _decimal_str(pnl["realised_pnl_net"]) if pnl["realised_pnl_net"] is not None else None,
             "realised_pnl_gross": _decimal_str(pnl["realised_pnl_gross"]) if pnl["realised_pnl_gross"] is not None else None,
             "realised_pnl_fee": _decimal_str(pnl["realised_pnl_fee"]) if pnl["realised_pnl_fee"] is not None else None,
+            "trade_fee_net": _decimal_str(pnl["trade_fee_net"]) if pnl.get("trade_fee_net") is not None else None,
             "closed_quantity": _decimal_str(pnl["closed_quantity"]) if pnl["closed_quantity"] else None,
         }
     return annotations

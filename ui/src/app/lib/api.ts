@@ -287,6 +287,9 @@ export type ApiOrderRow = {
   realised_pnl_net?: string | null;
   realised_pnl_gross?: string | null;
   realised_pnl_fee?: string | null;
+  // Per-order transaction fee broken out so the UI can label opening trades
+  // as "open · fee X.XX" instead of conflating fee with realised P&L.
+  trade_fee_net?: string | null;
   closed_quantity?: string | null;
   broker?: string | null;
 };

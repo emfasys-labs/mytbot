@@ -168,7 +168,12 @@ def test_order_fill_realised_pnl_short_close_after_fees():
     assert pnl["trade_pnl_net"] == Decimal("8.10")
 
 
-def test_order_fill_trade_pnl_open_is_negative_fee():
+def test_order_fill_trade_pnl_open_is_none_not_negative_fee():
+    """Opening trades realise no P&L — only a fee. ``trade_pnl_net`` must be
+    None for opens so the UI doesn't render the fee as a "loss" in the
+    Recent Position Changes panel. The fee is still exposed via the
+    ``fee`` column and the ``trade_fee_net`` annotation.
+    """
     new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
         position_qty=Decimal("0"),
         position_avg=Decimal("0"),
@@ -181,7 +186,45 @@ def test_order_fill_trade_pnl_open_is_negative_fee():
     assert new_avg == Decimal("100")
     assert pnl["closes_position"] is False
     assert pnl["realised_pnl_net"] is None
-    assert pnl["trade_pnl_net"] == Decimal("-2.25")
+    assert pnl["trade_pnl_net"] is None
+    assert pnl["trade_fee_net"] == Decimal("2.25")
+
+
+def test_order_fill_topup_is_open_not_close():
+    """Increasing an existing long position is an open, not a close — no realised P&L."""
+    new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+        position_qty=Decimal("10"),
+        position_avg=Decimal("100"),
+        side="buy",
+        fill_qty=Decimal("5"),
+        fill_price=Decimal("110"),
+        fee=Decimal("1.50"),
+    )
+    assert new_qty == Decimal("15")
+    # Weighted average: (10*100 + 5*110) / 15 = 103.333...
+    assert pnl["closes_position"] is False
+    assert pnl["realised_pnl_net"] is None
+    assert pnl["trade_pnl_net"] is None
+    assert pnl["trade_fee_net"] == Decimal("1.50")
+
+
+def test_order_fill_close_trade_pnl_is_gross_minus_fee():
+    """Closing trades report (gross - fee) so the UI shows real round-trip P&L."""
+    new_qty, new_avg, pnl = _apply_order_fill_to_position_state(
+        position_qty=Decimal("10"),
+        position_avg=Decimal("100"),
+        side="sell",
+        fill_qty=Decimal("10"),
+        fill_price=Decimal("110"),
+        fee=Decimal("0.50"),
+    )
+    assert new_qty == Decimal("0")
+    assert pnl["closes_position"] is True
+    # gross = (110-100) * 10 = 100; trade_pnl_net = 100 - 0.50 = 99.50
+    assert pnl["realised_pnl_gross"] == Decimal("100")
+    assert pnl["realised_pnl_net"] == Decimal("99.50")
+    assert pnl["trade_pnl_net"] == Decimal("99.50")
+    assert pnl["trade_fee_net"] == Decimal("0.50")
 
 
 class _FakeBusSnapshot:
