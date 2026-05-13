@@ -29,7 +29,7 @@ class _FakeClassifier:
             ),
             NewsScore(
                 headline="btc down",
-                sentiment=0.5,
+                sentiment=-0.5,
                 confidence=0.8,
                 affected_symbols=["BTC-USD"],
                 event_type="regulatory",
@@ -47,9 +47,9 @@ class _ConflictClassifier:
         now = datetime.now(timezone.utc).isoformat()
         return [
             NewsScore("a", 0.9, 0.3, ["SPY"], "macro", "bullish", "x", now, 24),
-            NewsScore("b", 0.8, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
+            NewsScore("b", -0.8, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
             NewsScore("c", 0.7, 0.2, ["SPY"], "macro", "bullish", "x", now, 24),
-            NewsScore("d", 0.6, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
+            NewsScore("d", -0.6, 0.2, ["SPY"], "macro", "bearish", "x", now, 24),
             NewsScore("e", 1.0, 0.3, ["QQQ"], "macro", "bullish", "x", now, 24),
         ]
 

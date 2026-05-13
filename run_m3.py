@@ -9,7 +9,7 @@ import argparse
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,47 @@ async def _load_recent_features(
     return _rows_to_features_frame(rows), rows[-1].bar_timestamp
 
 
+def _coerce_decimal(value) -> "Decimal | None":
+    """Best-effort cast that tolerates floats, strings, and bad inputs."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, Decimal):
+            return value
+        s = str(value).strip()
+        if not s:
+            return None
+        return Decimal(s)
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+
+
+def _resolve_signal_news_score(signal) -> "Decimal | None":
+    """Pick the best available news_score for SignalLog persistence.
+
+    Priority:
+      1. The ``Signal.news_score`` attribute (legacy ``signals.engine.Signal``
+         path always sets this from accumulator / AI).
+      2. ``metadata.news_score`` (direct AI passthrough).
+      3. ``metadata.accumulator_score`` (decayed multi-source conviction).
+      4. ``metadata.ai_news_score`` (point-in-time AI sentiment).
+
+    Returns ``None`` only when no signed score is available anywhere.
+    The ``risk.engine.Signal`` dataclass (D015 execution path) has no
+    ``news_score`` field, so this fallback is the difference between
+    rich audit data and a NULL column.
+    """
+    direct = _coerce_decimal(getattr(signal, "news_score", None))
+    if direct is not None:
+        return direct
+    md = getattr(signal, "metadata", None) or {}
+    for key in ("news_score", "accumulator_score", "ai_news_score"):
+        v = _coerce_decimal(md.get(key))
+        if v is not None:
+            return v
+    return None
+
+
 async def _persist_signal(session_factory, signal, *, paper_mode: bool, timeframe: str, feature_ts: datetime | None) -> None:
     ts = datetime.now(timezone.utc)
     metadata = dict(signal.metadata or {})
@@ -113,8 +154,8 @@ async def _persist_signal(session_factory, signal, *, paper_mode: bool, timefram
         confidence=Decimal(str(signal.confidence)),
         asset_class=signal.asset_class[:20],
         broker=signal.broker[:20],
-        news_score=Decimal(str(signal.news_score)) if signal.news_score is not None else None,
-        news_veto=signal.news_veto,
+        news_score=_resolve_signal_news_score(signal),
+        news_veto=bool(getattr(signal, "news_veto", False)),
         metadata_=metadata,
     )
     async with session_factory() as session:

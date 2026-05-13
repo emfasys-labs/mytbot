@@ -379,17 +379,70 @@ class AIPipeline:
                     discovered_set.add(s)
         all_symbols = list(monitored_set | discovered_set)
 
+        # Symbol-alias map (mirrors api.server._alias_symbols_for_signal):
+        # a headline tagged ``EUR`` or ``USD`` legitimately moves ``EURUSD``;
+        # without this, every forex / index-future / metals monitored symbol
+        # falls out of the score aggregator because the providers tag the
+        # underlying name, not the cross. Keep this in lockstep with the API.
+        _SYMBOL_ALIAS_MAP: dict[str, tuple[str, ...]] = {
+            "ES": ("SPY", "ES", "SPX"),
+            "NQ": ("QQQ", "NQ", "NDX"),
+            "YM": ("DIA", "YM", "DJI"),
+            "CL": ("USO", "CL", "OIL", "WTI"),
+            "GC": ("GLD", "GC", "GOLD", "XAUUSD", "XAU"),
+            "SI": ("SLV", "SI", "SILVER", "XAGUSD", "XAG"),
+            "EURUSD": ("EURUSD", "EUR", "USD", "DXY"),
+            "USDJPY": ("USDJPY", "USD", "JPY", "DXY"),
+            "GBPUSD": ("GBPUSD", "GBP", "USD", "DXY"),
+            "AUDUSD": ("AUDUSD", "AUD", "USD", "DXY"),
+            "USDCHF": ("USDCHF", "USD", "CHF", "DXY"),
+            "USDCAD": ("USDCAD", "USD", "CAD", "DXY"),
+        }
+
+        def _alias_symbols(symbol: str) -> tuple[str, ...]:
+            s = (symbol or "").strip().upper()
+            if s.endswith("=X"):
+                s = s[:-2]
+            if s.endswith("=F"):
+                s = s[:-2]
+            if s in _SYMBOL_ALIAS_MAP:
+                return _SYMBOL_ALIAS_MAP[s]
+            if s.endswith("-USD") and len(s) > 4:
+                base = s[:-4]
+                return (s, base) if base else (s,)
+            if s.endswith("USD") and len(s) == 6:
+                return (s, s[:3], "USD")
+            return (s,)
+
         def _score_symbol(symbol: str) -> None:
-            sym_scores = [s for s in usable if symbol in s.affected_symbols]
+            aliases = _alias_symbols(symbol)
+            sym_scores = [
+                s for s in usable
+                if any(a in s.affected_symbols for a in aliases)
+            ]
             if not sym_scores:
                 if symbol in monitored_set:
                     scores[symbol] = 0.0  # keep monitored symbols even if no match
                 return
-            weighted = []
+            # Sentiment is already signed (-1..+1) from every provider; multiplying
+            # by ``bias_mult`` double-counts direction AND collapses any "neutral"
+            # label to 0 even when sentiment magnitude is non-trivial. Use the
+            # signed sentiment directly so providers without a discrete bias
+            # label (or borderline-neutral classifications) still contribute.
+            weighted: list[float] = []
+            denom = 0.0
             for s in sym_scores:
-                bias_mult = 1.0 if s.directional_bias == "bullish" else (-1.0 if s.directional_bias == "bearish" else 0.0)
-                weighted.append(s.sentiment * s.confidence * bias_mult)
-            v = sum(weighted) / max(1, len(weighted))
+                if abs(s.sentiment) < 1e-6:
+                    continue
+                w = max(0.0, float(s.confidence))
+                if w <= 0:
+                    continue
+                weighted.append(float(s.sentiment) * w)
+                denom += w
+            if denom > 0:
+                v = sum(weighted) / denom
+            else:
+                v = 0.0
             v = max(-1.0, min(1.0, v))
             top = max(sym_scores, key=lambda x: x.confidence)
             scores[symbol] = v

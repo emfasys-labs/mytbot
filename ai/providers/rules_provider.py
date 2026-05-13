@@ -46,6 +46,16 @@ _KNOWN_TICKERS: dict[str, str] = {
     "NASDAQ COMPOSITE": "QQQ", "DOW JONES": "DIA",
     "RUSSELL 2000": "IWM", "TREASURY": "TLT", "GOLD": "GLD", "CRUDE": "USO",
     "OIL": "USO", "DOLLAR": "DXY", "VIX": "VIX",
+    # Forex pairs / currency names — let headlines about "the pound" or
+    # "the euro" actually surface in the per-symbol score aggregator.
+    "POUND": "GBP", "STERLING": "GBP", "BRITISH POUND": "GBP",
+    "EURO": "EUR", "EUROZONE": "EUR",
+    "YEN": "JPY", "JAPANESE YEN": "JPY",
+    "SWISS FRANC": "CHF", "FRANC": "CHF",
+    "AUSSIE": "AUD", "AUSTRALIAN DOLLAR": "AUD",
+    "LOONIE": "CAD", "CANADIAN DOLLAR": "CAD",
+    "KIWI": "NZD", "NEW ZEALAND DOLLAR": "NZD",
+    "GREENBACK": "USD", "U.S. DOLLAR": "USD", "US DOLLAR": "USD",
 }
 
 _STANDALONE_TICKERS = {
