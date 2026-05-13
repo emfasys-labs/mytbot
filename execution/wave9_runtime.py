@@ -61,6 +61,14 @@ class Wave9RuntimeConfig:
     venue_priors: VenuePriors = field(default_factory=VenuePriors)
     slippage_model: SlippageModel = field(default_factory=SlippageModel)
     unknown_liquidity_penalty_bps: float = 5.0
+    # Venue-aware edge/cost cushion: above this fee tier the static
+    # ``edge_to_cost_safety`` is too strict (cost dominates so much that
+    # almost no real-world quant edge can clear it). For these venues we
+    # relax the cushion so cost-aware routing still trades — typically
+    # crypto-only exchanges like Kraken (40 bps taker). Set the relaxed
+    # value to 0 to disable this override and keep the static cushion.
+    high_fee_threshold_bps: float = 25.0
+    high_fee_edge_to_cost_safety: float = 1.3
 
     @classmethod
     def from_dict(cls, raw: Optional[Mapping[str, Any]]) -> "Wave9RuntimeConfig":
@@ -107,6 +115,8 @@ class Wave9RuntimeConfig:
             venue_priors=priors,
             slippage_model=slip,
             unknown_liquidity_penalty_bps=float(sect.get("unknown_liquidity_penalty_bps", 5.0)),
+            high_fee_threshold_bps=float(sect.get("high_fee_threshold_bps", 25.0)),
+            high_fee_edge_to_cost_safety=float(sect.get("high_fee_edge_to_cost_safety", 1.3)),
         )
 
     @classmethod
@@ -153,23 +163,39 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
     return f
 
 
-def _extract_signal_inputs(signal_metadata: Mapping[str, Any]) -> dict[str, float]:
-    """Pull the inputs Wave 9 needs out of ``Signal.metadata``."""
+def _extract_signal_inputs(
+    signal_metadata: Mapping[str, Any],
+    *,
+    fee_bps: float = 0.0,
+) -> dict[str, float]:
+    """Pull the inputs Wave 9 needs out of ``Signal.metadata``.
+
+    The score-proxy edge ceiling scales with the venue's fee tier. For
+    a low-fee venue (IBKR ~1 bps) the conservative 25 bps cap is fine:
+    cost is ~10 bps, so even capped proxy edge can clear the gate. For
+    a high-fee venue (Kraken ~26 bps) total cost lands ~40 bps and a
+    25 bps ceiling makes the venue uneconomic regardless of conviction.
+    Scale the cap as ``max(25, 2 * fee_bps)`` so high-fee venues get
+    headroom proportional to their cost while low-fee venues keep the
+    conservative 25 bps default — same conviction score, calibrated proxy.
+    """
     md = signal_metadata or {}
     edge_bps = _safe_float(md.get("forecast_expected_return"), 0.0) * 10_000.0
     if edge_bps <= 0:
         edge_bps = _safe_float(md.get("expected_edge_bps"), 0.0)
     if edge_bps <= 0:
         # ``expected_edge`` / ``priority_score`` in the global-edge allocator
-        # are bounded conviction scores, not calibrated returns. Use them only
-        # as a conservative execution proxy so the scheduler can compare costs
-        # against something non-zero without treating score=0.8 as +80%.
-        # Score-only trades therefore get at most 25 bps of assumed edge.
+        # are bounded conviction scores, not calibrated returns. Use them
+        # only as a conservative execution proxy so the scheduler can
+        # compare costs against something non-zero without treating
+        # score=0.8 as +80%.
         score_proxy = max(
             _safe_float(md.get("expected_edge"), 0.0),
             _safe_float(md.get("priority_score"), 0.0),
         )
-        edge_bps = max(0.0, min(25.0, score_proxy * 25.0))
+        # Venue-aware proxy ceiling: low-fee → 25 bps; high-fee scales up.
+        proxy_cap_bps = max(25.0, 2.0 * max(0.0, float(fee_bps)))
+        edge_bps = max(0.0, min(proxy_cap_bps, score_proxy * proxy_cap_bps))
     return {
         "daily_volume": _safe_float(
             md.get("daily_volume") or md.get("avg_daily_volume") or md.get("volume"),
@@ -213,11 +239,11 @@ def pre_flight_cost_gate(
         )
 
     try:
-        meta_in = _extract_signal_inputs(signal_metadata or {})
         ac = (asset_class or "other").strip().lower()
         coef = config.impact_coefficients.get(ac, config.impact_coefficients.get("other", 0.10))
         fee_bps = config.venue_priors.fee_for(broker, taker=True)
         spread_bps = config.venue_priors.spread_for(broker, ac)
+        meta_in = _extract_signal_inputs(signal_metadata or {}, fee_bps=fee_bps)
         slip_est = config.slippage_model.estimate(
             broker=broker, symbol=symbol, asset_class=ac
         )
@@ -247,13 +273,34 @@ def pre_flight_cost_gate(
         regime_label = meta_in["regime_label"]
         regime_str = str(regime_label) if regime_label is not None else None
 
+        # Venue-aware edge/cost cushion. On high-fee venues (e.g. Kraken at
+        # 40 bps taker), the configured ``edge_to_cost_safety`` (default 2x)
+        # is so strict that real signals can never clear it and the venue
+        # gets locked out entirely. When the broker's base fee exceeds the
+        # configured threshold, swap in the relaxed safety just for this
+        # decision — the rest of the policy is unchanged.
+        effective_policy = config.urgency_policy
+        venue_relaxed = False
+        if (
+            config.high_fee_threshold_bps > 0
+            and config.high_fee_edge_to_cost_safety > 0
+            and fee_bps >= config.high_fee_threshold_bps
+            and config.high_fee_edge_to_cost_safety < config.urgency_policy.edge_to_cost_safety
+        ):
+            from dataclasses import replace as _dc_replace
+            effective_policy = _dc_replace(
+                config.urgency_policy,
+                edge_to_cost_safety=config.high_fee_edge_to_cost_safety,
+            )
+            venue_relaxed = True
+
         verdict = decide_urgency(
             expected_cost_bps=cost.total_bps,
             edge_bps=meta_in["edge_bps"],
             signal_urgency=meta_in["signal_urgency"],
             demand_alignment=meta_in["demand_alignment"],
             regime_label=regime_str,
-            policy=config.urgency_policy,
+            policy=effective_policy,
         )
 
         breakdown = {
@@ -273,6 +320,9 @@ def pre_flight_cost_gate(
             "wave9_liquidity_known": meta_in["daily_volume"] > 0,
             "wave9_broker": broker,
             "wave9_asset_class": ac,
+            "wave9_edge_to_cost_safety_applied": effective_policy.edge_to_cost_safety,
+            "wave9_venue_relaxed": venue_relaxed,
+            "wave9_fee_bps": fee_bps,
         }
 
         if verdict.urgency is Urgency.DO_NOT_TRADE:

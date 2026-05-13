@@ -76,6 +76,7 @@ from run_m3 import (
     _persist_position_snapshot,
     _persist_signal,
     _pick_best_signal,
+    _refresh_position_marks_and_persist,
     _upsert_daily_pnl,
 )
 from signals.accumulator import SignalAccumulator
@@ -1926,6 +1927,24 @@ class TradingLoop:
                         symbols=symbols, generated=generated, executed=executed,
                         extra=hb_extra,
                     )
+                    # Global mark-to-market sweep: refresh every open position's
+                    # ``unrealised_pnl`` from the latest feature snapshot close,
+                    # so the ``daily_pnl_unrealised_differs_from_open_book``
+                    # accounting check converges even when the allocator hasn't
+                    # touched a given symbol this cycle (notably after a crash
+                    # recovery where inherited positions stay stale otherwise).
+                    try:
+                        refreshed = await _refresh_position_marks_and_persist(
+                            session_factory,
+                            timeframe=self.timeframe,
+                        )
+                        if refreshed:
+                            logger.debug(
+                                "mark_to_market | refreshed {} positions",
+                                refreshed,
+                            )
+                    except Exception as mtm_exc:  # noqa: BLE001
+                        logger.warning("mark_to_market | sweep failed (non-fatal) | {}", mtm_exc)
                     self.last_iteration_at = datetime.now(timezone.utc)
                     self.iterations += 1
                     self.last_error = None

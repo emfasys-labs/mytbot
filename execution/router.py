@@ -110,6 +110,21 @@ def _slippage_percentiles_bps(samples: list[float]) -> tuple[float, float]:
 
 class SmartOrderRouter:
 
+    # ── Equity routing tuning ──────────────────────────────────────────────
+    # Below this demand_score we keep equity orders on IBKR even in hunter
+    # mode. Originally 0.35, which proved too strict in practice — the
+    # learned router never sees Alpaca fills, so it can't accumulate
+    # comparative execution-quality stats. 0.15 lets cheap Alpaca pick up
+    # mildly risk-on flow while still defaulting to IBKR in flat regimes.
+    ALPACA_HUNTER_DEMAND_THRESHOLD: float = 0.15
+
+    # Probabilistic A/B split: even outside the hunter+demand path, route a
+    # small slice of equity orders to Alpaca so the online quality model
+    # has real comparative fill / slippage data. Without this, ``Alpaca``
+    # is permanently penalised by a zero-evidence prior. Override per call
+    # via ``metadata['equity_ab_split']``.
+    EQUITY_ALPACA_AB_PROBABILITY: float = 0.20
+
     def __init__(self, available_brokers: list[str]):
         self.available_brokers = available_brokers
         self.permissions = get_permissions()
@@ -120,6 +135,11 @@ class SmartOrderRouter:
         self._obs_stats: dict[tuple[str, str], dict[str, float | str]] = {}
         # Per (broker, symbol): rolling slippage |bps| samples + fill counts for telemetry / persistence.
         self._exec_metrics: dict[tuple[str, str], dict[str, object]] = {}
+        # Deterministic RNG for A/B routing; seeded per-symbol so the same
+        # symbol routes consistently within a session unless the seed key
+        # changes (e.g. the operator flips ``equity_ab_split=0`` off).
+        import random as _random
+        self._ab_rng = _random.Random()
 
     def route(self, asset_class: str, symbol: str, metadata: dict | None = None) -> Optional[str]:
         """
@@ -172,11 +192,36 @@ class SmartOrderRouter:
             demand_score = 0.0
         profile_mode = str(md.get("profile_mode", "") or "").strip().lower()
 
-        # IBKR is preferred for non-crypto (regulatory safety, multi-asset)
+        # IBKR is preferred for non-crypto (regulatory safety, multi-asset).
+        # Two carve-outs for ``equity`` / ``etf`` keep Alpaca in the mix:
+        #   (a) explicit "give cheap Alpaca the modestly-risk-on flow"
+        #       path — threshold lowered from 0.35 to 0.15 because the old
+        #       threshold was effectively never hit in normal markets.
+        #   (b) a small probabilistic A/B slice so the online quality model
+        #       actually has Alpaca evidence to compare against IBKR.
         if asset_class != "crypto" and "ibkr" in permitted:
-            # In strong risk-on hunter mode for equities, allow cheaper Alpaca.
-            if asset_class in {"equity", "etf"} and profile_mode == "hunter" and demand_score > 0.35 and "alpaca" in permitted:
+            if (
+                asset_class in {"equity", "etf"}
+                and profile_mode == "hunter"
+                and demand_score > self.ALPACA_HUNTER_DEMAND_THRESHOLD
+                and "alpaca" in permitted
+            ):
                 return "alpaca"
+            if (
+                asset_class in {"equity", "etf"}
+                and "alpaca" in permitted
+                and _truthy(md.get("equity_ab_split", True))
+            ):
+                try:
+                    ab_p = float(md.get("equity_ab_probability", self.EQUITY_ALPACA_AB_PROBABILITY))
+                except (TypeError, ValueError):
+                    ab_p = self.EQUITY_ALPACA_AB_PROBABILITY
+                ab_p = max(0.0, min(1.0, ab_p))
+                if ab_p > 0:
+                    # Seed on symbol so same symbol routes consistently within a session.
+                    self._ab_rng.seed(hash(sym_u) & 0xFFFFFFFF)
+                    if self._ab_rng.random() < ab_p:
+                        return "alpaca"
             return "ibkr"
 
         # Crypto perps / shorts: prefer Bybit when listed and permitted

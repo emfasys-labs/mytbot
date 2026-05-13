@@ -20,6 +20,16 @@ execution_models:
   enabled: true
   unknown_liquidity_penalty_bps: 5.0
 
+  # Venue-aware edge/cost cushion. The default ``edge_to_cost_safety`` of
+  # 2.0 is calibrated for low-fee venues like IBKR (1 bps). On high-fee
+  # crypto venues (Kraken at 26 bps taker) it is so strict that real signals
+  # never clear cost — the venue gets de-facto blocked. When the broker's
+  # taker fee is >= ``high_fee_threshold_bps`` the gate swaps in the
+  # relaxed safety instead. Set ``high_fee_edge_to_cost_safety`` to 0 to
+  # disable and keep the static cushion for all venues.
+  high_fee_threshold_bps: 25.0
+  high_fee_edge_to_cost_safety: 1.3
+
   # ── Square-root impact coefficients (Almgren / Kissell) ──────────────
   impact:
     coefficients:

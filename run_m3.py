@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pandas as pd
 import yaml
@@ -538,6 +538,21 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
     portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
 
 
+def _compute_unrealised_pnl(qty: Decimal, current_price: Decimal, avg_entry_price: Decimal) -> Decimal:
+    """Mark-to-market unrealised P&L for a position row.
+
+    Skipped (returns ``0``) when we don't have a usable current price — the
+    column legitimately can't be filled until a mark refreshes. ``qty`` is
+    signed: positive for long, negative for short, so the formula handles
+    both sides naturally.
+    """
+    if qty == 0:
+        return Decimal("0")
+    if current_price <= 0 or avg_entry_price <= 0:
+        return Decimal("0")
+    return (current_price - avg_entry_price) * qty
+
+
 async def _persist_position_snapshot(session_factory, portfolio_state: dict[str, Any]) -> None:
     positions = portfolio_state.get("positions", {})
     tombstones = list(portfolio_state.get("_closed_position_tombstones") or [])
@@ -548,14 +563,17 @@ async def _persist_position_snapshot(session_factory, portfolio_state: dict[str,
         for symbol, p in positions.items():
             im = p.get("instrument_metadata") if isinstance(p.get("instrument_metadata"), dict) else None
             persisted_symbol = str(p.get("symbol") or symbol)
+            qty = Decimal(str(p.get("quantity", "0")))
+            avg = Decimal(str(p.get("avg_entry_price", "0")))
+            cur = Decimal(str(p.get("current_price", "0")))
             row = PositionLog(
                 timestamp=ts,
                 symbol=persisted_symbol[:72],
                 broker=str(p.get("broker", "ibkr"))[:20] or "ibkr",
-                quantity=Decimal(str(p.get("quantity", "0"))),
-                avg_entry_price=Decimal(str(p.get("avg_entry_price", "0"))),
-                current_price=Decimal(str(p.get("current_price", "0"))),
-                unrealised_pnl=Decimal("0"),
+                quantity=qty,
+                avg_entry_price=avg,
+                current_price=cur,
+                unrealised_pnl=_compute_unrealised_pnl(qty, cur, avg),
                 asset_class=str(p.get("asset_class", ""))[:20],
                 instrument_metadata=im,
             )
@@ -576,6 +594,104 @@ async def _persist_position_snapshot(session_factory, portfolio_state: dict[str,
             if row.symbol:
                 session.add(row)
         await session.commit()
+
+
+async def _refresh_position_marks_and_persist(
+    session_factory,
+    *,
+    timeframe: str,
+    price_oracle: "Callable[[str], Awaitable[Decimal]] | None" = None,
+) -> int:
+    """Mark-to-market sweep: refresh every open position's ``unrealised_pnl``.
+
+    Reads the latest persisted row per (broker, symbol), looks up the most
+    recent close price (default: ``feature_snapshots``; pass a ``price_oracle``
+    for venue-native prices), recomputes mark-to-market, and writes a fresh
+    ``PositionLog`` row.
+
+    Without this sweep, inherited positions that haven't been touched since a
+    crash carry stale ``current_price`` values from their last fill, and the
+    ``daily_pnl_unrealised_differs_from_open_book`` accounting check stays
+    flagged forever. Run this once per trading-loop iteration so every open
+    position is freshly marked before snapshots publish.
+
+    Returns the number of position rows refreshed.
+    """
+    ts = datetime.now(timezone.utc)
+    refreshed = 0
+    async with session_factory() as session:
+        latest_by_key = (
+            select(
+                PositionLog.broker.label("broker"),
+                PositionLog.symbol.label("symbol"),
+                func.max(PositionLog.timestamp).label("max_ts"),
+            )
+            .group_by(PositionLog.broker, PositionLog.symbol)
+            .subquery()
+        )
+        latest_q = await session.execute(
+            select(PositionLog).join(
+                latest_by_key,
+                and_(
+                    PositionLog.broker == latest_by_key.c.broker,
+                    PositionLog.symbol == latest_by_key.c.symbol,
+                    PositionLog.timestamp == latest_by_key.c.max_ts,
+                ),
+            )
+        )
+        latest_rows = list(latest_q.scalars().all())
+        open_rows = [r for r in latest_rows if Decimal(str(r.quantity or 0)) != 0]
+
+        # Fall back to a feature_snapshots close lookup when no oracle is
+        # supplied — paper-mode trading loops always have features warm.
+        async def _fallback_price(sym: str) -> Decimal:
+            df, _ = await _load_recent_features(
+                session_factory,
+                symbol=sym,
+                timeframe=timeframe,
+                lookback_bars=2,
+            )
+            if df is None or not hasattr(df, "empty") or df.empty:
+                return Decimal("0")
+            if "close" not in df.columns:
+                return Decimal("0")
+            try:
+                return Decimal(str(float(df["close"].iloc[-1])))
+            except Exception:  # noqa: BLE001
+                return Decimal("0")
+
+        for row in open_rows:
+            sym = str(row.symbol or "")
+            if not sym:
+                continue
+            qty = Decimal(str(row.quantity or 0))
+            avg = Decimal(str(row.avg_entry_price or 0))
+            try:
+                px = await (price_oracle(sym) if price_oracle is not None else _fallback_price(sym))
+            except Exception:  # noqa: BLE001
+                px = Decimal("0")
+            if px <= 0:
+                # No fresh quote — keep the last-known price; this still
+                # gives a meaningful ``unrealised_pnl`` (vs 0 before this
+                # function existed), just not freshly marked this cycle.
+                px = Decimal(str(row.current_price or 0))
+            unreal = _compute_unrealised_pnl(qty, px, avg)
+            new_row = PositionLog(
+                timestamp=ts,
+                symbol=sym[:72],
+                broker=str(row.broker or "ibkr")[:20] or "ibkr",
+                quantity=qty,
+                avg_entry_price=avg,
+                current_price=px,
+                unrealised_pnl=unreal,
+                asset_class=str(row.asset_class or "")[:20],
+                instrument_metadata=row.instrument_metadata if isinstance(row.instrument_metadata, dict) else None,
+            )
+            session.add(new_row)
+            refreshed += 1
+        if refreshed > 0:
+            await session.commit()
+    return refreshed
 
 
 async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) -> None:
