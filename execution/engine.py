@@ -1018,12 +1018,11 @@ class ExecutionEngine:
 
     def _build_order(self, signal: Signal) -> Order:
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
-        inst_meta = None
+        inst_meta = dict(meta) if meta else None
         if isinstance(meta.get("option_contract"), dict):
-            inst_meta = {
-                "instrument_type": "option",
-                "option_contract": dict(meta["option_contract"]),
-            }
+            inst_meta = dict(inst_meta or {})
+            inst_meta["instrument_type"] = "option"
+            inst_meta["option_contract"] = dict(meta["option_contract"])
             for key in (
                 "options_buy_to_open",
                 "options_sell_to_open",

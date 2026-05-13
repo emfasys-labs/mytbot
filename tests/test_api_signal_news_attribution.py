@@ -3,11 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from api.server import (
     _alias_symbols_for_signal,
+    _canonical_symbol_for_news_lookup,
     _candidate_news_rows_for_signal,
     _explicit_tickers_in_news_row,
     _is_market_wide_news_row,
+    _metadata_float,
     _news_lookup_symbols_for_signals,
     _news_row_matches_logged_symbol,
     _pick_strongest_news_log_per_symbol,
@@ -72,6 +76,45 @@ def test_signal_news_impact_source_distinguishes_accumulator_from_headline() -> 
 def test_signal_news_impact_source_uses_direct_ai_news_score() -> None:
     sig = SimpleNamespace(metadata_={"ai_news_score": -0.2, "accumulator_score": 0.0}, news_score=-0.2)
     assert _signal_news_impact_source(sig, []) == "ai_news"
+
+
+def test_metadata_float_parses_string_and_decimal_accumulator_scores() -> None:
+    md = {"accumulator_score": "0.42", "ai_news_score": "-0"}
+    assert _metadata_float(md, "accumulator_score") == pytest.approx(0.42)
+    assert _metadata_float(md, "ai_news_score") == 0.0
+
+
+def test_canonical_news_symbol_strips_router_prefix_for_ai_lookup() -> None:
+    assert _canonical_symbol_for_news_lookup("IBKR:AAPL") == "AAPL"
+    assert _canonical_symbol_for_news_lookup("kraken:ETH-USD") == "ETH-USD"
+    a = _news_lookup_symbols_for_signals(["IBKR:QQQ"])
+    b = _news_lookup_symbols_for_signals(["QQQ"])
+    assert set(a) == set(b)
+
+
+def test_signal_news_attribution_accepts_wide_clock_skew_same_day_news() -> None:
+    """Regression: attribution used a ±6h / +30min window — missed older AI batches vs newer logs."""
+    t0 = datetime(2026, 5, 12, 12, tzinfo=timezone.utc)
+    sig = SimpleNamespace(timestamp=t0)
+    row_far_before = SimpleNamespace(
+        timestamp=t0 - timedelta(hours=30),
+        score=0.31,
+        event_type="macro",
+        source="local",
+        payload={"headline": "Older macro note", "provider": "rules"},
+    )
+    out = _signal_news_attribution(sig, [row_far_before], max_items=1)
+    assert len(out) == 1
+    assert out[0]["score"] == 0.31
+
+    row_too_far = SimpleNamespace(
+        timestamp=t0 - timedelta(hours=60),
+        score=0.99,
+        event_type="macro",
+        source="local",
+        payload={"headline": "Stale", "provider": "rules"},
+    )
+    assert _signal_news_attribution(sig, [row_too_far], max_items=1) == []
 
 
 def test_market_wide_news_filter_excludes_single_name_earnings() -> None:

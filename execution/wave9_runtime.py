@@ -30,6 +30,7 @@ from typing import Any, Mapping, Optional
 import yaml
 
 from execution.impact import (
+    CostBreakdown,
     DEFAULT_IMPACT_COEFFICIENTS,
     total_execution_cost_bps,
 )
@@ -59,6 +60,7 @@ class Wave9RuntimeConfig:
     urgency_policy: UrgencyPolicy = field(default_factory=UrgencyPolicy)
     venue_priors: VenuePriors = field(default_factory=VenuePriors)
     slippage_model: SlippageModel = field(default_factory=SlippageModel)
+    unknown_liquidity_penalty_bps: float = 5.0
 
     @classmethod
     def from_dict(cls, raw: Optional[Mapping[str, Any]]) -> "Wave9RuntimeConfig":
@@ -104,6 +106,7 @@ class Wave9RuntimeConfig:
             urgency_policy=policy,
             venue_priors=priors,
             slippage_model=slip,
+            unknown_liquidity_penalty_bps=float(sect.get("unknown_liquidity_penalty_bps", 5.0)),
         )
 
     @classmethod
@@ -153,6 +156,20 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 def _extract_signal_inputs(signal_metadata: Mapping[str, Any]) -> dict[str, float]:
     """Pull the inputs Wave 9 needs out of ``Signal.metadata``."""
     md = signal_metadata or {}
+    edge_bps = _safe_float(md.get("forecast_expected_return"), 0.0) * 10_000.0
+    if edge_bps <= 0:
+        edge_bps = _safe_float(md.get("expected_edge_bps"), 0.0)
+    if edge_bps <= 0:
+        # ``expected_edge`` / ``priority_score`` in the global-edge allocator
+        # are bounded conviction scores, not calibrated returns. Use them only
+        # as a conservative execution proxy so the scheduler can compare costs
+        # against something non-zero without treating score=0.8 as +80%.
+        # Score-only trades therefore get at most 25 bps of assumed edge.
+        score_proxy = max(
+            _safe_float(md.get("expected_edge"), 0.0),
+            _safe_float(md.get("priority_score"), 0.0),
+        )
+        edge_bps = max(0.0, min(25.0, score_proxy * 25.0))
     return {
         "daily_volume": _safe_float(
             md.get("daily_volume") or md.get("avg_daily_volume") or md.get("volume"),
@@ -162,7 +179,7 @@ def _extract_signal_inputs(signal_metadata: Mapping[str, Any]) -> dict[str, floa
             md.get("daily_volatility") or md.get("realised_vol") or md.get("atr_pct"),
             0.0,
         ),
-        "edge_bps": _safe_float(md.get("forecast_expected_return"), 0.0) * 10_000.0,
+        "edge_bps": edge_bps,
         "signal_urgency": _safe_float(md.get("urgency_score") or md.get("opportunity_urgency"), 0.5),
         "demand_alignment": _safe_float(md.get("demand_alignment"), 0.0),
         "regime_label": md.get("regime_label") or md.get("market_state_label"),
@@ -214,6 +231,18 @@ def pre_flight_cost_gate(
             slippage_bps=slip_est.bps,
             coefficient=coef,
         )
+        unknown_liquidity_penalty = (
+            max(0.0, float(config.unknown_liquidity_penalty_bps or 0.0))
+            if meta_in["daily_volume"] <= 0
+            else 0.0
+        )
+        if unknown_liquidity_penalty:
+            cost = CostBreakdown(
+                fee_bps=cost.fee_bps,
+                spread_bps=cost.spread_bps,
+                slippage_bps=cost.slippage_bps,
+                impact_bps=cost.impact_bps + unknown_liquidity_penalty,
+            )
 
         regime_label = meta_in["regime_label"]
         regime_str = str(regime_label) if regime_label is not None else None
@@ -232,6 +261,7 @@ def pre_flight_cost_gate(
             "spread_bps": cost.spread_bps,
             "slippage_bps": cost.slippage_bps,
             "impact_bps": cost.impact_bps,
+            "unknown_liquidity_penalty_bps": unknown_liquidity_penalty,
             "total_bps": cost.total_bps,
         }
         meta_out = {
@@ -240,6 +270,7 @@ def pre_flight_cost_gate(
             "wave9_expected_cost_bps": cost.total_bps,
             "wave9_edge_bps": meta_in["edge_bps"],
             "wave9_slippage_source": slip_est.source,
+            "wave9_liquidity_known": meta_in["daily_volume"] > 0,
             "wave9_broker": broker,
             "wave9_asset_class": ac,
         }

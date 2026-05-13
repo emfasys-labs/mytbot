@@ -55,8 +55,8 @@ class UrgencyPolicy:
     # slicing the per-child cost can't drop below ``do_not_trade_ceiling``,
     # we refuse the trade.
     do_not_trade_ceiling: float = 150.0
-    # Ratio of expected cost to edge — if cost > edge_to_cost_safety * edge,
-    # downgrade or refuse.
+    # Required edge/cost cushion. When positive, edge must be at least
+    # ``edge_to_cost_safety * expected_cost``; set 0 to disable this veto.
     edge_to_cost_safety: float = 1.0
     # When signal urgency is high (close to 1.0) we accept higher costs;
     # this multiplies the effective ceilings.
@@ -106,14 +106,17 @@ def decide_urgency(
             edge_bps=edge,
         )
 
-    # Edge sanity: if cost dwarfs the edge by the safety factor, refuse.
-    if edge > 0 and cost > edge * p.edge_to_cost_safety:
+    # Edge sanity: refuse trades that do not clear the required edge/cost
+    # cushion. The previous form let higher safety values make the gate
+    # looser; for profitability this needs to be a minimum edge multiple.
+    safety = max(0.0, float(p.edge_to_cost_safety or 0.0))
+    if edge > 0 and safety > 0 and edge < cost * safety:
         return UrgencyDecision(
             urgency=Urgency.DO_NOT_TRADE,
             reason="cost_exceeds_edge",
             expected_cost_bps=cost,
             edge_bps=edge,
-            metadata={"edge_to_cost_safety": p.edge_to_cost_safety},
+            metadata={"edge_to_cost_safety": safety},
         )
 
     # Effective ceilings — relax when signal urgency is high or demand

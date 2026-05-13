@@ -128,6 +128,50 @@ def enrich_signal_volume_z(signal: Any, df: Any) -> None:
         pass
 
 
+def enrich_signal_liquidity(signal: Any, df: Any) -> None:
+    """Average daily volume + dollar volume + realised vol → signal.metadata.
+
+    These feed the Wave 9 cost gate: ``daily_volume`` lets the impact term
+    use the real square-root model and clears the unknown-liquidity penalty;
+    ``daily_volatility`` keeps the impact estimate calibrated to the symbol.
+    """
+    try:
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return
+        if not isinstance(getattr(signal, "metadata", None), dict):
+            signal.metadata = {}
+        meta = signal.metadata
+
+        if "volume" in df.columns:
+            vol = df["volume"].dropna()
+            if len(vol):
+                window = vol.tail(20) if len(vol) >= 5 else vol
+                adv = float(window.mean())
+                if adv > 0:
+                    meta.setdefault("daily_volume", round(adv, 4))
+                    meta.setdefault("avg_daily_volume", round(adv, 4))
+                    if "close" in df.columns:
+                        close_tail = df["close"].dropna().tail(len(window))
+                        if len(close_tail):
+                            px = float(close_tail.iloc[-1])
+                            if px > 0:
+                                meta.setdefault(
+                                    "daily_dollar_volume",
+                                    round(adv * px, 2),
+                                )
+
+        if "close" in df.columns:
+            close = df["close"].dropna()
+            if len(close) >= 6:
+                rets = close.pct_change().dropna().tail(20)
+                if len(rets) >= 5:
+                    vol_pct = float(rets.std())
+                    if vol_pct > 0:
+                        meta.setdefault("daily_volatility", round(vol_pct, 6))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def apply_saved_mode_to_risk_cfg(risk_engine: Any) -> None:
     """Mutate ``risk_engine.config`` to reflect the saved profile mode.
 
@@ -216,5 +260,42 @@ def enrich_candidate_volume_z(candidate: Any, df: Any) -> None:
         if not isinstance(getattr(candidate, "metadata", None), dict):
             candidate.metadata = {}
         candidate.metadata["volume_z_score"] = round(z, 4)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def enrich_candidate_liquidity(candidate: Any, df: Any) -> None:
+    """Mirror of :func:`enrich_signal_liquidity` for batch candidates."""
+    try:
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return
+        if not isinstance(getattr(candidate, "metadata", None), dict):
+            candidate.metadata = {}
+        meta = candidate.metadata
+        if "volume" in df.columns:
+            vol = df["volume"].dropna()
+            if len(vol):
+                window = vol.tail(20) if len(vol) >= 5 else vol
+                adv = float(window.mean())
+                if adv > 0:
+                    meta.setdefault("daily_volume", round(adv, 4))
+                    meta.setdefault("avg_daily_volume", round(adv, 4))
+                    if "close" in df.columns:
+                        close_tail = df["close"].dropna().tail(len(window))
+                        if len(close_tail):
+                            px = float(close_tail.iloc[-1])
+                            if px > 0:
+                                meta.setdefault(
+                                    "daily_dollar_volume",
+                                    round(adv * px, 2),
+                                )
+        if "close" in df.columns:
+            close = df["close"].dropna()
+            if len(close) >= 6:
+                rets = close.pct_change().dropna().tail(20)
+                if len(rets) >= 5:
+                    vol_pct = float(rets.std())
+                    if vol_pct > 0:
+                        meta.setdefault("daily_volatility", round(vol_pct, 6))
     except Exception:  # noqa: BLE001
         pass

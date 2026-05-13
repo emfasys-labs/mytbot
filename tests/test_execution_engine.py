@@ -231,6 +231,22 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     assert risk.killed is False
 
 
+def test_build_order_preserves_signal_metadata_for_audit() -> None:
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    sig = _signal()
+    sig.metadata = {
+        "strategy": "volatility_regime",
+        "expected_edge": "0.15",
+        "target_notional": "1000",
+    }
+
+    order = engine._build_order(sig)
+
+    assert order.instrument_metadata["strategy"] == "volatility_regime"
+    assert order.instrument_metadata["expected_edge"] == "0.15"
+    assert order.instrument_metadata["target_notional"] == "1000"
+
+
 @pytest.mark.asyncio
 async def test_rejected_order_without_broker_reason_gets_persistable_reason(monkeypatch) -> None:
     risk = _FakeRiskEngine(

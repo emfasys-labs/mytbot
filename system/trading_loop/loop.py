@@ -126,7 +126,9 @@ from system.trading_loop.helpers import (
     asset_class_for_symbol,
     broker_symbol_for,
     d015_legacy_fallback,
+    enrich_candidate_liquidity,
     enrich_candidate_volume_z,
+    enrich_signal_liquidity,
     enrich_signal_volume_z,
     is_crypto_symbol,
     is_futures_symbol,
@@ -1307,6 +1309,7 @@ class TradingLoop:
                                 signal.metadata["ai_macro_confidence"] = ai_result.macro_confidence
 
                             enrich_signal_volume_z(signal, df)
+                            enrich_signal_liquidity(signal, df)
 
                             await log_d015_shadow_for_signal(
                                 session_factory,
@@ -1485,6 +1488,7 @@ class TradingLoop:
                                     cand.metadata["ai_macro_confidence"] = ai_result.macro_confidence
 
                                 enrich_candidate_volume_z(cand, df)
+                                enrich_candidate_liquidity(cand, df)
                                 batch_candidates.append(cand)
                                 sc_log_rows.append(
                                     strategy_candidate_row(

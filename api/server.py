@@ -97,10 +97,20 @@ def _float_or_zero(v: Any) -> float:
 
 
 def _metadata_float(metadata: dict[str, Any] | None, key: str) -> float | None:
+    """Parse optional scores from persisted JSON metadata (float, Decimal, int, or str)."""
     if not metadata or key not in metadata:
         return None
+    raw = metadata[key]
+    if raw is None:
+        return None
     try:
-        return float(metadata[key])
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, Decimal):
+            return float(raw)
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        return float(str(raw).strip())
     except (TypeError, ValueError):
         return None
 
@@ -121,6 +131,9 @@ def _signal_news_impact_source(signal_row: Any, attribution: list[dict[str, Any]
 
 
 _EXPLICIT_TICKER_RE = re.compile(r"\$([A-Z]{1,8})\b")
+# Venue-prefixed symbols in execution logs (``ibkr:AAPL``, ``kraken:ETH-USD``);
+# AIOutputLog.news rows use native tickers without the router prefix.
+_BROKER_PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,19}:")
 _BROAD_MARKET_TICKERS = frozenset(
     {
         "SPY",
@@ -140,6 +153,13 @@ _BROAD_MARKET_TICKERS = frozenset(
 _MARKET_WIDE_NEWS_EVENTS = frozenset({"macro", "geopolitical", "geopolitics", "crypto"})
 
 
+def _canonical_symbol_for_news_lookup(symbol: str) -> str:
+    s = (symbol or "").strip().upper()
+    if _BROKER_PREFIX_RE.match(s) and ":" in s:
+        return s.split(":", 1)[1].strip().upper()
+    return s
+
+
 def _news_row_headline_text(row: Any) -> str:
     payload = getattr(row, "payload", None)
     if isinstance(payload, dict):
@@ -154,8 +174,9 @@ def _explicit_tickers_in_news_row(row: Any) -> set[str]:
 
 
 def _candidate_news_rows_for_signal(symbol: str, rows: list[Any]) -> list[Any]:
-    allowed = set(_alias_symbols_for_signal(symbol))
-    allowed.add((symbol or "").strip().upper())
+    sym_u = _canonical_symbol_for_news_lookup(symbol)
+    allowed = set(_alias_symbols_for_signal(sym_u))
+    allowed.add(sym_u)
     out: list[Any] = []
     for row in rows:
         explicit = _explicit_tickers_in_news_row(row)
@@ -166,7 +187,7 @@ def _candidate_news_rows_for_signal(symbol: str, rows: list[Any]) -> list[Any]:
 
 
 def _news_row_matches_logged_symbol(row: Any) -> bool:
-    symbol = (getattr(row, "symbol", None) or "").strip().upper()
+    symbol = _canonical_symbol_for_news_lookup((getattr(row, "symbol", None) or ""))
     if not symbol:
         return True
     explicit = _explicit_tickers_in_news_row(row)
@@ -195,20 +216,28 @@ def _is_market_wide_news_row(row: Any) -> bool:
 def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, max_items: int = 2) -> list[dict[str, Any]]:
     """
     Build per-signal explainability rows from nearby AI news logs.
+
+    Windows are deliberately wide symmetrically — the runner may persist
+    ``SignalLog.timestamp`` noticeably after AI batch scoring timestamps, so
+    a tight forward-only heuristic hid explainability for older dashboard rows.
     """
     ts = getattr(signal_row, "timestamp", None)
     if ts is None:
         return []
     sig_ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    before_ahead = timedelta(hours=48)
+    lookahead = timedelta(hours=48)
+    abs_before = before_ahead.total_seconds()
+    abs_after = lookahead.total_seconds()
     picked: list[tuple[float, float, Any]] = []
     for r in symbol_news_rows:
         r_ts = getattr(r, "timestamp", None)
         if r_ts is None:
             continue
         row_ts = r_ts if r_ts.tzinfo else r_ts.replace(tzinfo=timezone.utc)
-        # Prefer news from before the signal, but allow a small lag after logging delays.
         delta_s = (sig_ts - row_ts).total_seconds()
-        if delta_s < -1800 or delta_s > 6 * 3600:
+        # Symmetric lookahead / look-back (default ±48h) around the logged signal time.
+        if delta_s < -abs_after or delta_s > abs_before:
             continue
         score = _float_or_zero(getattr(r, "score", None))
         if score == 0.0:
@@ -246,7 +275,7 @@ def _signal_news_attribution(signal_row: Any, symbol_news_rows: list[Any], *, ma
 
 
 def _alias_symbols_for_signal(symbol: str) -> list[str]:
-    s = (symbol or "").strip().upper()
+    s = _canonical_symbol_for_news_lookup(symbol or "")
     alias_map: dict[str, list[str]] = {
         "ES": ["SPY", "ES", "SPX"],
         "NQ": ["QQQ", "NQ", "NDX"],
@@ -270,7 +299,7 @@ def _news_lookup_symbols_for_signals(symbols: list[str]) -> list[str]:
     """Expand signal symbols to the direct + alias symbols used by AI news logs."""
     out: dict[str, None] = {}
     for sym in symbols:
-        s = (sym or "").strip().upper()
+        s = _canonical_symbol_for_news_lookup(sym or "")
         if not s:
             continue
         out[s] = None
@@ -1556,14 +1585,24 @@ async def get_intelligence_signals(
                         "checks_failed": rv.checks_failed or [],
                     }
             # News attribution: map each signal to nearby AI "news" logs for same symbol.
-            sig_symbols = sorted({(s.symbol or "").strip().upper() for s in sigs if (s.symbol or "").strip()})
+            sig_symbols = sorted(
+                {
+                    ss
+                    for s in sigs
+                    if (ss := _canonical_symbol_for_news_lookup((s.symbol or "").strip())).strip()
+                }
+            )
             lookup_symbols = _news_lookup_symbols_for_signals(sig_symbols)
             if lookup_symbols:
                 min_ts = min((s.timestamp for s in sigs if s.timestamp is not None), default=None)
                 max_ts = max((s.timestamp for s in sigs if s.timestamp is not None), default=None)
                 if min_ts is not None and max_ts is not None:
-                    min_cutoff = (min_ts if min_ts.tzinfo else min_ts.replace(tzinfo=timezone.utc)) - timedelta(hours=6)
-                    max_cutoff = (max_ts if max_ts.tzinfo else max_ts.replace(tzinfo=timezone.utc)) + timedelta(minutes=30)
+                    min_ts_tz = min_ts if min_ts.tzinfo else min_ts.replace(tzinfo=timezone.utc)
+                    max_ts_tz = max_ts if max_ts.tzinfo else max_ts.replace(tzinfo=timezone.utc)
+                    # Cover the widest per-row symmetric window ``_signal_news_attribution``
+                    # uses (+ batch skew) around all signals fetched in one request.
+                    min_cutoff = min_ts_tz - timedelta(hours=72)
+                    max_cutoff = max_ts_tz + timedelta(hours=72)
                     ai_q = await session.execute(
                         select(AIOutputLog)
                         .where(
@@ -1586,7 +1625,7 @@ async def get_intelligence_signals(
                         if _is_market_wide_news_row(r):
                             market_rows.append(r)
                     for s in sigs:
-                        sig_sym = (s.symbol or "").strip().upper()
+                        sig_sym = _canonical_symbol_for_news_lookup((s.symbol or "").strip())
                         if not sig_sym:
                             continue
                         direct_rows = _candidate_news_rows_for_signal(sig_sym, by_sym.get(sig_sym, []))

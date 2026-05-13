@@ -92,7 +92,7 @@ async def test_gate_passes_when_cost_low(monkeypatch) -> None:
             limit_cost_ceiling=2000.0,
             passive_cost_ceiling=3000.0,
             do_not_trade_ceiling=10_000.0,
-            edge_to_cost_safety=1000.0,    # disable edge-vs-cost veto
+            edge_to_cost_safety=0.0,       # disable edge-vs-cost veto
         ),
     )
     monkeypatch.setattr("execution.engine.get_broker", lambda *a, **kw: None)
@@ -134,6 +134,96 @@ async def test_gate_blocks_when_cost_exceeds_edge(monkeypatch) -> None:
     assert result is None
     assert eng.wave9_gate_blocked == 1
     assert eng.wave9_gate_passed == 0
+
+
+def test_gate_uses_bounded_allocator_edge_proxy_when_forecast_missing() -> None:
+    cfg = Wave9RuntimeConfig(
+        enabled=True,
+        urgency_policy=UrgencyPolicy(
+            market_cost_ceiling=1000.0,
+            limit_cost_ceiling=2000.0,
+            passive_cost_ceiling=3000.0,
+            do_not_trade_ceiling=10_000.0,
+            edge_to_cost_safety=1.0,
+        ),
+    )
+
+    decision = pre_flight_cost_gate(
+        config=cfg,
+        broker="ibkr",
+        symbol="SPY",
+        asset_class="equity",
+        quantity=10,
+        signal_metadata={
+            "daily_volume": 1_000_000.0,
+            "daily_volatility": 0.01,
+            "expected_edge": "0.80",
+        },
+    )
+
+    assert decision.allow is True
+    assert decision.metadata["wave9_edge_bps"] == pytest.approx(20.0)
+
+
+def test_gate_blocks_score_only_trade_without_cost_cushion() -> None:
+    cfg = Wave9RuntimeConfig(
+        enabled=True,
+        urgency_policy=UrgencyPolicy(
+            market_cost_ceiling=1000.0,
+            limit_cost_ceiling=2000.0,
+            passive_cost_ceiling=3000.0,
+            do_not_trade_ceiling=10_000.0,
+            edge_to_cost_safety=2.0,
+        ),
+    )
+
+    decision = pre_flight_cost_gate(
+        config=cfg,
+        broker="kraken",
+        symbol="SOL-USD",
+        asset_class="crypto",
+        quantity=1,
+        signal_metadata={
+            "daily_volume": 1_000_000.0,
+            "daily_volatility": 0.01,
+            "expected_edge": "0.80",
+        },
+    )
+
+    assert decision.allow is False
+    assert decision.reason == "cost_exceeds_edge"
+    assert decision.metadata["wave9_edge_bps"] == pytest.approx(20.0)
+
+
+def test_gate_penalizes_missing_liquidity_for_score_only_trade() -> None:
+    cfg = Wave9RuntimeConfig(
+        enabled=True,
+        unknown_liquidity_penalty_bps=5.0,
+        urgency_policy=UrgencyPolicy(
+            market_cost_ceiling=1000.0,
+            limit_cost_ceiling=2000.0,
+            passive_cost_ceiling=3000.0,
+            do_not_trade_ceiling=10_000.0,
+            edge_to_cost_safety=2.0,
+        ),
+    )
+
+    decision = pre_flight_cost_gate(
+        config=cfg,
+        broker="ibkr",
+        symbol="SPY",
+        asset_class="equity",
+        quantity=10,
+        signal_metadata={
+            "daily_volatility": 0.01,
+            "expected_edge": "0.80",
+        },
+    )
+
+    assert decision.allow is False
+    assert decision.reason == "cost_exceeds_edge"
+    assert decision.metadata["wave9_liquidity_known"] is False
+    assert decision.metadata["wave9_expected_cost_bps"] == pytest.approx(16.0)
 
 
 # ── 4. gate exception is swallowed ──────────────────────────────────────────
@@ -225,7 +315,7 @@ def test_pre_flight_returns_do_not_trade_when_cost_above_dnt_ceiling() -> None:
             limit_cost_ceiling=2.0,
             passive_cost_ceiling=3.0,
             do_not_trade_ceiling=4.0,
-            edge_to_cost_safety=1000.0,  # disable edge veto
+            edge_to_cost_safety=0.0,  # disable edge veto
         ),
     )
     decision = pre_flight_cost_gate(
