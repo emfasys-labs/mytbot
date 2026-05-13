@@ -1279,6 +1279,12 @@ class Orchestrator:
                         abs(qty),
                         decision.reason,
                     )
+                    # Persist the fill into PositionLog + daily_pnl. See
+                    # _persist_fill_to_portfolio_state docstring — without
+                    # this, the same breaching position re-triggers next tick.
+                    await self._persist_fill_to_portfolio_state(
+                        sf=sf, signal=signal, result=result, fallback_nav=nav,
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | stop-loss tick error (non-fatal): {}", exc)
         finally:
@@ -1518,6 +1524,12 @@ class Orchestrator:
                     decision.reason,
                     decision.profit_absolute,
                 )
+                # Persist the fill into PositionLog + daily_pnl. Without
+                # this, the position never updates and the monitor fires
+                # again next tick on the same "still profitable" position.
+                await self._persist_fill_to_portfolio_state(
+                    sf=sf, signal=signal, result=result, fallback_nav=nav,
+                )
 
             for key in list(self._profit_harvest_peak_pnl.keys()):
                 if key not in active_keys:
@@ -1563,6 +1575,63 @@ class Orchestrator:
             return max(2.0, float(ph_cfg.get("monitor_interval_sec", 20.0)))
         except (TypeError, ValueError):
             return 20.0
+
+    async def _persist_fill_to_portfolio_state(
+        self,
+        *,
+        sf: Any,
+        signal: Any,
+        result: Any,
+        fallback_nav: Decimal,
+    ) -> None:
+        """Apply an out-of-band fill (profit-harvest, stop-loss) to PositionLog.
+
+        Without this, monitor-issued closes fill on paper and charge fees
+        but the position ledger never updates. The monitor then sees the
+        same "still profitable" or "still breaching" position next tick
+        and fires another redundant close — 19 phantom closes for one
+        symbol observed in production. Mirrors the persistence the main
+        trading loop runs after every fill.
+        """
+        try:
+            from run_m3 import (
+                _apply_signal_to_portfolio_state,
+                _load_portfolio_state,
+                _persist_position_snapshot,
+                _upsert_daily_pnl,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | post-fill persist import failed: {}", exc)
+            return
+        try:
+            filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
+            if filled_qty <= 0:
+                return
+            avg_fill = getattr(result, "avg_fill_price", None)
+            if avg_fill is not None:
+                try:
+                    avg_d = Decimal(str(avg_fill))
+                    if avg_d > 0:
+                        signal.suggested_price = avg_d
+                except Exception:  # noqa: BLE001
+                    pass
+            signal.suggested_quantity = filled_qty
+            try:
+                fee_dec = Decimal(str(getattr(result, "fee", "0") or "0"))
+            except Exception:  # noqa: BLE001
+                fee_dec = Decimal("0")
+            post_trade_state = await _load_portfolio_state(
+                sf,
+                fallback_portfolio_value=fallback_nav,
+                signal_price_fallback=signal.suggested_price,
+                capital_pct=Decimal(str(self.capital_pct)),
+            )
+            post_trade_state["fees_today_delta"] = fee_dec
+            _apply_signal_to_portfolio_state(post_trade_state, signal)
+            await _persist_position_snapshot(sf, post_trade_state)
+            await _upsert_daily_pnl(sf, post_trade_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("orchestrator | post-fill persist failed: {}", exc)
 
     async def _profit_harvest_loop(self) -> None:
         """Periodic post-open profit harvesting monitor loop."""

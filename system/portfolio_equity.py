@@ -33,6 +33,23 @@ def _cache_ttl_seconds() -> float:
         return 45.0
 
 
+def _extended_cache_ttl_seconds() -> float:
+    """Fallback staleness window for brokers that the manager confirmed are
+    ``balance_ready`` but which momentarily return an empty ``get_balance``.
+
+    IBKR's paper account snapshot is intermittent: a single 1-2 minute window
+    of empty replies can flip the NAV banner to "WAITING FOR IBKR" even when
+    the trading loop is otherwise happily filling orders. As long as the
+    broker manager periodically marks the adapter ``balance_ready`` we trust
+    the last good value for this window (default 10 min).
+    """
+    raw = os.getenv("LIVE_PORTFOLIO_VALUE_EXT_CACHE_TTL_SEC", "600")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 600.0
+
+
 def _cache_for(broker_manager: Any) -> dict[str, tuple[Decimal, float]]:
     cache = getattr(broker_manager, _NAV_CACHE_ATTR, None)
     if isinstance(cache, dict):
@@ -122,6 +139,14 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
 
     IBKR often reports NetLiquidation on the BASE row; taking ``max`` across all currencies
     can pick a small cash line instead of account NAV, understating live equity.
+
+    Two-tier cache fallback for transient empty replies:
+      * Standard TTL (``LIVE_PORTFOLIO_VALUE_CACHE_TTL_SEC``, default 45s) covers
+        the normal case — last successful snapshot is reused for a short window.
+      * Extended TTL (``LIVE_PORTFOLIO_VALUE_EXT_CACHE_TTL_SEC``, default 600s)
+        kicks in only when the broker manager has confirmed the adapter is
+        ``balance_ready``. This protects the dashboard from IBKR's paper API
+        going briefly empty without flipping the whole NAV gate to "missing".
     """
     if broker_manager is None:
         return PortfolioValueSnapshot(Decimal(0), False, tuple(), tuple())
@@ -129,10 +154,15 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
     disabled = _disabled_broker_names()
     cache = _cache_for(broker_manager)
     ttl = _cache_ttl_seconds()
+    ext_ttl = _extended_cache_ttl_seconds()
     now = time.monotonic()
     total = Decimal(0)
     included: list[str] = []
     missing: list[str] = []
+    # Brokers the manager has confirmed ``balance_ready`` are eligible for the
+    # extended fallback window — we trust the last good value for longer when
+    # the broker manager periodically vouches for the adapter.
+    healthy = allow if allow is not None else set()
     # Snapshot adapters to avoid concurrent mutation during late broker connects.
     for name, adapter in list(broker_manager.adapters.items()):
         n = str(name).strip().lower()
@@ -141,10 +171,11 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
         if n in disabled:
             continue
         included.append(n)
+        effective_ttl = ext_ttl if n in healthy else ttl
         try:
             balances = await adapter.get_balance()
         except Exception:  # noqa: BLE001
-            cached = _cached_value(cache, n, now, ttl)
+            cached = _cached_value(cache, n, now, effective_ttl)
             if cached > 0:
                 total += cached
             else:
@@ -157,7 +188,7 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
         elif _zero_balance_is_complete(n, list(balances)):
             total += Decimal(0)
         else:
-            cached = _cached_value(cache, n, now, ttl)
+            cached = _cached_value(cache, n, now, effective_ttl)
             if cached > 0:
                 total += cached
             else:

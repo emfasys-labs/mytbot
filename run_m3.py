@@ -34,7 +34,7 @@ from risk.options_env import merge_options_env_into_risk_cfg
 from signals.accumulator import SignalAccumulator
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
-from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, PositionLog, SignalLog
+from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, OrderLog, PositionLog, SignalLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -694,6 +694,81 @@ async def _refresh_position_marks_and_persist(
     return refreshed
 
 
+async def _compute_today_realised_pnl(session) -> Decimal:
+    """Round-trip realised P&L from today's filled orders.
+
+    Replays the day's fill sequence against a per-(broker, symbol) position
+    state and sums ``(gross - fee)`` whenever a fill closes part of an
+    existing position. Mirrors the API's ``_filled_order_net_pnl_for_period``
+    so the persisted ``daily_pnl.realised_pnl`` always equals what the API
+    computes — previously the column read 0 while the API showed thousands.
+
+    Returns 0 when no fills are found.
+    """
+    today = datetime.now(timezone.utc).date()
+    start_dt = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
+    q = await session.execute(
+        select(OrderLog)
+        .where(
+            OrderLog.timestamp >= start_dt,
+            OrderLog.timestamp < end_dt,
+            OrderLog.status.in_(("filled", "partially_filled")),
+        )
+        .order_by(OrderLog.timestamp.asc(), OrderLog.id.asc())
+    )
+    rows = list(q.scalars().all())
+    if not rows:
+        return Decimal("0")
+
+    state: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
+    total = Decimal("0")
+    for r in rows:
+        broker = str(r.broker or "").strip().lower()
+        symbol = str(r.symbol or "").strip().upper()
+        key = (broker, symbol)
+        pos_qty, pos_avg = state.get(key, (Decimal("0"), Decimal("0")))
+        try:
+            fill_qty = Decimal(str(r.filled_quantity if r.filled_quantity is not None else r.quantity or 0))
+            fill_price = Decimal(str(r.avg_fill_price if r.avg_fill_price is not None else r.limit_price or 0))
+            fee = Decimal(str(r.fee or 0))
+        except (TypeError, ValueError, InvalidOperation):
+            continue
+        side_l = str(r.side or "").strip().lower()
+        if side_l not in {"buy", "sell"} or fill_qty <= 0 or fill_price <= 0:
+            continue
+        signed_fill = fill_qty if side_l == "buy" else -fill_qty
+        closing_qty = Decimal("0")
+        gross = Decimal("0")
+        if pos_qty > 0 and signed_fill < 0:
+            closing_qty = min(pos_qty, abs(signed_fill))
+            gross = (fill_price - pos_avg) * closing_qty
+        elif pos_qty < 0 and signed_fill > 0:
+            closing_qty = min(abs(pos_qty), signed_fill)
+            gross = (pos_avg - fill_price) * closing_qty
+        if closing_qty > 0:
+            fee_alloc = fee * (closing_qty / fill_qty)
+            total += gross - fee_alloc
+        new_qty = pos_qty + signed_fill
+        eps = Decimal("0.00000001")
+        if abs(new_qty) <= eps:
+            new_qty = Decimal("0")
+            new_avg = fill_price
+        elif pos_qty == 0 or (pos_qty > 0 and signed_fill > 0) or (pos_qty < 0 and signed_fill < 0):
+            total_abs = abs(pos_qty) + abs(signed_fill)
+            new_avg = (
+                ((abs(pos_qty) * pos_avg) + (abs(signed_fill) * fill_price)) / total_abs
+                if total_abs > 0
+                else fill_price
+            )
+        elif abs(signed_fill) < abs(pos_qty):
+            new_avg = pos_avg
+        else:
+            new_avg = fill_price
+        state[key] = (new_qty, new_avg)
+    return total
+
+
 async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
     d = now.date().isoformat()
@@ -722,12 +797,23 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
         unreal = Decimal("0")
 
     async with session_factory() as session:
+        # Always compute realised P&L from today's orders so the persisted
+        # row matches the API's round-trip view. The state-passed
+        # ``daily_realized_pnl`` only updates in the legacy execution path;
+        # D015 batch closes never accumulate into it, which is why the
+        # ``daily_pnl.realised_pnl`` column used to read 0 while
+        # ``/pnl`` correctly reported thousands.
+        try:
+            realised_today = await _compute_today_realised_pnl(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("daily_pnl | realised compute failed, falling back to state: {}", exc)
+            realised_today = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
         q = await session.execute(select(DailyPnL).where(DailyPnL.date == d).limit(1))
         row = q.scalars().first()
         if row is None:
             row = DailyPnL(
                 date=d,
-                realised_pnl=Decimal(str(portfolio_state.get("daily_realized_pnl", "0"))),
+                realised_pnl=realised_today,
                 unrealised_pnl=unreal,
                 total_fees=fee_delta,
                 trade_count=int(portfolio_state.get("trades_today", 0)),
@@ -740,7 +826,7 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
             )
             session.add(row)
         else:
-            row.realised_pnl = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
+            row.realised_pnl = realised_today
             row.unrealised_pnl = unreal
             if fee_delta and fee_delta != Decimal("0"):
                 try:
