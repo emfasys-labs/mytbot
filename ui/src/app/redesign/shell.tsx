@@ -181,22 +181,22 @@ export function TopBar({
         </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Mode is auto-derived from market state (drawdown, vol, signal
+            density, news emergencies). The pills are indicators — never
+            clickable. Hunter is the bias; the system only steps down on
+            objective adverse evidence. See system/adaptive_mode.py. */}
         <div
-          title={modeInteractive ? undefined : 'Start the system to change trading mode'}
+          title="Mode is auto-derived from market state — not operator-settable"
           style={{
             display: 'flex', alignItems: 'center', gap: 4, padding: 2,
             borderRadius: 8, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1,
-            opacity: modeInteractive ? 1 : 0.52,
           }}
         >
           {(['defender', 'trader', 'hunter'] as const).map((m) => {
-            const active = modeInteractive && mode === m;
+            const active = mode === m;
             return (
-              <button
+              <span
                 key={m}
-                type="button"
-                disabled={!modeInteractive}
-                onClick={() => { if (modeInteractive) onSetMode(m); }}
                 style={{
                   padding: '4px 8px',
                   borderRadius: 6,
@@ -207,12 +207,17 @@ export function TopBar({
                   fontSize: 10,
                   letterSpacing: '0.04em',
                   textTransform: 'uppercase',
-                  cursor: modeInteractive ? 'pointer' : 'not-allowed',
+                  cursor: 'default',
+                  userSelect: 'none',
                 }}
-                title={modeInteractive ? `Set mode: ${m}` : 'Start the system to change mode'}
+                title={
+                  active
+                    ? `Current market state classifier output: ${m}`
+                    : `Inactive — classifier picks ${m} only on specific market conditions`
+                }
               >
                 {m}
-              </button>
+              </span>
             );
           })}
         </div>

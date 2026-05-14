@@ -323,6 +323,10 @@ class TradingLoop:
         self.last_iteration_at: datetime | None = None
         self.iterations: int = 0
         self.last_error: str | None = None
+        # Rolling signal-density input for the adaptive_mode classifier.
+        # Updated at the end of every iteration; read at the start of the
+        # next. None on fresh boot so the classifier falls back to defaults.
+        self._last_generated_count: int = 0
 
         self._global_edge_cfg: dict[str, Any] = {}
         self._enable_arbitrage: bool = False
@@ -1114,16 +1118,83 @@ class TradingLoop:
                             now=datetime.now(timezone.utc),
                         )
 
-                    mode_raw = "trader"
+                    # ── Adaptive mode (Phase 0) ─────────────────────────────
+                    # Mode is now derived from market state every iteration —
+                    # operator can't set it. The classifier biases toward
+                    # ``hunter`` and only steps down on objective adverse
+                    # evidence (drawdown breach, emergency news, vol spike
+                    # when those inputs are wired in Phase 4). The result is
+                    # written to ``active_mode.json`` so every consumer that
+                    # already reads that file picks up the new value without
+                    # any further wiring.
                     try:
+                        from system.adaptive_mode import (
+                            ModeInputs,
+                            classify_market_mode,
+                            serialise_for_active_mode_json,
+                        )
+                        # Drawdown: today's NAV vs the persisted HWM. Negative
+                        # values are losses.
+                        nav_dd_pct = None
+                        try:
+                            hwm = Decimal(str(portfolio_state.get("high_watermark_value", 0) or 0))
+                            pv = Decimal(str(portfolio_state.get("portfolio_value", 0) or 0))
+                            if hwm > 0 and pv > 0:
+                                nav_dd_pct = float((pv - hwm) / hwm)
+                        except Exception:  # noqa: BLE001
+                            nav_dd_pct = None
+                        # Signal density: candidates generated in the prior
+                        # iteration. Fresh boot → None (defaults pass through).
+                        sig_density = float(
+                            getattr(self, "_last_generated_count", 0) or 0
+                        )
+                        # Emergency news flag — Phase 0 leaves this False until
+                        # Phase 4 wires in the AI pipeline anomaly bus. Defender
+                        # via news today only triggers if someone sets it
+                        # externally; that's intentional.
+                        decision = classify_market_mode(
+                            ModeInputs(
+                                nav_drawdown_pct=nav_dd_pct,
+                                recent_signal_density=sig_density,
+                                emergency_news_active=False,
+                            )
+                        )
+                        mode_raw = decision.mode
+                        # Persist the decision payload so the dashboard can
+                        # render "why" the mode is what it is.
                         import json as _json
                         from pathlib import Path as _Path
-
-                        _mf = _Path("data/runtime/active_mode.json")
-                        if _mf.is_file():
-                            mode_raw = str(_json.loads(_mf.read_text(encoding="utf-8")).get("mode", "trader"))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        _runtime_dir = _Path("data/runtime")
+                        _runtime_dir.mkdir(parents=True, exist_ok=True)
+                        _mf = _runtime_dir / "active_mode.json"
+                        _mf.write_text(
+                            _json.dumps(serialise_for_active_mode_json(decision), default=str),
+                            encoding="utf-8",
+                        )
+                        if self.iterations % 5 == 0 or decision.mode != "hunter":
+                            logger.info(
+                                "adaptive_mode | mode={} reason={} dd_pct={} sig_density={}",
+                                decision.mode,
+                                decision.reason,
+                                f"{nav_dd_pct:.4f}" if nav_dd_pct is not None else "n/a",
+                                f"{sig_density:.1f}" if sig_density is not None else "n/a",
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        # Fallback to whatever active_mode.json contains; if
+                        # that fails too, default to ``trader`` to keep the
+                        # rest of the loop safe.
+                        logger.debug("adaptive_mode | classifier failed, falling back: {}", exc)
+                        mode_raw = "trader"
+                        try:
+                            import json as _json
+                            from pathlib import Path as _Path
+                            _mf = _Path("data/runtime/active_mode.json")
+                            if _mf.is_file():
+                                mode_raw = str(
+                                    _json.loads(_mf.read_text(encoding="utf-8")).get("mode", "trader")
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
                     for strategy in strategies.values():
                         try:
                             if isinstance(getattr(strategy, "config", None), dict):
@@ -1946,6 +2017,9 @@ class TradingLoop:
                     except Exception as mtm_exc:  # noqa: BLE001
                         logger.warning("mark_to_market | sweep failed (non-fatal) | {}", mtm_exc)
                     self.last_iteration_at = datetime.now(timezone.utc)
+                    # Remember the count so the adaptive_mode classifier on
+                    # the NEXT tick can use signal density as an input.
+                    self._last_generated_count = int(generated or 0)
                     self.iterations += 1
                     self.last_error = None
                     logger.info("trading_loop | iteration #{} | generated={} executed={}", self.iterations, generated, executed)
@@ -1973,10 +2047,34 @@ class TradingLoop:
                             "trading_loop | iteration DB error — rebound CommandBus (shared engine; not disposed)",
                         )
 
-                # Pick the iteration cadence for the *current* profile mode so
-                # a hunter → defender switch takes effect on the very next sleep.
+                # Adaptive cadence (Phase 1) — the loop paces itself to the
+                # market's actual signal rate, the session window, and the
+                # current adaptive_mode label, rather than a static per-mode
+                # number. The mode_cadence_map is kept as the ``base_interval``
+                # input so operators can still influence the centre point via
+                # YAML, but the dynamic factors dominate.
                 current_mode = self._read_active_mode()
-                iter_interval = mode_cadence_map.get(current_mode, self.loop_interval_sec)
+                base_iter = mode_cadence_map.get(current_mode, self.loop_interval_sec)
+                try:
+                    from system.adaptive_cadence import CadenceInputs, compute_loop_cadence
+                    iter_interval = compute_loop_cadence(
+                        CadenceInputs(
+                            mode=current_mode,
+                            recent_signal_density=float(getattr(self, "_last_generated_count", 0) or 0),
+                            base_interval_sec=float(base_iter),
+                        )
+                    )
+                    if self.iterations % 5 == 0:
+                        logger.info(
+                            "adaptive_cadence | mode={} density={} base={}s → next={}s",
+                            current_mode,
+                            getattr(self, "_last_generated_count", 0),
+                            int(base_iter),
+                            int(iter_interval),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("adaptive_cadence | failed, falling back to static: {}", exc)
+                    iter_interval = base_iter
                 try:
                     should_stop = await self._wait_for_next_iteration(iter_interval)
                     if should_stop:
@@ -2238,7 +2336,61 @@ class TradingLoop:
                 except Exception:  # noqa: BLE001
                     pass
 
-        coord = GlobalEdgeCoordinator(self._global_edge_cfg, logger=logger)
+        # Phase 2: inject cost-aware adaptive inputs into the coordinator
+        # config so its ``_threshold(mode)`` returns a dynamic value
+        # grounded in live execution cost + recent realised outcomes.
+        # We patch a transient ``adaptive_edge`` block on the cfg dict;
+        # the coordinator's threshold reads it if present, falls back
+        # cleanly otherwise.
+        adaptive_edge_cfg: dict[str, Any] = {}
+        try:
+            from system.adaptive_edge import estimate_cross_venue_cost_bps
+            if self.execution_engine is not None and self.execution_engine._wave9_cfg is not None:
+                w9 = self.execution_engine._wave9_cfg
+                active_brokers = list(self.available_brokers or [])
+                # Conservative asset-class set: equity + crypto covers the
+                # bulk of volume; the average is a coarse baseline that the
+                # coordinator's per-symbol decisions further refine.
+                active_acs = ["equity", "crypto"]
+                cost_bps = estimate_cross_venue_cost_bps(
+                    venue_priors=w9.venue_priors,
+                    slippage_model=w9.slippage_model,
+                    active_brokers=active_brokers,
+                    active_asset_classes=active_acs,
+                )
+                if cost_bps is not None:
+                    adaptive_edge_cfg["cross_venue_cost_bps"] = cost_bps
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("adaptive_edge | cost estimate failed: {}", exc)
+        # Outcome inputs: compute a coarse recent win-rate / avg return
+        # from the persisted P&L. Use today's daily_pnl row for now —
+        # Phase 4 will move this to a rolling per-strategy window.
+        try:
+            real = Decimal(str(portfolio_dict.get("daily_realized_pnl", 0) or 0))
+            trades = int(portfolio_dict.get("trades_today", 0) or 0)
+            if trades > 0:
+                avg_ret_proxy = float(real) / max(1.0, float(total_equity)) / trades
+                adaptive_edge_cfg["recent_avg_return"] = avg_ret_proxy
+                # Win rate is hard to compute cheaply from daily totals; a
+                # signed-avg proxy of >0 implies winners > losers. Use a
+                # simple binary mapping: any net-positive day defaults to
+                # 60% win-rate; negative day to 40%. Phase 4 will replace.
+                adaptive_edge_cfg["recent_win_rate"] = 0.6 if real > 0 else 0.4
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("adaptive_edge | outcome inputs failed: {}", exc)
+        # Merge onto a shallow copy of the YAML cfg so we don't mutate the
+        # underlying loaded dict (other code paths read it).
+        coord_cfg = dict(self._global_edge_cfg or {})
+        if adaptive_edge_cfg:
+            coord_cfg["adaptive_edge"] = adaptive_edge_cfg
+            if self.iterations % 5 == 0:
+                logger.info(
+                    "adaptive_edge | cost_bps={} avg_ret={} win_rate={}",
+                    adaptive_edge_cfg.get("cross_venue_cost_bps"),
+                    adaptive_edge_cfg.get("recent_avg_return"),
+                    adaptive_edge_cfg.get("recent_win_rate"),
+                )
+        coord = GlobalEdgeCoordinator(coord_cfg, logger=logger)
         repl_ctx = await load_replacement_context_from_bus(bus)
         mode_for_coord = mode_raw if mode_raw in ("hunter", "trader", "defender") else "trader"
         if tradable <= 0:
@@ -2285,21 +2437,29 @@ class TradingLoop:
                 )
             if adaptive_on and tradable > 0:
                 adaptive_budget_active = True
-                # Adaptive gross fraction: hunter deploys the slider-allocated
-                # capital fully; trader/defender progressively conservative.
-                # Concentration exponent — higher means sharper softmax (more
-                # winner-take-all). These are the only mode-aware multipliers
-                # in the adaptive path; they are NOT hard caps on size or count.
-                adaptive_mode_cfg = (
-                    (self._global_edge_cfg.get("adaptive") or {}).get("mode") or {}
-                )
-                _mode_raw_cfg = adaptive_mode_cfg.get(mode_for_coord) or adaptive_mode_cfg.get("trader") or {}
+                # Phase 5: mode-keyed adaptive block collapsed to scalars
+                # at top level of ``adaptive``. Hunter values are canonical.
+                # Legacy dict shape (``adaptive.mode.<mode>``) is still
+                # tolerated so older YAML configs don't break.
+                _adaptive_cfg = self._global_edge_cfg.get("adaptive") or {}
+                _legacy_mode_block = _adaptive_cfg.get("mode")
+                if isinstance(_legacy_mode_block, dict):
+                    _mode_raw_cfg = (
+                        _legacy_mode_block.get(mode_for_coord)
+                        or _legacy_mode_block.get("trader")
+                        or {}
+                    )
+                    _gf_src = _mode_raw_cfg.get("gross_fraction", _adaptive_cfg.get("gross_fraction", "1.0"))
+                    _ce_src = _mode_raw_cfg.get("concentration", _adaptive_cfg.get("concentration", "1.0"))
+                else:
+                    _gf_src = _adaptive_cfg.get("gross_fraction", "1.0")
+                    _ce_src = _adaptive_cfg.get("concentration", "1.0")
                 try:
-                    _gross_fraction = Decimal(str(_mode_raw_cfg.get("gross_fraction", "1.0")))
+                    _gross_fraction = Decimal(str(_gf_src))
                 except Exception:  # noqa: BLE001
                     _gross_fraction = Decimal("1.0")
                 try:
-                    _concentration = Decimal(str(_mode_raw_cfg.get("concentration", "1.0")))
+                    _concentration = Decimal(str(_ce_src))
                 except Exception:  # noqa: BLE001
                     _concentration = Decimal("1.0")
                 # Sizing in CASH-DEPLOYED space, not notional. The slider

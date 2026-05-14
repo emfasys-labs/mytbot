@@ -15,20 +15,13 @@ max_position_pct: 1.00          # Legacy/fallback only when enforce_static_expos
 max_concentration_pct: 1.00     # Legacy/fallback only when enforce_static_exposure_caps=true
 max_gross_exposure_pct: 1.00    # Legacy/fallback only when enforce_static_exposure_caps=true
 
+# Phase 5: ``mode_overrides`` collapsed. Mode is now a derived indicator
+# (see ``system/adaptive_mode.py``) so per-mode ceilings serve no purpose.
+# All values are 1.00 (no clip) because the genuine risk caps come from
+# adaptive sizing (Phase 3) plus operator policy below. Kept under the
+# legacy key ``mode_overrides.hunter`` so readers that do
+# ``mode_overrides.get(mode)`` still find the canonical block.
 mode_overrides:
-  # Per-mode adaptive ceilings. Unused when USE_ADAPTIVE_SIZING is off.
-  defender:
-    max_position_pct: 1.00
-    max_concentration_pct: 1.00
-    max_gross_exposure_pct: 1.00
-    max_single_stock_pct: 1.00
-    max_crypto_pct: 1.00
-  trader:
-    max_position_pct: 1.00
-    max_concentration_pct: 1.00
-    max_gross_exposure_pct: 1.00
-    max_single_stock_pct: 1.00
-    max_crypto_pct: 1.00
   hunter:
     max_position_pct: 1.00
     max_concentration_pct: 1.00
@@ -40,6 +33,19 @@ mode_overrides:
     max_forex_pct: 1.00
     max_future_pct: 1.00
     max_option_pct: 1.00
+  # trader / defender fall back to hunter via the helper that reads this.
+  trader:
+    max_position_pct: 1.00
+    max_concentration_pct: 1.00
+    max_gross_exposure_pct: 1.00
+    max_single_stock_pct: 1.00
+    max_crypto_pct: 1.00
+  defender:
+    max_position_pct: 1.00
+    max_concentration_pct: 1.00
+    max_gross_exposure_pct: 1.00
+    max_single_stock_pct: 1.00
+    max_crypto_pct: 1.00
 
 # ── Loss limits ───────────────────────────────────────────────────────────────
 max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio
@@ -63,13 +69,14 @@ profit_harvest:
   monitor_interval_sec: 20      # Fallback cadence; overridden by mode_interval_sec.
   close_cooldown_sec: 90
 
-  # Mode-aware cadence — hunter must react fast or runners round-trip into the
-  # red before the next tick fires. Defender can be slower; the trade thesis
-  # there is calmer.
+  # Phase 5: mode-keyed cadence collapsed. Hunter's 8s is canonical —
+  # stop-loss / profit-harvest fire every 8s regardless of derived mode.
+  # ``monitor_interval_sec`` above is the legacy fallback; this dict is
+  # kept for reader compat and all entries match.
   mode_interval_sec:
-    defender: 30
-    trader: 20
     hunter: 8
+    trader: 8
+    defender: 8
 
   # Operator-set floors / fallbacks (used when volatility cannot be measured
   # and as a lower bound under the dynamic resolver).
@@ -97,19 +104,22 @@ profit_harvest:
     giveback_vol_low: "0.25"     # In calm regimes, lock with 25% giveback
     giveback_vol_high: "0.55"    # In wild regimes, allow 55% giveback
 
+  # Phase 5: profit-harvest mode_bias collapsed to the hunter values.
+  # All three keys map to the same numbers — readers that look up
+  # ``mode_bias.get(mode)`` get the canonical (hunter) bias regardless.
   mode_bias:
-    defender:
-      threshold_mult: "0.70"     # Bank earlier
-      giveback_mult: "0.70"      # Protect peaks harder
-      trim_fraction_mult: "1.20" # Take more off the table
-    trader:
-      threshold_mult: "1.00"
-      giveback_mult: "1.00"
-      trim_fraction_mult: "1.00"
     hunter:
-      threshold_mult: "0.50"     # Bank quicker in fast Hunter paper cycles
-      giveback_mult: "0.50"      # Protect small intraday peaks
+      threshold_mult: "0.50"     # Bank quicker — small intraday peaks
+      giveback_mult: "0.50"      # Protect peaks harder
       trim_fraction_mult: "1.00" # Bank enough to offset fees
+    trader:
+      threshold_mult: "0.50"
+      giveback_mult: "0.50"
+      trim_fraction_mult: "1.00"
+    defender:
+      threshold_mult: "0.50"
+      giveback_mult: "0.50"
+      trim_fraction_mult: "1.00"
 
   bounds:
     trim_fraction_min: "0.10"

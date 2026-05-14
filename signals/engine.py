@@ -349,32 +349,73 @@ class SignalEngine:
                 "risk_notional_override" if coord_risk_override is not None else "target_notional"
             )
         else:
-            # Legacy fallback: nav * fixed fraction with optional volatility scaling.
+            # Phase 3 adaptive path: vol-targeted sizing via
+            # :mod:`system.adaptive_sizing`. Replaces the static
+            # ``default_position_pct = 0.05`` (5% of NAV on everything)
+            # with a risk-budget-driven sizer: ``notional = NAV ×
+            # risk_per_trade / atr_pct``. Every trade now risks the same
+            # dollar amount in a 1-ATR adverse move, regardless of
+            # symbol. The static ``default_position_pct`` becomes the
+            # safety fallback when ``atr_pct`` is missing.
+            #
+            # Operator opt-out: ``volatility_sizing.enabled = False`` in
+            # YAML forces the legacy path (preserves the pre-Phase-3
+            # contract for anyone relying on it). The default (missing
+            # or True) uses adaptive sizing.
             position_pct = self.config.get("default_position_pct", 0.05)
-            suggested_quantity = self._calculate_quantity(
-                portfolio_value,
-                position_pct,
-                raw.symbol,
-                last_price=last_price,
-            )
-            sizing_path = "nav_fallback"
-            vs = self.config.get("volatility_sizing")
-            if isinstance(vs, dict) and vs.get("enabled"):
-                atr_pct = raw_md.get("atr_pct")
-                if atr_pct is not None:
+            vs_cfg = self.config.get("volatility_sizing") or {}
+            adaptive_enabled = bool(vs_cfg.get("enabled", True)) if isinstance(vs_cfg, dict) else True
+
+            if not adaptive_enabled:
+                # Legacy path explicitly requested — preserve old behaviour.
+                suggested_quantity = self._calculate_quantity(
+                    portfolio_value,
+                    position_pct,
+                    raw.symbol,
+                    last_price=last_price,
+                )
+                sizing_path = "nav_fallback"
+            else:
+                sizing_path = "nav_fallback"
+                try:
+                    from system.adaptive_sizing import SizingInputs, compute_position_size
+                    atr_pct_raw = raw_md.get("atr_pct")
                     try:
-                        ap = float(atr_pct)
-                        if ap > 0:
-                            target = float(vs.get("target_atr_pct", 0.02))
-                            scale = target / ap
-                            mn = float(vs.get("min_scale", 0.25))
-                            mx = float(vs.get("max_scale", 2.0))
-                            scale = max(mn, min(mx, scale))
-                            suggested_quantity = (
-                                suggested_quantity * Decimal(str(scale))
-                            ).quantize(tick)
-                    except (TypeError, ValueError, InvalidOperation):
-                        pass
+                        atr_pct_val = float(atr_pct_raw) if atr_pct_raw is not None else None
+                    except (TypeError, ValueError):
+                        atr_pct_val = None
+                    mode_str = str(raw_md.get("profile_mode") or self.config.get("_active_profile_mode") or "hunter")
+                    decision = compute_position_size(
+                        SizingInputs(
+                            nav=portfolio_value,
+                            last_price=last_price,
+                            atr_pct=atr_pct_val,
+                            mode=mode_str,
+                            fallback_position_pct=float(position_pct),
+                            confidence=float(raw.confidence),
+                        )
+                    )
+                    suggested_quantity = decision.quantity.quantize(tick) if decision.quantity > 0 else Decimal("0")
+                    if suggested_quantity > 0:
+                        sizing_path = f"adaptive_sizing:{decision.path}"
+                    else:
+                        # Adaptive sizer couldn't produce a tradable size (no
+                        # last_price), fall through to the legacy path so we
+                        # still get a notional-denominated number.
+                        suggested_quantity = self._calculate_quantity(
+                            portfolio_value,
+                            position_pct,
+                            raw.symbol,
+                            last_price=last_price,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("adaptive_sizing | failed, falling back to legacy: %s", exc)
+                    suggested_quantity = self._calculate_quantity(
+                        portfolio_value,
+                        position_pct,
+                        raw.symbol,
+                        last_price=last_price,
+                    )
 
         min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
         if suggested_quantity < min_qty:

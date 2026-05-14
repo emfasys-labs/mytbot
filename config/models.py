@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ModeName = Literal["defender", "trader", "hunter"]
-ModeSelectionSource = Literal["ui", "api", "config"]
+ModeSelectionSource = Literal["ui", "api", "config", "adaptive_classifier"]
 AllocatorMode = Literal["global_opportunity_replacement", "static_sleeves"]
 RebalanceTrigger = Literal["continuous", "interval", "hybrid"]
 NormalisationMethod = Literal["bounded_sigmoid", "tanh", "zscore_clip"]

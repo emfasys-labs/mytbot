@@ -5,37 +5,33 @@ version: 1
 
 enabled: true
 
-# Relative edge advantage required to prefer a new opportunity over the weakest held position.
-edge_advantage:
-  hunter: "0.02"
-  trader: "0.05"
-  defender: "0.12"
+# Phase 5: mode-keyed entries collapsed to single scalars. Mode is now a
+# derived indicator (see ``system/adaptive_mode.py``) — there is no
+# operator-selectable mode at runtime, so per-mode parameters served no
+# purpose. Hunter values are the canonical baseline because hunter is the
+# system's default unless market evidence proves otherwise. Adaptive
+# layers (Phases 1–4) refine these statics on every loop iteration.
 
-# Max coordinator-emitted actions per tick (incremental only).
-#   * ``hunter`` → broad book, many concurrent opens per cycle
-#   * ``trader`` → balanced default (matches legacy single scalar)
-#   * ``defender`` → defensive, at most one new opening per cycle
-# A scalar value is still honoured (back-compat) and used for every mode.
-max_actions_per_tick:
-  hunter: 20
-  trader: 3
-  defender: 1
+# Static floor for the edge displacement gate. The Phase 2 cost-aware
+# threshold computes a live value from fee+spread+slippage and never
+# goes below this floor. Was a {hunter:0.02, trader:0.05, defender:0.12}
+# map; collapsed to the hunter floor.
+edge_advantage: "0.02"
+
+# Max coordinator-emitted actions per tick. Hunter's value of 20 lets
+# the allocator open a wide book on bursty iterations; the Phase 1
+# cadence will also accelerate the loop in those conditions so the
+# absolute action rate is well-controlled.
+max_actions_per_tick: 20
 
 # When a new opportunity displaces a weak held edge, emit a reduce-only trim
 # for the old position before opening replacement capital.
 emit_trim_actions: true
 
-# Per-mode fraction applied to each opportunity's strategy-requested capital
-# (D030). Hunter deploys the full request (aggressive), trader scales to half,
-# defender trims to 15% (risk-off). A scalar value (legacy) is still honoured
-# and applied uniformly to every mode.
-#   * ``hunter``   → 1.00 (full strategy request — broad, aggressive deployment)
-#   * ``trader``   → 0.50 (balanced)
-#   * ``defender`` → 0.15 (defensive, matches pre-D030 uniform default)
-max_notional_fraction_per_action:
-  hunter: "1.00"
-  trader: "0.50"
-  defender: "0.15"
+# Fraction applied to each opportunity's strategy-requested capital.
+# Hunter deploys the full request; Phase 3 vol-targeted sizing then
+# refines this per-symbol based on ATR. Was a per-mode map.
+max_notional_fraction_per_action: "1.00"
 
 # Arbitrage short-horizon boost applied to expected_edge before compare (Decimal add).
 arbitrage_edge_boost:
@@ -67,30 +63,18 @@ adaptive:
   # after ``soft_shed_max_defer_iterations`` consecutive deferrals.
   soft_shed_loss_defer_pct: "0.0010"
   soft_shed_max_defer_iterations: 3
-  mode:
-    hunter:
-      gross_fraction: "1.00"
-      concentration: "1.2"
-    trader:
-      gross_fraction: "1.00"
-      concentration: "1.5"
-    defender:
-      gross_fraction: "1.00"
-      concentration: "1.0"
+  # Phase 5: collapsed from per-mode block. Hunter values are canonical.
+  gross_fraction: "1.00"
+  concentration: "1.2"
 
 # At/near the capital target, Hunter should keep hunting: close weak/flat
 # holdings and redeploy the same cash into stronger fresh opportunities when
 # the expected edge clears estimated round-trip costs.
 rotation:
   enabled: true
-  max_replacements_per_tick:
-    hunter: 1
-    trader: 1
-    defender: 0
-  min_edge_advantage:
-    hunter: "0.03"
-    trader: "0.03"
-    defender: "0.08"
+  # Phase 5: per-mode dicts collapsed to scalars. Hunter values prevail.
+  max_replacements_per_tick: 1
+  min_edge_advantage: "0.03"
   estimated_round_trip_fee_bps: "40"
   fee_edge_multiplier: "1.5"
   # Prevent fee-only churn: after a rotation touches a symbol, do not use that

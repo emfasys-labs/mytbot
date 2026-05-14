@@ -369,6 +369,20 @@ def build_opportunities(
         demand_alignment = max(-1.0, min(1.0, demand_score * side_sign))
         demand_mult = Decimal(str(max(0.85, min(1.15, 1.0 + demand_alignment * 0.10))))
         opportunity_score = clip_decimal(opportunity_score * demand_mult, Decimal("0"), one)
+        # Phase 4 adaptive: amplify or fade this strategy's signal based
+        # on whether the current regime fits its historical strength.
+        # Multiplier is conservative ([0.5, 1.5]) — a misclassified
+        # regime can't silence a strategy outright. Falls back to 1.0
+        # (no preference) for unknown strategy / regime combos.
+        try:
+            from system.adaptive_regime_weights import strategy_regime_multiplier
+            regime_mult = strategy_regime_multiplier(
+                str(c.strategy_name or ""),
+                str(getattr(regime_state, "regime_label", "") or ""),
+            )
+            opportunity_score = clip_decimal(opportunity_score * regime_mult, Decimal("0"), one)
+        except Exception:  # noqa: BLE001
+            regime_mult = Decimal("1.0")
 
         ucfg = oe.scoring.urgency
         urgency = clip_decimal(
@@ -414,6 +428,12 @@ def build_opportunities(
                 "profile_mode": mode_eff,
                 "demand_score": round(demand_score, 6),
                 "demand_alignment": round(demand_alignment, 6),
+                # Phase 4 audit: which regime fired, what multiplier the
+                # strategy got. Lets the dashboard explain "why is
+                # momentum suddenly amplified" or "why is mean_reversion
+                # quiet today" without reading code.
+                "regime_label": str(getattr(regime_state, "regime_label", "") or ""),
+                "regime_strategy_multiplier": float(regime_mult),
             },
         )
         # Wave 6 — forecast-native ML. Populate expected_return / volatility

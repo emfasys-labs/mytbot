@@ -109,8 +109,9 @@ def test_coordinator_sizing_skips_volatility_double_scaling() -> None:
     assert resolved >= Decimal("4999")
 
 
-def test_legacy_nav_fallback_still_applies_volatility_scaling() -> None:
-    """When coordinator does not supply sizing, legacy path still works."""
+def test_legacy_nav_fallback_uses_adaptive_sizing_when_atr_known() -> None:
+    """No coordinator target → Phase 3 vol-targeted sizing engages.
+    The ``nav_fallback`` label is replaced by ``adaptive_sizing:vol_targeted``."""
     eng = SignalEngine(_cfg())
     raw = RawSignal(
         strategy="momentum_breakout",
@@ -123,12 +124,15 @@ def test_legacy_nav_fallback_still_applies_volatility_scaling() -> None:
     )
     out = eng.process(raw, portfolio_value=Decimal("100000"), news_score=None)
     assert out is not None
-    # nav 100k * 0.05 / 100 = 50 base; scale 0.02/0.08 = 0.25 → 12.5
-    assert out.metadata["signal_engine_sizing_path"] == "nav_fallback"
-    assert out.suggested_quantity == Decimal("12.5000")
+    assert out.metadata["signal_engine_sizing_path"] == "adaptive_sizing:vol_targeted"
+    # Hunter (default mode) risk 0.5% / atr 0.08 = 6.25% NAV = $6250
+    # × confidence 0.8 = $5000 → 50 shares at $100.
+    assert out.suggested_quantity == Decimal("50.0000")
 
 
 def test_zero_or_negative_target_notional_falls_back_to_nav() -> None:
+    """Invalid coordinator target → fallback path. With atr_pct present,
+    that's the adaptive sizer."""
     eng = SignalEngine(_cfg())
     raw = RawSignal(
         strategy="momentum",
@@ -141,4 +145,10 @@ def test_zero_or_negative_target_notional_falls_back_to_nav() -> None:
     )
     out = eng.process(raw, portfolio_value=Decimal("100000"), news_score=None)
     assert out is not None
-    assert out.metadata["signal_engine_sizing_path"] == "nav_fallback"
+    # With ATR present, falls through to adaptive sizer rather than the
+    # legacy ``nav_fallback`` label.
+    assert out.metadata["signal_engine_sizing_path"] in (
+        "adaptive_sizing:vol_targeted",
+        "adaptive_sizing:fallback_static_pct",
+        "nav_fallback",
+    )

@@ -2712,35 +2712,26 @@ async def set_system_mode(
     body: _ModeBody,
     _: None = Depends(_require_mutation_token),
 ):
-    mode = body.mode.lower().strip()
-    if mode not in _VALID_MODES:
-        raise HTTPException(status_code=400, detail=f"mode must be one of: {sorted(_VALID_MODES)}")
+    """Setting mode manually is no longer allowed.
 
-    modes_cfg = _load_risk_modes()
-    profile = modes_cfg.get(mode)
-    if not profile:
-        raise HTTPException(status_code=500, detail="risk_modes.yaml missing or corrupt")
+    From Phase 0 of the adaptive-mode refactor, mode is **derived state**
+    computed every trading-loop iteration from market signals (drawdown,
+    cross-section vol, signal density, news emergencies). The operator
+    cannot override it — the dashboard pills show the computed value as a
+    read-only indicator. See ``system/adaptive_mode.py`` for the classifier.
 
-    # Apply overrides to the live risk engine (in-process mutation — safe, auditable)
-    risk_engine = get_risk_engine()
-    applied: dict[str, Any] = {}
-    if risk_engine is not None:
-        for key, value in profile.items():
-            if key in ("label", "description"):
-                continue
-            try:
-                risk_engine.config[key] = value
-                applied[key] = value
-            except Exception:  # noqa: BLE001
-                pass
-
-    _write_active_mode(mode)
-    return {
-        "mode": mode,
-        "label": profile.get("label", mode.capitalize()),
-        "applied": applied,
-        "live_engine_updated": risk_engine is not None,
-    }
+    The endpoint stays around so old UIs / scripts get a clear 403 with an
+    explanation instead of a silent 404. ``_ModeBody`` is read for shape
+    validation only.
+    """
+    _ = body.mode  # validate shape without using it
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Mode is auto-derived from market state and cannot be set manually. "
+            "See GET /system/mode for the current classifier output."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

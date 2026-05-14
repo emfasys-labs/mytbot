@@ -665,11 +665,52 @@ class GlobalEdgeCoordinator:
         self._logger = logger
 
     def _threshold(self, mode: str) -> Decimal:
-        ea = self._cfg.get("edge_advantage") or {}
+        """Edge threshold for the displacement gate.
+
+        Phase 2 adaptive path: the threshold is computed from current
+        execution costs (fee + spread + slippage) and recent realised
+        outcomes via :mod:`system.adaptive_edge`. The static YAML map
+        (``edge_advantage: {hunter, trader, defender}``) is preserved as
+        a floor — we never go more aggressive than the operator's
+        existing setting until Phase 5 strips the YAML entirely.
+
+        Falls back to the pure-static behaviour on any error so a buggy
+        adaptive layer can never block the gate.
+        """
+        # Phase 5: ``edge_advantage`` is now a scalar (hunter value) in
+        # YAML. We still accept the legacy dict shape so older configs
+        # don't break — fall through to the scalar form once collapsed.
+        ea = self._cfg.get("edge_advantage", "0.05")
         key = (mode or DEFAULT_MODE).strip().lower()
         if key not in ("hunter", "trader", "defender"):
             key = DEFAULT_MODE
-        return Decimal(str(ea.get(key, ea.get("trader", "0.05"))))
+        if isinstance(ea, dict):
+            static_floor = float(ea.get(key, ea.get("trader", "0.05")))
+        else:
+            try:
+                static_floor = float(ea)
+            except (TypeError, ValueError):
+                static_floor = 0.05
+        try:
+            from system.adaptive_edge import (
+                EdgeThresholdInputs,
+                compute_edge_threshold,
+            )
+            adaptive_cfg = self._cfg.get("adaptive_edge") or {}
+            cost_bps = adaptive_cfg.get("cross_venue_cost_bps")
+            win_rate = adaptive_cfg.get("recent_win_rate")
+            avg_ret = adaptive_cfg.get("recent_avg_return")
+            return compute_edge_threshold(
+                EdgeThresholdInputs(
+                    mode=key,
+                    cross_venue_cost_bps=float(cost_bps) if cost_bps is not None else None,
+                    recent_win_rate=float(win_rate) if win_rate is not None else None,
+                    recent_avg_return=float(avg_ret) if avg_ret is not None else None,
+                    static_floor=static_floor,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            return Decimal(str(static_floor))
 
     def _max_actions_for_mode(self, mode: str) -> int:
         """Per-mode cap on coordinator actions emitted per tick.
