@@ -221,7 +221,11 @@ export function DashboardScreen({
             <Label>Live feed</Label>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
               <Glyph state={state} accent={accentColor} size={8} />
-              {live.wsConnected ? 'streaming' : state === 'running' ? 'polling' : 'idle'}
+              {live.wsConnected
+                ? (state === 'running' ? 'streaming' : 'connected')
+                : state === 'running'
+                  ? 'polling'
+                  : 'idle'}
             </span>
           </div>
         </div>
@@ -365,7 +369,7 @@ function NavPendingPanel({
       return 'system needs attention';
     }
     if (uiState === 'paused') {
-      return 'paused';
+      return 'frozen';
     }
     if (uiState === 'starting' && coverage.full) {
       return 'syncing net asset value';

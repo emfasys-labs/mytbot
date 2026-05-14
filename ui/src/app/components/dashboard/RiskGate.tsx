@@ -11,7 +11,7 @@ const REASON_LABEL: Record<string, string> = {
   max_exposure: 'Would exceed max exposure for this name or book',
   max_position: 'Would exceed max position size',
   max_orders: 'Order rate or count limit',
-  kill_switch: 'Kill switch active',
+  kill_switch: 'System frozen (no opens or closes)',
   news_veto: 'News filter veto',
   liquidity: 'Liquidity / spread check failed',
   correlation: 'Correlation / concentration limit',

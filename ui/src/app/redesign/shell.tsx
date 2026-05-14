@@ -134,6 +134,7 @@ export function TopBar({
   mode: TradingMode;
   onSetMode: (m: TradingMode) => void;
 }) {
+  const modeInteractive = state === 'running';
   return (
     <div style={{
       height: 48, flexShrink: 0, display: 'flex', alignItems: 'center',
@@ -180,16 +181,22 @@ export function TopBar({
         </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 4, padding: 2,
-          borderRadius: 8, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1,
-        }}>
+        <div
+          title={modeInteractive ? undefined : 'Start the system to change trading mode'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4, padding: 2,
+            borderRadius: 8, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1,
+            opacity: modeInteractive ? 1 : 0.52,
+          }}
+        >
           {(['defender', 'trader', 'hunter'] as const).map((m) => {
-            const active = mode === m;
+            const active = modeInteractive && mode === m;
             return (
               <button
                 key={m}
-                onClick={() => onSetMode(m)}
+                type="button"
+                disabled={!modeInteractive}
+                onClick={() => { if (modeInteractive) onSetMode(m); }}
                 style={{
                   padding: '4px 8px',
                   borderRadius: 6,
@@ -200,9 +207,9 @@ export function TopBar({
                   fontSize: 10,
                   letterSpacing: '0.04em',
                   textTransform: 'uppercase',
-                  cursor: 'pointer',
+                  cursor: modeInteractive ? 'pointer' : 'not-allowed',
                 }}
-                title={`Set mode: ${m}`}
+                title={modeInteractive ? `Set mode: ${m}` : 'Start the system to change mode'}
               >
                 {m}
               </button>
@@ -351,7 +358,7 @@ export function MasterButton({
         <span style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
           <I.power />
           {armed
-            ? 'paused'
+            ? 'frozen'
             : running
               ? 'live'
               : starting
@@ -394,6 +401,7 @@ const CMD_ITEMS: CmdItem[] = [
 
 export function CmdPalette({
   open, onClose, onNav, onStart, onStop, onSetMode, universeNavEnabled = true,
+  modeSwitchEnabled = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -402,6 +410,8 @@ export function CmdPalette({
   onStop: () => void;
   onSetMode: (m: TradingMode) => void;
   universeNavEnabled?: boolean;
+  /** When false, mode palette rows are disabled (system not running). */
+  modeSwitchEnabled?: boolean;
 }) {
   const [q, setQ] = useState('');
   useEffect(() => { if (!open) setQ(''); }, [open]);
@@ -416,6 +426,7 @@ export function CmdPalette({
 
   const execute = (it: CmdItem) => {
     if (it.kind === 'nav' && it.route === 'universe' && !universeNavEnabled) return;
+    if (it.kind === 'mode' && it.mode && !modeSwitchEnabled) return;
     if (it.kind === 'nav' && it.route) onNav(it.route);
     if (it.kind === 'action' && it.action === 'start') onStart();
     if (it.kind === 'action' && it.action === 'stop') onStop();
@@ -458,23 +469,29 @@ export function CmdPalette({
             <div style={{ padding: 14, color: TOKENS.ink3, fontSize: 12 }}>No matches</div>
           ) : filtered.map((it) => {
             const uniLock = it.id === 'universe' && !universeNavEnabled;
+            const modeLock = it.kind === 'mode' && !modeSwitchEnabled;
+            const rowLock = uniLock || modeLock;
             return (
             <button
               key={it.id}
               type="button"
-              title={uniLock ? 'Start the system to open Universe' : undefined}
-              disabled={uniLock}
+              title={
+                uniLock ? 'Start the system to open Universe'
+                  : modeLock ? 'Start the system to change trading mode'
+                    : undefined
+              }
+              disabled={rowLock}
               onClick={() => execute(it)}
               style={{
                 display: 'flex', alignItems: 'center', width: '100%', padding: '10px 12px',
                 background: 'transparent', border: 'none', borderRadius: 8,
-                cursor: uniLock ? 'not-allowed' : 'pointer',
-                opacity: uniLock ? 0.45 : 1,
+                cursor: rowLock ? 'not-allowed' : 'pointer',
+                opacity: rowLock ? 0.45 : 1,
                 color: TOKENS.ink1, fontFamily: TOKENS.sans, fontSize: 13, textAlign: 'left',
                 justifyContent: 'space-between',
               }}
               onMouseEnter={(e: ReactMouseEvent<HTMLButtonElement>) => {
-                if (uniLock) return;
+                if (rowLock) return;
                 e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
               }}
               onMouseLeave={(e: ReactMouseEvent<HTMLButtonElement>) => {
@@ -488,7 +505,9 @@ export function CmdPalette({
                 }}>{it.kind}</span>
                 {it.label}
               </span>
-              <span style={{ color: TOKENS.ink3, fontSize: 11 }}>{uniLock ? 'start system' : it.hint}</span>
+              <span style={{ color: TOKENS.ink3, fontSize: 11 }}>
+                {uniLock || modeLock ? 'start system' : it.hint}
+              </span>
             </button>
           );})}
         </div>

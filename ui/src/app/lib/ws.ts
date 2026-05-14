@@ -66,10 +66,10 @@ export function formatWsEventLine(ev: WsTickEvent): string | null {
     return `${sym} filled · ${st || 'filled'}`;
   }
   if (ev.type === 'kill_activated') {
-    return `Kill switch · activated${p.killed != null ? ` (${p.killed ? 'on' : 'off'})` : ''}`;
+    return 'System freeze (on)';
   }
   if (ev.type === 'kill_reset') {
-    return `Kill switch · reset${p.killed != null ? ` (${p.killed ? 'on' : 'off'})` : ''}`;
+    return 'System freeze (off)';
   }
   if (ev.type === 'command_completed') {
     const t = String((p as { type?: string }).type ?? '');

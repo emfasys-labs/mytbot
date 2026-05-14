@@ -30,6 +30,7 @@ import {
   Tweaks,
 } from './tokens';
 import { useLiveSystem } from './useLiveSystem';
+import { api } from '../lib/api';
 
 const TITLES: Record<Route, string> = {
   dash:    'Dashboard',
@@ -99,7 +100,25 @@ export default function App() {
 
   const [cmdOpen, setCmdOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
-  const [armed, setArmed] = useState(false);
+  const [armedLocal, setArmedLocal] = useState(false);
+
+  // The "armed/paused" pill is now a real backend freeze, not just a UI
+  // hint. We mirror ``live.killSwitch`` (from ``/system/status``) so the
+  // pill stays accurate even if /kill is fired by another client or the
+  // command bus, and we wrap ``setArmed`` so the operator's click on the
+  // button fires the risk-engine kill switch. When armed, the risk engine
+  // refuses every signal — including reduce-only closes — so the book
+  // stays exactly as-is. Resuming clears the kill switch and trading
+  // continues. Nothing else about the UI changes.
+  const armed = live.killSwitch || armedLocal;
+  const setArmed = useCallback((next: boolean) => {
+    setArmedLocal(next);
+    if (next) {
+      void api.riskKill().catch(() => { /* status poll reconciles */ });
+    } else {
+      void api.riskResetKill().catch(() => { /* status poll reconciles */ });
+    }
+  }, []);
 
   const accentMain = useMemo(() => ACCENTS[tweaks.accent].main, [tweaks.accent]);
 
@@ -116,7 +135,7 @@ export default function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, []);
+  }, [setArmed]);
 
   // Power action from button/cmd: start if off, stop if running.
   const togglePower = useCallback(() => {
@@ -129,10 +148,10 @@ export default function App() {
 
   // Clear armed (paused visual) whenever the backend is no longer live.
   useEffect(() => {
-    if (live.backendState !== 'running' && live.backendState !== 'starting' && armed) {
-      setArmed(false);
+    if (live.backendState !== 'running' && live.backendState !== 'starting' && armedLocal) {
+      setArmedLocal(false);
     }
-  }, [live.backendState, armed]);
+  }, [live.backendState, armedLocal]);
 
   const state = live.uiState;
 
@@ -252,6 +271,7 @@ export default function App() {
         onStop={() => void live.stop()}
         onSetMode={(m) => void live.setMode(m)}
         universeNavEnabled={universeNavEnabled}
+        modeSwitchEnabled={state === 'running'}
       />
       <TweaksPanel open={tweaksOpen} onClose={() => setTweaksOpen(false)} tweaks={tweaks} setTweaks={setTweaks} />
     </div>
@@ -287,7 +307,7 @@ function ArmOverlay() {
         fontFamily: TOKENS.sans, fontSize: 12, fontWeight: 500,
         letterSpacing: '0.04em', textTransform: 'uppercase',
       }}>
-        paused · hold power to stop
+        frozen · click again to resume
       </div>
     </div>
   );

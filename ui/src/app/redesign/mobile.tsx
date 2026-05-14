@@ -38,7 +38,15 @@ export function MobileApp({
         fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2,
       }}>
         <span>{new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
-        <span>{live.wsConnected ? '● live' : '○ polling'}</span>
+        <span>
+          {live.wsConnected && state === 'running'
+            ? '● live'
+            : live.wsConnected
+              ? '● ws'
+              : state === 'running'
+                ? '○ poll'
+                : '○ idle'}
+        </span>
       </div>
       <div style={{
         padding: '8px 22px 16px', display: 'flex', alignItems: 'center',

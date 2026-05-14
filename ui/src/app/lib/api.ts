@@ -757,6 +757,12 @@ export const api = {
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
+  // Risk-engine kill switch. Activating it blocks both new opens AND
+  // reduce-only closes (stop-loss, profit-harvest, allocator flatten) so
+  // the book stays exactly as-is until reset. Wired to the UI's
+  // "armed/paused" toggle so a single click freezes activity.
+  riskKill: () => postJsonBody<{ kill_switch: boolean }>('/kill', {}),
+  riskResetKill: () => postJsonBody<{ kill_switch: boolean }>('/kill/reset', {}),
   setCapitalAllocation: (pct: number) =>
     putJson<{ capital_pct: number }>('/system/capital-allocation', { pct }),
   getSystemMode: () => getJson<SystemModeResponse>('/system/mode'),

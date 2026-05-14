@@ -301,6 +301,7 @@ export function useLiveSystem(): LiveData {
         api.getOrders(50),
         api.getRoutingQuality(),
         api.getStrategyCandidateMix(24),
+        api.getSystemMode(),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -312,6 +313,13 @@ export function useLiveSystem(): LiveData {
       const ordRes = res[7].status === 'fulfilled' ? res[7].value : null;
       const routingRes = res[8].status === 'fulfilled' ? res[8].value : null;
       const mixRes = res[9].status === 'fulfilled' ? res[9].value : null;
+      const modeHttpRes = res[10].status === 'fulfilled' ? res[10].value : null;
+      if (modeHttpRes?.mode) {
+        const m = String(modeHttpRes.mode).toLowerCase();
+        if (m === 'defender' || m === 'trader' || m === 'hunter') {
+          setModeState(m as TradingMode);
+        }
+      }
 
       if (sysRes) {
         const newState: BackendSystemState = sysRes.state ?? 'off';
@@ -475,19 +483,17 @@ export function useLiveSystem(): LiveData {
         clearLive();
       }
 
-      // Throttled intelligence / mode fetch.
+      // Throttled intelligence fetch (mode is synced every HTTP refresh above).
       if (feedsLive && Date.now() - lastIntelRefresh.current > INTEL_THROTTLE_MS) {
         lastIntelRefresh.current = Date.now();
         // Fetch the endpoint's full window (max 50) so secondary strategies
         // whose signals are older than the newest 16 (e.g. momentum_breakout
         // during a mean-reversion-dominant regime) still appear in the
         // Strategy Mix card.
-        const [sig, modeRes] = await Promise.allSettled([
-          api.getIntelligenceSignals(50),
-          api.getSystemMode(),
-        ]);
-        if (sig.status === 'fulfilled') setIntelligence(sig.value);
-        if (modeRes.status === 'fulfilled' && modeRes.value.mode) setModeState(modeRes.value.mode);
+        try {
+          const sig = await api.getIntelligenceSignals(50);
+          setIntelligence(sig);
+        } catch { /* keep last known */ }
       }
 
       // Slow-cadence prefetch of the Universe snapshot. The endpoint is
@@ -544,9 +550,24 @@ export function useLiveSystem(): LiveData {
         try {
           const msg = JSON.parse(evt.data as string) as WsTickMessage;
           if (msg.type !== 'tick' || !msg.payload) return;
-          const evs = msg.payload.events;
-          if (evs && evs.length) setWsEvents(evs.slice(-40));
           const sys = msg.payload.system as Record<string, unknown> | undefined;
+          const wsState =
+            sys?.state && typeof sys.state === 'string'
+              ? (sys.state as BackendSystemState)
+              : stateRef.current;
+          const effective = shutdownInFlight.current ? 'stopping' : wsState;
+          const feedsLiveWs = effective === 'running';
+
+          // Never paint bus/control lines into the Live feed while trading is
+          // stopped — `/ws` ticks every 2s even when `off`, and applying those
+          // events here fought `clearLive()` on HTTP refresh (empty ↔ lines).
+          const evs = msg.payload.events;
+          if (feedsLiveWs) {
+            if (evs && evs.length) setWsEvents(evs.slice(-40));
+          } else {
+            setWsEvents((prev) => (prev.length ? [] : prev));
+          }
+
           const wsKill = !!msg.payload.status?.kill_switch;
           setKillSwitch(wsKill);
           if (sys?.state && typeof sys.state === 'string') commitBackendState(sys.state as BackendSystemState);
@@ -613,6 +634,7 @@ export function useLiveSystem(): LiveData {
   }, [clearLive, commitBackendState]);
 
   const setMode = useCallback(async (m: TradingMode) => {
+    if (stateRef.current !== 'running') return;
     setModeState(m);
     try { await api.setSystemMode(m); } catch { /* ignore */ }
   }, []);

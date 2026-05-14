@@ -429,7 +429,7 @@ function explainReason(code: string): string {
   if (k.includes('max_exposure')) return 'Would exceed max exposure.';
   if (k.includes('max_position')) return 'Would exceed max position size.';
   if (k.includes('max_orders')) return 'Order rate or count limit.';
-  if (k.includes('kill_switch')) return 'Kill switch active.';
+  if (k.includes('kill_switch')) return 'System frozen (no opens or closes).';
   if (k.includes('news_veto')) return 'News filter veto.';
   if (k.includes('liquidity')) return 'Liquidity / spread check failed.';
   if (k.includes('correlation')) return 'Correlation / concentration limit.';
