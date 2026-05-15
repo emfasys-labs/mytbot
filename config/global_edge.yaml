@@ -86,6 +86,11 @@ rotation:
   churn_penalty_per_event: "0.08"
   churn_block_threshold: "0.16"
 
+shed:
+  # Prevent repeated trim/cross-spread churn on the same symbol when the book is
+  # above the capital target and live prices are delayed or noisy.
+  symbol_cooldown_sec: 900
+
 # Capital-recycling safety net. The rotation gate only fires when a fresh
 # opportunity beats a held position by min_edge_advantage + round-trip fees;
 # when nothing clears that bar a fully-deployed book stays idle indefinitely
@@ -105,6 +110,8 @@ capital_recycle:
   dead_edge_floor: "0.01"
   # Hard cap on recycle actions per iteration (prevents fee churn).
   max_actions_per_tick: 3
+  # Same anti-churn symbol cooldown as rotation/shed.
+  symbol_cooldown_sec: 900
 
 cash_factors:
   equity: "1.0"

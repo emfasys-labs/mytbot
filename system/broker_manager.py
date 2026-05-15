@@ -27,6 +27,7 @@ from loguru import logger
 
 from brokers.base import BrokerAdapter
 from brokers.registry import BROKER_REGISTRY, get_broker
+from system.live_arming import validate_live_arming
 
 
 def _balance_rows_mean_ready(balances: list[Any]) -> bool:
@@ -222,6 +223,7 @@ class BrokerManager:
     def __init__(self, paper_mode: bool = True):
         self.paper_mode = paper_mode
         self.configs = _broker_configs_from_env()
+        validate_live_arming(paper_mode=self.paper_mode, broker_configs=self.configs)
         self.adapters: dict[str, BrokerAdapter] = {}
         self.report = BrokerReport()
         self._late_connect_task: asyncio.Task | None = None

@@ -1298,6 +1298,7 @@ class GlobalEdgeCoordinator:
         *,
         cash_target_absolute: Decimal,
         active_mode: str = DEFAULT_MODE,
+        replacement_context: ReplacementContext | None = None,
     ) -> list[CoordinatorAction]:
         """Emit reduce-only ``trim_symbol`` actions to bring held cash usage
         down to ``cash_target_absolute``.
@@ -1323,6 +1324,34 @@ class GlobalEdgeCoordinator:
         held_cash_total = sum((_cash_used(h) for h in held), Decimal("0"))
         if held_cash_total <= cash_target_absolute:
             return []
+        shed_cfg = self._cfg.get("shed") or {}
+        rot_cfg = self._cfg.get("rotation") or {}
+        try:
+            symbol_cooldown_sec = int(shed_cfg.get("symbol_cooldown_sec", rot_cfg.get("symbol_cooldown_sec", 900)))
+        except Exception:  # noqa: BLE001
+            symbol_cooldown_sec = 900
+        now = datetime.now(timezone.utc)
+
+        def _norm_sym(s: str) -> str:
+            x = s.strip().upper()
+            for suf in ("=X", "=F"):
+                if x.endswith(suf):
+                    return x[: -len(suf)]
+            if x.endswith("-USD") and len(x) > 4:
+                return x[:-4]
+            return x
+
+        def _recently_touched(sym: str) -> bool:
+            if replacement_context is None or symbol_cooldown_sec <= 0:
+                return False
+            last = replacement_context.last_event_at_by_symbol.get(_norm_sym(sym))
+            if last is None:
+                last = replacement_context.last_event_at_by_symbol.get(str(sym).strip().upper())
+            if last is None:
+                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (now - last.astimezone(timezone.utc)).total_seconds() < symbol_cooldown_sec
 
         excess = held_cash_total - cash_target_absolute
         # Largest-cash-first, tie-break weakest-edge.
@@ -1335,6 +1364,8 @@ class GlobalEdgeCoordinator:
         for h in ranked:
             if shed_so_far >= excess:
                 break
+            if _recently_touched(h.symbol):
+                continue
             cu = _cash_used(h)
             if cu <= 0:
                 continue
@@ -1362,6 +1393,7 @@ class GlobalEdgeCoordinator:
             meta["sizing_cash_target_absolute"] = str(cash_target_absolute)
             meta["sizing_held_cash_total_pre"] = str(held_cash_total)
             meta["sizing_final_capital_required"] = str(trim_notional)
+            meta["shed_symbol_cooldown_sec"] = str(symbol_cooldown_sec)
             if h.broker:
                 meta["broker"] = h.broker
             out.append(
@@ -1382,6 +1414,7 @@ class GlobalEdgeCoordinator:
         held: list[HeldPositionEdge],
         *,
         active_mode: str = DEFAULT_MODE,
+        replacement_context: ReplacementContext | None = None,
     ) -> list[CoordinatorAction]:
         """Free capital when the book is full, *independent of rotation edge*.
 
@@ -1423,9 +1456,36 @@ class GlobalEdgeCoordinator:
             max_actions = int(cfg.get("max_actions_per_tick", 3))
         except (TypeError, ValueError):
             max_actions = 3
+        rot_cfg = self._cfg.get("rotation") or {}
+        try:
+            symbol_cooldown_sec = int(cfg.get("symbol_cooldown_sec", rot_cfg.get("symbol_cooldown_sec", 900)))
+        except Exception:  # noqa: BLE001
+            symbol_cooldown_sec = 900
         if max_actions <= 0:
             return []
         trim_fraction = min(Decimal("1"), max(Decimal("0"), trim_fraction))
+        now = datetime.now(timezone.utc)
+
+        def _norm_sym(s: str) -> str:
+            x = s.strip().upper()
+            for suf in ("=X", "=F"):
+                if x.endswith(suf):
+                    return x[: -len(suf)]
+            if x.endswith("-USD") and len(x) > 4:
+                return x[:-4]
+            return x
+
+        def _recently_touched(sym: str) -> bool:
+            if replacement_context is None or symbol_cooldown_sec <= 0:
+                return False
+            last = replacement_context.last_event_at_by_symbol.get(_norm_sym(sym))
+            if last is None:
+                last = replacement_context.last_event_at_by_symbol.get(str(sym).strip().upper())
+            if last is None:
+                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (now - last.astimezone(timezone.utc)).total_seconds() < symbol_cooldown_sec
 
         def _unrl(h: HeldPositionEdge) -> Decimal:
             try:
@@ -1444,6 +1504,8 @@ class GlobalEdgeCoordinator:
             if len(out) >= max_actions:
                 break
             if h.symbol in seen or h.notional <= 0:
+                continue
+            if _recently_touched(h.symbol):
                 continue
             seen.add(h.symbol)
             is_winner = _unrl(h) >= take_profit_pct and take_profit_pct > 0
@@ -1467,6 +1529,7 @@ class GlobalEdgeCoordinator:
             meta["sizing_path"] = "capital_recycle"
             meta["sizing_final_capital_required"] = str(trim_notional)
             meta["capital_recycle_reason"] = reason
+            meta["capital_recycle_symbol_cooldown_sec"] = str(symbol_cooldown_sec)
             if h.broker:
                 meta["broker"] = h.broker
             out.append(

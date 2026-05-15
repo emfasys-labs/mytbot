@@ -143,6 +143,11 @@ def _resolve_port(preferred: int) -> int:
     if _port_is_free(preferred):
         return preferred
 
+    if os.getenv("APP_ENV", "paper").strip().lower() == "live":
+        raise RuntimeError(
+            f"API port {preferred} is already in use; refusing live port takeover or alternate-port restart"
+        )
+
     logger.warning("port {} in use — attempting to free it", preferred)
     _try_free_port(preferred)
 

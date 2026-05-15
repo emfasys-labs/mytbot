@@ -345,8 +345,7 @@ class Orchestrator:
                 from control.runtime import get_risk_engine
                 _re = get_risk_engine()
                 if _re is not None and _re.is_killed:
-                    _re.reset_kill()
-                    logger.info("orchestrator | cleared stale kill switch on fresh start")
+                    logger.critical("orchestrator | risk kill switch remains latched after start; use reset_kill control to clear deliberately")
 
                 self._set_state(SystemState.RUNNING)
                 self._last_start_error = None

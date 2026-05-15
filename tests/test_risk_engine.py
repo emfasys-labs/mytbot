@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -301,6 +302,42 @@ def test_rejects_when_broker_disabled() -> None:
     )
     assert decision.verdict == RiskVerdict.REJECTED
     assert decision.checks_failed == ["broker_disabled"]
+
+
+def test_kill_switch_persists_across_engine_restart(tmp_path) -> None:
+    state_path = tmp_path / "risk_state.json"
+    cfg = _risk_cfg()
+    cfg["runtime_state_path"] = str(state_path)
+    engine = RiskEngine(cfg)
+    engine.kill()
+
+    restarted = RiskEngine(cfg)
+    assert restarted.is_killed is True
+    assert json.loads(state_path.read_text())["is_killed"] is True
+
+
+def test_runtime_snapshot_restores_disabled_brokers_and_kill(tmp_path) -> None:
+    cfg = _risk_cfg()
+    cfg["runtime_state_path"] = str(tmp_path / "risk_state.json")
+    engine = RiskEngine(cfg)
+    engine.restore_runtime_state({"is_killed": True, "disabled_brokers": ["IBKR"]})
+
+    assert engine.is_killed is True
+    assert engine.is_broker_disabled("ibkr") is True
+    snap = engine.snapshot_runtime_state()
+    assert snap["is_killed"] is True
+    assert snap["disabled_brokers"] == ["ibkr"]
+
+
+def test_stale_runtime_snapshot_cannot_clear_persisted_kill(tmp_path) -> None:
+    cfg = _risk_cfg()
+    cfg["runtime_state_path"] = str(tmp_path / "risk_state.json")
+    engine = RiskEngine(cfg)
+    engine.kill()
+
+    restarted = RiskEngine(cfg)
+    restarted.restore_runtime_state({"is_killed": False, "disabled_brokers": []})
+    assert restarted.is_killed is True
 
 
 def test_rejects_on_consecutive_losses_and_enters_cooldown() -> None:

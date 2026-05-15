@@ -1042,6 +1042,58 @@ async def test_cancel_working_orders_cancels_and_marks_db() -> None:
         await db.dispose()
 
 
+@pytest.mark.asyncio
+async def test_live_cancel_working_orders_requires_broker_terminal_cancel(monkeypatch) -> None:
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from storage.models import Base, OrderLog
+
+    monkeypatch.setenv("ORDER_CANCEL_CONFIRM_TIMEOUT_SEC", "0.1")
+    monkeypatch.setenv("ORDER_CANCEL_CONFIRM_POLL_SEC", "0.05")
+    db = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with db.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(db, expire_on_commit=False)
+
+    async with factory() as session:
+        session.add(
+            OrderLog(
+                id="client-live",
+                broker_order_id="broker-live",
+                signal_id="sig-live",
+                timestamp=datetime.now(timezone.utc),
+                symbol="BA",
+                side="buy",
+                order_type="limit",
+                quantity=Decimal("20"),
+                limit_price=Decimal("250"),
+                broker="ibkr",
+                status="pending",
+                filled_quantity=Decimal("0"),
+                paper_mode=False,
+            )
+        )
+        await session.commit()
+
+    broker = _FakeBroker(order_status_sequence=[OrderStatus.OPEN])
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
+    engine._brokers = {"ibkr": broker}
+
+    try:
+        cancelled = await engine.cancel_working_orders(session_factory=factory, reason="stale")
+
+        assert cancelled == 0
+        assert broker.cancel_calls == 1
+        async with factory() as session:
+            row = (
+                await session.execute(select(OrderLog).where(OrderLog.id == "client-live"))
+            ).scalar_one()
+            assert row.status == "pending"
+    finally:
+        await db.dispose()
+
+
 def test_add_allowed_broker_appends_once() -> None:
     from control.runtime import set_execution_engine
 

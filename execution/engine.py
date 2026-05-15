@@ -816,7 +816,7 @@ class ExecutionEngine:
         reason: str = "operator_cancel",
         older_than_sec: float | None = None,
     ) -> int:
-        """Cancel DB-tracked working orders and mark successful cancels locally.
+        """Cancel DB-tracked working orders and mark broker-confirmed cancels locally.
 
         ``older_than_sec`` (audit #11): when set, only orders whose timestamp
         is older than this many seconds are cancelled. Used to age-out STALE
@@ -824,7 +824,10 @@ class ExecutionEngine:
         delayed IBKR data) — those orders otherwise perpetually shadow their
         symbol via ``_load_working_order_keys`` so the coordinator can never
         re-propose them, silently starving good opportunities. A fresh
-        working order (still likely to fill) is left untouched.
+        working order (still likely to fill) is left untouched. In live mode,
+        local status changes only after the broker confirms a terminal
+        cancel/reject; fills or still-open states remain non-terminal so
+        restart dedup keeps blocking duplicates.
         """
         if session_factory is None:
             return 0
@@ -855,7 +858,8 @@ class ExecutionEngine:
             if not broker_name:
                 continue
             if not broker_order_id:
-                cancelled_ids.append(getattr(row, "id", None))
+                if self.paper_mode:
+                    cancelled_ids.append(getattr(row, "id", None))
                 continue
             broker = await self._get_broker(broker_name)
             if broker is None:
@@ -877,7 +881,12 @@ class ExecutionEngine:
                     exc,
                 )
                 continue
-            if ok:
+            if ok and await self._confirm_broker_cancelled(
+                broker,
+                broker_order_id,
+                broker_name=broker_name,
+                symbol=str(getattr(row, "symbol", "") or ""),
+            ):
                 cancelled_ids.append(getattr(row, "id", None))
                 logger.info(
                     "cancel_working_orders cancelled | broker=%s id=%s symbol=%s reason=%s",
@@ -898,6 +907,63 @@ class ExecutionEngine:
             )
             await session.commit()
         return len(cancelled_ids)
+
+    async def _confirm_broker_cancelled(
+        self,
+        broker: Any,
+        broker_order_id: str,
+        *,
+        broker_name: str,
+        symbol: str,
+    ) -> bool:
+        """Return True only when broker state confirms terminal cancel/reject."""
+        if self.paper_mode:
+            return True
+        try:
+            timeout_sec = float(os.getenv("ORDER_CANCEL_CONFIRM_TIMEOUT_SEC", "10") or "10")
+        except Exception:  # noqa: BLE001
+            timeout_sec = 10.0
+        try:
+            interval_sec = float(os.getenv("ORDER_CANCEL_CONFIRM_POLL_SEC", "0.5") or "0.5")
+        except Exception:  # noqa: BLE001
+            interval_sec = 0.5
+        deadline = datetime.now(timezone.utc).timestamp() + max(0.1, timeout_sec)
+        terminal_cancel = {"cancelled", "canceled", "rejected", "expired"}
+        fill_race = {"filled", "partially_filled"}
+        while True:
+            try:
+                result = await broker.get_order(broker_order_id)
+                raw_status = getattr(result, "status", "")
+                status = str(getattr(raw_status, "value", raw_status)).strip().lower()
+                if status in terminal_cancel:
+                    return True
+                if status in fill_race:
+                    logger.warning(
+                        "cancel confirmation saw fill/race | broker=%s id=%s symbol=%s status=%s; local status unchanged",
+                        broker_name,
+                        broker_order_id,
+                        symbol,
+                        status,
+                    )
+                    return False
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "cancel confirmation failed | broker=%s id=%s symbol=%s | %s",
+                    broker_name,
+                    broker_order_id,
+                    symbol,
+                    exc,
+                )
+                return False
+            if datetime.now(timezone.utc).timestamp() >= deadline:
+                logger.warning(
+                    "cancel confirmation timed out | broker=%s id=%s symbol=%s; local status unchanged",
+                    broker_name,
+                    broker_order_id,
+                    symbol,
+                )
+                return False
+            await asyncio.sleep(max(0.05, interval_sec))
 
     async def reconcile_positions(
         self,
@@ -1005,6 +1071,13 @@ class ExecutionEngine:
                 broker_name,
                 broker_order_id,
             )
+            return False
+        if not await self._confirm_broker_cancelled(
+            broker,
+            broker_order_id,
+            broker_name=broker_name,
+            symbol=str(signal.symbol),
+        ):
             return False
         if session_factory is not None:
             try:

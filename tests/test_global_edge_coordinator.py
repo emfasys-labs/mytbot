@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from portfolio.global_edge_coordinator import (
@@ -385,6 +385,53 @@ def test_hunter_rotation_records_and_respects_symbol_cooldown() -> None:
     assert "NEW" in ctx.last_event_at_by_symbol
 
     assert coord.propose_rotation_actions(held, [opp], active_mode="hunter", replacement_context=ctx) == []
+
+
+def test_capital_recycle_respects_symbol_cooldown() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "dead_edge_floor": "0.10",
+                "max_actions_per_tick": 3,
+                "symbol_cooldown_sec": 900,
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="STALE",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.01"),
+            metadata={"asset_class": "equity"},
+        )
+    ]
+    ctx = ReplacementContext(
+        last_event_at_by_symbol={"STALE": datetime.now(timezone.utc) - timedelta(seconds=30)}
+    )
+
+    assert coord.propose_capital_recycle_actions(held, replacement_context=ctx) == []
+
+
+def test_shed_respects_symbol_cooldown() -> None:
+    coord = GlobalEdgeCoordinator({"shed": {"symbol_cooldown_sec": 900}})
+    held = [
+        HeldPositionEdge(
+            symbol="HOT",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.01"),
+            metadata={"asset_class": "equity"},
+        )
+    ]
+    ctx = ReplacementContext(
+        last_event_at_by_symbol={"HOT": datetime.now(timezone.utc) - timedelta(seconds=30)}
+    )
+
+    assert coord.propose_shed_actions(
+        held,
+        cash_target_absolute=Decimal("0"),
+        replacement_context=ctx,
+    ) == []
 
 
 def test_max_actions_per_tick_scalar_is_mode_blind_backcompat() -> None:

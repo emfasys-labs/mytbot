@@ -56,6 +56,7 @@ from brokers.base import (
     Position,
     Tick,
 )
+from system.live_arming import validate_ibkr_port_arming
 
 # ib_insync expects asyncio integration when using connectAsync outside its own loop.
 util.patchAsyncio()
@@ -180,6 +181,7 @@ class IBKRAdapter(BrokerAdapter):
         paper_mode: bool = True,
         **kwargs: Any,
     ) -> None:
+        validate_ibkr_port_arming(paper_mode=paper_mode, port=7496 if not paper_mode else port)
         self.host = host
         self.port = port if paper_mode else 7496
         self.client_id = client_id

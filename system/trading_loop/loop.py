@@ -570,12 +570,8 @@ class TradingLoop:
             )
             self.sig_engine = SignalEngine(_se_cfg, accumulator=_acc)
             self.risk_engine = RiskEngine(risk_cfg)
-            # Starting the system from OFF should begin from a clean trading state.
-            # Clear any stale latched kill switch from prior runs.
-            try:
-                self.risk_engine.reset_kill()
-            except Exception:  # noqa: BLE001
-                pass
+            if self.risk_engine.is_killed:
+                logger.critical("trading_loop | risk kill switch is latched from persisted state; new orders remain blocked")
             # Apply persisted mode overrides (if user selected a mode before this start)
             apply_saved_mode_to_risk_cfg(self.risk_engine)
             set_risk_engine(self.risk_engine)
@@ -2646,6 +2642,7 @@ class TradingLoop:
                         held,
                         cash_target_absolute=soft_target,
                         active_mode=mode_for_coord,
+                        replacement_context=repl_ctx,
                     )
                     if shed_actions:
                         logger.info(
@@ -2676,6 +2673,7 @@ class TradingLoop:
                     recycle_actions = coord.propose_capital_recycle_actions(
                         held,
                         active_mode=mode_for_coord,
+                        replacement_context=repl_ctx,
                     )
                 except Exception as exc:  # noqa: BLE001
                     recycle_actions = []
@@ -2716,7 +2714,7 @@ class TradingLoop:
                         return s
 
                     for act in actions:
-                        if str(getattr(act, "kind", "") or "") != "open_strategy":
+                        if str(getattr(act, "kind", "") or "") not in {"open_strategy", "trim_symbol"}:
                             continue
                         sym_key = _ctx_sym(str(getattr(act, "symbol", "") or ""))
                         if sym_key:

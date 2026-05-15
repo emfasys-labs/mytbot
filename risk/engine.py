@@ -20,9 +20,11 @@ from datetime import datetime, timezone
 from datetime import timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
+import json
 import logging
 import os
+from pathlib import Path
+from typing import Any, Optional
 
 from core.instruments import option_premium_notional, parse_option_contract_from_metadata
 from risk.options_env import options_trading_config
@@ -85,6 +87,12 @@ class RiskEngine:
         self._is_killed = False
         self._disabled_brokers: set[str] = set()
         self._high_watermark = Decimal("0")
+        explicit_runtime_path = config.get("runtime_state_path") or os.getenv("RISK_RUNTIME_STATE_PATH")
+        self._runtime_state_path = Path(str(explicit_runtime_path or "data/runtime/risk_state.json"))
+        self._runtime_state_enabled = bool(config.get("persist_runtime_state", True))
+        if "PYTEST_CURRENT_TEST" in os.environ and explicit_runtime_path is None:
+            self._runtime_state_enabled = False
+        self._restore_persisted_runtime_state()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -195,12 +203,14 @@ class RiskEngine:
     def kill(self) -> None:
         """Activate kill switch. Halts all new orders immediately."""
         self._is_killed = True
+        self._persist_runtime_state()
         logger.critical("KILL SWITCH ACTIVATED — no new orders will be placed")
 
     def reset_kill(self) -> None:
         """Deactivate kill switch. Must be deliberate manual action."""
         self._is_killed = False
         self._disabled_brokers.clear()
+        self._persist_runtime_state()
         logger.warning("Kill switch deactivated")
 
     def disable_broker(self, name: str) -> None:
@@ -209,12 +219,14 @@ class RiskEngine:
         if not n:
             return
         self._disabled_brokers.add(n)
+        self._persist_runtime_state()
         logger.critical("RISK | broker disabled for new orders | broker=%s", n)
 
     def enable_broker(self, name: str) -> None:
         n = (name or "").strip().lower()
         if n:
             self._disabled_brokers.discard(n)
+            self._persist_runtime_state()
             logger.warning("RISK | broker re-enabled | broker=%s", n)
 
     def is_broker_disabled(self, name: str) -> bool:
@@ -232,15 +244,18 @@ class RiskEngine:
         """Called by execution engine after a losing trade."""
         self._daily_loss += amount
         self._consecutive_losses += 1
+        self._persist_runtime_state()
 
     def record_win(self) -> None:
         """Called by execution engine after a winning trade."""
         self._consecutive_losses = 0
+        self._persist_runtime_state()
 
     def reset_daily(self) -> None:
         """Called at start of each trading day."""
         self._daily_loss = Decimal("0")
         self._cooldown_until = None
+        self._persist_runtime_state()
 
     def update_high_watermark(self, portfolio_value: Decimal) -> None:
         """Track best observed portfolio value for drawdown checks."""
@@ -266,13 +281,52 @@ class RiskEngine:
                 self._cooldown_until = dt
             except Exception:  # noqa: BLE001
                 pass
+        if bool(portfolio_state.get("is_killed")):
+            self._is_killed = True
+        raw_disabled = portfolio_state.get("disabled_brokers")
+        if isinstance(raw_disabled, (list, tuple, set)):
+            self._disabled_brokers.update({
+                str(name).strip().lower()
+                for name in raw_disabled
+                if str(name).strip()
+            })
+        self._persist_runtime_state()
 
     def snapshot_runtime_state(self) -> dict:
         return {
             "consecutive_losses": int(self._consecutive_losses),
-            "daily_loss_accumulated": self._daily_loss,
+            "daily_loss_accumulated": str(self._daily_loss),
             "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
+            "is_killed": bool(self._is_killed),
+            "disabled_brokers": sorted(self._disabled_brokers),
         }
+
+    def _restore_persisted_runtime_state(self) -> None:
+        if not self._runtime_state_enabled:
+            return
+        try:
+            if not self._runtime_state_path.exists():
+                return
+            with self._runtime_state_path.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                self.restore_runtime_state(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("risk runtime restore failed | path=%s | %s", self._runtime_state_path, exc)
+
+    def _persist_runtime_state(self) -> None:
+        if not self._runtime_state_enabled:
+            return
+        try:
+            self._runtime_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._runtime_state_path.with_suffix(self._runtime_state_path.suffix + ".tmp")
+            payload: dict[str, Any] = self.snapshot_runtime_state()
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+            tmp.replace(self._runtime_state_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("risk runtime persist failed | path=%s | %s", self._runtime_state_path, exc)
 
     # ── Checks ────────────────────────────────────────────────────────────────
 
@@ -745,6 +799,7 @@ class RiskEngine:
         if self._consecutive_losses >= max_losses:
             cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
             self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
+            self._persist_runtime_state()
             return (False, "consecutive_losses")
         return (True, "consecutive_losses")
 
