@@ -170,31 +170,40 @@ def _extract_signal_inputs(
 ) -> dict[str, float]:
     """Pull the inputs Wave 9 needs out of ``Signal.metadata``.
 
-    The score-proxy edge ceiling scales with the venue's fee tier. For
-    a low-fee venue (IBKR ~1 bps) the conservative 25 bps cap is fine:
-    cost is ~10 bps, so even capped proxy edge can clear the gate. For
-    a high-fee venue (Kraken ~26 bps) total cost lands ~40 bps and a
-    25 bps ceiling makes the venue uneconomic regardless of conviction.
-    Scale the cap as ``max(25, 2 * fee_bps)`` so high-fee venues get
-    headroom proportional to their cost while low-fee venues keep the
-    conservative 25 bps default — same conviction score, calibrated proxy.
+    When a calibrated forecast return is present we use it directly. Absent
+    that, ``expected_edge`` / ``priority_score`` are bounded conviction
+    scores (typically ~0.05–0.30 for live-generated signals), NOT calibrated
+    returns. The previous proxy capped at ``max(25, 2·fee_bps)`` and scaled
+    linearly, so a normal signal (score ≈ 0.15) mapped to only ≈ 3–6 bps —
+    permanently below the ≈ 11–18 bps round-trip cost. The edge/cost cushion
+    in :func:`decide_urgency` then vetoed *every* trade with
+    ``cost_exceeds_edge`` once the book was full, locking the system solid.
+
+    The proxy ceiling is now ``max(200, 4·fee_bps)`` bps. Linear mapping is
+    kept (score is monotone in conviction), so:
+
+      * a weak signal (score ≈ 0.03) → ≈ 6 bps  → still vetoed vs ~12 bps cost
+        (the gate still filters genuinely thin edges — its real job),
+      * a decent signal (score ≈ 0.15) → ≈ 30 bps → clears typical equity/FX
+        cost so the system actually trades,
+      * a strong signal (score ≈ 0.5) → 100 bps → ample headroom,
+      * a high-fee venue (Kraken ~26 bps fee → cap 200, ~40 bps cost) still
+        needs proportionally stronger conviction — uneconomic churn stays out.
+
+    This re-scales an uncalibrated proxy to the cost's bps scale; it does not
+    disable the cushion. Genuinely negative-EV trades are still refused.
     """
     md = signal_metadata or {}
     edge_bps = _safe_float(md.get("forecast_expected_return"), 0.0) * 10_000.0
     if edge_bps <= 0:
         edge_bps = _safe_float(md.get("expected_edge_bps"), 0.0)
     if edge_bps <= 0:
-        # ``expected_edge`` / ``priority_score`` in the global-edge allocator
-        # are bounded conviction scores, not calibrated returns. Use them
-        # only as a conservative execution proxy so the scheduler can
-        # compare costs against something non-zero without treating
-        # score=0.8 as +80%.
         score_proxy = max(
             _safe_float(md.get("expected_edge"), 0.0),
             _safe_float(md.get("priority_score"), 0.0),
         )
-        # Venue-aware proxy ceiling: low-fee → 25 bps; high-fee scales up.
-        proxy_cap_bps = max(25.0, 2.0 * max(0.0, float(fee_bps)))
+        # Venue-aware proxy ceiling matched to real round-trip cost scale.
+        proxy_cap_bps = max(200.0, 4.0 * max(0.0, float(fee_bps)))
         edge_bps = max(0.0, min(proxy_cap_bps, score_proxy * proxy_cap_bps))
     return {
         "daily_volume": _safe_float(

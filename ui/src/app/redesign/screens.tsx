@@ -1014,6 +1014,7 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
               : (!!s.idle || (s.weight === 0 && s.trades === 0));
             const kind = String(s.kind ?? 'signal');
             const isArb = kind === 'arbitrage';
+            const runtimeLoaded = s.runtimeLoaded !== false;
             const kindLabel = kind === 'relative_value' ? 'relative value' : kind.replace(/_/g, ' ');
             const showSpark = trace != null || !rosterIdle;
             const synthSpark =
@@ -1047,6 +1048,7 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                   >{strategyTitle(s.name)}</span>
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     {kind !== 'signal' && <Pill tone="neutral">{kindLabel}</Pill>}
+                    {!runtimeLoaded && <Pill tone="neutral">configured</Pill>}
                     {s.enabled === false && <Pill tone="loss">disabled</Pill>}
                     {mix ? (
                       <Pill tone={lifecycleTone}>{mix.lifecycleDisplay}</Pill>
@@ -1074,6 +1076,8 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                   }}>
                     {isArb
                       ? 'Awaiting spread / funding opportunity'
+                      : !runtimeLoaded
+                        ? 'Configured research module · not loaded by trading loop'
                       : mix && mix.evaluated > 0
                         ? 'Activity from strategy_candidate_log (see metrics below)'
                         : 'No recent signals in DB window · strategy registered'}

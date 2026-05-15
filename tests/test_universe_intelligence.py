@@ -182,3 +182,37 @@ def test_intelligence_builder_clusters_without_touching_disk():
     assert state.clusters
     assert any("AAA" in c["members"] and "BBB" in c["members"] for c in state.clusters)
     assert "BBB" in state.core
+
+
+def test_intelligence_builder_derives_promotions_from_conviction_scores():
+    tiers = UniverseTiers(
+        core=("AAA",),
+        scan=("BBB", "CCC"),
+        light=("DDD",),
+        scores={"AAA": 1, "BBB": 100, "CCC": 50, "DDD": 0},
+        updated_at="2026-05-12T18:00:00+00:00",
+    )
+
+    def history(sym: str) -> list[float]:
+        offset = {"AAA": 0, "BBB": 5, "CCC": 11, "DDD": 17}.get(sym, 0)
+        return [100 + offset + i * (1 + offset / 100) for i in range(30)]
+
+    import asyncio
+
+    state = asyncio.run(
+        build_universe_intelligence_state(
+            tiers,
+            cfg={
+                "cluster_max_symbols": 4,
+                "cluster_yf_concurrency": 2,
+                "min_cluster_price_series": 3,
+                "correlation_cluster_threshold": 0.9999,
+                "promotion": {"conviction_threshold": 65, "promotion_ttl_minutes": 60},
+            },
+            history_fetcher=history,
+        )
+    )
+    assert state is not None
+    promoted = {p["symbol"]: p for p in state.promotions}
+    assert "BBB" in promoted
+    assert promoted["BBB"]["reason"] == "conviction_score"

@@ -137,11 +137,19 @@ class RiskEngine:
         # any operation regardless of direction (kill switch, broker
         # disabled, options policy, minimum size sanity, arbitrage bundle).
         if self._is_reduce_only_signal(signal):
+            # NOTE: ``_check_minimum_order_size`` is deliberately NOT kept here.
+            # The minimum-size floor exists to stop trivially-tiny *opens*
+            # (dust positions). Applying it to exits is actively harmful: a
+            # small/odd-lot residual (e.g. a $30 trim of a name whose class
+            # minimum is $50, or a fractional remainder after a partial
+            # take-profit) would be REJECTED, so the system could neither
+            # trim nor close it — capital trapped with no release valve
+            # (audit #5). Exits are bounded by the held position and must
+            # always be allowed through the hard rails only.
             keep = {
                 self._check_kill_switch,
                 self._check_broker_disabled,
                 self._check_options_trading_policy,
-                self._check_minimum_order_size,
             }
             checks = [c for c in checks if c in keep]
             logger.info(

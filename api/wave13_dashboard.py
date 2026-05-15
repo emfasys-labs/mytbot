@@ -107,6 +107,8 @@ def _collect_strategy_coverage(
         "name": "trained_meta_labeler",
         "wave": 2,
         "enabled": bool(sig_engine.get("use_trained_meta_labeler", False)),
+        "runtime_state": "model_gate",
+        "runtime_note": "Applied inside the signal/opportunity pipeline, not a standalone strategy card.",
         "config_path": strategies_yaml_path,
     })
 
@@ -117,6 +119,8 @@ def _collect_strategy_coverage(
         "name": "factor_sleeve",
         "wave": 3,
         "enabled": bool(fs.get("enabled", False)),
+        "runtime_state": "opportunity_overlay",
+        "runtime_note": "Merged through the opportunity engine when enough factor inputs exist.",
         "config_path": factor_yaml_path,
     })
 
@@ -127,6 +131,8 @@ def _collect_strategy_coverage(
         "name": "stat_arb_pairs",
         "wave": 5,
         "enabled": bool(sap.get("enabled", False)),
+        "runtime_state": "configured_not_loop_loaded",
+        "runtime_note": "Research stat-arb module is configured; the live loop currently loads pairs_trading.",
         "config_path": pairs_yaml_path,
     })
 
@@ -139,6 +145,8 @@ def _collect_strategy_coverage(
         "wave": 12,
         "enabled": bool(od.get("enabled", False)),
         "paper_only": bool(od.get("paper_only", True)),
+        "runtime_state": "configured_not_loop_loaded",
+        "runtime_note": "Options modules are paper-configured but not instantiated by the main trading loop.",
         "config_path": options_yaml_path,
     })
     out["families"].append({
@@ -146,6 +154,8 @@ def _collect_strategy_coverage(
         "wave": 12,
         "enabled": bool(oh.get("enabled", False)),
         "paper_only": bool(oh.get("paper_only", True)),
+        "runtime_state": "configured_not_loop_loaded",
+        "runtime_note": "Options modules are paper-configured but not instantiated by the main trading loop.",
         "config_path": options_yaml_path,
     })
 

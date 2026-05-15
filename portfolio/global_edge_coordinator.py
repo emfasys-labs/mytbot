@@ -1377,6 +1377,110 @@ class GlobalEdgeCoordinator:
             shed_so_far += trim_cash
         return out
 
+    def propose_capital_recycle_actions(
+        self,
+        held: list[HeldPositionEdge],
+        *,
+        active_mode: str = DEFAULT_MODE,
+    ) -> list[CoordinatorAction]:
+        """Free capital when the book is full, *independent of rotation edge*.
+
+        The rotation path only fires when a fresh opportunity beats a held
+        position by ``min_edge_advantage + fees``. When nothing clears that
+        bar the book stays 100% deployed and idle indefinitely — realised
+        P&L flat-lines even though winners could be banked and dead weight
+        culled. This method is the missing capital-recycling path:
+
+          * **Take-profit** — a position whose unrealised return ≥
+            ``take_profit_pct`` gets a reduce-only trim of
+            ``take_profit_trim_fraction`` (lock the gain, let the rest run).
+          * **Dead-edge cull** — a position whose live
+            ``expected_remaining_edge`` ≤ ``dead_edge_floor`` (flat/losing
+            per the live held-edge proxy) is closed reduce-only.
+
+        Freed cash is redeployed by the build-up path on the next iteration,
+        so the system continuously recycles worst→best instead of locking
+        solid. Bounded by ``max_actions_per_tick`` to avoid fee churn. All
+        knobs are YAML-driven (``global_edge.yaml: capital_recycle``); the
+        defaults are deliberately conservative.
+        """
+        if not held:
+            return []
+        cfg = self._cfg.get("capital_recycle") or {}
+        if not bool(cfg.get("enabled", True)):
+            return []
+
+        def _d(key: str, default: str) -> Decimal:
+            try:
+                return Decimal(str(cfg.get(key, default)))
+            except (TypeError, ValueError):
+                return Decimal(default)
+
+        take_profit_pct = _d("take_profit_pct", "0.02")
+        trim_fraction = _d("take_profit_trim_fraction", "0.50")
+        dead_edge_floor = _d("dead_edge_floor", "0.01")
+        try:
+            max_actions = int(cfg.get("max_actions_per_tick", 3))
+        except (TypeError, ValueError):
+            max_actions = 3
+        if max_actions <= 0:
+            return []
+        trim_fraction = min(Decimal("1"), max(Decimal("0"), trim_fraction))
+
+        def _unrl(h: HeldPositionEdge) -> Decimal:
+            try:
+                return Decimal(str((h.metadata or {}).get("unrealised_return", "0") or "0"))
+            except (TypeError, ValueError):
+                return Decimal("0")
+
+        winners = [h for h in held if _unrl(h) >= take_profit_pct and take_profit_pct > 0]
+        winners.sort(key=lambda h: float(_unrl(h)), reverse=True)
+        dead = [h for h in held if h.expected_remaining_edge <= dead_edge_floor]
+        dead.sort(key=lambda h: float(h.expected_remaining_edge))
+
+        out: list[CoordinatorAction] = []
+        seen: set[str] = set()
+        for h in winners + dead:
+            if len(out) >= max_actions:
+                break
+            if h.symbol in seen or h.notional <= 0:
+                continue
+            seen.add(h.symbol)
+            is_winner = _unrl(h) >= take_profit_pct and take_profit_pct > 0
+            if is_winner and trim_fraction < 1:
+                trim_notional = (h.notional * trim_fraction)
+                close_only = False
+                reason = "take_profit_trim"
+            else:
+                trim_notional = h.notional
+                close_only = True
+                reason = "take_profit_close" if is_winner else "dead_edge_cull"
+            if trim_notional <= 0:
+                continue
+            meta = dict(h.metadata or {})
+            meta["coordinator_kind"] = "trim_symbol"
+            meta["reduce_only"] = True
+            meta["partial_reduce_only"] = not close_only
+            meta["close_only"] = close_only
+            meta["target_notional"] = str(trim_notional)
+            meta["risk_notional_override"] = str(trim_notional)
+            meta["sizing_path"] = "capital_recycle"
+            meta["sizing_final_capital_required"] = str(trim_notional)
+            meta["capital_recycle_reason"] = reason
+            if h.broker:
+                meta["broker"] = h.broker
+            out.append(
+                CoordinatorAction(
+                    kind="trim_symbol",
+                    symbol=h.symbol,
+                    strategy_name="capital_recycle",
+                    capital=trim_notional,
+                    priority_score=Decimal("0"),
+                    metadata=meta,
+                )
+            )
+        return out
+
     def propose_rotation_actions(
         self,
         held: list[HeldPositionEdge],
@@ -1725,15 +1829,47 @@ def held_positions_from_portfolio(
         n = abs(qty) * px
         if n <= 0:
             continue
-        base_edge = Decimal("0.15")
-        rem = max(Decimal("0"), base_edge * (Decimal("1") - decay))
+        side = str(row.get("side") or ("short" if qty < 0 else "long")).strip().lower()
+        # ── Live held-edge proxy (replaces the old constant 0.15·(1−decay)) ──
+        # The old code gave EVERY holding the same 0.138 remaining edge, so a
+        # new opportunity had to clear 0.138 + threshold + fees to displace
+        # anything — structurally unwinnable, the book locked solid once full.
+        #
+        # Remaining edge now reflects how the position is actually doing:
+        #   * a small residual "option to keep holding" floor,
+        #   * plus a momentum term from the position's own unrealised return
+        #     (let winners run — a position working in our favour keeps edge),
+        #   * minus for losers/flat (cut them — they're the cheapest to shed).
+        # Scale is matched to typical opportunity priority_scores (~0.05–0.25)
+        # so rotation/displacement maths is winnable for genuinely better
+        # ideas while a strong winner still resists being churned out.
+        try:
+            avg = Decimal(str(row.get("avg_entry_price", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            avg = Decimal("0")
+        unrl_ret = Decimal("0")
+        if avg > 0 and px > 0:
+            raw_ret = (px - avg) / avg
+            unrl_ret = -raw_ret if side == "short" else raw_ret
+        core_hold = Decimal("0.04")
+        # k=1.5 → a +8% winner adds ≈ +0.12; clamp asymmetric: winners can
+        # build edge up to +0.12, losers bleed it down to −0.06 (→ floored 0).
+        momentum = unrl_ret * Decimal("1.5")
+        if momentum > Decimal("0.12"):
+            momentum = Decimal("0.12")
+        elif momentum < Decimal("-0.06"):
+            momentum = Decimal("-0.06")
+        rem = max(Decimal("0"), (core_hold + momentum) * (Decimal("1") - decay))
+        oversize_cap = Decimal("0.15")
         meta: dict[str, Any] = {
             "source": "portfolio_snapshot",
             "quantity": str(qty),
             "close": str(px),
             "price": str(px),
-            "side": str(row.get("side") or ("short" if qty < 0 else "long")),
+            "side": side,
             "asset_class": str(row.get("asset_class", "equity") or "equity"),
+            "unrealised_return": str(unrl_ret.quantize(Decimal("0.000001"))),
+            "held_edge_basis": "live_unrealised_momentum_v2",
         }
         if actual_symbol != str(sym):
             meta["position_key"] = str(sym)
@@ -1743,7 +1879,7 @@ def held_positions_from_portfolio(
             meta["sizing_hard_cap_notional"] = str(ceiling)
             meta["oversized_position_flag"] = ratio > oversize_flag_ratio
             if ratio > Decimal("1"):
-                oversize_penalty = min(base_edge, (ratio - Decimal("1")) * Decimal("0.05"))
+                oversize_penalty = min(oversize_cap, (ratio - Decimal("1")) * Decimal("0.05"))
                 rem = max(Decimal("0"), rem - oversize_penalty)
         out.append(
             HeldPositionEdge(

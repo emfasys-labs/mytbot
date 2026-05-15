@@ -75,6 +75,41 @@ def _f(x) -> float:
         return 0.0
 
 
+def _stamp_conviction_edge_fallback(opp, signal, *, reason: str) -> None:
+    """Audit #8 — make the no-forecast path fail *open*, explicitly.
+
+    When the forecast ensemble errors OR is simply unavailable (``decision.
+    used`` False — the common case with no trained models), the function
+    used to return without ever populating an edge. Downstream the Wave 9
+    cost gate then saw edge≈0 and a transient/absent forecast looked
+    identical to "no edge at all". Combined with the cost cushion that
+    permanently vetoed everything once the book filled.
+
+    We now stamp a deterministic, signed conviction proxy into metadata so
+    the (correctly-scaled, see wave9_runtime) cost gate compares cost
+    against a real conviction estimate. This is a *proxy*, not a calibrated
+    return — Wave 9 caps it conservatively — but it means a genuinely
+    strong signal is no longer treated as zero-edge just because no model
+    is trained yet. ``expected_edge`` is only set if not already present so
+    an upstream allocator value always wins.
+    """
+    try:
+        md = opp.metadata
+        if not isinstance(md, dict):
+            return
+        md.setdefault("forecast_fallback", reason)
+        if md.get("expected_edge") in (None, "", 0, 0.0):
+            score = max(
+                _f(getattr(opp, "opportunity_score", 0.0)),
+                _f(getattr(opp, "priority_score", 0.0)),
+            )
+            sign = 1.0 if _map_side(getattr(signal, "side", "")) == "long" else -1.0
+            md["expected_edge"] = round(score, 6)
+            md.setdefault("expected_edge_sign", sign)
+    except Exception:  # noqa: BLE001 — fallback stamping must never raise
+        pass
+
+
 _FORECAST_BRIDGE_CFG_UNLOADED = object()
 _FORECAST_BRIDGE_CFG_CACHE: object = _FORECAST_BRIDGE_CFG_UNLOADED
 
@@ -151,6 +186,7 @@ def _apply_forecast_bridge_to_opportunity(
         logger.warning("opportunity_engine | forecast_bridge eval failed: %s", exc)
         opp.metadata["forecast_used"] = False
         opp.metadata["forecast_error"] = str(exc)
+        _stamp_conviction_edge_fallback(opp, signal, reason="forecast_error")
         return
 
     opp.metadata["forecast_used"] = bool(decision.used)
@@ -163,6 +199,7 @@ def _apply_forecast_bridge_to_opportunity(
         opp.metadata["forecast_contributions"] = dict(decision.contributions)
 
     if not decision.used:
+        _stamp_conviction_edge_fallback(opp, signal, reason="forecast_not_used")
         return
 
     # Populate expected_return / volatility on the dataclass so the

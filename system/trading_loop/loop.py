@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -327,6 +328,15 @@ class TradingLoop:
         # Updated at the end of every iteration; read at the start of the
         # next. None on fresh boot so the classifier falls back to defaults.
         self._last_generated_count: int = 0
+        # Audit #6: telemetry for swallowed hot-path exceptions. The loop has
+        # many broad ``except Exception`` guards that intentionally degrade
+        # gracefully rather than crash a trading iteration — but historically
+        # they vanished into a debug log, so a metadata/feedback/persistence
+        # subsystem could be 100% failing with zero operator-visible signal.
+        # ``_swallow`` records the failure by label and the per-iteration
+        # total is logged with the iteration summary.
+        self._swallow_counts: dict[str, int] = {}
+        self._swallow_iter_total: int = 0
 
         self._global_edge_cfg: dict[str, Any] = {}
         self._enable_arbitrage: bool = False
@@ -338,6 +348,22 @@ class TradingLoop:
     @property
     def is_running(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
+
+    def _swallow(self, where: str, exc: BaseException) -> None:
+        """Record a swallowed hot-path exception (audit #6).
+
+        Use in place of a bare ``except Exception: pass`` / ``...: debug(...)``
+        in the candidate→execution path. The iteration keeps degrading
+        gracefully (no crash) but the failure is now counted by ``where`` and
+        the per-iteration total is surfaced in the iteration summary log, so
+        a silently-failing subsystem is no longer invisible.
+        """
+        try:
+            self._swallow_counts[where] = self._swallow_counts.get(where, 0) + 1
+            self._swallow_iter_total += 1
+            logger.debug("trading_loop | swallowed[{}] | {}", where, exc)
+        except Exception:  # noqa: BLE001 — telemetry must never raise
+            pass
 
     def _check_late_brokers(self) -> None:
         """Pick up brokers that connected after startup (e.g. IBKR background connect)."""
@@ -1484,16 +1510,50 @@ class TradingLoop:
                             }
                             demand_alert_history.append(dict(last_demand_alert))
                             demand_alert_history = demand_alert_history[-20:]
+                        # Audit #7: prefetch every symbol's feature window
+                        # CONCURRENTLY (bounded) instead of one blocking DB
+                        # round-trip per symbol inside the loop. Previously a
+                        # single slow/locked feature read stalled every
+                        # downstream symbol's opportunity for the whole
+                        # iteration. The per-symbol processing below stays
+                        # sequential (it mutates shared buffers and ordering
+                        # matters) — only the I/O is parallelized.
+                        try:
+                            _pf = int(os.getenv("FEATURE_PREFETCH_CONCURRENCY", "8") or 8)
+                        except (TypeError, ValueError):
+                            _pf = 8
+                        _pf = max(1, min(_pf, 32))
+                        _feat_sem = asyncio.Semaphore(_pf)
+
+                        async def _prefetch_one(_sym: str):
+                            async with _feat_sem:
+                                try:
+                                    return _sym, await _load_recent_features(
+                                        session_factory,
+                                        symbol=_sym,
+                                        timeframe=self.timeframe,
+                                        lookback_bars=self.lookback_bars,
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    self._swallow("feature_prefetch", exc)
+                                    return _sym, None
+
+                        _prefetched = await asyncio.gather(
+                            *[_prefetch_one(s) for s in symbols]
+                        )
+                        _feature_by_symbol: dict[str, Any] = {
+                            s: res for s, res in _prefetched
+                        }
+
                         for symbol in symbols:
                             if self._stop_event.is_set():
                                 break
 
-                            df, feature_ts = await _load_recent_features(
-                                session_factory,
-                                symbol=symbol,
-                                timeframe=self.timeframe,
-                                lookback_bars=self.lookback_bars,
-                            )
+                            _res = _feature_by_symbol.get(symbol)
+                            if _res is None:
+                                symbols_feature_empty += 1
+                                continue
+                            df, feature_ts = _res
                             if df.empty:
                                 symbols_feature_empty += 1
                                 continue
@@ -2022,7 +2082,19 @@ class TradingLoop:
                     self._last_generated_count = int(generated or 0)
                     self.iterations += 1
                     self.last_error = None
-                    logger.info("trading_loop | iteration #{} | generated={} executed={}", self.iterations, generated, executed)
+                    if self._swallow_iter_total:
+                        logger.info(
+                            "trading_loop | iteration #{} | generated={} executed={} | swallowed={} {}",
+                            self.iterations, generated, executed,
+                            self._swallow_iter_total, dict(self._swallow_counts),
+                        )
+                    else:
+                        logger.info(
+                            "trading_loop | iteration #{} | generated={} executed={}",
+                            self.iterations, generated, executed,
+                        )
+                    self._swallow_iter_total = 0
+                    self._swallow_counts = {}
 
                 except Exception as exc:
                     self.last_error = str(exc)[:300]
@@ -2289,6 +2361,31 @@ class TradingLoop:
                 )
             new_opps = filtered_existing
 
+        # Audit #11: age-out STALE resting orders before the short-circuit.
+        # A limit order that never fills (PASSIVE/LIMIT urgency on delayed
+        # IBKR data) would otherwise stay "working" forever and perpetually
+        # exclude its symbol below, silently starving that opportunity. Cancel
+        # anything older than the threshold so the symbol becomes tradable
+        # again; fresh orders (still likely to fill) are left alone.
+        try:
+            _stale_sec = float(os.getenv("STALE_WORKING_ORDER_SEC", "900") or 900)
+        except (TypeError, ValueError):
+            _stale_sec = 900.0
+        if _stale_sec > 0 and self.execution_engine is not None:
+            try:
+                _stale_cancelled = await self.execution_engine.cancel_working_orders(
+                    session_factory=session_factory,
+                    reason="stale_working_order_ageout",
+                    older_than_sec=_stale_sec,
+                )
+                if _stale_cancelled:
+                    logger.info(
+                        "trading_loop | aged-out {} stale working order(s) (>{}s) so their symbols are tradable again",
+                        _stale_cancelled, int(_stale_sec),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._swallow("stale_working_order_ageout", exc)
+
         working_keys = await _load_working_order_keys(session_factory)
         if working_keys:
             filtered_opps: list[Any] = []
@@ -2361,7 +2458,7 @@ class TradingLoop:
                 if cost_bps is not None:
                     adaptive_edge_cfg["cross_venue_cost_bps"] = cost_bps
         except Exception as exc:  # noqa: BLE001
-            logger.debug("adaptive_edge | cost estimate failed: {}", exc)
+            self._swallow("adaptive_edge_cost_estimate", exc)
         # Outcome inputs: compute a coarse recent win-rate / avg return
         # from the persisted P&L. Use today's daily_pnl row for now —
         # Phase 4 will move this to a rolling per-strategy window.
@@ -2377,7 +2474,7 @@ class TradingLoop:
                 # 60% win-rate; negative day to 40%. Phase 4 will replace.
                 adaptive_edge_cfg["recent_win_rate"] = 0.6 if real > 0 else 0.4
         except Exception as exc:  # noqa: BLE001
-            logger.debug("adaptive_edge | outcome inputs failed: {}", exc)
+            self._swallow("adaptive_edge_outcome_inputs", exc)
         # Merge onto a shallow copy of the YAML cfg so we don't mutate the
         # underlying loaded dict (other code paths read it).
         coord_cfg = dict(self._global_edge_cfg or {})
@@ -2568,6 +2665,31 @@ class TradingLoop:
                     active_mode=mode_for_coord,
                     replacement_context=repl_ctx,
                 )
+                # Capital-recycling safety net (audit #3): rotation only fires
+                # when a fresh opp beats a holding by min_edge_advantage+fees.
+                # When nothing clears that, the book would stay 100% deployed
+                # and idle forever. Independently bank take-profit winners and
+                # cull dead-edge positions; the freed cash is redeployed by
+                # the build-up path next iteration. Prepended so closes settle
+                # before any same-tick rotation opens.
+                try:
+                    recycle_actions = coord.propose_capital_recycle_actions(
+                        held,
+                        active_mode=mode_for_coord,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    recycle_actions = []
+                    logger.debug("trading_loop | capital_recycle failed: {}", exc)
+                if recycle_actions:
+                    logger.info(
+                        "trading_loop | capital_recycle | freeing cash via {} reduce-only action(s) | sample={}",
+                        len(recycle_actions),
+                        [
+                            (a.symbol, (a.metadata or {}).get("capital_recycle_reason"))
+                            for a in recycle_actions[:5]
+                        ],
+                    )
+                    actions = list(recycle_actions) + list(actions)
             else:
                 actions = coord.propose_actions(
                     held,
@@ -2601,7 +2723,7 @@ class TradingLoop:
                             repl_ctx.last_event_at_by_symbol[sym_key] = ts
                 await save_replacement_context_to_bus(bus, repl_ctx)
             except Exception as exc:  # noqa: BLE001
-                logger.debug("trading_loop | save global-edge replacement context failed: {}", exc)
+                self._swallow("save_replacement_context", exc)
         if buf is not None and actions:
             for act in actions:
                 try:
@@ -2615,8 +2737,8 @@ class TradingLoop:
                             loop_iteration=self.iterations,
                         )
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    self._swallow("sc_buffer_selected_for_allocation", exc)
         elif buf is not None and new_opps:
             try:
                 buf.append(
@@ -2676,7 +2798,37 @@ class TradingLoop:
         }
         planner = ExecutionPlanner(OrderBookAnalyzer(), planner_cfg)
 
-        for action in actions:
+        # Audit #10: bound the blast radius of a slow/hung broker. Fully
+        # parallelising this loop is unsafe — every action runs through the
+        # risk engine + execution + portfolio accounting, and concurrent
+        # actions would race capital and over-deploy. Instead we cap the
+        # wall-clock the action batch may consume: in-flight actions are
+        # never cancelled (no partial DB/exec state), we simply stop
+        # STARTING new ones once the budget is spent; the rest are
+        # reconsidered next iteration. This stops one stuck broker call on
+        # action #1 from eating the whole loop interval and starving the
+        # other 19 + every downstream opportunity.
+        try:
+            _act_budget = float(os.getenv("ACTION_BATCH_BUDGET_SEC", "45") or 45)
+        except (TypeError, ValueError):
+            _act_budget = 45.0
+        _act_budget = max(5.0, _act_budget)
+        _act_started = time.monotonic()
+        try:
+            _ob_timeout = float(os.getenv("ACTION_ORDERBOOK_TIMEOUT_SEC", "8") or 8)
+        except (TypeError, ValueError):
+            _ob_timeout = 8.0
+        _act_deferred = 0
+
+        for _act_idx, action in enumerate(actions):
+            if _act_idx > 0 and (time.monotonic() - _act_started) > _act_budget:
+                _act_deferred = len(actions) - _act_idx
+                logger.warning(
+                    "trading_loop | action batch budget {}s exhausted after {} action(s) | "
+                    "deferring {} to next iteration",
+                    _act_budget, _act_idx, _act_deferred,
+                )
+                break
             sig = process_coordinator_action(
                 action,
                 self.sig_engine,
@@ -2705,8 +2857,16 @@ class TradingLoop:
                 sa = self._broker_manager.adapters.get(sell_v)
                 if ba and sa:
                     try:
-                        ob_b = await ba.get_order_book(sig.symbol, depth=25)
-                        ob_s = await sa.get_order_book(sig.symbol, depth=25)
+                        # Timeout the order-book reads — a hung venue here
+                        # would otherwise block the whole action batch. Pure
+                        # reads, safe to cancel (audit #10).
+                        ob_b, ob_s = await asyncio.wait_for(
+                            asyncio.gather(
+                                ba.get_order_book(sig.symbol, depth=25),
+                                sa.get_order_book(sig.symbol, depth=25),
+                            ),
+                            timeout=_ob_timeout,
+                        )
                         plan = planner.plan_trade(ob_b, ob_s, min(sig.suggested_quantity * (sig.suggested_price or Decimal("1")), tradable * Decimal("0.15")))
                         if plan is None:
                             log_arb_event("reject", reason="execution_planner", symbol=sig.symbol)

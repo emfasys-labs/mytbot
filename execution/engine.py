@@ -814,8 +814,18 @@ class ExecutionEngine:
         *,
         session_factory=None,
         reason: str = "operator_cancel",
+        older_than_sec: float | None = None,
     ) -> int:
-        """Cancel DB-tracked working orders and mark successful cancels locally."""
+        """Cancel DB-tracked working orders and mark successful cancels locally.
+
+        ``older_than_sec`` (audit #11): when set, only orders whose timestamp
+        is older than this many seconds are cancelled. Used to age-out STALE
+        resting limit orders that never filled (e.g. PASSIVE/LIMIT urgency on
+        delayed IBKR data) — those orders otherwise perpetually shadow their
+        symbol via ``_load_working_order_keys`` so the coordinator can never
+        re-propose them, silently starving good opportunities. A fresh
+        working order (still likely to fill) is left untouched.
+        """
         if session_factory is None:
             return 0
         try:
@@ -825,12 +835,17 @@ class ExecutionEngine:
             logger.warning("cancel_working_orders imports failed | %s", exc)
             return 0
 
+        cutoff = None
+        if older_than_sec is not None and older_than_sec > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=float(older_than_sec))
+
         async with session_factory() as session:
-            q = await session.execute(
-                select(OrderLog)
-                .where(OrderLog.status.in_(("pending", "open", "partially_filled")))
-                .order_by(OrderLog.timestamp.asc())
+            stmt = select(OrderLog).where(
+                OrderLog.status.in_(("pending", "open", "partially_filled"))
             )
+            if cutoff is not None:
+                stmt = stmt.where(OrderLog.timestamp < cutoff)
+            q = await session.execute(stmt.order_by(OrderLog.timestamp.asc()))
             rows = list(q.scalars().all())
 
         cancelled_ids: list[Any] = []
@@ -1236,7 +1251,30 @@ class ExecutionEngine:
         asset = str(getattr(signal, "asset_class", "") or "").strip().lower()
         qty = Decimal(str(order.quantity))
 
-        if broker == "ibkr" and asset in {"equity", "etf", "bond", "future", "option"}:
+        # Reduce-only/close orders must NOT be floored to whole shares. A
+        # fractional residual (e.g. 0.7 sh of an expensive name, common after
+        # a partial trim) would ROUND_DOWN to 0, then the qty<=0 guard would
+        # silently skip the close — capital gets trapped in a position the
+        # system explicitly decided to exit (audit #4). The exit quantity is
+        # bounded by the held position, so pass it through exactly; if the
+        # venue genuinely can't take the fraction it rejects loudly (visible)
+        # rather than us zeroing it out invisibly.
+        sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        is_reduce_only = bool(
+            getattr(order, "reduce_only", False)
+            or getattr(signal, "reduce_only", False)
+            or sig_md.get("reduce_only")
+            or sig_md.get("close_only")
+            or str(sig_md.get("coordinator_kind", "")).strip().lower() in {"trim_symbol", "close_symbol", "flatten_symbol"}
+            or str(getattr(signal, "strategy", "") or "").strip().lower() == "stop_loss_monitor"
+            or str(getattr(signal, "signal_id", "") or "").strip().lower().startswith(("stoploss-", "stop_loss-", "profitharvest-"))
+        )
+
+        if (
+            not is_reduce_only
+            and broker == "ibkr"
+            and asset in {"equity", "etf", "bond", "future", "option"}
+        ):
             qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
 
         if qty == order.quantity:

@@ -86,6 +86,26 @@ rotation:
   churn_penalty_per_event: "0.08"
   churn_block_threshold: "0.16"
 
+# Capital-recycling safety net. The rotation gate only fires when a fresh
+# opportunity beats a held position by min_edge_advantage + round-trip fees;
+# when nothing clears that bar a fully-deployed book stays idle indefinitely
+# (realised P&L flat-lines). This independently banks take-profit winners and
+# culls dead-edge holdings every iteration so freed cash is redeployed by the
+# build-up path. Conservative by design — raise take_profit_pct / lower
+# max_actions_per_tick to trade less aggressively.
+capital_recycle:
+  enabled: true
+  # Unrealised return at/above which a winner is partially harvested.
+  take_profit_pct: "0.02"
+  # Fraction of the winning position trimmed (rest is left to run).
+  take_profit_trim_fraction: "0.50"
+  # Live held-edge at/below which a position is treated as dead weight and
+  # closed reduce-only (matches the held-edge proxy floor in
+  # global_edge_coordinator.held_positions_from_portfolio).
+  dead_edge_floor: "0.01"
+  # Hard cap on recycle actions per iteration (prevents fee churn).
+  max_actions_per_tick: 3
+
 cash_factors:
   equity: "1.0"
   etf: "1.0"

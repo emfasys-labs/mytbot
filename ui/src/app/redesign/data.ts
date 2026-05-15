@@ -135,6 +135,8 @@ export interface Strategy {
   idle?: boolean;
   /** Whether the strategy is enabled in the trading loop registry. */
   enabled?: boolean;
+  /** True only when reported by `/system/status.loaded_strategies`. */
+  runtimeLoaded?: boolean;
   /** D033 — pre-execution rollups from ``/diagnostics/strategy-candidates``. */
   mix?: {
     evaluated: number;

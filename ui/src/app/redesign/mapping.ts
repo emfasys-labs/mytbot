@@ -759,22 +759,23 @@ export const DEFAULT_STRATEGY_MIX_ROSTER: Array<{
   name: string;
   kind: 'signal' | 'arbitrage' | 'factor' | 'relative_value' | 'options';
   enabled: boolean;
+  runtimeLoaded?: boolean;
 }> = [
-  { name: 'momentum_breakout', kind: 'signal', enabled: true },
-  { name: 'mean_reversion', kind: 'signal', enabled: true },
-  { name: 'volume_flow', kind: 'signal', enabled: true },
-  { name: 'event_driven_news', kind: 'signal', enabled: true },
-  { name: 'pairs_trading', kind: 'signal', enabled: true },
-  { name: 'volatility_regime', kind: 'signal', enabled: true },
-  { name: 'regime_rotation', kind: 'signal', enabled: true },
-  { name: 'funding_rate_arbitrage', kind: 'arbitrage', enabled: true },
-  { name: 'cross_exchange_arbitrage', kind: 'arbitrage', enabled: true },
-  { name: 'factor_sleeve', kind: 'factor', enabled: true },
-  { name: 'stat_arb_pairs', kind: 'relative_value', enabled: true },
-  { name: 'options_long_call', kind: 'options', enabled: true },
-  { name: 'options_long_put', kind: 'options', enabled: true },
-  { name: 'options_protective_put', kind: 'options', enabled: true },
-  { name: 'options_covered_call', kind: 'options', enabled: true },
+  { name: 'momentum_breakout', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'mean_reversion', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'volume_flow', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'event_driven_news', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'pairs_trading', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'volatility_regime', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'regime_rotation', kind: 'signal', enabled: true, runtimeLoaded: true },
+  { name: 'funding_rate_arbitrage', kind: 'arbitrage', enabled: true, runtimeLoaded: true },
+  { name: 'cross_exchange_arbitrage', kind: 'arbitrage', enabled: true, runtimeLoaded: true },
+  { name: 'factor_sleeve', kind: 'factor', enabled: true, runtimeLoaded: false },
+  { name: 'stat_arb_pairs', kind: 'relative_value', enabled: true, runtimeLoaded: false },
+  { name: 'options_long_call', kind: 'options', enabled: true, runtimeLoaded: false },
+  { name: 'options_long_put', kind: 'options', enabled: true, runtimeLoaded: false },
+  { name: 'options_protective_put', kind: 'options', enabled: true, runtimeLoaded: false },
+  { name: 'options_covered_call', kind: 'options', enabled: true, runtimeLoaded: false },
 ];
 
 const INTERNAL_ALLOCATION_ACTIONS = new Set([
@@ -981,7 +982,7 @@ export function mergeStrategiesWithSignals(
     if (!isStrategyScreenEligible(name)) continue;
     if (out.has(name)) {
       const prev = out.get(name)!;
-      out.set(name, { ...prev, kind: ls.kind ?? prev.kind, enabled: ls.enabled });
+      out.set(name, { ...prev, kind: ls.kind ?? prev.kind, enabled: ls.enabled, runtimeLoaded: true });
       continue;
     }
     out.set(name, {
@@ -992,6 +993,7 @@ export function mergeStrategiesWithSignals(
       trades: 0,
       kind: ls.kind,
       enabled: ls.enabled,
+      runtimeLoaded: true,
       idle: true,
     });
   }
@@ -1006,6 +1008,7 @@ export function mergeStrategiesWithSignals(
       trades: 0,
       kind: d.kind,
       enabled: d.enabled,
+      runtimeLoaded: !!d.runtimeLoaded,
       idle: true,
     });
   }

@@ -305,25 +305,38 @@ def _symbols_fallback(
     core_max = caps["core_max"]
     out: list[dict[str, Any]] = []
     pair_syms = set()
+    promoted_syms = set()
+    active_syms = set()
     if intel and intel.clusters:
         for cl in intel.clusters:
             mem = cl.get("members") or []
             if len(mem) > 1:
                 pair_syms.update(str(m).upper() for m in mem)
+    if intel:
+        promoted_syms = {
+            str(p.get("symbol", "")).upper()
+            for p in (intel.promotions or [])
+            if isinstance(p, dict) and str(p.get("symbol", "")).strip()
+        }
+        active_syms = {str(s).upper() for s in (intel.core or [])}
 
     for i, sym in enumerate(syms[: min(len(syms), 400)]):
         sc = float(scores.get(sym.upper(), 50.0 + (i % 17)))
+        su = sym.upper()
         stage = "watching"
-        if i < min(7, len(syms) // 15):
+        if intel and su in promoted_syms:
+            stage = "promoted"
+        elif intel and su in active_syms:
             stage = "active"
-        elif i < min(27, len(syms) // 5):
+        elif not intel and i < min(7, len(syms) // 15):
+            stage = "active"
+        elif not intel and i < min(27, len(syms) // 5):
             stage = "promoted"
         if intel_disabled:
             stage = "watching" if i >= min(7, len(syms) // 15) else stage
         tier_reason = "core" if i < core_max else "scan"
         klass = _classify_symbol(sym)
         spark = [max(0, min(100, sc + j * 2 - 10)) for j in range(12)]
-        su = sym.upper()
         cat_name, cat_sector = _catalog_lookup(sym)
         sector_ui = cat_sector if cat_sector else "general"
         sec_lbl = _fmt_sector_label(sector_ui)
@@ -382,22 +395,28 @@ def _classify_symbol(sym: str) -> str:
 
 def _promotion_stream(symbols: list[dict[str, Any]], promotions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     stream: list[dict[str, Any]] = []
-    now = datetime.now(timezone.utc).timestamp()
+    by_symbol = {str(s.get("sym", "")).upper(): s for s in symbols if isinstance(s, dict)}
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     for p in promotions:
         sym = str(p.get("symbol", "")).upper()
         if not sym:
             continue
+        row = by_symbol.get(sym) or {}
+        promoted_at = _parse_dt(str(p.get("promoted_at") or "") or None)
         stream.append(
             {
                 "sym": sym,
-                "klass": "equity",
+                "klass": row.get("klass") or _classify_symbol(sym),
                 "why": str(p.get("reason", "promoted")),
-                "conviction": 72,
-                "trend": "rising",
-                "promotedAt": int(now * 1000) - 3600_000,
-                "spark": [60, 62, 65, 70, 72],
-                "bookCorr": 0.1,
-                "topFactors": [("volume_z", "3.1"), ("price_z", "2.8"), ("news", "1")],
+                "conviction": int(float(p.get("conviction", row.get("conviction", 72)) or 72)),
+                "trend": row.get("trend") or "rising",
+                "promotedAt": int(promoted_at.timestamp() * 1000) if promoted_at else now_ms,
+                "spark": row.get("spark") or [60, 62, 65, 70, 72],
+                "bookCorr": row.get("bookCorr", 0.1),
+                "topFactors": [
+                    ("conviction", str(p.get("conviction", "")) or "n/a"),
+                    ("score", str(p.get("score", "")) or "n/a"),
+                ],
                 "relatedNews": [],
             }
         )

@@ -891,8 +891,23 @@ async def get_status():
 
     orch = _get_orchestrator()
     system_state = orch.state.value if orch else "off"
-    orch_brokers = orch.status().get("active_brokers", []) if orch else []
+    orch_status = orch.status() if orch else {}
+    orch_brokers = orch_status.get("active_brokers", []) if orch else []
     connected_brokers = orch_brokers if orch_brokers else exec_connected
+    loaded_strategies = list(orch_status.get("loaded_strategies") or []) if orch else []
+
+    if loaded_strategies:
+        strategies = {
+            str(s.get("name", "")).strip(): bool(s.get("enabled", True))
+            for s in loaded_strategies
+            if isinstance(s, dict) and str(s.get("name", "")).strip()
+        }
+        if bus is not None:
+            state_map = await bus.get_state_prefix("strategy.enabled.")
+            for k, v in state_map.items():
+                name = k.replace("strategy.enabled.", "", 1)
+                if name in strategies:
+                    strategies[name] = bool(v)
 
     disabled = sorted(getattr(risk_engine, "disabled_brokers", frozenset())) if risk_engine is not None else []
 
@@ -905,6 +920,7 @@ async def get_status():
         "disabled_brokers": disabled,
         "connected_brokers": connected_brokers or orch_brokers,
         "active_strategies": strategies,
+        "loaded_strategies": loaded_strategies,
         "runtime": runtime,
     }
 

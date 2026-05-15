@@ -36,6 +36,82 @@ def _default_history_fetcher(symbol: str) -> list[float]:
     return [float(x) for x in df["Close"].tolist() if str(x) != "nan"]
 
 
+def _normalised_convictions(scores: dict[str, float]) -> dict[str, float]:
+    if not scores:
+        return {}
+    vals = [float(v) for v in scores.values()]
+    lo = min(vals)
+    hi = max(vals)
+    if hi <= lo:
+        return {str(k).upper(): 50.0 for k in scores}
+    span = hi - lo
+    return {str(k).upper(): ((float(v) - lo) / span) * 100.0 for k, v in scores.items()}
+
+
+def _derive_promotions(
+    tiers: UniverseTiers,
+    *,
+    cfg: dict,
+    cold_scan: list[str],
+    generated_at: datetime,
+) -> list[dict]:
+    """Create honest recent-promotion rows from the scored universe snapshot.
+
+    The tier scorer emits small raw scores, while the operator-facing
+    promotion threshold is on a 0-100 conviction scale. Normalize within the
+    current build, promote only non-core names above threshold, and cap the
+    stream so a daily rebuild cannot flood the UI.
+    """
+    seed = [dict(p) for p in (cfg.get("seed_promotions") or []) if isinstance(p, dict)]
+    rules = dict(cfg.get("promotion") or {})
+    try:
+        threshold = float(rules.get("conviction_threshold", 65))
+    except (TypeError, ValueError):
+        threshold = 65.0
+    try:
+        ttl_min = int(rules.get("promotion_ttl_minutes", 240))
+    except (TypeError, ValueError):
+        ttl_min = 240
+    try:
+        max_items = int(rules.get("max_promotions_per_build", 12))
+    except (TypeError, ValueError):
+        max_items = 12
+    max_items = max(0, min(50, max_items))
+
+    scores = {str(k).upper(): float(v) for k, v in tiers.scores.items()}
+    convictions = _normalised_convictions(scores)
+    core = {str(s).upper() for s in tiers.core}
+    promoted_seen = {str(p.get("symbol", "")).upper() for p in seed}
+    candidates = list(dict.fromkeys([str(s).upper() for s in list(cold_scan) + list(tiers.scan) + list(tiers.light)]))
+    expires_at = datetime.fromtimestamp(
+        generated_at.timestamp() + max(1, ttl_min) * 60,
+        tz=timezone.utc,
+    ).isoformat()
+
+    derived: list[dict] = []
+    for sym in candidates:
+        if not sym or sym in core or sym in promoted_seen:
+            continue
+        conviction = float(convictions.get(sym, 0.0))
+        if conviction < threshold:
+            continue
+        derived.append(
+            {
+                "symbol": sym,
+                "reason": "conviction_score",
+                "tier_hint": "promoted",
+                "score": round(float(scores.get(sym, 0.0)), 6),
+                "conviction": round(conviction, 2),
+                "promoted_at": generated_at.isoformat(),
+                "expires_at": expires_at,
+            }
+        )
+        promoted_seen.add(sym)
+        if len(derived) >= max_items:
+            break
+    return (seed + derived)[:max_items]
+
+
 async def build_universe_intelligence_state(
     tiers: UniverseTiers,
     *,
@@ -97,14 +173,17 @@ async def build_universe_intelligence_state(
     rep_set = {v.upper() for v in reps.values()}
     cold = [s for s in ordered if s.upper() not in rep_set]
 
+    generated_at = datetime.now(timezone.utc)
+    promotions = _derive_promotions(tiers, cfg=cfg, cold_scan=cold, generated_at=generated_at)
+
     return UniverseIntelligenceState(
         candidate_count=max(len(tiers.core) + len(tiers.scan) + len(tiers.light), len(ordered)),
         cold_scan=cold,
         active_eval=list(dict.fromkeys(list(tiers.scan) + list(tiers.core))),
         core=sorted(rep_set),
         clusters=clusters,
-        promotions=list(cfg.get("seed_promotions") or []),
-        last_full_cluster_at=datetime.now(timezone.utc).isoformat(),
+        promotions=promotions,
+        last_full_cluster_at=generated_at.isoformat(),
     )
 
 

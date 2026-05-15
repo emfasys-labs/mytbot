@@ -9,16 +9,34 @@ from typing import Any
 import yaml
 from loguru import logger
 
-_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-EUR", "-GBP", "/USD", "/USDT", "/EUR", "/GBP")
+_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-EUR", "-GBP", "/USD", "/USDT", "/USDC", "/EUR", "/GBP")
+# Retained for reference / fast-path; detection is no longer gated on it.
 _CRYPTO_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "UNI", "LTC"}
 
 
 def is_crypto_symbol(symbol: str) -> bool:
+    """Suffix-based crypto detection (audit #9).
+
+    The old code only returned True if the base was in a hard-coded 12-coin
+    allowlist (``_CRYPTO_BASES``). Every other crypto pair the pipeline
+    surfaced — ATOM-USD, NEAR-USD, API3-USD, BGB-USD, … — fell through to
+    "equity" and was then routed to IBKR as a ``Stock`` contract, producing
+    an Error 200 ("No security definition") and a wasted, doomed order on
+    *every* loop iteration.
+
+    The pipeline's crypto convention is ``BASE-USD`` / ``BASE/USDT`` etc.
+    (forex uses the disjoint ``=X`` form, futures ``=F``). So: any symbol
+    ending in a crypto quote suffix whose base is a plausible alnum ticker
+    is crypto. This cannot collide with US equity dual-class tickers
+    (``BRK-B``, ``BF-B`` — they don't end in a quote suffix) nor with forex
+    (``EURUSD=X`` — no ``-USD`` suffix).
+    """
     s = symbol.upper().strip()
-    if any(s.endswith(suf) for suf in _CRYPTO_SUFFIXES):
-        base = s.split("-")[0].split("/")[0]
-        if base in _CRYPTO_BASES:
-            return True
+    for suf in _CRYPTO_SUFFIXES:
+        if s.endswith(suf):
+            base = s[: -len(suf)].rstrip("-/")
+            if 1 <= len(base) <= 12 and base.isalnum():
+                return True
     return False
 
 
