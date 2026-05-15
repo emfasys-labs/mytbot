@@ -1027,10 +1027,58 @@ class GlobalEdgeCoordinator:
         absolute_cash_target = held_cash_used + gross_target_capital
         displacement_mode = held_cash_used > absolute_cash_target * Decimal("1.05")
 
+        # Re-entry debounce (close→reopen churn fix). The recycle/shed path
+        # culls a dead-edge position; without this the build-up path re-opens
+        # the SAME symbol next iteration → it's flat again → culled again,
+        # bleeding spread+fees every loop on the same ~10 names. A symbol the
+        # recycle/shed path culled within ``symbol_cooldown_sec`` is not
+        # re-opened here. Dynamic, config-driven debounce — NOT a position
+        # cap; uses the same window the recycle/shed/rotation paths use.
+        _rc_cfg = self._cfg.get("capital_recycle") or {}
+        _sh_cfg = self._cfg.get("shed") or {}
+        _rt_cfg = self._cfg.get("rotation") or {}
+        try:
+            _reentry_cd = int(
+                _rc_cfg.get(
+                    "symbol_cooldown_sec",
+                    _sh_cfg.get(
+                        "symbol_cooldown_sec",
+                        _rt_cfg.get("symbol_cooldown_sec", 900),
+                    ),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            _reentry_cd = 900
+        _now_reentry = datetime.now(timezone.utc)
+
+        def _recently_culled(sym: str) -> bool:
+            if replacement_context is None or _reentry_cd <= 0:
+                return False
+            cull_map = getattr(replacement_context, "last_cull_at_by_symbol", None) or {}
+            if not cull_map:
+                return False
+            key = str(sym).strip().upper()
+            last = cull_map.get(key)
+            if last is None:
+                n = key
+                for suf in ("=X", "=F"):
+                    if n.endswith(suf):
+                        n = n[: -len(suf)]
+                if n.endswith("-USD") and len(n) > 4:
+                    n = n[:-4]
+                last = cull_map.get(n)
+            if last is None:
+                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (_now_reentry - last.astimezone(timezone.utc)).total_seconds() < _reentry_cd
+
         # ---- Filter to qualifying opportunities --------------------------
         qualifying: list[tuple[StrategyOpportunity, HeldPositionEdge | None, HeldPositionEdge | None]] = []
         for opp in ranked:
             opp_side = _canonical_position_side(getattr(opp, "side", None))
+            if _recently_culled(opp.symbol):
+                continue
             same_side_held = next(
                 (
                     h

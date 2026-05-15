@@ -2717,8 +2717,24 @@ class TradingLoop:
                         if str(getattr(act, "kind", "") or "") not in {"open_strategy", "trim_symbol"}:
                             continue
                         sym_key = _ctx_sym(str(getattr(act, "symbol", "") or ""))
-                        if sym_key:
-                            repl_ctx.last_event_at_by_symbol[sym_key] = ts
+                        if not sym_key:
+                            continue
+                        repl_ctx.last_event_at_by_symbol[sym_key] = ts
+                        # Record reduce-only CULLs (capital-recycle dead-edge
+                        # close / adaptive-shed) separately so the build-up
+                        # path's re-entry debounce can block re-opening a
+                        # just-culled name without also blocking legitimate
+                        # top-ups of normally-opened positions.
+                        _am = getattr(act, "metadata", None) or {}
+                        _sp = str(_am.get("sizing_path", "") or "").lower()
+                        _strat = str(getattr(act, "strategy_name", "") or "").lower()
+                        is_cull = (
+                            bool(_am.get("capital_recycle_reason"))
+                            or _sp in {"capital_recycle", "adaptive_shed_to_target"}
+                            or _strat in {"capital_recycle", "adaptive_shed"}
+                        )
+                        if is_cull:
+                            repl_ctx.last_cull_at_by_symbol[sym_key] = ts
                 await save_replacement_context_to_bus(bus, repl_ctx)
             except Exception as exc:  # noqa: BLE001
                 self._swallow("save_replacement_context", exc)
