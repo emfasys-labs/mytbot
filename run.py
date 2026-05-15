@@ -35,6 +35,37 @@ def _configure_logging() -> None:
         "<cyan>{name}</cyan> | "
         "<level>{message}</level>"
     ))
+    # B2 — durable in-process file logging. Previously the only sink was
+    # stderr, so when the launching shell/wrapper detached (the exit-255
+    # respawn pattern) the live process's logs were unrecoverable and the
+    # bot could not be audited while running — unacceptable for a money
+    # system. A rotating file sink means the running process ALWAYS writes
+    # an auditable log to logs/mytbot.log regardless of how it was started
+    # or whether its parent died. Rotation + retention bound disk use; the
+    # path is overridable via MYTBOT_LOG_FILE. Failure to open the file
+    # must never prevent the system from starting (stderr still works).
+    try:
+        log_file = os.getenv("MYTBOT_LOG_FILE", "").strip() or str(
+            Path(__file__).resolve().parent / "logs" / "mytbot.log"
+        )
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            log_file,
+            level=level,
+            rotation=os.getenv("MYTBOT_LOG_ROTATION", "50 MB"),
+            retention=os.getenv("MYTBOT_LOG_RETENTION", "14 days"),
+            compression="zip",
+            enqueue=True,          # process-safe, non-blocking under a supervisor
+            backtrace=True,
+            diagnose=False,        # never leak locals/secrets into the file
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
+                "{name}:{function}:{line} | {message}"
+            ),
+        )
+        logger.info("mytbot | file log → {}", log_file)
+    except Exception as exc:  # noqa: BLE001 — logging must never block startup
+        logger.warning("mytbot | file logging unavailable ({}); stderr only", exc)
 
 
 def _port_is_free(port: int) -> bool:
