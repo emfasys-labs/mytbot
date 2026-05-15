@@ -9,6 +9,7 @@ import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 import type { RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
+import { formatStrategyDisplayName } from './strategyLabels';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
@@ -965,28 +966,6 @@ function formatRelativeTime(ms: number): string {
   return `${d}d ago`;
 }
 
-const STRATEGY_TITLE: Record<string, string> = {
-  momentum_breakout: 'Momentum breakout',
-  mean_reversion: 'Mean reversion',
-  volume_flow: 'Volume flow',
-  event_driven_news: 'Event-driven (news)',
-  pairs_trading: 'Pairs trading',
-  volatility_regime: 'Volatility regime',
-  regime_rotation: 'Regime rotation',
-  funding_rate_arbitrage: 'Funding rate arb',
-  cross_exchange_arbitrage: 'Cross-exchange arb',
-  factor_sleeve: 'Factor sleeve',
-  stat_arb_pairs: 'Stat-arb pairs',
-  options_long_call: 'Options long call',
-  options_long_put: 'Options long put',
-  options_protective_put: 'Protective put',
-  options_covered_call: 'Covered call',
-};
-
-function strategyTitle(name: string): string {
-  return STRATEGY_TITLE[name] ?? name.replace(/_/g, ' ');
-}
-
 export function StrategiesScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const rows = live.strategies;
@@ -1045,7 +1024,7 @@ export function StrategiesScreen({ accent, live }: { accent: AccentName; live: L
                       color: TOKENS.ink0, letterSpacing: '-0.02em',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}
-                  >{strategyTitle(s.name)}</span>
+                  >{formatStrategyDisplayName(s.name)}</span>
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     {kind !== 'signal' && <Pill tone="neutral">{kindLabel}</Pill>}
                     {!runtimeLoaded && <Pill tone="neutral">configured</Pill>}
