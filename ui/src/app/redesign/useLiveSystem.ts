@@ -15,6 +15,7 @@ import {
   type ApiNewsResponse,
   type ApiOrderRow,
   type ApiPnlResponse,
+  type ApiRealisedCurveResponse,
   type ApiPositionsResponse,
   type DashboardSnapshot,
   type IntelligenceSignalsResponse,
@@ -83,6 +84,7 @@ try {
 // ~1h of intraday NAV samples at 10s cadence. Keeps the hero equity line
 // responsive while the system is running without blowing up memory.
 const MAX_LIVE_NAV_SAMPLES = 360;
+const MAX_REALISED_TODAY_SAMPLES = 720;
 
 export interface LiveData {
   backendState: BackendSystemState;
@@ -115,6 +117,10 @@ export interface LiveData {
   };
   equity: number[];
   equitySeries: Array<{ date: string; value: number }>;
+  /** Order-derived daily realised P&L (per-UTC-day delta + running total). */
+  realisedSeries: Array<{ date: string; realised: number; cumulative: number }>;
+  /** Intraday samples of today's realised P&L, for the live "Today" view. */
+  realisedTodaySamples: Array<{ t: number; value: number }>;
 
   snapshot: DashboardSnapshot | null;
   conviction: Conviction[];
@@ -206,6 +212,18 @@ export function useLiveSystem(): LiveData {
   // live so the hero equity curve moves in real time instead of showing a
   // single-point flat line from DailyPnL.
   const [liveNavSamples, setLiveNavSamples] = useState<Array<{ t: number; value: number }>>([]);
+  // Order-derived daily realised P&L series (from /pnl/realised-curve).
+  const [realisedSeries, setRealisedSeries] = useState<
+    Array<{ date: string; realised: number; cumulative: number }>
+  >([]);
+  // Rolling intraday buffer of today's realised P&L so the "Today" view of
+  // the graph animates as fills close, instead of being a single point.
+  const [realisedTodaySamples, setRealisedTodaySamples] = useState<
+    Array<{ t: number; value: number }>
+  >([]);
+  // The UTC day the realised-today buffer belongs to; reset the buffer at the
+  // day boundary so "Today" always starts from zero at midnight UTC.
+  const realisedTodayDay = useRef<string>('');
 
   // ────── refs ──────
   const refreshLock = useRef(false);
@@ -302,6 +320,7 @@ export function useLiveSystem(): LiveData {
         api.getRoutingQuality(),
         api.getStrategyCandidateMix(24),
         api.getSystemMode(),
+        api.getRealisedCurve(400),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -314,6 +333,7 @@ export function useLiveSystem(): LiveData {
       const routingRes = res[8].status === 'fulfilled' ? res[8].value : null;
       const mixRes = res[9].status === 'fulfilled' ? res[9].value : null;
       const modeHttpRes = res[10].status === 'fulfilled' ? res[10].value : null;
+      const realisedCurveRes = res[11].status === 'fulfilled' ? res[11].value : null;
       if (modeHttpRes?.mode) {
         const m = String(modeHttpRes.mode).toLowerCase();
         if (m === 'defender' || m === 'trader' || m === 'hunter') {
@@ -454,6 +474,38 @@ export function useLiveSystem(): LiveData {
                 : next;
             });
           }
+        }
+        if (pnlRes) {
+          // Sample today's REALISED P&L into a rolling intraday buffer so the
+          // "Today" view of the graph animates as trades close. Reset at the
+          // UTC day boundary so it always starts from zero at midnight.
+          const todayRealised = toNumber(pnlRes.today?.realised, 0);
+          const utcDay = new Date().toISOString().slice(0, 10);
+          const now = Date.now();
+          setRealisedTodaySamples((prev) => {
+            const dayChanged = realisedTodayDay.current !== utcDay;
+            realisedTodayDay.current = utcDay;
+            const base = dayChanged ? [] : prev;
+            const last = base[base.length - 1];
+            if (last && last.value === todayRealised && now - last.t < 1_000) {
+              return base;
+            }
+            const next = [...base, { t: now, value: todayRealised }];
+            return next.length > MAX_REALISED_TODAY_SAMPLES
+              ? next.slice(next.length - MAX_REALISED_TODAY_SAMPLES)
+              : next;
+          });
+        }
+        if (realisedCurveRes) {
+          const rc = (realisedCurveRes as ApiRealisedCurveResponse).series || [];
+          const rcSeries = rc
+            .map((x) => ({
+              date: String(x.date ?? ''),
+              realised: toNumber(x.realised, 0),
+              cumulative: toNumber(x.cumulative, 0),
+            }))
+            .filter((x) => x.date);
+          setRealisedSeries(rcSeries);
         }
         if (histRes) {
           const series = (histRes.history || [])
@@ -895,6 +947,8 @@ export function useLiveSystem(): LiveData {
     exposure,
     equity: equityValues,
     equitySeries,
+    realisedSeries,
+    realisedTodaySamples,
 
     snapshot,
     conviction,

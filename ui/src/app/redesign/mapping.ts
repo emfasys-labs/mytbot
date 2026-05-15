@@ -590,17 +590,18 @@ export function mapPnlRollups(
 ): {
   d: number; w: number; m: number; y: number;
 } {
-  const wApi = toNumber(pnl?.week?.realised, 0) + toNumber(pnl?.week?.unrealised, 0);
-  const mApi = toNumber(pnl?.month?.realised, 0) + toNumber(pnl?.month?.unrealised, 0);
-  const yApi = toNumber(pnl?.all_time?.realised, 0) + toNumber(pnl?.all_time?.unrealised, 0);
-  const todayApi = toNumber(pnl?.today?.realised, 0) + toNumber(pnl?.today?.unrealised, 0);
+  // Realised-only. The operator explicitly wants the headline/day number and
+  // the rollups to show money actually banked, not mark-to-market on the open
+  // book (unrealised swings every tick and reads as a "loss" while the book is
+  // simply in flight). The backend derives these realised figures from filled
+  // orders including opening/closing fees.
+  const wApi = toNumber(pnl?.week?.realised, 0);
+  const mApi = toNumber(pnl?.month?.realised, 0);
+  const yApi = toNumber(pnl?.all_time?.realised, 0);
+  const todayApi = toNumber(pnl?.today?.realised, 0);
   if (hasPartialBrokerCoverage(pnl)) {
     return { d: todayApi, w: 0, m: 0, y: 0 };
   }
-  // P&L rollups are trading-accounting figures, not pure NAV deltas. The
-  // backend now derives realised values directly from filled orders including
-  // opening/closing fees, so prefer those API rollups; paper NAV history can
-  // stay flat even when fees are being incurred locally.
   if (pnl) {
     return { d: todayApi, w: wApi, m: mApi, y: yApi };
   }

@@ -2109,6 +2109,88 @@ async def get_pnl_history(
     }
 
 
+@app.get("/pnl/realised-curve")
+async def get_pnl_realised_curve(
+    response: Response,
+    days: int = Query(400, ge=1, le=1100),
+    session_factory=Depends(_session_factory),
+):
+    """Daily *realised* P&L series, order-derived (authoritative).
+
+    This is the data source for the dashboard's cumulative-realised graph.
+    It is computed from the SAME order-replay machinery that produces the
+    headline "today realised" number (``_order_realised_pnl_annotations``),
+    so the curve and the big number can never disagree — unlike the
+    ``daily_pnl.realised_pnl`` column, which is a running figure seeded
+    across restarts and is therefore not a clean per-day delta.
+
+    Every row is a per-UTC-day realised delta (closed-trade gross minus
+    fees). The frontend turns this into a cumulative curve and re-bases it
+    to zero at the start of whichever window (Historical / YTD / Month /
+    Week / Today) the operator selects. No broker filter — all brokers
+    that ever traded are included (online/offline is a separate indicator).
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    end_day = datetime.now(timezone.utc).date()
+    start_day = end_day - timedelta(days=days - 1)
+    start_dt = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
+    end_dt = datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        q = await session.execute(
+            select(OrderLog)
+            .where(
+                OrderLog.timestamp >= start_dt,
+                OrderLog.timestamp < end_dt,
+                OrderLog.status.in_(("filled", "partially_filled")),
+            )
+            .order_by(OrderLog.timestamp.desc(), OrderLog.id.desc())
+        )
+        rows = list(q.scalars().all())
+        annotations = await _order_realised_pnl_annotations(session, rows)
+
+    by_day: dict[str, Decimal] = {}
+    trades_by_day: dict[str, int] = {}
+    for r in rows:
+        if r.timestamp is None:
+            continue
+        day_key = r.timestamp.astimezone(timezone.utc).date().isoformat()
+        ann = annotations.get(str(r.id), {})
+        raw = ann.get("trade_pnl_net")
+        if raw is None:
+            continue
+        try:
+            delta = Decimal(str(raw))
+        except Exception:  # noqa: BLE001
+            continue
+        by_day[day_key] = by_day.get(day_key, Decimal("0")) + delta
+        trades_by_day[day_key] = trades_by_day.get(day_key, 0) + 1
+
+    series: list[dict[str, Any]] = []
+    cumulative = Decimal("0")
+    cur = start_day
+    while cur <= end_day:
+        key = cur.isoformat()
+        realised = by_day.get(key, Decimal("0"))
+        cumulative += realised
+        series.append(
+            {
+                "date": key,
+                "realised": _decimal_str(realised),
+                "cumulative": _decimal_str(cumulative),
+                "trades": trades_by_day.get(key, 0),
+            }
+        )
+        cur += timedelta(days=1)
+
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "start": start_day.isoformat(),
+        "end": end_day.isoformat(),
+        "series": series,
+    }
+
+
 def _command_row_dict(r) -> dict[str, Any]:
     return {
         "id": r.id,

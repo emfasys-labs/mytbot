@@ -12,6 +12,98 @@ import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } fr
 import type { BackendSystemState } from '../lib/api';
 import type { LiveData } from './useLiveSystem';
 
+export type PnlWindow = 'today' | 'week' | 'month' | 'ytd' | 'historical';
+const PNL_WINDOWS: PnlWindow[] = ['today', 'week', 'month', 'ytd', 'historical'];
+const PNL_WINDOW_LABEL: Record<PnlWindow, string> = {
+  today: 'Today',
+  week: 'Week',
+  month: 'Month',
+  ytd: 'YTD',
+  historical: 'Historical',
+};
+
+/** UTC "YYYY-MM-DD" for the start of the selected window. */
+function pnlWindowStart(win: PnlWindow): string {
+  const now = new Date();
+  if (win === 'ytd') return `${now.getUTCFullYear()}-01-01`;
+  if (win === 'month') {
+    const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+    return `${now.getUTCFullYear()}-${m}-01`;
+  }
+  if (win === 'week') {
+    // Monday-anchored week in UTC.
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const dow = d.getUTCDay(); // 0=Sun..6=Sat
+    const back = dow === 0 ? 6 : dow - 1;
+    d.setUTCDate(d.getUTCDate() - back);
+    return d.toISOString().slice(0, 10);
+  }
+  return '0000-01-01'; // historical → everything
+}
+
+export type RealisedPoint = { label: string; delta: number; cum: number };
+export type RealisedWindow = { points: RealisedPoint[]; net: number; hasData: boolean };
+
+function trimLeadingFlat(points: RealisedPoint[]): RealisedPoint[] {
+  // Drop leading periods with no activity so the chart fills the width with
+  // the part that actually has data, instead of a long flat zero run.
+  let i = 0;
+  while (i < points.length && points[i].delta === 0 && points[i].cum === 0) i += 1;
+  return points.slice(Math.max(0, i));
+}
+
+function shortDayLabel(iso: string): string {
+  // "2026-05-14" → "5/14"
+  const [, m, d] = iso.split('-');
+  return m && d ? `${Number(m)}/${Number(d)}` : iso;
+}
+
+/**
+ * Per-period realised P&L deltas + a re-based cumulative running total,
+ * trimmed to the part of the window that actually has data.
+ *
+ * Non-"today" windows slice the order-derived daily series (each row is a
+ * per-UTC-day realised delta). "Today" uses the live intraday buffer (samples
+ * of today's realised so far), turned into per-sample deltas so it animates
+ * as positions close.
+ */
+export function buildRealisedWindow(
+  series: Array<{ date: string; realised: number; cumulative: number }>,
+  todaySamples: Array<{ t: number; value: number }>,
+  win: PnlWindow,
+  dToday: number,
+): RealisedWindow {
+  if (win === 'today') {
+    let prev = 0;
+    const raw: RealisedPoint[] = todaySamples.map((s) => {
+      const v = Number.isFinite(s.value) ? s.value : 0;
+      const delta = v - prev;
+      prev = v;
+      const dt = new Date(s.t);
+      const label = `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+      return { label, delta, cum: v };
+    });
+    const pts = trimLeadingFlat(raw);
+    if (pts.length === 0) {
+      const d = Number.isFinite(dToday) ? dToday : 0;
+      return { points: [], net: d, hasData: Math.abs(d) > 1e-9 };
+    }
+    return { points: pts, net: pts[pts.length - 1].cum, hasData: true };
+  }
+
+  const start = pnlWindowStart(win);
+  const sliced = series.filter((r) => r.date >= start);
+  let running = 0;
+  const raw: RealisedPoint[] = sliced.map((r) => {
+    const delta = Number.isFinite(r.realised) ? r.realised : 0;
+    running += delta;
+    return { label: shortDayLabel(r.date), delta, cum: running };
+  });
+  const pts = trimLeadingFlat(raw);
+  const net = pts.length ? pts[pts.length - 1].cum : 0;
+  return { points: pts, net, hasData: pts.some((p) => p.delta !== 0) };
+}
+
 export function DashboardScreen({
   state, accent, density, live,
 }: {
@@ -24,6 +116,7 @@ export function DashboardScreen({
 }) {
   const [newSignal, setNewSignal] = useState<{ sym: string; score: number; t: number } | null>(null);
   const [milestoneFlash, setMilestoneFlash] = useState(false);
+  const [pnlWindow, setPnlWindow] = useState<PnlWindow>('historical');
   const accentColor = ACCENTS[accent].main;
   const accentGlow = ACCENTS[accent].glow;
 
@@ -60,6 +153,21 @@ export function DashboardScreen({
   const gap = density === 'compact' ? 10 : 14;
   const dayChange = Number.isFinite(live.pnlRollups.d) ? live.pnlRollups.d : navValue - live.navOpen;
   const dayPct = live.navOpen > 0 ? (dayChange / live.navOpen) * 100 : 0;
+
+  // Cumulative realised P&L re-based to zero at the start of the selected
+  // window. "Today" uses the live intraday buffer so it animates as fills
+  // close; the other windows slice the order-derived daily series.
+  const realisedWindow = useMemo(
+    () => buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, pnlWindow, live.pnlRollups.d),
+    [live.realisedSeries, live.realisedTodaySamples, pnlWindow, live.pnlRollups.d],
+  );
+  // Mini-stat nets share the same order-derived series as the graph so the
+  // numbers always agree with whatever window is plotted.
+  const realisedNets = useMemo(() => ({
+    week: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'week', live.pnlRollups.d).net,
+    month: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'month', live.pnlRollups.d).net,
+    ytd: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'ytd', live.pnlRollups.d).net,
+  }), [live.realisedSeries, live.realisedTodaySamples, live.pnlRollups.d]);
 
   const topConviction = live.conviction[0];
   const tradable = live.tradableCapital;
@@ -146,9 +254,9 @@ export function DashboardScreen({
               <div style={{ flex: 1 }} />
 
               <div style={{ display: 'flex', gap: 28 }}>
-                <MiniStat label="Week"  value={live.pnlRollups.w} />
-                <MiniStat label="Month" value={live.pnlRollups.m} />
-                <MiniStat label="YTD"   value={live.pnlRollups.y} />
+                <MiniStat label="Week"  value={realisedNets.week} />
+                <MiniStat label="Month" value={realisedNets.month} />
+                <MiniStat label="YTD"   value={realisedNets.ytd} />
               </div>
 
               <div style={{ width: 1, height: 48, background: TOKENS.line }} />
@@ -163,7 +271,47 @@ export function DashboardScreen({
             </div>
 
             <div style={{ marginTop: 18 }}>
-              <EquityCurve values={live.equity.length ? live.equity : [navValue, navValue]} accent={accentColor} width={900} height={48} />
+              <div style={{
+                display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+                marginBottom: 8, flexWrap: 'wrap', gap: 10,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                  <Label accent={TOKENS.ink3}>Realised P&L</Label>
+                  <span style={{
+                    fontFamily: TOKENS.mono, fontSize: 13,
+                    color: realisedWindow.net >= 0 ? TOKENS.profit : TOKENS.loss,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {realisedWindow.net >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(realisedWindow.net).toFixed(2)}
+                  </span>
+                  <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                    {PNL_WINDOW_LABEL[pnlWindow]}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {PNL_WINDOWS.map((w) => {
+                    const activeW = w === pnlWindow;
+                    return (
+                      <button
+                        key={w}
+                        type="button"
+                        onClick={() => setPnlWindow(w)}
+                        style={{
+                          fontFamily: TOKENS.mono, fontSize: 10, letterSpacing: 0.4,
+                          padding: '3px 9px', borderRadius: 5, cursor: 'pointer',
+                          textTransform: 'uppercase',
+                          border: `1px solid ${activeW ? accentColor : TOKENS.line}`,
+                          background: activeW ? `${accentColor}1a` : 'transparent',
+                          color: activeW ? accentColor : TOKENS.ink3,
+                        }}
+                      >
+                        {PNL_WINDOW_LABEL[w]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <RealisedChart window={realisedWindow} accent={accentColor} width={900} height={64} />
             </div>
 
             {tradable != null && (
@@ -574,6 +722,106 @@ export function EquityCurve({
         <animate attributeName="opacity" from="1" to="0" dur="1.8s" repeatCount="indefinite" />
       </circle>
       <circle cx={last[0]} cy={last[1]} r="2.5" fill={accent} />
+    </svg>
+  );
+}
+
+/**
+ * Realised-P&L combo chart: per-period green/red bars (money made/lost each
+ * period) with the cumulative running total overlaid as a line + area. Bars
+ * and line use independent vertical scales (a single day's swing is tiny next
+ * to the running total) but share one zero baseline so direction reads
+ * instantly. Empty windows render a quiet "nothing banked yet" state rather
+ * than a misleading flat line.
+ */
+export function RealisedChart({
+  window, accent, width = 900, height = 64,
+}: { window: RealisedWindow; accent: string; width?: number; height?: number }) {
+  const pts = window.points;
+  const padX = 10;
+  const padY = 8;
+  const plotW = Math.max(1, width - padX * 2);
+  const plotH = Math.max(1, height - padY * 2);
+
+  if (pts.length === 0) {
+    const midY = padY + plotH / 2;
+    return (
+      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        <line x1={padX} y1={midY} x2={width - padX} y2={midY} stroke={TOKENS.line} strokeWidth="1" strokeDasharray="3 4" vectorEffect="non-scaling-stroke" />
+        <text x={width / 2} y={midY - 8} textAnchor="middle" fontFamily={TOKENS.mono} fontSize="11" fill={TOKENS.ink3}>
+          No realised P&amp;L in this window yet
+        </text>
+      </svg>
+    );
+  }
+
+  const n = pts.length;
+  const xAt = (i: number) => (n === 1 ? padX + plotW / 2 : padX + (i / (n - 1)) * plotW);
+
+  // Cumulative scale (line/area) — always include 0 so the zero baseline is real.
+  const cums = pts.map((p) => p.cum);
+  const cumMin = Math.min(0, ...cums);
+  const cumMax = Math.max(0, ...cums);
+  const cumRng = cumMax - cumMin || 1;
+  const yCum = (v: number) => padY + plotH - ((v - cumMin) / cumRng) * plotH;
+  const zeroY = yCum(0);
+
+  // Bar scale (per-period delta) — symmetric around zero, capped to ~42% of
+  // plot height so a big day never dwarfs the cumulative line.
+  const maxAbsDelta = Math.max(1e-9, ...pts.map((p) => Math.abs(p.delta)));
+  const barMaxPx = plotH * 0.42;
+  const barH = (d: number) => (Math.abs(d) / maxAbsDelta) * barMaxPx;
+  const barW = Math.max(1.5, (plotW / n) * 0.55);
+
+  const linePts = pts.map((p, i) => [xAt(i), yCum(p.cum)] as const);
+  const linePath = linePts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0]},${p[1]}`).join(' ');
+  const first = linePts[0];
+  const last = linePts[linePts.length - 1];
+  const areaPath = `${linePath} L${last[0]},${zeroY} L${first[0]},${zeroY} Z`;
+  const up = window.net >= 0;
+  const lineColor = up ? accent : TOKENS.loss;
+
+  return (
+    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="ds-rp-area" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={lineColor} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+
+      {/* per-period bars */}
+      {pts.map((p, i) => {
+        if (p.delta === 0) return null;
+        const x = xAt(i) - barW / 2;
+        const h = barH(p.delta);
+        const pos = p.delta >= 0;
+        const y = pos ? zeroY - h : zeroY;
+        return (
+          <rect
+            key={i}
+            x={x}
+            y={y}
+            width={barW}
+            height={Math.max(0.5, h)}
+            rx={0.6}
+            fill={pos ? TOKENS.profit : TOKENS.loss}
+            opacity={0.45}
+          />
+        );
+      })}
+
+      {/* zero baseline */}
+      <line x1={padX} y1={zeroY} x2={width - padX} y2={zeroY} stroke={TOKENS.line} strokeWidth="1" vectorEffect="non-scaling-stroke" />
+
+      {/* cumulative area + line */}
+      <path d={areaPath} fill="url(#ds-rp-area)" />
+      <path d={linePath} stroke={lineColor} strokeWidth="1.6" fill="none" opacity="0.95" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={last[0]} cy={last[1]} r="3" fill={lineColor}>
+        <animate attributeName="r" from="3" to="7" dur="1.8s" repeatCount="indefinite" />
+        <animate attributeName="opacity" from="1" to="0" dur="1.8s" repeatCount="indefinite" />
+      </circle>
+      <circle cx={last[0]} cy={last[1]} r="2.5" fill={lineColor} />
     </svg>
   );
 }

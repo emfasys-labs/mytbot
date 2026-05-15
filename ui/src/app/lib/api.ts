@@ -265,7 +265,27 @@ export type ApiPnlResponse = {
 export type ApiPnlHistoryResponse = {
   history?: Array<{
     date: string;
+    realised?: string;
+    unrealised?: string;
+    fees?: string;
+    trades?: number;
     portfolio_value?: string;
+  }>;
+};
+
+/** Order-derived daily realised P&L series — source for the cumulative-realised graph. */
+export type ApiRealisedCurveResponse = {
+  as_of?: string;
+  start?: string;
+  end?: string;
+  series?: Array<{
+    /** UTC day, "YYYY-MM-DD". */
+    date: string;
+    /** Realised P&L booked that day (closed-trade gross minus fees). */
+    realised?: string;
+    /** Running total across the full returned window. */
+    cumulative?: string;
+    trades?: number;
   }>;
 };
 
@@ -748,6 +768,8 @@ export const api = {
   init: resolveApiBase,
   getPnl: () => getJson<ApiPnlResponse>('/pnl'),
   getPnlHistory: (limit = 90) => getJson<ApiPnlHistoryResponse>(`/pnl/history?limit=${limit}`),
+  getRealisedCurve: (days = 400) =>
+    getJson<ApiRealisedCurveResponse>(`/pnl/realised-curve?days=${days}`),
   getPositions: (limit = POSITIONS_POLL_LIMIT) =>
     getJson<ApiPositionsResponse>(`/positions?limit=${limit}`),
   getSignals: (limit = 20) => getJson<ApiSignalsResponse>(`/signals?limit=${limit}`),
