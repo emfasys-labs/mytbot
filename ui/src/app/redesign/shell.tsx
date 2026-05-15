@@ -23,6 +23,19 @@ import {
 } from './tokens';
 import type { TradingMode } from '../lib/api';
 
+const MODE_LABEL: Record<TradingMode, string> = {
+  defender: 'defender',
+  trader: 'trader',
+  hunter: 'hunter',
+};
+
+/** Accent per classifier output (read-only indicator). */
+function modeAccent(mode: TradingMode, fallback: string): string {
+  if (mode === 'hunter') return fallback;
+  if (mode === 'defender') return TOKENS.danger;
+  return TOKENS.ink2;
+}
+
 interface NavItem {
   id: Route;
   label: string;
@@ -118,7 +131,7 @@ export function Sidebar({
 
 export function TopBar({
   state, accent, onArm, onPower, armed, currentTitle, onOpenCmd, onOpenTweaks,
-  loopIteration, path, wsConnected, mode, onSetMode,
+  loopIteration, path, wsConnected, mode,
 }: {
   state: SystemState;
   accent: string;
@@ -132,9 +145,8 @@ export function TopBar({
   path: string;
   wsConnected: boolean;
   mode: TradingMode;
-  onSetMode: (m: TradingMode) => void;
 }) {
-  const modeInteractive = state === 'running';
+  const modeColor = modeAccent(mode, accent);
   return (
     <div style={{
       height: 48, flexShrink: 0, display: 'flex', alignItems: 'center',
@@ -181,46 +193,24 @@ export function TopBar({
         </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-        {/* Mode is auto-derived from market state (drawdown, vol, signal
-            density, news emergencies). The pills are indicators — never
-            clickable. Hunter is the bias; the system only steps down on
-            objective adverse evidence. See system/adaptive_mode.py. */}
-        <div
-          title="Mode is auto-derived from market state — not operator-settable"
+        <span
+          title="Market state classifier (defender / trader / hunter) — updates automatically"
           style={{
-            display: 'flex', alignItems: 'center', gap: 4, padding: 2,
-            borderRadius: 8, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1,
+            padding: '4px 10px',
+            borderRadius: 8,
+            border: `1px solid ${modeColor}55`,
+            background: `${modeColor}18`,
+            color: modeColor,
+            fontFamily: TOKENS.mono,
+            fontSize: 10,
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            cursor: 'default',
+            userSelect: 'none',
           }}
         >
-          {(['defender', 'trader', 'hunter'] as const).map((m) => {
-            const active = mode === m;
-            return (
-              <span
-                key={m}
-                style={{
-                  padding: '4px 8px',
-                  borderRadius: 6,
-                  border: `1px solid ${active ? `${accent}55` : TOKENS.line}`,
-                  background: active ? `${accent}18` : 'transparent',
-                  color: active ? accent : TOKENS.ink3,
-                  fontFamily: TOKENS.mono,
-                  fontSize: 10,
-                  letterSpacing: '0.04em',
-                  textTransform: 'uppercase',
-                  cursor: 'default',
-                  userSelect: 'none',
-                }}
-                title={
-                  active
-                    ? `Current market state classifier output: ${m}`
-                    : `Inactive — classifier picks ${m} only on specific market conditions`
-                }
-              >
-                {m}
-              </span>
-            );
-          })}
-        </div>
+          {MODE_LABEL[mode]}
+        </span>
         <button
           onClick={onOpenCmd}
           style={{
@@ -383,10 +373,9 @@ interface CmdItem {
   id: string;
   label: string;
   hint: string;
-  kind: 'nav' | 'action' | 'mode';
+  kind: 'nav' | 'action';
   route?: Route;
   action?: 'start' | 'stop';
-  mode?: TradingMode;
 }
 
 const CMD_ITEMS: CmdItem[] = [
@@ -399,24 +388,17 @@ const CMD_ITEMS: CmdItem[] = [
   { id: 'log',         label: 'Go to Trade log',  hint: 'events',         kind: 'nav',    route: 'log' },
   { id: 'start',       label: 'Start system',     hint: 'api /system/start', kind: 'action', action: 'start' },
   { id: 'stop',        label: 'Stop system',      hint: 'api /system/stop',  kind: 'action', action: 'stop' },
-  { id: 'mode-trader',   label: 'Mode · trader',   hint: 'normal trading', kind: 'mode', mode: 'trader' },
-  { id: 'mode-defender', label: 'Mode · defender', hint: 'defensive',      kind: 'mode', mode: 'defender' },
-  { id: 'mode-hunter',   label: 'Mode · hunter',   hint: 'aggressive',     kind: 'mode', mode: 'hunter' },
 ];
 
 export function CmdPalette({
-  open, onClose, onNav, onStart, onStop, onSetMode, universeNavEnabled = true,
-  modeSwitchEnabled = true,
+  open, onClose, onNav, onStart, onStop, universeNavEnabled = true,
 }: {
   open: boolean;
   onClose: () => void;
   onNav: (r: Route) => void;
   onStart: () => void;
   onStop: () => void;
-  onSetMode: (m: TradingMode) => void;
   universeNavEnabled?: boolean;
-  /** When false, mode palette rows are disabled (system not running). */
-  modeSwitchEnabled?: boolean;
 }) {
   const [q, setQ] = useState('');
   useEffect(() => { if (!open) setQ(''); }, [open]);
@@ -431,11 +413,9 @@ export function CmdPalette({
 
   const execute = (it: CmdItem) => {
     if (it.kind === 'nav' && it.route === 'universe' && !universeNavEnabled) return;
-    if (it.kind === 'mode' && it.mode && !modeSwitchEnabled) return;
     if (it.kind === 'nav' && it.route) onNav(it.route);
     if (it.kind === 'action' && it.action === 'start') onStart();
     if (it.kind === 'action' && it.action === 'stop') onStop();
-    if (it.kind === 'mode' && it.mode) onSetMode(it.mode);
     onClose();
   };
 
@@ -474,17 +454,12 @@ export function CmdPalette({
             <div style={{ padding: 14, color: TOKENS.ink3, fontSize: 12 }}>No matches</div>
           ) : filtered.map((it) => {
             const uniLock = it.id === 'universe' && !universeNavEnabled;
-            const modeLock = it.kind === 'mode' && !modeSwitchEnabled;
-            const rowLock = uniLock || modeLock;
+            const rowLock = uniLock;
             return (
             <button
               key={it.id}
               type="button"
-              title={
-                uniLock ? 'Start the system to open Universe'
-                  : modeLock ? 'Start the system to change trading mode'
-                    : undefined
-              }
+              title={uniLock ? 'Start the system to open Universe' : undefined}
               disabled={rowLock}
               onClick={() => execute(it)}
               style={{
@@ -511,7 +486,7 @@ export function CmdPalette({
                 {it.label}
               </span>
               <span style={{ color: TOKENS.ink3, fontSize: 11 }}>
-                {uniLock || modeLock ? 'start system' : it.hint}
+                {uniLock ? 'start system' : it.hint}
               </span>
             </button>
           );})}

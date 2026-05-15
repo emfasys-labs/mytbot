@@ -224,7 +224,6 @@ export default function App() {
           path={live.path}
           wsConnected={live.wsConnected}
           mode={live.mode}
-          onSetMode={(m) => void live.setMode(m)}
         />
         <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: TOKENS.bg0, position: 'relative' }}>
           {effectiveRoute === 'dash' && (
@@ -269,9 +268,7 @@ export default function App() {
         onNav={setRoute}
         onStart={() => void live.start()}
         onStop={() => void live.stop()}
-        onSetMode={(m) => void live.setMode(m)}
         universeNavEnabled={universeNavEnabled}
-        modeSwitchEnabled={state === 'running'}
       />
       <TweaksPanel open={tweaksOpen} onClose={() => setTweaksOpen(false)} tweaks={tweaks} setTweaks={setTweaks} />
     </div>

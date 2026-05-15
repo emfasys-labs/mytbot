@@ -149,7 +149,6 @@ export interface LiveData {
 
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  setMode: (m: TradingMode) => Promise<void>;
   setCapitalPct: (p: number) => Promise<void>;
   refresh: () => void;
 }
@@ -685,12 +684,6 @@ export function useLiveSystem(): LiveData {
     }
   }, [clearLive, commitBackendState]);
 
-  const setMode = useCallback(async (m: TradingMode) => {
-    if (stateRef.current !== 'running') return;
-    setModeState(m);
-    try { await api.setSystemMode(m); } catch { /* ignore */ }
-  }, []);
-
   // Capital-ceiling writer. Optimistically updates local state so the slider
   // stays in sync with the cursor, then reconciles with whatever the backend
   // confirms (it may clamp, or the server-side policy may reject outright).
@@ -975,7 +968,6 @@ export function useLiveSystem(): LiveData {
 
     start,
     stop,
-    setMode,
     setCapitalPct,
     refresh: () => { void refresh(); },
   };
