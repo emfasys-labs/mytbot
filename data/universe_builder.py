@@ -31,6 +31,10 @@ def _to_yf_symbol(symbol: str, broker: str) -> str | None:
             if base == "XBT":
                 base = "BTC"
             return f"{base}-USD"
+    if b == "ibkr" and "." in s:
+        parts = [p.strip().upper() for p in s.split(".") if p.strip()]
+        if len(parts) == 2 and all(len(p) == 3 and p.isalpha() for p in parts):
+            return f"{parts[0]}{parts[1]}=X"
     if "." in s:
         return None
     if "_" in s:
@@ -113,7 +117,7 @@ class UniverseBuilder:
         if not symbols:
             universe = UniverseManager()
             for inst in universe.get_all():
-                sym = _to_yf_symbol(inst.symbol, inst.broker)
+                sym = _to_yf_symbol(inst.broker_symbol or inst.symbol, inst.broker)
                 if sym and sym not in seen:
                     seen.add(sym)
                     symbols.append(sym)
@@ -130,11 +134,11 @@ class UniverseBuilder:
 
     async def build_tiered_universe(self, broker_manager: Any | None) -> UniverseTiers:
         """Collect broker symbols, score with yfinance, assign core / scan / light tiers."""
-        candidates = await self._collect_candidates(broker_manager)
+        by_broker = await self._collect_candidates_by_broker(broker_manager)
+        candidates = list(dict.fromkeys([s for rows in by_broker.values() for s in rows]))
         max_cand = max(50, int(self.ranking_cfg.get("max_candidates_to_score", 450)))
         if len(candidates) > max_cand:
-            rng = random.Random(int(self.ranking_cfg.get("sample_seed", 42)))
-            candidates = rng.sample(candidates, max_cand)
+            candidates = self._stratified_sample_candidates(by_broker, max_cand=max_cand)
 
         core_max = max(1, int(self.ranking_cfg.get("core_max", 50)))
         scan_max = max(0, int(self.ranking_cfg.get("scan_max", 250)))
@@ -190,34 +194,95 @@ class UniverseBuilder:
         return tiers
 
     async def _collect_candidates(self, broker_manager: Any | None) -> list[str]:
+        by_broker = await self._collect_candidates_by_broker(broker_manager)
+        return list(dict.fromkeys([s for rows in by_broker.values() for s in rows]))
+
+    async def _collect_candidates_by_broker(self, broker_manager: Any | None) -> dict[str, list[str]]:
         symbols: list[str] = []
         seen: set[str] = set()
+        by_broker: dict[str, list[str]] = {}
 
         if broker_manager is not None:
             tasks = []
             for name, adapter in broker_manager.adapters.items():
-                tasks.append(self._fetch_for_broker(name, adapter))
+                tasks.append((name, self._fetch_for_broker(name, adapter)))
             if tasks:
-                rows = await asyncio.gather(*tasks, return_exceptions=True)
-                for row in rows:
+                rows = await asyncio.gather(*[t for _, t in tasks], return_exceptions=True)
+                for (name, _), row in zip(tasks, rows):
                     if isinstance(row, Exception):
                         continue
+                    broker_rows: list[str] = []
                     for sym in row:
                         u = sym.strip().upper()
                         if u not in seen:
                             seen.add(u)
                             symbols.append(u)
+                            broker_rows.append(u)
+                    by_broker[name] = broker_rows
 
         if not symbols:
             universe = UniverseManager()
             for inst in universe.get_all():
-                sym = _to_yf_symbol(inst.symbol, inst.broker)
+                sym = _to_yf_symbol(inst.broker_symbol or inst.symbol, inst.broker)
                 if sym:
                     u = sym.strip().upper()
                     if u not in seen:
                         seen.add(u)
                         symbols.append(u)
-        return symbols
+                        by_broker.setdefault(inst.broker, []).append(u)
+        return by_broker
+
+    def _stratified_sample_candidates(self, by_broker: dict[str, list[str]], *, max_cand: int) -> list[str]:
+        """Deterministic broker-balanced sample with curated anchors pinned first."""
+        rng = random.Random(int(self.ranking_cfg.get("sample_seed", 42)))
+        anchor_syms: list[str] = []
+        for inst in UniverseManager.INITIAL_UNIVERSE:
+            sym = _to_yf_symbol(inst.broker_symbol or inst.symbol, inst.broker)
+            if sym:
+                anchor_syms.append(sym.strip().upper())
+        out = list(dict.fromkeys(anchor_syms))[:max_cand]
+        remaining_slots = max(0, max_cand - len(out))
+        if remaining_slots <= 0:
+            return out[:max_cand]
+
+        pools = {
+            broker: [s for s in list(dict.fromkeys(rows)) if s not in set(out)]
+            for broker, rows in by_broker.items()
+            if rows
+        }
+        total = sum(len(v) for v in pools.values())
+        if total <= 0:
+            return out[:max_cand]
+
+        selected: list[str] = []
+        brokers = sorted(pools)
+        min_per_broker = min(25, max(1, remaining_slots // max(1, len(brokers) * 2)))
+        for broker in brokers:
+            pool = pools[broker]
+            take = min(len(pool), min_per_broker, remaining_slots - len(selected))
+            if take <= 0:
+                break
+            selected.extend(rng.sample(pool, take) if len(pool) > take else pool)
+
+        remaining_slots = max(0, max_cand - len(out) - len(selected))
+        if remaining_slots > 0:
+            weighted: list[str] = []
+            already = set(out + selected)
+            for broker in brokers:
+                pool = [s for s in pools[broker] if s not in already]
+                if not pool:
+                    continue
+                share = max(1, round(remaining_slots * (len(pool) / total)))
+                take = min(len(pool), share)
+                weighted.extend(rng.sample(pool, take) if len(pool) > take else pool)
+                already.update(weighted)
+            if len(weighted) < remaining_slots:
+                tail = [s for rows in pools.values() for s in rows if s not in already]
+                take = min(len(tail), remaining_slots - len(weighted))
+                weighted.extend(rng.sample(tail, take) if len(tail) > take else tail)
+            selected.extend(weighted[:remaining_slots])
+
+        return list(dict.fromkeys(out + selected))[:max_cand]
 
     async def _fetch_for_broker(self, name: str, adapter: Any) -> list[str]:
         try:

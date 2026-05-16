@@ -1,0 +1,374 @@
+# Curated IBKR execution/discovery seed.
+#
+# Alpaca remains the broad US equity/ETF discovery catalog. This file is the
+# explicit IBKR priority set used for IBKR coverage reporting and contract
+# qualification. A symbol appearing here is not treated as orderable until IBKR
+# contract qualification succeeds.
+version: 1
+instruments:
+  - symbol: SPY
+    name: S&P 500 ETF
+    asset_class: etf
+    broker_symbol: SPY
+    sector: broad_market
+    region: US
+  - symbol: QQQ
+    name: Nasdaq 100 ETF
+    asset_class: etf
+    broker_symbol: QQQ
+    sector: technology
+    region: US
+  - symbol: IWM
+    name: Russell 2000 ETF
+    asset_class: etf
+    broker_symbol: IWM
+    sector: small_cap
+    region: US
+  - symbol: DIA
+    name: Dow Jones Industrial Average ETF
+    asset_class: etf
+    broker_symbol: DIA
+    sector: broad_market
+    region: US
+  - symbol: VTI
+    name: Total US Market ETF
+    asset_class: etf
+    broker_symbol: VTI
+    sector: broad_market
+    region: US
+  - symbol: ACWI
+    name: MSCI ACWI ETF
+    asset_class: etf
+    broker_symbol: ACWI
+    sector: global_market
+    region: Global
+  - symbol: EFA
+    name: MSCI EAFE ETF
+    asset_class: etf
+    broker_symbol: EFA
+    sector: developed_ex_us
+    region: Global
+  - symbol: AGG
+    name: US Aggregate Bond ETF
+    asset_class: etf
+    broker_symbol: AGG
+    sector: bonds
+    region: US
+  - symbol: BND
+    name: Vanguard Total Bond Market ETF
+    asset_class: etf
+    broker_symbol: BND
+    sector: bonds
+    region: US
+  - symbol: TLT
+    name: 20yr Treasury ETF
+    asset_class: etf
+    broker_symbol: TLT
+    sector: bonds
+    region: US
+  - symbol: IEF
+    name: 10yr Treasury ETF
+    asset_class: etf
+    broker_symbol: IEF
+    sector: bonds
+    region: US
+  - symbol: HYG
+    name: High Yield Bond ETF
+    asset_class: etf
+    broker_symbol: HYG
+    sector: bonds
+    region: US
+  - symbol: TIPS
+    name: Inflation-Protected ETF
+    asset_class: etf
+    broker_symbol: TIPS
+    sector: bonds
+    region: US
+  - symbol: GLD
+    name: Gold ETF
+    asset_class: etf
+    broker_symbol: GLD
+    sector: commodities
+    region: Global
+  - symbol: SLV
+    name: Silver ETF
+    asset_class: etf
+    broker_symbol: SLV
+    sector: commodities
+    region: Global
+  - symbol: USO
+    name: Oil ETF
+    asset_class: etf
+    broker_symbol: USO
+    sector: commodities
+    region: Global
+  - symbol: UNG
+    name: Natural Gas ETF
+    asset_class: etf
+    broker_symbol: UNG
+    sector: commodities
+    region: Global
+  - symbol: CORN
+    name: Corn ETF
+    asset_class: etf
+    broker_symbol: CORN
+    sector: commodities
+    region: Global
+  - symbol: WEAT
+    name: Wheat ETF
+    asset_class: etf
+    broker_symbol: WEAT
+    sector: commodities
+    region: Global
+  - symbol: COPX
+    name: Copper Miners ETF
+    asset_class: etf
+    broker_symbol: COPX
+    sector: commodities
+    region: Global
+  - symbol: XLE
+    name: Energy Sector ETF
+    asset_class: etf
+    broker_symbol: XLE
+    sector: energy
+    region: US
+  - symbol: XLF
+    name: Financial Sector ETF
+    asset_class: etf
+    broker_symbol: XLF
+    sector: financials
+    region: US
+  - symbol: XLK
+    name: Technology Sector ETF
+    asset_class: etf
+    broker_symbol: XLK
+    sector: technology
+    region: US
+  - symbol: XLV
+    name: Healthcare Sector ETF
+    asset_class: etf
+    broker_symbol: XLV
+    sector: healthcare
+    region: US
+  - symbol: XLI
+    name: Industrial Sector ETF
+    asset_class: etf
+    broker_symbol: XLI
+    sector: industrials
+    region: US
+  - symbol: XLY
+    name: Consumer Discretionary ETF
+    asset_class: etf
+    broker_symbol: XLY
+    sector: consumer
+    region: US
+  - symbol: XLP
+    name: Consumer Staples ETF
+    asset_class: etf
+    broker_symbol: XLP
+    sector: staples
+    region: US
+  - symbol: XLU
+    name: Utilities Sector ETF
+    asset_class: etf
+    broker_symbol: XLU
+    sector: utilities
+    region: US
+  - symbol: XLB
+    name: Materials Sector ETF
+    asset_class: etf
+    broker_symbol: XLB
+    sector: materials
+    region: US
+  - symbol: XLRE
+    name: Real Estate Sector ETF
+    asset_class: etf
+    broker_symbol: XLRE
+    sector: real_estate
+    region: US
+  - symbol: XLC
+    name: Communications Sector ETF
+    asset_class: etf
+    broker_symbol: XLC
+    sector: comms
+    region: US
+  - symbol: EEM
+    name: Emerging Markets ETF
+    asset_class: etf
+    broker_symbol: EEM
+    sector: em
+    region: Global
+  - symbol: FXI
+    name: China Large Cap ETF
+    asset_class: etf
+    broker_symbol: FXI
+    sector: china
+    region: Asia
+  - symbol: EWJ
+    name: Japan ETF
+    asset_class: etf
+    broker_symbol: EWJ
+    sector: japan
+    region: Asia
+  - symbol: EWG
+    name: Germany ETF
+    asset_class: etf
+    broker_symbol: EWG
+    sector: europe
+    region: EU
+  - symbol: EWU
+    name: UK ETF
+    asset_class: etf
+    broker_symbol: EWU
+    sector: uk
+    region: EU
+  - symbol: VWO
+    name: Vanguard Emerging Markets ETF
+    asset_class: etf
+    broker_symbol: VWO
+    sector: em
+    region: Global
+  - symbol: GDX
+    name: Gold Miners ETF
+    asset_class: etf
+    broker_symbol: GDX
+    sector: mining
+    region: Global
+  - symbol: SMH
+    name: Semiconductor ETF
+    asset_class: etf
+    broker_symbol: SMH
+    sector: semiconductors
+    region: US
+  - symbol: AAPL
+    name: Apple
+    asset_class: equity
+    broker_symbol: AAPL
+    sector: technology
+    region: US
+  - symbol: MSFT
+    name: Microsoft
+    asset_class: equity
+    broker_symbol: MSFT
+    sector: technology
+    region: US
+  - symbol: NVDA
+    name: Nvidia
+    asset_class: equity
+    broker_symbol: NVDA
+    sector: semiconductors
+    region: US
+  - symbol: TSLA
+    name: Tesla
+    asset_class: equity
+    broker_symbol: TSLA
+    sector: ev
+    region: US
+  - symbol: JPM
+    name: JPMorgan Chase
+    asset_class: equity
+    broker_symbol: JPM
+    sector: financials
+    region: US
+  - symbol: XOM
+    name: Exxon Mobil
+    asset_class: equity
+    broker_symbol: XOM
+    sector: energy
+    region: US
+  - symbol: CVX
+    name: Chevron
+    asset_class: equity
+    broker_symbol: CVX
+    sector: energy
+    region: US
+  - symbol: UAL
+    name: United Airlines
+    asset_class: equity
+    broker_symbol: UAL
+    sector: airlines
+    region: US
+  - symbol: DAL
+    name: Delta Airlines
+    asset_class: equity
+    broker_symbol: DAL
+    sector: airlines
+    region: US
+  - symbol: LMT
+    name: Lockheed Martin
+    asset_class: equity
+    broker_symbol: LMT
+    sector: defence
+    region: US
+  - symbol: RTX
+    name: RTX
+    asset_class: equity
+    broker_symbol: RTX
+    sector: defence
+    region: US
+  - symbol: COIN
+    name: Coinbase
+    asset_class: equity
+    broker_symbol: COIN
+    sector: crypto
+    region: US
+  - symbol: MSTR
+    name: MicroStrategy
+    asset_class: equity
+    broker_symbol: MSTR
+    sector: crypto
+    region: US
+  - symbol: MARA
+    name: Marathon Digital
+    asset_class: equity
+    broker_symbol: MARA
+    sector: crypto
+    region: US
+  - symbol: EUR_USD
+    name: Euro/Dollar
+    asset_class: forex
+    broker_symbol: EUR.USD
+    sector: major
+    region: Global
+  - symbol: GBP_USD
+    name: Pound/Dollar
+    asset_class: forex
+    broker_symbol: GBP.USD
+    sector: major
+    region: Global
+  - symbol: USD_JPY
+    name: Dollar/Yen
+    asset_class: forex
+    broker_symbol: USD.JPY
+    sector: major
+    region: Global
+  - symbol: AUD_USD
+    name: Aussie/Dollar
+    asset_class: forex
+    broker_symbol: AUD.USD
+    sector: commodity_fx
+    region: Global
+  - symbol: USD_CAD
+    name: Dollar/Canadian
+    asset_class: forex
+    broker_symbol: USD.CAD
+    sector: commodity_fx
+    region: Global
+  - symbol: USD_NOK
+    name: Dollar/Krone
+    asset_class: forex
+    broker_symbol: USD.NOK
+    sector: commodity_fx
+    region: Global
+  - symbol: USD_CHF
+    name: Dollar/Swiss Franc
+    asset_class: forex
+    broker_symbol: USD.CHF
+    sector: major
+    region: Global
+  - symbol: EUR_GBP
+    name: Euro/Pound
+    asset_class: forex
+    broker_symbol: EUR.GBP
+    sector: major_cross
+    region: Global

@@ -124,6 +124,7 @@ def test_snapshot_enabled_missing_artifact_reports_fallback(monkeypatch, tmp_pat
     assert payload["fallback"]
     assert payload["build"]["state"] == "missing"
     assert payload["clusters"] == []
+    assert "coverage" in payload
 
 
 def test_catalog_lookup_resolves_aliases(monkeypatch):
@@ -133,6 +134,7 @@ def test_catalog_lookup_resolves_aliases(monkeypatch):
     assert _catalog_lookup("SPY") == ("S&P 500 ETF", "broad_market")
     assert _catalog_lookup("BTC-USD")[0] == "Bitcoin"
     assert _catalog_lookup("EUR.USD")[0] == "Euro/Dollar"
+    assert _catalog_lookup("EURUSD=X")[0] == "Euro/Dollar"
     unknown = _catalog_lookup("ZZZNOTREAL")
     assert unknown == (None, None)
     catalog_syms = {inst.symbol.upper() for inst in UniverseManager.INITIAL_UNIVERSE}
@@ -142,6 +144,32 @@ def test_catalog_lookup_resolves_aliases(monkeypatch):
         row = overlap[0]
         assert row.get("name")
         assert row["sym"] in catalog_syms
+
+
+def test_snapshot_reports_active_count_from_representatives(monkeypatch, tmp_path):
+    import universe.snapshot_service as ss
+    from universe.persistence import save_intelligence_state
+
+    monkeypatch.setattr(ss, "load_universe_selection_config", lambda path=None: {"enabled": True, "rebuild": {"interval_sec": 60}})
+    state = UniverseIntelligenceState(
+        candidate_count=4,
+        active_eval=["AAA", "BBB", "CCC"],
+        core=["AAA", "BBB"],
+        promotions=[{"symbol": "CCC", "reason": "conviction_score"}],
+        last_full_cluster_at="2026-05-12T18:00:00+00:00",
+    )
+    p = tmp_path / "intel.json"
+    save_intelligence_state(state, p)
+
+    payload = build_universe_snapshot_dict(
+        broker_symbol_totals={"ibkr": 2},
+        broker_symbols={"ibkr": ["SPY", "QQQ"]},
+        intelligence_path=p,
+    )
+    by_stage = {row["stage"]: row["count"] for row in payload["funnel"]}
+    assert by_stage["active"] == 2
+    assert by_stage["promoted"] == 1
+    assert payload["coverage"]["by_broker"]["ibkr"]["source"] == "curated_seed"
 
 
 def test_load_config():

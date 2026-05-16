@@ -1461,22 +1461,27 @@ async def get_intelligence_universe(response: Response):
     orch = _get_orchestrator()
     bm = getattr(orch, "_broker_manager", None) if orch else None
     broker_total: dict[str, int] = {}
+    broker_symbols: dict[str, list[str]] = {}
     if bm is not None and bm.adapters:
         names = list(bm.adapters.keys())
 
-        async def _count(name: str) -> int:
+        async def _symbols(name: str) -> tuple[str, list[str]]:
             try:
                 syms = await asyncio.wait_for(
                     bm.adapters[name].get_supported_symbols(), timeout=5
                 )
-                return len(syms or [])
+                return name, [str(s) for s in (syms or []) if str(s).strip()]
             except Exception:  # noqa: BLE001
-                return 0
+                return name, []
 
-        counts = await asyncio.gather(*(_count(n) for n in names), return_exceptions=False)
-        broker_total = {n: int(c) for n, c in zip(names, counts)}
+        rows = await asyncio.gather(*(_symbols(n) for n in names), return_exceptions=False)
+        broker_symbols = {name: syms for name, syms in rows}
+        broker_total = {name: len(syms) for name, syms in broker_symbols.items()}
 
-    payload = build_universe_snapshot_dict(broker_symbol_totals=broker_total)
+    payload = build_universe_snapshot_dict(
+        broker_symbol_totals=broker_total,
+        broker_symbols=broker_symbols,
+    )
     _UNIVERSE_SNAPSHOT_CACHE["payload"] = payload
     _UNIVERSE_SNAPSHOT_CACHE["at"] = now
     return payload

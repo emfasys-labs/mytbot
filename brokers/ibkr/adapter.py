@@ -41,6 +41,8 @@ from ib_insync import (
 )
 from loguru import logger
 
+from brokers.ibkr.qualification import IBKRQualificationCache, IBKRQualificationRecord, utc_now_iso
+from brokers.ibkr.universe import ibkr_supported_symbol_seed
 from core.instruments import OptionContractSpec
 from brokers.base import (
     AssetClass,
@@ -192,6 +194,7 @@ class IBKRAdapter(BrokerAdapter):
         self._ib: Optional[IB] = None
         self._last_ib_order_snapshot_monotonic: float = -1e9
         self._ib_order_snap_lock = asyncio.Lock()
+        self._qualification_cache = IBKRQualificationCache()
 
     def _resolve_account(self) -> str:
         """Return configured account or the sole managed account from IB."""
@@ -207,6 +210,10 @@ class IBKRAdapter(BrokerAdapter):
     def _symbol_to_contract(self, symbol: str) -> Contract:
         """Map a canonical symbol string to an ib_insync Contract."""
         s = symbol.strip().upper()
+        if "." in s:
+            parts = [p.strip().upper() for p in s.split(".") if p.strip()]
+            if len(parts) == 2 and all(len(p) == 3 and p.isalpha() for p in parts):
+                return Forex(parts[0] + parts[1])
         if "/" in s:
             base, quote = s.split("/", 1)
             quote = quote.strip().upper()
@@ -239,6 +246,133 @@ class IBKRAdapter(BrokerAdapter):
                 spec = OptionContractSpec.from_dict(raw)
                 return self.build_option_contract(spec)
         return self._symbol_to_contract(order.symbol)
+
+    def _qualification_record_from_contract(
+        self,
+        *,
+        symbol: str,
+        asset_class: str | None,
+        broker_symbol: str,
+        contract: Contract,
+        status: str = "qualified",
+        error: str | None = None,
+    ) -> IBKRQualificationRecord:
+        return IBKRQualificationRecord(
+            symbol=symbol.strip().upper(),
+            asset_class=(asset_class or "").strip().lower() or None,
+            status=status,
+            broker_symbol=broker_symbol.strip().upper(),
+            sec_type=(getattr(contract, "secType", None) or None),
+            exchange=(getattr(contract, "exchange", None) or None),
+            currency=(getattr(contract, "currency", None) or None),
+            con_id=int(getattr(contract, "conId", 0) or 0) or None,
+            local_symbol=(getattr(contract, "localSymbol", None) or None),
+            trading_class=(getattr(contract, "tradingClass", None) or None),
+            primary_exchange=(getattr(contract, "primaryExchange", None) or None),
+            qualified_at=utc_now_iso(),
+            error=error,
+        )
+
+    async def qualify_symbol(
+        self,
+        symbol: str,
+        asset_class: str | None = None,
+        *,
+        force: bool = True,
+    ) -> IBKRQualificationRecord:
+        """Qualify a symbol with IBKR and persist the contract identity.
+
+        IBKR has no useful "all orderable symbols" endpoint. This method is the
+        authority for whether a curated/listed symbol can become an IBKR order:
+        if TWS/Gateway cannot qualify the contract, the order path must reject.
+        """
+        sym = str(symbol or "").strip().upper()
+        ac = (asset_class or "").strip().lower() or None
+        if not sym:
+            return IBKRQualificationRecord(
+                symbol="",
+                asset_class=ac,
+                status="failed",
+                broker_symbol="",
+                qualified_at=utc_now_iso(),
+                error="empty symbol",
+            )
+        if not force:
+            cached = self._qualification_cache.get(sym, ac)
+            if cached is not None and cached.is_qualified():
+                return cached
+        if self._ib is None or not self._ib.isConnected():
+            rec = IBKRQualificationRecord(
+                symbol=sym,
+                asset_class=ac,
+                status="failed",
+                broker_symbol=sym,
+                qualified_at=utc_now_iso(),
+                error="not connected",
+            )
+            self._qualification_cache.upsert(rec)
+            return rec
+
+        contract = self._symbol_to_contract(sym)
+        try:
+            qualified = await self._ib.qualifyContractsAsync(contract)
+            if not qualified:
+                rec = self._qualification_record_from_contract(
+                    symbol=sym,
+                    asset_class=ac,
+                    broker_symbol=sym,
+                    contract=contract,
+                    status="failed",
+                    error="IBKR returned no qualified contracts",
+                )
+                self._qualification_cache.upsert(rec)
+                return rec
+            q = qualified[0]
+            rec = self._qualification_record_from_contract(
+                symbol=sym,
+                asset_class=ac,
+                broker_symbol=sym,
+                contract=q,
+            )
+            self._qualification_cache.upsert(rec)
+            return rec
+        except Exception as exc:  # noqa: BLE001
+            rec = IBKRQualificationRecord(
+                symbol=sym,
+                asset_class=ac,
+                status="failed",
+                broker_symbol=sym,
+                qualified_at=utc_now_iso(),
+                error=str(exc),
+            )
+            self._qualification_cache.upsert(rec)
+            return rec
+
+    async def _qualified_order_contract(self, order: Order) -> Contract | None:
+        contract = self._order_to_contract(order)
+        if self._ib is None or not self._ib.isConnected():
+            return None
+        qualified = await self._ib.qualifyContractsAsync(contract)
+        if not qualified:
+            rec = self._qualification_record_from_contract(
+                symbol=order.symbol,
+                asset_class=None,
+                broker_symbol=order.symbol,
+                contract=contract,
+                status="failed",
+                error="IBKR returned no qualified contracts",
+            )
+            self._qualification_cache.upsert(rec)
+            return None
+        q = qualified[0]
+        rec = self._qualification_record_from_contract(
+            symbol=order.symbol,
+            asset_class=None,
+            broker_symbol=order.symbol,
+            contract=q,
+        )
+        self._qualification_cache.upsert(rec)
+        return q
 
     def _contract_symbol_key(self, contract: Contract) -> str:
         """Produce a display symbol for ticks/positions."""
@@ -1325,8 +1459,24 @@ class IBKRAdapter(BrokerAdapter):
                     )
                     return self._trade_to_order_result(existing)
 
-            contract = self._order_to_contract(order)
-            await self._ib.qualifyContractsAsync(contract)
+            contract = await self._qualified_order_contract(order)
+            if contract is None:
+                logger.error(
+                    "place_order | IBKR | rejected unqualified contract | symbol={}",
+                    order.symbol,
+                )
+                return OrderResult(
+                    broker_order_id="",
+                    client_order_id=order.client_order_id,
+                    status=OrderStatus.REJECTED,
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=order.quantity,
+                    filled_quantity=Decimal(0),
+                    avg_fill_price=None,
+                    fee=None,
+                    timestamp=_iso_now(),
+                )
             ib_ord = await self._build_ib_order_for_contract(order, contract)
             trade = self._ib.placeOrder(contract, ib_ord)
             for _ in range(120):
@@ -1481,9 +1631,20 @@ class IBKRAdapter(BrokerAdapter):
             return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
 
     async def get_supported_symbols(self) -> list[str]:
-        """IBKR has no single list-all API; return an empty list."""
-        logger.debug("get_supported_symbols | IBKR | not supported via API")
-        return []
+        """Return the curated IBKR seed universe.
+
+        IBKR/TWS does not expose a practical "list every tradeable symbol" API.
+        Returning an empty list made Universe Intelligence look as if the primary
+        broker had no coverage, so we expose the project's explicitly curated
+        IBKR instruments as the supported-symbol seed instead.
+        """
+        try:
+            out = ibkr_supported_symbol_seed()
+            logger.debug("get_supported_symbols | IBKR | curated seed symbols={}", len(out))
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_supported_symbols | IBKR | curated seed unavailable: {}", exc)
+            return []
 
     async def get_asset_class(self, symbol: str) -> AssetClass:
         """Best-effort asset class from symbol string (contract not qualified)."""

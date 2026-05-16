@@ -312,6 +312,35 @@ class ExecutionEngine:
 
         broker = await self._get_broker(signal.broker)
         if broker is None:
+            # #2b-2 — IBKR resilience. When the routed venue is down (the
+            # cause of ``broker is None`` here: disconnect / maintenance
+            # window / failed connect) we have NO trustworthy live quote.
+            # Simulating a reduce-only *close* would book it at a stale
+            # carried/pipeline price and realise fictitious P&L — corrupting
+            # exactly the realised curve we judge the soak on, and lying
+            # about money. A close you cannot price is a close you defer:
+            # skip this cycle and let it execute at a real price once the
+            # venue is back (mirrors live reality — you can't close what you
+            # can't reach). Opening trades still simulate off the M2
+            # pipeline price (independent of IBKR connectivity) as before.
+            _sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+            _is_reduce_only = bool(
+                getattr(order, "reduce_only", False)
+                or getattr(signal, "reduce_only", False)
+                or _sig_md.get("reduce_only")
+                or _sig_md.get("close_only")
+                or str(_sig_md.get("coordinator_kind", "")).strip().lower() in {"trim_symbol", "close_symbol", "flatten_symbol"}
+                or str(getattr(signal, "strategy", "") or "").strip().lower() == "stop_loss_monitor"
+                or str(getattr(signal, "signal_id", "") or "").strip().lower().startswith(("stoploss-", "stop_loss-", "profitharvest-"))
+            )
+            if _is_reduce_only:
+                logger.warning(
+                    "EXEC DEFER (venue down, no quote for close) | %s %s broker=%s — "
+                    "deferring reduce-only close to avoid stale-price fill",
+                    signal.symbol, signal.side, signal.broker,
+                )
+                self.last_skip_reason = "deferred_close_no_quote_venue_down"
+                return None
             if self.paper_mode:
                 logger.info(
                     "PAPER FILL (no broker) | %s %s qty=%s broker=%s",
@@ -1355,10 +1384,52 @@ class ExecutionEngine:
         return replace(order, quantity=qty)
 
     async def _get_broker(self, name: str):
-        """Lazy-load broker adapter."""
+        """Lazy-load broker adapter.
+
+        IBKR resilience (#2b): the adapter used to be cached on first
+        resolution and returned forever after with NO connectivity recheck —
+        so a mid-session IBKR socket drop (its mandatory daily restart /
+        weekly re-auth) was never re-detected here and orders were sent into
+        a dead socket. Now every resolution first asks the BrokerManager
+        whether the venue is available (adapter present + ready + not in a
+        maintenance window) and, for a cached adapter, rechecks
+        ``is_connected()``. A venue that is down evicts its cache entry and
+        returns ``None`` so ``execute()`` skips cleanly
+        (``last_skip_reason='broker_disconnected'``) instead of failing an
+        order against a broken connection.
+        """
         key = (name or "").strip().lower()
         if not key:
             return None
+
+        bm = getattr(self, "_broker_manager", None)
+        # Proactive availability gate — covers disconnect AND maintenance
+        # window without per-call socket probes when the manager already
+        # knows the venue is down.
+        if bm is not None:
+            is_avail = getattr(bm, "is_broker_available", None)
+            if callable(is_avail):
+                try:
+                    if not is_avail(key):
+                        self._brokers.pop(key, None)
+                        return None
+                except Exception:  # noqa: BLE001
+                    pass
+
+        cached = self._brokers.get(key)
+        if cached is not None:
+            try:
+                still_connected = await cached.is_connected()
+            except Exception:  # noqa: BLE001
+                still_connected = False
+            if still_connected:
+                return cached
+            # Stale cache — venue dropped after it was first resolved.
+            logger.warning(
+                "Broker cache evicted (no longer connected) | broker=%s", key
+            )
+            self._brokers.pop(key, None)
+
         if key not in self._brokers:
             bm = getattr(self, "_broker_manager", None)
             adapters = getattr(bm, "adapters", None) if bm is not None else None

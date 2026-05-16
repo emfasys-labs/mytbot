@@ -21,6 +21,7 @@ import socket
 import struct
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, time as dtime
 from typing import Any
 
 from loguru import logger
@@ -238,6 +239,85 @@ class BrokerManager:
         # non-rate-limit failure. Used to escalate backoff and error text when a
         # venue is persistently throttled server-side (e.g. Kraken key punishment).
         self._broker_rate_limit_streak: dict[str, int] = {}
+        # IBKR resilience (#2c) — expected maintenance windows. IBKR Gateway
+        # has a MANDATORY daily restart (and weekly re-auth) — it is engineered
+        # to drop, not merely flaky. During a known window we proactively treat
+        # IBKR as unavailable: no connect attempts, no error spam, execution
+        # refuses IBKR routing (via ``is_broker_available``) instead of erroring
+        # dozens of times, and we auto-resume after the window. Config-driven
+        # via env (no hardcoded schedule, no code change to retune):
+        #   IBKR_MAINTENANCE_WINDOWS="23:45-00:30,Sat 22:00-23:30"
+        # Each item is "HH:MM-HH:MM" (server-local time), optionally prefixed
+        # with a 3-letter weekday. Windows may wrap past midnight. Empty/unset
+        # ⇒ no window (behaviour unchanged).
+        self._ibkr_maint_windows = self._parse_maintenance_windows(
+            os.getenv("IBKR_MAINTENANCE_WINDOWS", "")
+        )
+
+    @staticmethod
+    def _parse_maintenance_windows(raw: str) -> list[tuple[str | None, dtime, dtime]]:
+        """Parse ``IBKR_MAINTENANCE_WINDOWS`` → [(weekday|None, start, end)].
+
+        Item grammar: ``[DDD ]HH:MM-HH:MM`` (server-local). Robust to junk —
+        a malformed item is skipped, never raises (must not break startup).
+        """
+        out: list[tuple[str | None, dtime, dtime]] = []
+        for item in (raw or "").split(","):
+            s = item.strip()
+            if not s:
+                continue
+            try:
+                wd: str | None = None
+                parts = s.split()
+                if len(parts) == 2:
+                    wd = parts[0].strip().lower()[:3]
+                    s = parts[1].strip()
+                a, b = s.split("-", 1)
+                ah, am = (int(x) for x in a.strip().split(":"))
+                bh, bm = (int(x) for x in b.strip().split(":"))
+                out.append((wd, dtime(ah, am), dtime(bh, bm)))
+            except Exception:  # noqa: BLE001
+                logger.warning("broker | ignoring malformed IBKR maintenance window: {!r}", item)
+                continue
+        return out
+
+    def _in_ibkr_maintenance(self, now: datetime | None = None) -> bool:
+        if not self._ibkr_maint_windows:
+            return False
+        n = now or datetime.now()
+        wd = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[n.weekday()]
+        cur = n.time()
+        for day, start, end in self._ibkr_maint_windows:
+            if day is not None and day != wd:
+                continue
+            if start <= end:
+                if start <= cur <= end:
+                    return True
+            else:
+                # Wraps past midnight (e.g. 23:45-00:30).
+                if cur >= start or cur <= end:
+                    return True
+        return False
+
+    def is_broker_available(self, name: str) -> bool:
+        """True iff a venue is usable for execution RIGHT NOW.
+
+        Consulted by ExecutionEngine._get_broker (#2b) so a disconnected /
+        in-maintenance venue is refused cleanly instead of having orders
+        thrown at a dead socket. Conservative: a venue absent from
+        ``adapters`` or flagged not-ready, or IBKR inside a maintenance
+        window, is unavailable.
+        """
+        key = (name or "").strip().lower()
+        if not key:
+            return False
+        if key not in self.adapters:
+            return False
+        if not self._broker_ready_state.get(key, True):
+            return False
+        if key == "ibkr" and self._in_ibkr_maintenance():
+            return False
+        return True
 
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
@@ -601,12 +681,28 @@ class BrokerManager:
                 readiness_bypass = False
                 ibkr_probe_ready: bool | None = None
                 if name == "ibkr":
+                    # #2c — during a known Gateway maintenance window, do NOT
+                    # probe or attempt: it is *expected* down. This kills the
+                    # error-spam burst (53 socket-disconnect errors last night)
+                    # and pointless connect churn during the daily restart.
+                    # We auto-resume the moment the window ends.
+                    if self._in_ibkr_maintenance():
+                        self._broker_ready_state[name] = False
+                        continue
                     backoff = self._ibkr_backoff()
                     last = self._ibkr_last_attempt
-                    was_ready = self._broker_ready_state.get(name, False)
                     ibkr_probe_ready = await self._probe_ibkr_ready(cfg, status)
+                    # #2a — probe-driven re-detection. Previously a reconnect
+                    # was only bypassed on the first False→True edge; if the
+                    # probe flicked ready while Gateway was still in a zombie
+                    # re-auth state the edge was consumed and real recovery
+                    # then waited out the 300s backoff (→ the observed
+                    # 10–27 min gaps). Now ANY poll where the probe says
+                    # Gateway is reachable forces an attempt, so recovery is
+                    # ≈ the next health poll (≤10s) once it is genuinely back —
+                    # without polling faster (the probe still gates it).
+                    readiness_bypass = bool(ibkr_probe_ready)
                     self._broker_ready_state[name] = bool(ibkr_probe_ready)
-                    readiness_bypass = bool(ibkr_probe_ready and not was_ready)
                 else:
                     backoff = self._broker_backoff(name)
                     last = self._broker_last_attempt.get(name, 0)

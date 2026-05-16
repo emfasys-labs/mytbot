@@ -23,20 +23,20 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 const STAGE_LABELS: Record<string, string> = {
-  source: 'source pool',
-  eligible: 'eligible',
+  source: 'broker listings',
+  eligible: 'scored',
   watching: 'watching',
-  promoted: 'promoted',
-  active: 'active',
+  promoted: 'promoted now',
+  active: 'active reps',
   banned: 'banned',
 };
 
 const STAGE_DESC: Record<string, string> = {
-  source: 'Broker catalogue and configured monitors.',
-  eligible: 'Passes liquidity, spread, and data filters.',
-  watching: 'Dynamic tier — core + scan from universe_tiers.json.',
-  promoted: 'Recent anomaly or promotion signals.',
-  active: 'Symbols with elevated engine attention.',
+  source: 'Raw broker listings plus curated broker seeds.',
+  eligible: 'Normalized symbols selected for scoring.',
+  watching: 'Dynamic core + scan from universe_tiers.json.',
+  promoted: 'Recent temporary promotion signals.',
+  active: 'Correlation representatives under engine attention.',
   banned: 'Excluded or blocked.',
 };
 
@@ -142,10 +142,15 @@ export function UniverseScreen({
 
   const heroLine = useMemo(() => {
     const src = funnel.find((f) => f.stage === 'source');
+    const scored = funnel.find((f) => f.stage === 'eligible');
     const watch = funnel.find((f) => f.stage === 'watching');
     const act = funnel.find((f) => f.stage === 'active');
-    return `${fmtNum(src?.count ?? 0)} sourced · ${fmtNum(watch?.count ?? 0)} watched · ${fmtNum(act?.count ?? 0)} active`;
-  }, [funnel]);
+    const unique = data?.coverage?.unique_normalized_count;
+    const sourceLabel = unique != null
+      ? `${fmtNum(src?.count ?? 0)} listings / ${fmtNum(unique)} unique`
+      : `${fmtNum(src?.count ?? 0)} listings`;
+    return `${sourceLabel} · ${fmtNum(scored?.count ?? 0)} scored · ${fmtNum(watch?.count ?? 0)} watched · ${fmtNum(act?.count ?? 0)} active reps`;
+  }, [data?.coverage?.unique_normalized_count, funnel]);
 
   const onJumpTo = (t: UniTab, stage?: string | null) => {
     setTab(t);
@@ -367,6 +372,14 @@ function OverviewTab({
               Non-redundant representatives and cold-scan members. Correlation clusters: {clusters.length}.
               {data?.fallback && ` (${data.fallback})`}
             </div>
+            {data?.coverage && (
+              <div style={{ marginTop: 8, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.6 }}>
+                unique normalized {fmtNum(data.coverage.unique_normalized_count ?? 0)}
+                {' · '}candidate cap {fmtNum(data.coverage.caps?.candidates ?? 0)}
+                {' · '}watch cap {fmtNum(data.coverage.caps?.watching ?? 0)}
+                {data.coverage.by_broker?.ibkr?.note ? ` · ibkr ${fmtNum(data.coverage.by_broker.ibkr.raw ?? 0)} curated` : ''}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             <div style={{

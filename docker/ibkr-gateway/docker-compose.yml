@@ -1,0 +1,70 @@
+# Dockerized IB Gateway + IBC (Interactive Brokers Controller).
+# ============================================================
+# This is the durable fix for IBKR Gateway's *engineered* unreliability:
+# IBC auto-logs-in, auto-dismisses dialogs, and — critically — performs
+# the MANDATORY daily Gateway restart on a schedule WE choose, as a ~1-min
+# blip instead of an unplanned multi-hour outage. mytbot then points at
+# this container instead of a hand-launched Gateway on the desktop.
+#
+# This is intentionally a SEPARATE compose file from the repo-root
+# docker-compose.yml (Postgres/Redis) so it can be stood up / torn down
+# independently and is opt-in.
+#
+# Image: gnzsnz/ib-gateway — the most widely used community image, IBC
+# built in, actively maintained. (Alternatives: extrange/ibkr-docker.)
+#
+# ── One-time setup ───────────────────────────────────────────────────
+#   1. cp .env.example .env   and fill in TWS_USERID / TWS_PASSWORD
+#   2. docker compose up -d
+#   3. Point mytbot at it (in the repo .env):
+#        IBKR_HOST=127.0.0.1
+#        IBKR_PORT=4002          # paper API port (see ports below)
+#        IBKR_MAINTENANCE_WINDOWS=<match AUTO_RESTART_TIME ± a few min>
+#   4. Restart mytbot under the supervisor.
+#
+# See docs/IBKR_GATEWAY_DOCKER.md for the full runbook + live switch notes.
+
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: mytbot-ib-gateway
+    restart: unless-stopped          # container-level supervision
+    env_file:
+      - .env
+    environment:
+      # paper | live  — keep paper until the deliberate live switch.
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      # API stays writable so mytbot can place (paper) orders. The risk
+      # engine + live-arming interlocks remain the real safety boundary.
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      # IBC performs the unavoidable daily Gateway restart at THIS local
+      # time as a controlled ~1-min outage. Align IBKR_MAINTENANCE_WINDOWS
+      # in mytbot's .env to cover this so the bot pauses IBKR cleanly
+      # rather than erroring through it.
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-02:55 AM}
+      TIME_ZONE: ${TIME_ZONE:-Europe/London}
+      # Bigger java heap + relogin tolerance helps overnight stability.
+      RELOGIN_AFTER_2FA_TIMEOUT: ${RELOGIN_AFTER_2FA_TIMEOUT:-yes}
+    ports:
+      # host:container — mytbot connects to the host side.
+      #   4002 → Gateway PAPER API   (set IBKR_PORT=4002)
+      #   4001 → Gateway LIVE  API   (set IBKR_PORT=4001 only at go-live)
+      - "127.0.0.1:4001:4003"        # live  api (SSL-tunnelled internally)
+      - "127.0.0.1:4002:4004"        # paper api
+      # VNC for first-run / 2FA / debugging (localhost only).
+      - "127.0.0.1:5900:5900"
+    # NOTE: do NOT bind-mount over /home/ibgateway/Jts — the gnzsnz image
+    # ships config templates (jts.ini.tmpl) there and the entrypoint reads
+    # them at startup; an empty host mount shadows them and crash-loops the
+    # container. IBC re-logs-in from env creds every start, so settings
+    # persistence is not required for headless paper. (If persistence is
+    # ever needed, use the image's TWS_SETTINGS_PATH mechanism instead.)
+    healthcheck:
+      # Container is "healthy" only when the API port is actually accepting
+      # connections — so `restart: unless-stopped` + this catches a zombie
+      # Gateway, not just a dead process.
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/4004' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 120s

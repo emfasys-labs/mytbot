@@ -542,6 +542,19 @@ export type IntelligenceUniverseResponse = {
   config_mirror: Record<string, unknown>;
   build: Record<string, unknown>;
   broker_totals?: Record<string, number>;
+  coverage?: {
+    broker_listing_count?: number;
+    unique_normalized_count?: number;
+    scored_candidate_count?: number;
+    watched_count?: number;
+    caps?: Record<string, number>;
+    by_broker?: Record<string, {
+      raw?: number;
+      normalized?: number;
+      source?: string;
+      note?: string | null;
+    }>;
+  };
 };
 
 export type TradingMode = 'defender' | 'trader' | 'hunter';

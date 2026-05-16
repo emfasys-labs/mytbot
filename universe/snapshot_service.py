@@ -7,7 +7,9 @@ from typing import Any
 
 import yaml
 
+from brokers.ibkr.universe import load_ibkr_universe
 from data.universe import UniverseManager
+from data.universe_builder import _to_yf_symbol
 from data.universe_tiers import load_universe_tiers
 from universe.persistence import DEFAULT_INTELLIGENCE_PATH, load_intelligence_state
 from universe.universe_tiers import UniverseIntelligenceState
@@ -17,6 +19,9 @@ from universe.universe_tiers import UniverseIntelligenceState
 _CATALOG_BY_SYMBOL: dict[str, tuple[str, str | None]] = {
     inst.symbol.upper(): (inst.name, inst.sector) for inst in UniverseManager.INITIAL_UNIVERSE
 }
+for _entry in load_ibkr_universe():
+    _CATALOG_BY_SYMBOL.setdefault(_entry.symbol.upper(), (_entry.name, _entry.sector))
+    _CATALOG_BY_SYMBOL.setdefault(_entry.broker_symbol.upper(), (_entry.name, _entry.sector))
 
 
 def _catalog_lookup(sym: str) -> tuple[str | None, str | None]:
@@ -24,6 +29,14 @@ def _catalog_lookup(sym: str) -> tuple[str | None, str | None]:
     u = sym.upper().strip()
     if u in _CATALOG_BY_SYMBOL:
         return _CATALOG_BY_SYMBOL[u]
+    if u.endswith("=X") and len(u) == 8:
+        pair = u[:6]
+        dotted = f"{pair[:3]}.{pair[3:]}"
+        underscored = f"{pair[:3]}_{pair[3:]}"
+        if dotted in _CATALOG_BY_SYMBOL:
+            return _CATALOG_BY_SYMBOL[dotted]
+        if underscored in _CATALOG_BY_SYMBOL:
+            return _CATALOG_BY_SYMBOL[underscored]
     norm = u.replace(".", "_")
     if norm in _CATALOG_BY_SYMBOL:
         return _CATALOG_BY_SYMBOL[norm]
@@ -97,6 +110,7 @@ def _parse_dt(value: str | None) -> datetime | None:
 def build_universe_snapshot_dict(
     *,
     broker_symbol_totals: dict[str, int] | None = None,
+    broker_symbols: dict[str, list[str]] | None = None,
     intelligence_path: Path | None = None,
 ) -> dict[str, Any]:
     """
@@ -111,7 +125,13 @@ def build_universe_snapshot_dict(
     intel = load_intelligence_state(intelligence_path or DEFAULT_INTELLIGENCE_PATH)
 
     broker_totals = dict(broker_symbol_totals or {})
+    broker_symbol_rows = {str(k): list(v or []) for k, v in (broker_symbols or {}).items()}
+    if broker_symbol_rows and not broker_totals:
+        broker_totals = {k: len(v) for k, v in broker_symbol_rows.items()}
     source_pool = int(sum(broker_totals.values())) if broker_totals else int(cfg.get("candidate_pool_default", 0))
+    normalised_by_broker = _normalised_broker_symbols(broker_symbol_rows)
+    unique_source_symbols = sorted({s for syms in normalised_by_broker.values() for s in syms})
+    unique_source_count = len(unique_source_symbols)
 
     core_list = list(tiers.core) if tiers else []
     scan_list = list(tiers.scan) if tiers else []
@@ -119,25 +139,42 @@ def build_universe_snapshot_dict(
     scores = dict(tiers.scores) if tiers else {}
 
     watching_count = len(set(core_list + scan_list)) or min(len(pipeline_syms), caps["max_symbols"])
-    eligible_count = max(watching_count, min(source_pool, caps["candidates"]) if source_pool else watching_count)
+    scored_count = len(set(core_list + scan_list + light_list)) or min(
+        unique_source_count or source_pool or len(pipeline_syms),
+        caps["candidates"],
+    )
+    eligible_count = max(watching_count, scored_count)
+    source_detail = _source_detail(
+        broker_totals=broker_totals,
+        normalised_by_broker=normalised_by_broker,
+        unique_source_count=unique_source_count,
+        scored_count=eligible_count,
+        watching_count=watching_count,
+        caps=caps,
+    )
 
     funnel_template = cfg.get("funnel_display") or {}
-    drops_eligible = funnel_template.get("drops_eligible") or [
-        {"reason": "Low liquidity (ADV)", "count": max(0, source_pool - eligible_count)},
-        {"reason": "Asset class / region filter", "count": 0},
-        {"reason": "Stale data", "count": 0},
-    ]
-    drops_watching = funnel_template.get("drops_watching") or [
-        {"reason": f"Capacity cap ({caps['max_symbols']} max)", "count": max(0, eligible_count - watching_count)},
-        {"reason": "Correlation overlap (representative kept)", "count": 0},
-        {"reason": "Low opportunity score", "count": 0},
-    ]
+    drops_eligible = _drop_rows(
+        [
+            ("Broker duplicates / unsupported symbol formats", max(0, source_pool - unique_source_count)),
+            (f"Scoring capacity cap ({caps['candidates']} max)", max(0, unique_source_count - eligible_count)),
+        ],
+        fallback=funnel_template.get("drops_eligible"),
+    )
+    drops_watching = _drop_rows(
+        [
+            (f"Watch capacity cap ({caps['max_symbols']} max)", max(0, eligible_count - watching_count)),
+            ("Light tier retained for cold scan", max(0, len(light_list))),
+            ("Correlation overlap (representative kept)", max(0, len((intel.core if intel else []) or []) - watching_count)),
+        ],
+        fallback=funnel_template.get("drops_watching"),
+    )
 
     if not enabled:
         promoted_n = min(12, max(0, watching_count // 10))
         active_n = min(7, max(0, watching_count // 40))
         funnel = [
-            {"stage": "source", "count": max(source_pool, eligible_count, 1), "fresh": True, "drops": None},
+            {"stage": "source", "count": max(source_pool or eligible_count, 1), "fresh": True, "drops": None},
             {"stage": "eligible", "count": max(eligible_count, 1), "fresh": True, "drops": drops_eligible},
             {
                 "stage": "watching",
@@ -164,6 +201,7 @@ def build_universe_snapshot_dict(
             "config_mirror": _config_mirror(cfg, caps),
             "build": _build_info(tiers.updated_at if tiers else None, cfg),
             "broker_totals": broker_totals,
+            "coverage": source_detail,
         }
 
     if intel is None:
@@ -175,7 +213,7 @@ def build_universe_snapshot_dict(
             "fallback": "universe intelligence enabled but no build artifact yet",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "funnel": [
-                {"stage": "source", "count": max(source_pool, eligible_count, 1), "fresh": True, "drops": None},
+                {"stage": "source", "count": max(source_pool or eligible_count, 1), "fresh": True, "drops": None},
                 {"stage": "eligible", "count": max(eligible_count, 1), "fresh": True, "drops": drops_eligible},
                 {
                     "stage": "watching",
@@ -194,6 +232,7 @@ def build_universe_snapshot_dict(
             "config_mirror": _config_mirror(cfg, caps),
             "build": _build_info(tiers.updated_at if tiers else None, cfg, state="missing"),
             "broker_totals": broker_totals,
+            "coverage": source_detail,
             "core_intel": [],
             "cold_scan": [],
             "active_eval": [],
@@ -204,9 +243,11 @@ def build_universe_snapshot_dict(
     core_intel = list(intel.core)
     clusters = deepcopy(intel.clusters)
     promotions = deepcopy(intel.promotions)
+    active_count = len(core_intel)
+    source_count = max(source_pool or intel.candidate_count, 1)
 
     funnel = [
-        {"stage": "source", "count": max(intel.candidate_count, source_pool, 1), "fresh": True, "drops": None},
+        {"stage": "source", "count": source_count, "fresh": True, "drops": None},
         {"stage": "eligible", "count": max(len(cold), eligible_count, 1), "fresh": True, "drops": drops_eligible},
         {
             "stage": "watching",
@@ -217,7 +258,7 @@ def build_universe_snapshot_dict(
         {"stage": "promoted", "count": len(promotions), "fresh": True, "drops": None},
         {
             "stage": "active",
-            "count": max(1, min(32, len(active_eval) // 15 + len(core_intel))),
+            "count": active_count,
             "fresh": True,
             "drops": None,
         },
@@ -241,9 +282,67 @@ def build_universe_snapshot_dict(
         "config_mirror": _config_mirror(cfg, caps),
         "build": _build_info(intel.last_full_cluster_at or (tiers.updated_at if tiers else None), cfg),
         "broker_totals": broker_totals,
+        "coverage": source_detail,
         "core_intel": core_intel,
         "cold_scan": cold,
         "active_eval": active_eval,
+    }
+
+
+def _normalised_broker_symbols(broker_symbols: dict[str, list[str]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for broker, symbols in broker_symbols.items():
+        vals: list[str] = []
+        for raw in symbols:
+            sym = _to_yf_symbol(str(raw), broker)
+            if sym:
+                vals.append(sym.strip().upper())
+        out[str(broker)] = list(dict.fromkeys(vals))
+    return out
+
+
+def _drop_rows(rows: list[tuple[str, int]], *, fallback: Any = None) -> list[dict[str, Any]]:
+    out = [{"reason": reason, "count": int(max(0, count))} for reason, count in rows if int(max(0, count)) > 0]
+    if out:
+        return out
+    if isinstance(fallback, list):
+        return fallback
+    return [{"reason": "No measured drops at this stage", "count": 0}]
+
+
+def _source_detail(
+    *,
+    broker_totals: dict[str, int],
+    normalised_by_broker: dict[str, list[str]],
+    unique_source_count: int,
+    scored_count: int,
+    watching_count: int,
+    caps: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "broker_listing_count": int(sum(broker_totals.values())),
+        "unique_normalized_count": int(unique_source_count),
+        "scored_candidate_count": int(scored_count),
+        "watched_count": int(watching_count),
+        "caps": {
+            "candidates": int(caps["candidates"]),
+            "watching": int(caps["max_symbols"]),
+            "core": int(caps["core_max"]),
+            "scan": int(caps["scan_max"]),
+        },
+        "by_broker": {
+            broker: {
+                "raw": int(broker_totals.get(broker, 0)),
+                "normalized": len(symbols),
+                "source": "curated_seed" if broker.lower() == "ibkr" else "broker_catalog",
+                "note": (
+                    "IBKR/TWS has no practical list-all endpoint; using curated IBKR tradable seed."
+                    if broker.lower() == "ibkr"
+                    else None
+                ),
+            }
+            for broker, symbols in normalised_by_broker.items()
+        },
     }
 
 
