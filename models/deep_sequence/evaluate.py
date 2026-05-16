@@ -11,9 +11,10 @@ The Wave 11 governance rule lives here in code:
       1. mse(deep) / mse(baseline) <= mse_ratio_threshold      AND
       2. hit_rate(deep) - hit_rate(baseline) >= hit_rate_margin AND
       3. cost-aware net P&L of deep > cost-aware net P&L of baseline
+      4. cost-aware net P&L of deep > 0
 
-The third rule is non-negotiable: a deep model that wins on metrics but
-loses to costs after slippage is not added value and must not be
+    The P&L rules are non-negotiable: a deep model that wins on metrics but
+    loses to costs after slippage is not added value and must not be
 promoted.
 """
 
@@ -98,6 +99,8 @@ def compare_against_baseline(
         failures.append(f"hit_rate_margin={hr_d - hr_b:+.3f}<thr={hit_rate_margin}")
     if pnl_d <= pnl_b:
         failures.append(f"net_pnl_deep={pnl_d:.6f}<=baseline={pnl_b:.6f}")
+    if pnl_d <= 0.0:
+        failures.append(f"net_pnl_deep={pnl_d:.6f}<=0")
 
     deep_beats = len(failures) == 0
 

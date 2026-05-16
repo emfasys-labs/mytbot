@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from storage.models import FeatureSnapshot, MacroObservation, NewsHeadline
 
+FEATURE_SNAPSHOT_UPSERT_CHUNK_SIZE = 1000
+
 
 def _dec(x: Any) -> Decimal:
     return x if isinstance(x, Decimal) else Decimal(str(x))
@@ -41,21 +43,23 @@ async def upsert_feature_snapshots(
                 "data_source": r.get("data_source", "yfinance"),
             }
         )
-    stmt = pg_insert(FeatureSnapshot).values(cleaned)
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_feature_snapshots_symbol_tf_bar_ts",
-        set_={
-            "open": stmt.excluded.open,
-            "high": stmt.excluded.high,
-            "low": stmt.excluded.low,
-            "close": stmt.excluded.close,
-            "volume": stmt.excluded.volume,
-            "features": stmt.excluded.features,
-            "validation": stmt.excluded.validation,
-            "data_source": stmt.excluded.data_source,
-        },
-    )
-    await session.execute(stmt)
+    for i in range(0, len(cleaned), FEATURE_SNAPSHOT_UPSERT_CHUNK_SIZE):
+        chunk = cleaned[i : i + FEATURE_SNAPSHOT_UPSERT_CHUNK_SIZE]
+        stmt = pg_insert(FeatureSnapshot).values(chunk)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_feature_snapshots_symbol_tf_bar_ts",
+            set_={
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+                "features": stmt.excluded.features,
+                "validation": stmt.excluded.validation,
+                "data_source": stmt.excluded.data_source,
+            },
+        )
+        await session.execute(stmt)
     return len(cleaned)
 
 

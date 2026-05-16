@@ -236,6 +236,34 @@ async def _run() -> None:
 
     api_task = asyncio.create_task(server.serve(), name="api-server")
 
+    # Autostart: with MYTBOT_AUTOSTART truthy, the system comes up RUNNING
+    # on every boot — including unattended supervisor crash-recovery
+    # restarts — instead of sitting OFF waiting for a human to press START.
+    # Safe because the risk kill-switch now PERSISTS across restarts (B1):
+    # a tripped kill stays tripped even with autostart, so a bad day cannot
+    # be "restarted away". Default off preserves the conservative one-button
+    # behaviour for other deployments; opt in via .env.
+    async def _maybe_autostart() -> None:
+        if os.getenv("MYTBOT_AUTOSTART", "").strip().lower() not in (
+            "1", "true", "yes", "on",
+        ):
+            logger.info("mytbot | orchestrator ready (state=off) — autostart disabled")
+            return
+        await asyncio.sleep(2)  # let the API bind first
+        try:
+            if _orch.state.value == "off":
+                logger.info("mytbot | MYTBOT_AUTOSTART → starting orchestrator")
+                await _orch.start()
+                logger.info("mytbot | autostart complete (state={})", _orch.state.value)
+            else:
+                logger.info(
+                    "mytbot | autostart skipped (state={})", _orch.state.value
+                )
+        except Exception as exc:  # noqa: BLE001 — never crash boot on autostart
+            logger.error("mytbot | autostart failed: {}", exc)
+
+    autostart_task = asyncio.create_task(_maybe_autostart(), name="autostart")
+
     try:
         done, _ = await asyncio.wait(
             [asyncio.create_task(stop_event.wait()), api_task],
@@ -251,6 +279,8 @@ async def _run() -> None:
         logger.error("mytbot | API server exited unexpectedly")
 
     logger.info("mytbot | shutting down...")
+    if not autostart_task.done():
+        autostart_task.cancel()
     orch = Orchestrator.get_instance()
     if orch.state.value != "off":
         await orch.stop()

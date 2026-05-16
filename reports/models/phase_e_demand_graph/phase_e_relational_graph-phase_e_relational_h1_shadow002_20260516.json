@@ -1,0 +1,295 @@
+{
+  "version": "phase_e_relational_h1_shadow002_20260516",
+  "timeframe": "1h",
+  "symbols": [
+    "AAPL",
+    "BTC-USD",
+    "ETH-USD",
+    "EURUSD=X",
+    "GLD",
+    "HYG",
+    "IWM",
+    "MSFT",
+    "NVDA",
+    "QQQ",
+    "SOL-USD",
+    "SPY",
+    "TLT",
+    "USDCAD=X"
+  ],
+  "edges": [
+    {
+      "source": "EURUSD=X",
+      "target": "BTC-USD",
+      "weight": 0.05641222440186628,
+      "lag_correlation": 0.05641222440186628,
+      "same_bar_correlation": 0.19029766338024656,
+      "confidence": 0.05641222440186628,
+      "observations": 2476
+    },
+    {
+      "source": "EURUSD=X",
+      "target": "ETH-USD",
+      "weight": 0.04109871450093099,
+      "lag_correlation": 0.04109871450093099,
+      "same_bar_correlation": 0.17462654748272952,
+      "confidence": 0.04109871450093099,
+      "observations": 2476
+    },
+    {
+      "source": "SPY",
+      "target": "TLT",
+      "weight": 0.03831576790534421,
+      "lag_correlation": 0.03831576790534421,
+      "same_bar_correlation": 0.06410435736975315,
+      "confidence": 0.03831576790534421,
+      "observations": 3571
+    },
+    {
+      "source": "QQQ",
+      "target": "TLT",
+      "weight": 0.038133106790909525,
+      "lag_correlation": 0.038133106790909525,
+      "same_bar_correlation": 0.030360658505886373,
+      "confidence": 0.038133106790909525,
+      "observations": 3571
+    },
+    {
+      "source": "BTC-USD",
+      "target": "SOL-USD",
+      "weight": 0.03724069038478793,
+      "lag_correlation": 0.03724069038478793,
+      "same_bar_correlation": 0.8264160028753226,
+      "confidence": 0.03724069038478793,
+      "observations": 3991
+    },
+    {
+      "source": "AAPL",
+      "target": "TLT",
+      "weight": 0.03523538456538829,
+      "lag_correlation": 0.03523538456538829,
+      "same_bar_correlation": 0.064575994347074,
+      "confidence": 0.03523538456538829,
+      "observations": 3571
+    },
+    {
+      "source": "BTC-USD",
+      "target": "ETH-USD",
+      "weight": 0.03460221949457408,
+      "lag_correlation": 0.03460221949457408,
+      "same_bar_correlation": 0.8867428606635008,
+      "confidence": 0.03460221949457408,
+      "observations": 3991
+    },
+    {
+      "source": "HYG",
+      "target": "TLT",
+      "weight": 0.03350898216717951,
+      "lag_correlation": 0.03350898216717951,
+      "same_bar_correlation": 0.4494504166722957,
+      "confidence": 0.03350898216717951,
+      "observations": 3571
+    },
+    {
+      "source": "GLD",
+      "target": "QQQ",
+      "weight": -0.030622493990145667,
+      "lag_correlation": -0.030622493990145667,
+      "same_bar_correlation": -0.0011462616597950643,
+      "confidence": 0.030622493990145667,
+      "observations": 3570
+    },
+    {
+      "source": "HYG",
+      "target": "QQQ",
+      "weight": 0.030055559342841938,
+      "lag_correlation": 0.030055559342841938,
+      "same_bar_correlation": 0.6194742301098192,
+      "confidence": 0.030055559342841938,
+      "observations": 3571
+    },
+    {
+      "source": "HYG",
+      "target": "SPY",
+      "weight": 0.02924084505031918,
+      "lag_correlation": 0.02924084505031918,
+      "same_bar_correlation": 0.6888202822904329,
+      "confidence": 0.02924084505031918,
+      "observations": 3571
+    },
+    {
+      "source": "EURUSD=X",
+      "target": "SOL-USD",
+      "weight": 0.028706328969115007,
+      "lag_correlation": 0.028706328969115007,
+      "same_bar_correlation": 0.1576014227063495,
+      "confidence": 0.028706328969115007,
+      "observations": 2476
+    },
+    {
+      "source": "GLD",
+      "target": "NVDA",
+      "weight": -0.028028799046015677,
+      "lag_correlation": -0.028028799046015677,
+      "same_bar_correlation": -0.00686881714223893,
+      "confidence": 0.028028799046015677,
+      "observations": 3570
+    },
+    {
+      "source": "IWM",
+      "target": "HYG",
+      "weight": 0.027727131065078636,
+      "lag_correlation": 0.027727131065078636,
+      "same_bar_correlation": 0.6944702796328461,
+      "confidence": 0.027727131065078636,
+      "observations": 3571
+    },
+    {
+      "source": "MSFT",
+      "target": "QQQ",
+      "weight": 0.02631675626069201,
+      "lag_correlation": 0.02631675626069201,
+      "same_bar_correlation": 0.726021226924007,
+      "confidence": 0.02631675626069201,
+      "observations": 3571
+    },
+    {
+      "source": "MSFT",
+      "target": "TLT",
+      "weight": 0.02483390048534078,
+      "lag_correlation": 0.02483390048534078,
+      "same_bar_correlation": -0.025482986827308873,
+      "confidence": 0.02483390048534078,
+      "observations": 3571
+    },
+    {
+      "source": "IWM",
+      "target": "TLT",
+      "weight": 0.024409834023556048,
+      "lag_correlation": 0.024409834023556048,
+      "same_bar_correlation": 0.13148454681198146,
+      "confidence": 0.024409834023556048,
+      "observations": 3571
+    },
+    {
+      "source": "SPY",
+      "target": "QQQ",
+      "weight": 0.024334411710071727,
+      "lag_correlation": 0.024334411710071727,
+      "same_bar_correlation": 0.9539507442454318,
+      "confidence": 0.024334411710071727,
+      "observations": 3571
+    },
+    {
+      "source": "ETH-USD",
+      "target": "SOL-USD",
+      "weight": 0.024059654984772336,
+      "lag_correlation": 0.024059654984772336,
+      "same_bar_correlation": 0.8498846586026506,
+      "confidence": 0.024059654984772336,
+      "observations": 3991
+    },
+    {
+      "source": "GLD",
+      "target": "SPY",
+      "weight": -0.02372110626071689,
+      "lag_correlation": -0.02372110626071689,
+      "same_bar_correlation": 0.00740229493236487,
+      "confidence": 0.02372110626071689,
+      "observations": 3570
+    },
+    {
+      "source": "MSFT",
+      "target": "NVDA",
+      "weight": 0.023318611767132076,
+      "lag_correlation": 0.023318611767132076,
+      "same_bar_correlation": 0.5197280025159714,
+      "confidence": 0.023318611767132076,
+      "observations": 3571
+    },
+    {
+      "source": "HYG",
+      "target": "IWM",
+      "weight": 0.02321796455123269,
+      "lag_correlation": 0.02321796455123269,
+      "same_bar_correlation": 0.6944702796328461,
+      "confidence": 0.02321796455123269,
+      "observations": 3571
+    },
+    {
+      "source": "TLT",
+      "target": "IWM",
+      "weight": 0.022468453993476425,
+      "lag_correlation": 0.022468453993476425,
+      "same_bar_correlation": 0.13148454681198146,
+      "confidence": 0.022468453993476425,
+      "observations": 3571
+    },
+    {
+      "source": "EURUSD=X",
+      "target": "USDCAD=X",
+      "weight": -0.022048240903603987,
+      "lag_correlation": -0.022048240903603987,
+      "same_bar_correlation": -0.6146535740942989,
+      "confidence": 0.022048240903603987,
+      "observations": 3482
+    },
+    {
+      "source": "NVDA",
+      "target": "TLT",
+      "weight": 0.021195498166522553,
+      "lag_correlation": 0.021195498166522553,
+      "same_bar_correlation": -0.05326255413651855,
+      "confidence": 0.021195498166522553,
+      "observations": 3571
+    },
+    {
+      "source": "IWM",
+      "target": "GLD",
+      "weight": 0.020166188772159897,
+      "lag_correlation": 0.020166188772159897,
+      "same_bar_correlation": 0.05430776183710071,
+      "confidence": 0.020166188772159897,
+      "observations": 3569
+    }
+  ],
+  "metadata": {
+    "min_overlap": 300,
+    "min_abs_lag_corr": 0.02,
+    "max_edges": 80,
+    "bar_count": 11492,
+    "symbols_requested": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "TLT",
+      "HYG",
+      "GLD",
+      "BTC-USD",
+      "ETH-USD",
+      "SOL-USD",
+      "NVDA",
+      "AAPL",
+      "MSFT",
+      "USDCAD=X",
+      "EURUSD=X"
+    ],
+    "symbols_with_data": [
+      "AAPL",
+      "BTC-USD",
+      "ETH-USD",
+      "EURUSD=X",
+      "GLD",
+      "HYG",
+      "IWM",
+      "MSFT",
+      "NVDA",
+      "QQQ",
+      "SOL-USD",
+      "SPY",
+      "TLT",
+      "USDCAD=X"
+    ],
+    "built_at": "2026-05-16T23:01:03.211401+00:00"
+  }
+}

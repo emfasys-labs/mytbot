@@ -1,0 +1,212 @@
+{
+  "config": {
+    "architecture": "tcn",
+    "holdout_fraction": 0.2,
+    "horizon": 4,
+    "max_rows": 6000,
+    "min_feature_coverage": 0.85,
+    "min_rows": 1000,
+    "min_samples": 500,
+    "symbols": [
+      "ETH-USD",
+      "QQQ",
+      "NVDA"
+    ],
+    "timeframe": "1h",
+    "training": {
+      "architecture": "tcn",
+      "baseline_alpha": 1.0,
+      "batch_size": 128,
+      "enabled": true,
+      "epochs": 40,
+      "hit_rate_margin": 0.01,
+      "learning_rate": 0.001,
+      "mse_ratio_threshold": 0.95,
+      "patience": 6,
+      "require_manual_promotion": true,
+      "round_trip_cost_bps": 5.0,
+      "seed": 19
+    },
+    "window": 64
+  },
+  "generated_at": "2026-05-16T21:27:10.892332+00:00",
+  "results": [
+    {
+      "baseline_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\ETH-USD-ridge.pkl",
+      "comparison": {
+        "deep_beats_baseline": false,
+        "failures": [
+          "hit_rate_margin=+0.003<thr=0.01",
+          "net_pnl_deep=-0.498879<=baseline=-0.363191",
+          "net_pnl_deep=-0.498879<=0"
+        ],
+        "hit_rate_baseline": 0.48911070780399274,
+        "hit_rate_deep": 0.49183303085299457,
+        "hit_rate_margin_required": 0.01,
+        "metadata": {
+          "round_trip_cost_bps": 5.0
+        },
+        "mse_baseline": 0.0001864319927919281,
+        "mse_deep": 0.0001329634917098072,
+        "mse_ratio": 0.7132010430109187,
+        "n_oos": 1103,
+        "net_pnl_baseline": -0.36319087701097647,
+        "net_pnl_deep": -0.49887918815124
+      },
+      "deep_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\ETH-USD-tcn.pkl",
+      "feature_contract_hash": "469d0f890d512ae19f6d697ef87bed5207aae78537eb265101b9863ddc6bf4ff",
+      "feature_count": 15,
+      "feature_names": [
+        "rsi_14",
+        "MACD_12_26_9",
+        "MACDh_12_26_9",
+        "MACDs_12_26_9",
+        "atr_14",
+        "mom_10",
+        "vol_ratio",
+        "vpin_proxy_50",
+        "volume_z",
+        "relative_dollar_volume",
+        "trade_count_anomaly",
+        "volume_persistence",
+        "fake_spike_penalty",
+        "fracdiff_0_4",
+        "garch_vol_1d"
+      ],
+      "finished_at": "2026-05-16T21:26:50.886879+00:00",
+      "horizon": 4,
+      "notes": "tcn trained: best_val_mse=1.0707 epochs_used=7 n_feat=15 window=64",
+      "promote_eligible": false,
+      "rows_loaded": 6000,
+      "samples": 5511,
+      "started_at": "2026-05-16T21:26:42.230058+00:00",
+      "status": "trained",
+      "symbol": "ETH-USD",
+      "timeframe": "1h",
+      "training_metadata": {
+        "architecture": "tcn",
+        "n_test": 1103,
+        "n_train": 4408
+      },
+      "window": 64
+    },
+    {
+      "baseline_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\QQQ-ridge.pkl",
+      "comparison": {
+        "deep_beats_baseline": true,
+        "failures": [],
+        "hit_rate_baseline": 0.5070993914807302,
+        "hit_rate_deep": 0.537525354969574,
+        "hit_rate_margin_required": 0.01,
+        "metadata": {
+          "round_trip_cost_bps": 5.0
+        },
+        "mse_baseline": 0.00014665105786832155,
+        "mse_deep": 7.675500794413715e-05,
+        "mse_ratio": 0.5233853001800759,
+        "n_oos": 987,
+        "net_pnl_baseline": -0.2541262081562336,
+        "net_pnl_deep": 0.16536366081447218
+      },
+      "deep_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\QQQ-tcn.pkl",
+      "feature_contract_hash": "469d0f890d512ae19f6d697ef87bed5207aae78537eb265101b9863ddc6bf4ff",
+      "feature_count": 15,
+      "feature_names": [
+        "rsi_14",
+        "MACD_12_26_9",
+        "MACDh_12_26_9",
+        "MACDs_12_26_9",
+        "atr_14",
+        "mom_10",
+        "vol_ratio",
+        "vpin_proxy_50",
+        "volume_z",
+        "relative_dollar_volume",
+        "trade_count_anomaly",
+        "volume_persistence",
+        "fake_spike_penalty",
+        "fracdiff_0_4",
+        "garch_vol_1d"
+      ],
+      "finished_at": "2026-05-16T21:27:01.503226+00:00",
+      "horizon": 4,
+      "notes": "tcn trained: best_val_mse=0.440192 epochs_used=10 n_feat=15 window=64",
+      "promote_eligible": true,
+      "rows_loaded": 5078,
+      "samples": 4931,
+      "started_at": "2026-05-16T21:26:50.886889+00:00",
+      "status": "trained",
+      "symbol": "QQQ",
+      "timeframe": "1h",
+      "training_metadata": {
+        "architecture": "tcn",
+        "n_test": 987,
+        "n_train": 3944
+      },
+      "window": 64
+    },
+    {
+      "baseline_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\NVDA-ridge.pkl",
+      "comparison": {
+        "deep_beats_baseline": true,
+        "failures": [],
+        "hit_rate_baseline": 0.49037487335359675,
+        "hit_rate_deep": 0.5045592705167173,
+        "hit_rate_margin_required": 0.01,
+        "metadata": {
+          "round_trip_cost_bps": 5.0
+        },
+        "mse_baseline": 0.0005374269177919394,
+        "mse_deep": 0.0003450484944983536,
+        "mse_ratio": 0.6420379833522526,
+        "n_oos": 987,
+        "net_pnl_baseline": -0.4735206670669726,
+        "net_pnl_deep": 0.2487421746066366
+      },
+      "deep_artifact": "artifacts\\models\\forecast\\phase_b\\phase_b_panel_h4_seed19_20260516\\NVDA-tcn.pkl",
+      "feature_contract_hash": "469d0f890d512ae19f6d697ef87bed5207aae78537eb265101b9863ddc6bf4ff",
+      "feature_count": 15,
+      "feature_names": [
+        "rsi_14",
+        "MACD_12_26_9",
+        "MACDh_12_26_9",
+        "MACDs_12_26_9",
+        "atr_14",
+        "mom_10",
+        "vol_ratio",
+        "vpin_proxy_50",
+        "volume_z",
+        "relative_dollar_volume",
+        "trade_count_anomaly",
+        "volume_persistence",
+        "fake_spike_penalty",
+        "fracdiff_0_4",
+        "garch_vol_1d"
+      ],
+      "finished_at": "2026-05-16T21:27:10.885911+00:00",
+      "horizon": 4,
+      "notes": "tcn trained: best_val_mse=0.42123 epochs_used=9 n_feat=15 window=64",
+      "promote_eligible": true,
+      "rows_loaded": 5078,
+      "samples": 4931,
+      "started_at": "2026-05-16T21:27:01.503238+00:00",
+      "status": "trained",
+      "symbol": "NVDA",
+      "timeframe": "1h",
+      "training_metadata": {
+        "architecture": "tcn",
+        "n_test": 987,
+        "n_train": 3944
+      },
+      "window": 64
+    }
+  ],
+  "run_id": "phase_b_panel_h4_seed19_20260516",
+  "summary": {
+    "errors": 0,
+    "promote_eligible": 2,
+    "skipped": 0,
+    "symbols_total": 3,
+    "trained": 3
+  }
+}

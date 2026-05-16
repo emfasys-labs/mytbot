@@ -65,6 +65,14 @@ async def test_zero_allocation_watchdog_skips_when_loop_fresh(monkeypatch: pytes
 @pytest.mark.asyncio
 async def test_zero_allocation_watchdog_refuses_live(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "live")
+    # The committed live-arming interlock (validate_live_arming) is multi-factor
+    # when APP_ENV=live: IBKR_PORT=7496 AND the explicit arming phrase. Fully
+    # arm a simulated-live env so this test exercises the watchdog's
+    # refuse-in-live behaviour rather than tripping the (correct) arming guard
+    # during Orchestrator construction.
+    monkeypatch.setenv("IBKR_PORT", "7496")
+    monkeypatch.setenv("IBKR_LIVE_ARMED", "I_UNDERSTAND_IBKR_LIVE_ORDERS")
+    monkeypatch.setenv("MYTBOT_LIVE_ARMED", "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS")
     monkeypatch.setenv("ZERO_ALLOC_FLATTEN_STALE_SEC", "1")
 
     async def fake_flatten(**_kwargs):

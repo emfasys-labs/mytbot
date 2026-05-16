@@ -176,11 +176,24 @@ def _apply_forecast_bridge_to_opportunity(
         except (TypeError, ValueError):
             continue
 
+    # Phase B: a pre-built (window, n_feat) sequence is stashed on the
+    # signal metadata by the loop (where the recent feature df already
+    # lives) under "forecast_sequence_window". Pure read — no DB here.
+    # Absent ⇒ sequence members skip safely; tabular members unaffected.
+    _seq_win = None
+    try:
+        _md = getattr(signal, "metadata", None)
+        if isinstance(_md, dict):
+            _seq_win = _md.get("forecast_sequence_window")
+    except Exception:  # noqa: BLE001
+        _seq_win = None
+
     try:
         decision = _bridge_evaluate(
             features=features,
             mode=Mode.PAPER,
             config=config,
+            sequence_window=_seq_win,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("opportunity_engine | forecast_bridge eval failed: %s", exc)
@@ -313,6 +326,44 @@ def _apply_trained_meta_label_to_opportunity(
     if decision.feature_hash:
         opp.metadata["meta_label_feature_hash"] = decision.feature_hash
     return bool(decision.kept)
+
+
+_PHASE_F_WEIGHTS: Any = "unloaded"
+
+
+def _apply_fusion_weights_shadow(opp: Any, regime_state: Any) -> None:
+    """Phase F SHADOW: stamp an alternative opportunity score computed with
+    learned regime-conditional weights into ``opp.metadata`` for offline
+    comparison. NEVER alters ``opp.opportunity_score`` or any live value.
+    Gated by FUSION_WEIGHTS_SHADOW; inert if no artifact. Never raises."""
+    global _PHASE_F_WEIGHTS
+    try:
+        from system.fusion_weights import (
+            COMPONENTS,
+            RegimeConditionalFusionWeights,
+            fusion_weights_shadow_enabled,
+        )
+
+        if not fusion_weights_shadow_enabled():
+            return
+        if _PHASE_F_WEIGHTS == "unloaded":
+            # Shadow observation may use a not-yet-promoted artifact; the
+            # require_promote=True guard only matters for any future LIVE use.
+            _PHASE_F_WEIGHTS = RegimeConditionalFusionWeights.load(
+                require_promote=False
+            )
+        if _PHASE_F_WEIGHTS is None:
+            return
+        comp = {
+            c: float(getattr(opp.components, c, 0.0) or 0.0) for c in COMPONENTS
+        }
+        regime = str(getattr(regime_state, "regime_label", "") or "unknown")
+        s = _PHASE_F_WEIGHTS.shadow_score(comp, regime)
+        if s is not None:
+            opp.metadata["fusion_weights_shadow_score"] = round(float(s), 6)
+            opp.metadata["fusion_weights_shadow_regime"] = regime
+    except Exception:  # noqa: BLE001 — shadow must never disturb live
+        pass
 
 
 def build_opportunities(
@@ -501,6 +552,7 @@ def build_opportunities(
                     opp.metadata.get("meta_label_threshold"),
                 )
                 continue
+        _apply_fusion_weights_shadow(opp, regime_state)
         out.append(opp)
 
     if out:

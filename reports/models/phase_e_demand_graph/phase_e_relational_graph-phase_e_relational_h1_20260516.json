@@ -1,0 +1,60 @@
+{
+  "version": "phase_e_relational_h1_20260516",
+  "timeframe": "1h",
+  "symbols": [
+    "AAPL",
+    "BTC-USD",
+    "ETH-USD",
+    "EURUSD=X",
+    "GLD",
+    "HYG",
+    "IWM",
+    "MSFT",
+    "NVDA",
+    "QQQ",
+    "SOL-USD",
+    "SPY",
+    "TLT",
+    "USDCAD=X"
+  ],
+  "edges": [],
+  "metadata": {
+    "min_overlap": 300,
+    "min_abs_lag_corr": 0.08,
+    "max_edges": 80,
+    "bar_count": 11492,
+    "symbols_requested": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "TLT",
+      "HYG",
+      "GLD",
+      "BTC-USD",
+      "ETH-USD",
+      "SOL-USD",
+      "NVDA",
+      "AAPL",
+      "MSFT",
+      "USDCAD=X",
+      "EURUSD=X"
+    ],
+    "symbols_with_data": [
+      "AAPL",
+      "BTC-USD",
+      "ETH-USD",
+      "EURUSD=X",
+      "GLD",
+      "HYG",
+      "IWM",
+      "MSFT",
+      "NVDA",
+      "QQQ",
+      "SOL-USD",
+      "SPY",
+      "TLT",
+      "USDCAD=X"
+    ],
+    "built_at": "2026-05-16T23:00:56.499436+00:00"
+  }
+}

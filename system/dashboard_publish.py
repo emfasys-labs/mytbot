@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import lru_cache
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal
+
+from loguru import logger
+import yaml
 
 from control.command_bus import CommandBus
 from core.models_runtime import (
@@ -28,6 +33,9 @@ from portfolio.global_edge_coordinator import cash_factor_for_asset_class
 from signals.accumulator import SignalAccumulator
 
 DASHBOARD_SNAPSHOT_KEY = "dashboard.snapshot"
+REGIME_TRANSITION_SHADOW_HISTORY_KEY = "regime_transition.shadow_history"
+REGIME_TRANSITION_SHADOW_HISTORY_LIMIT = 1000
+REGIME_MODELS_DEFAULT_PATH = Path("config/regime_models.yaml")
 
 PathKind = Literal["d015", "global_edge"]
 
@@ -126,6 +134,22 @@ def serialize_opportunity(o: Opportunity, *, rank: int = 0) -> dict[str, Any]:
 
 def serialize_regime_state(r: RegimeState) -> dict[str, Any]:
     mc = r.components
+    metadata = r.metadata or {}
+    transition: dict[str, Any] | None = None
+    if metadata.get("regime_transition_used") is True:
+        transition = {
+            "used": True,
+            "shadow_only": bool(metadata.get("regime_transition_shadow_only", True)),
+            "probability": metadata.get("regime_transition_probability"),
+            "label": metadata.get("regime_transition_label"),
+            "threshold": metadata.get("regime_transition_threshold"),
+            "model_version": metadata.get("regime_transition_model_version"),
+        }
+    elif "regime_transition_reason" in metadata:
+        transition = {
+            "used": False,
+            "reason": str(metadata.get("regime_transition_reason"))[:120],
+        }
     return {
         "timestamp": r.timestamp.isoformat(),
         "regime_label": r.regime_label,
@@ -134,7 +158,8 @@ def serialize_regime_state(r: RegimeState) -> dict[str, Any]:
         "execution_quality": _d(r.execution_quality),
         "breadth_score": _d(r.breadth_score),
         "components": {k: _d(v) for k, v in mc.as_dict().items()},
-        "metadata": {k: v for k, v in (r.metadata or {}).items() if isinstance(v, (str, int, float, bool))},
+        "metadata": {k: v for k, v in metadata.items() if isinstance(v, (str, int, float, bool))},
+        "transition": transition,
     }
 
 
@@ -366,6 +391,75 @@ def snapshot_fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+@lru_cache(maxsize=1)
+def _phase_c_shadow_policy() -> dict[str, Any]:
+    try:
+        raw = yaml.safe_load(REGIME_MODELS_DEFAULT_PATH.read_text(encoding="utf-8")) or {}
+        cfg = ((raw.get("regime_models") or {}).get("transition_policy_shadow") or {})
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "trigger_probability": float(cfg.get("trigger_probability", 0.55)),
+        "exposure_multiplier": float(cfg.get("exposure_multiplier", 0.50)),
+    }
+
+
+def _transition_history_entry(payload: dict[str, Any]) -> dict[str, Any] | None:
+    regime = payload.get("regime")
+    if not isinstance(regime, dict):
+        return None
+    transition = regime.get("transition")
+    if not isinstance(transition, dict):
+        return None
+    entry = {
+        "timestamp": payload.get("updated_at"),
+        "loop_iteration": payload.get("loop_iteration"),
+        "path": payload.get("path"),
+        "regime_label": regime.get("regime_label"),
+        "market_state_score": regime.get("market_state_score"),
+        "breadth_score": regime.get("breadth_score"),
+        "used": transition.get("used"),
+        "shadow_only": transition.get("shadow_only"),
+        "label": transition.get("label"),
+        "probability": transition.get("probability"),
+        "threshold": transition.get("threshold"),
+        "model_version": transition.get("model_version"),
+        "reason": transition.get("reason"),
+    }
+    policy = _phase_c_shadow_policy()
+    if policy["enabled"] and transition.get("probability") is not None:
+        try:
+            prob = float(transition.get("probability"))
+            trigger = float(policy["trigger_probability"])
+            multiplier = float(policy["exposure_multiplier"]) if prob >= trigger else 1.0
+            entry["policy_shadow_enabled"] = True
+            entry["policy_trigger_probability"] = trigger
+            entry["policy_exposure_multiplier"] = multiplier
+            entry["policy_throttle_applied"] = multiplier < 1.0
+        except (TypeError, ValueError):
+            entry["policy_shadow_enabled"] = True
+            entry["policy_reason"] = "invalid_probability"
+    return entry
+
+
+async def append_regime_transition_shadow_history(
+    bus: CommandBus,
+    payload: dict[str, Any],
+    *,
+    limit: int = REGIME_TRANSITION_SHADOW_HISTORY_LIMIT,
+) -> None:
+    """Append the latest Phase C transition shadow row to a bounded control-state list."""
+    entry = _transition_history_entry(payload)
+    if entry is None:
+        return
+    raw = await bus.get_state(REGIME_TRANSITION_SHADOW_HISTORY_KEY, [])
+    rows = list(raw) if isinstance(raw, list) else []
+    rows.append(entry)
+    rows = rows[-max(1, int(limit)) :]
+    await bus.set_state(REGIME_TRANSITION_SHADOW_HISTORY_KEY, rows)
+
+
 async def publish_dashboard_snapshot_d015(
     bus: CommandBus,
     *,
@@ -409,6 +503,10 @@ async def publish_dashboard_snapshot_d015(
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)
+    try:
+        await append_regime_transition_shadow_history(bus, payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("phase_c_shadow_history | append skipped | {}", exc)
 
 
 async def publish_dashboard_snapshot_global_edge(
@@ -420,6 +518,7 @@ async def publish_dashboard_snapshot_global_edge(
     strategy_opportunities: list[StrategyOpportunity],
     coordinator_actions: list[Any],
     portfolio_state: PortfolioState,
+    regime: RegimeState | None = None,
     demand: dict[str, Any] | None = None,
     max_opps: int = 15,
 ) -> None:
@@ -433,7 +532,7 @@ async def publish_dashboard_snapshot_global_edge(
         "path": "global_edge",
         "loop_iteration": int(loop_iteration),
         "accumulator": acc_blob,
-        "regime": None,
+        "regime": serialize_regime_state(regime) if regime is not None else None,
         "opportunities": [serialize_strategy_opportunity(o) for o in ranked],
         "allocation": None,
         "execution_plan": {
@@ -454,3 +553,7 @@ async def publish_dashboard_snapshot_global_edge(
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)
+    try:
+        await append_regime_transition_shadow_history(bus, payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("phase_c_shadow_history | append skipped | {}", exc)

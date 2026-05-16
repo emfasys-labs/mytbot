@@ -389,6 +389,8 @@ async def run_once(
     cfg: dict[str, Any],
     *,
     backfill: bool,
+    include_news: bool = True,
+    include_fred: bool = True,
 ) -> None:
     stats: list[dict[str, Any]] = []
     for sym in cfg.get("symbols") or []:
@@ -409,8 +411,10 @@ async def run_once(
                 total,
                 (100.0 * full / total) if total else 0.0,
             )
-    await ingest_news(session_factory, cfg)
-    await ingest_fred(session_factory, cfg)
+    if include_news:
+        await ingest_news(session_factory, cfg)
+    if include_fred:
+        await ingest_fred(session_factory, cfg)
 
 
 async def run_loop(

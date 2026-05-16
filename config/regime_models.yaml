@@ -48,6 +48,34 @@ regime_models:
       - news_dispersion
     artifact_path: null          # path to a saved HMMRegimeClassifier pickle
 
+  # ── Phase C transition detector ───────────────────────────────────
+  # Shadow-only by default. When enabled, risk/regime_state.py adds
+  # probability diagnostics to RegimeState.metadata; it does not override
+  # the heuristic/classifier regime label and does not change allocation.
+  transition_detector:
+    enabled: true
+    shadow_only: true
+    artifact_path: artifacts/models/regime_transition/regime_transition-phase_c_transition_h4_thr045_20260516.pkl
+    threshold: 0.45
+    feature_names:
+      - trend_strength
+      - breadth_score
+      - market_state_score
+      - chaos_penalty
+      - volatility_structure
+      - anomaly_breadth
+      - correlation_crowding
+      - liquidity_state
+      - news_conflict_score
+
+  # Shadow-only policy candidate used for reports/history. This does not
+  # change allocation; it stamps what multiplier would have been used so
+  # later D094/D095 reports can evaluate the same policy consistently.
+  transition_policy_shadow:
+    enabled: true
+    trigger_probability: 0.55
+    exposure_multiplier: 0.50
+
   # ── label vocabulary (frozen for governance) ────────────────────────
   # See risk/regime_models.REGIME_LABELS — operator must NOT rename
   # without updating downstream consumers.

@@ -145,10 +145,14 @@ def test_score_proxy_ceiling_scales_with_high_fee_venue() -> None:
         config=cfg, broker="kraken", symbol="ETH-USD", asset_class="crypto",
         quantity=1.0, signal_metadata=score_only_md,
     )
-    # IBKR keeps the conservative 25 bps proxy ceiling.
-    assert ibkr_out.metadata["wave9_edge_bps"] == 25.0
-    # Kraken with 40 bps fee scales the cap to max(25, 2*40)=80 bps.
-    assert kraken_out.metadata["wave9_edge_bps"] == 80.0
+    # Wave-9 lockout fix (#2): the uncalibrated conviction→edge proxy ceiling
+    # was raised from max(25, 2*fee) → max(200, 4*fee) bps. At cap-clipping
+    # conviction (1.0) the proxy == the ceiling. The previous 25 bps cap made
+    # every score-only trade permanently fail the cost cushion once the book
+    # filled (the documented lockout). Floor now dominates ≤ 50 bps fee;
+    # venue scaling still applies above that.
+    assert ibkr_out.metadata["wave9_edge_bps"] == 200.0  # max(200, 4*1)
+    assert kraken_out.metadata["wave9_edge_bps"] == 200.0  # max(200, 4*40)
 
 
 def test_metadata_audit_fields_present() -> None:

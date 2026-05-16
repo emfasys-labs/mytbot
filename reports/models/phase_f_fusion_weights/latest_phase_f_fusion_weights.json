@@ -1,0 +1,60 @@
+{
+  "by_regime": {
+    "range": {
+      "momentum": 0.0,
+      "volume_anomaly": 0.8575135928045852,
+      "news_impact": 0.10898242185495695,
+      "regime_alignment": 0.0,
+      "liquidity_quality": 0.0,
+      "structure_quality": 0.033503985340457954,
+      "relative_strength": 0.0
+    },
+    "trend_down": {
+      "momentum": 0.0,
+      "volume_anomaly": 0.491014300207615,
+      "news_impact": 0.508985699792385,
+      "regime_alignment": 0.0,
+      "liquidity_quality": 0.0,
+      "structure_quality": 0.0,
+      "relative_strength": 0.0
+    },
+    "trend_up": {
+      "momentum": 0.0,
+      "volume_anomaly": 0.7710819715787537,
+      "news_impact": 0.14881897327994476,
+      "regime_alignment": 0.0,
+      "liquidity_quality": 0.0,
+      "structure_quality": 0.08009905514130157,
+      "relative_strength": 0.0
+    },
+    "volatile": {
+      "momentum": 0.0,
+      "volume_anomaly": 0.2764122458852295,
+      "news_impact": 0.7110891073543195,
+      "regime_alignment": 0.0,
+      "liquidity_quality": 0.0,
+      "structure_quality": 0.012498646760451006,
+      "relative_strength": 0.0
+    }
+  },
+  "default": {
+    "momentum": 0.0,
+    "volume_anomaly": 0.6231323468629208,
+    "news_impact": 0.37686765313707915,
+    "regime_alignment": 0.0,
+    "liquidity_quality": 0.0,
+    "structure_quality": 0.0,
+    "relative_strength": 0.0
+  },
+  "metadata": {
+    "promote_eligible": false,
+    "n_obs": 1581917,
+    "regimes": {
+      "range": 619082,
+      "trend_down": 416419,
+      "trend_up": 421985,
+      "volatile": 124431
+    },
+    "builder": "phase_f_v1_proxy_components"
+  }
+}

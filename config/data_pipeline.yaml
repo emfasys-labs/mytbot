@@ -51,6 +51,15 @@ backfill:
   expected_interval_seconds: 86400
   stale_after_days: 14
 
+# Governed model-training backfill. yfinance's practical 1h history limit is
+# about 730 days; use the live universe tiers via:
+#   python run_pipeline.py --training-backfill
+historical_training_backfill:
+  interval: "1h"
+  period: "730d"
+  expected_interval_seconds: 3600
+  stale_after_hours: 168
+
 incremental:
   interval: "1h"
   period: "5d"

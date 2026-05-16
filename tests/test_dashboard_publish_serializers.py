@@ -8,12 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.models_runtime import PortfolioState
+from core.models_runtime import MarketStateComponents, PortfolioState, RegimeState
 from portfolio.strategy_opportunity import StrategyOpportunity
 from system.dashboard_publish import (
     DASHBOARD_SNAPSHOT_KEY,
+    REGIME_TRANSITION_SHADOW_HISTORY_KEY,
+    _transition_history_entry,
+    append_regime_transition_shadow_history,
     publish_dashboard_snapshot_heartbeat,
     serialize_coordinator_actions,
+    serialize_regime_state,
     serialize_strategy_opportunity,
 )
 
@@ -24,6 +28,9 @@ class _FakeBus:
 
     async def set_state(self, key: str, value: object) -> None:
         self.state[key] = value
+
+    async def get_state(self, key: str, default: object = None) -> object:
+        return self.state.get(key, default)
 
 
 def test_strategy_opportunity_includes_opportunity_score_alias():
@@ -121,3 +128,98 @@ def test_coordinator_action_includes_action_alias():
     assert len(out) == 1
     assert out[0]["kind"] == "reduce"
     assert out[0]["action"] == "reduce"
+
+
+def test_regime_serializer_promotes_transition_shadow_block():
+    now = datetime.now(timezone.utc)
+    regime = RegimeState(
+        timestamp=now,
+        regime_label="mixed",
+        market_state_score=Decimal("0.1"),
+        drawdown_throttle=Decimal("0"),
+        execution_quality=Decimal("0.8"),
+        breadth_score=Decimal("0.2"),
+        components=MarketStateComponents(),
+        metadata={
+            "regime_transition_used": True,
+            "regime_transition_shadow_only": True,
+            "regime_transition_probability": 0.53,
+            "regime_transition_label": "stress_transition",
+            "regime_transition_threshold": 0.45,
+            "regime_transition_model_version": "phase_c",
+        },
+    )
+
+    out = serialize_regime_state(regime)
+
+    assert out["regime_label"] == "mixed"
+    assert out["transition"] == {
+        "used": True,
+        "shadow_only": True,
+        "probability": 0.53,
+        "label": "stress_transition",
+        "threshold": 0.45,
+        "model_version": "phase_c",
+    }
+    assert out["metadata"]["regime_transition_probability"] == 0.53
+
+
+@pytest.mark.asyncio
+async def test_transition_shadow_history_appends_bounded_rows():
+    bus = _FakeBus()
+    payload = {
+        "updated_at": "2026-05-16T22:00:00+00:00",
+        "path": "d015",
+        "loop_iteration": 11,
+        "regime": {
+            "regime_label": "mixed",
+            "market_state_score": "0.1",
+            "breadth_score": "0.2",
+            "transition": {
+                "used": True,
+                "shadow_only": True,
+                "probability": 0.53,
+                "label": "stress_transition",
+                "threshold": 0.45,
+                "model_version": "phase_c",
+            },
+        },
+    }
+
+    await append_regime_transition_shadow_history(bus, payload, limit=1)  # type: ignore[arg-type]
+    payload["loop_iteration"] = 12
+    await append_regime_transition_shadow_history(bus, payload, limit=1)  # type: ignore[arg-type]
+
+    rows = bus.state[REGIME_TRANSITION_SHADOW_HISTORY_KEY]
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    assert rows[0]["loop_iteration"] == 12
+    assert rows[0]["probability"] == 0.53
+
+
+def test_transition_history_entry_stamps_shadow_policy(monkeypatch):
+    monkeypatch.setattr(
+        "system.dashboard_publish._phase_c_shadow_policy",
+        lambda: {"enabled": True, "trigger_probability": 0.55, "exposure_multiplier": 0.5},
+    )
+    payload = {
+        "updated_at": "2026-05-16T22:00:00+00:00",
+        "path": "global_edge",
+        "loop_iteration": 1,
+        "regime": {
+            "regime_label": "mixed",
+            "transition": {
+                "used": True,
+                "probability": 0.56,
+                "label": "stress_transition",
+                "threshold": 0.45,
+            },
+        },
+    }
+
+    row = _transition_history_entry(payload)
+
+    assert row is not None
+    assert row["policy_shadow_enabled"] is True
+    assert row["policy_throttle_applied"] is True
+    assert row["policy_exposure_multiplier"] == 0.5

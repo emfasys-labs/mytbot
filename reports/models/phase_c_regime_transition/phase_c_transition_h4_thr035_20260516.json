@@ -1,0 +1,47 @@
+{
+  "artifact": "artifacts\\models\\regime_transition\\regime_transition-phase_c_transition_h4_thr035_20260516.pkl",
+  "config": {
+    "holdout_fraction": 0.25,
+    "horizon": 4,
+    "l2": 1.0,
+    "max_rows_per_symbol": 6000,
+    "min_samples": 1000,
+    "min_symbols_per_bar": 6,
+    "run_id": "phase_c_transition_h4_thr035_20260516",
+    "symbols": "SPY,QQQ,IWM,TLT,HYG,GLD,BTC-USD,ETH-USD,SOL-USD,NVDA,AAPL,MSFT,USDCAD=X,EURUSD=X",
+    "threshold": 0.35,
+    "timeframe": "1h"
+  },
+  "dataset": {
+    "feature_names": [
+      "trend_strength",
+      "breadth_score",
+      "market_state_score",
+      "chaos_penalty",
+      "volatility_structure",
+      "anomaly_breadth",
+      "correlation_crowding",
+      "liquidity_state",
+      "news_conflict_score"
+    ],
+    "positive_rate": 0.29799301919720766,
+    "rows": 4584,
+    "test_rows": 1146,
+    "train_rows": 3438
+  },
+  "generated_at": "2026-05-16T21:43:16.116220+00:00",
+  "oos_metrics": {
+    "accuracy": 0.1169284467713787,
+    "fn": 0,
+    "fp": 1012,
+    "n": 1146,
+    "positive_rate": 0.10907504363001745,
+    "precision": 0.10993843447669305,
+    "recall": 1.0,
+    "roc_auc": 0.611847208619001,
+    "tn": 9,
+    "tp": 125
+  },
+  "promotion_note": "research_only_shadow_candidate; config/regime_models.yaml not modified",
+  "run_id": "phase_c_transition_h4_thr035_20260516"
+}

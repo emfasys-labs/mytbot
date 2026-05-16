@@ -1,0 +1,15 @@
+{
+  "observations": 1581917,
+  "learned_ic": 0.001797,
+  "static_ic": -0.016042,
+  "learned_minus_static": 0.017839,
+  "promote_margin": 0.005,
+  "min_useful_ic": 0.02,
+  "recommendation": "do_not_promote",
+  "regimes": {
+    "range": 619082,
+    "trend_down": 416419,
+    "trend_up": 421985,
+    "volatile": 124431
+  }
+}

@@ -68,8 +68,12 @@ def test_no_broker_manager_returns_empty(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out == {}
 
 
-def test_first_non_zero_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fast adapter with positive price beats slower adapters."""
+def test_deterministic_median_positive_quote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_live_broker_prices`` was deliberately changed from a 'first
+    non-zero wins' latency race to a DETERMINISTIC MEDIAN of positive broker
+    quotes (more robust accounting basis — see api/server.py:~496). With two
+    positive quotes the result is their median, independent of adapter speed.
+    """
     import api.server as server
 
     bm = _FakeBM(
@@ -80,7 +84,8 @@ def test_first_non_zero_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL", broker="ibkr")]))
-    assert out == {"AAPL": Decimal("100.25")}
+    # median(100.25, 100.10) = 100.175 — no longer a speed race.
+    assert out == {"AAPL": Decimal("100.175")}
 
 
 def test_zero_adapter_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -58,6 +58,14 @@ class DeepSequenceConfig:
     hit_rate_margin: float = 0.01
     round_trip_cost_bps: float = 5.0
 
+    # Trainer controls. Conservative defaults preserve the existing harness
+    # behaviour while letting governed panel runs choose a faster research pass.
+    epochs: int = 80
+    batch_size: int = 64
+    patience: int = 10
+    learning_rate: float = 1e-3
+    seed: int = 17
+
     # Promotion: even when comparison wins, we never auto-promote past
     # ``research`` here. The operator must register manually.
     require_manual_promotion: bool = True
@@ -78,6 +86,114 @@ class DeepTrainingResult:
 
 
 # ── trainer ────────────────────────────────────────────────────────────────
+
+
+def _train_tcn(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    build_tcn,  # noqa: ANN001
+    TCNSpec,  # noqa: ANN001,N803
+    config: "DeepSequenceConfig",
+    epochs: int = 80,
+    batch_size: int = 64,
+    patience: int = 10,
+    lr: float = 1e-3,
+    seed: int = 17,
+):
+    """Train a TCN with Adam + early stopping on an inner validation split.
+
+    Returns ``(trained_eval_model, pred_deep_test_np, note)``. Pure-ish:
+    deterministic seed, no global state, exceptions propagate to the caller
+    which degrades to baseline-only. ``X`` shape ``(n, window, n_feat)``.
+    """
+    import torch
+    from torch import nn
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    X = np.asarray(X_train, dtype=np.float32)
+    y_raw = np.asarray(y_train, dtype=np.float32).reshape(-1, 1)
+    n, window, n_feat = X.shape
+    x_mean = X.mean(axis=(0, 1), keepdims=True)
+    x_std = X.std(axis=(0, 1), keepdims=True)
+    x_std = np.where(x_std > 1e-8, x_std, 1.0).astype(np.float32)
+    x_mean = x_mean.astype(np.float32)
+    X = (X - x_mean) / x_std
+    X_test_scaled = (np.asarray(X_test, dtype=np.float32) - x_mean) / x_std
+    y_mean = y_raw.mean(axis=0, keepdims=True).astype(np.float32)
+    y_std = y_raw.std(axis=0, keepdims=True).astype(np.float32)
+    y_std = np.where(y_std > 1e-8, y_std, 1.0).astype(np.float32)
+    y = (y_raw - y_mean) / y_std
+
+    # Inner time-ordered validation split for early stopping (no shuffle —
+    # preserves temporal order, avoids leakage).
+    v_cut = max(1, int(n * 0.85))
+    Xtr, Xva = torch.from_numpy(X[:v_cut]), torch.from_numpy(X[v_cut:])
+    ytr, yva = torch.from_numpy(y[:v_cut]), torch.from_numpy(y[v_cut:])
+    if len(Xva) == 0:  # tiny dataset → use train as its own val
+        Xva, yva = Xtr, ytr
+
+    model = build_tcn(
+        TCNSpec(
+            n_features=n_feat,
+            window=window,
+            channels=(32, 32, 32),
+            kernel_size=3,
+            dropout=0.1,
+            output_dim=1,
+        )
+    )
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    loss_fn = nn.MSELoss()
+
+    best_val = float("inf")
+    best_state: dict | None = None
+    bad = 0
+    idx = np.arange(len(Xtr))
+    for _ep in range(epochs):
+        model.train()
+        np.random.shuffle(idx)
+        for s in range(0, len(idx), batch_size):
+            b = idx[s : s + batch_size]
+            opt.zero_grad()
+            out = model(Xtr[b])
+            loss = loss_fn(out, ytr[b])
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            opt.step()
+        model.eval()
+        with torch.no_grad():
+            vloss = float(loss_fn(model(Xva), yva))
+        if vloss < best_val - 1e-9:
+            best_val = vloss
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            bad = 0
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    # Persist the exact train-only scaler with the model. The artefact uses
+    # it at inference so live/shadow scoring sees the same feature space.
+    model.input_feature_means = x_mean.reshape(-1).copy()
+    model.input_feature_stds = x_std.reshape(-1).copy()
+    model.target_mean = y_mean.reshape(-1).copy()
+    model.target_std = y_std.reshape(-1).copy()
+    model.eval()
+    with torch.no_grad():
+        pred = model(torch.from_numpy(X_test_scaled))
+    pred_np = pred.detach().cpu().numpy().reshape(-1)
+    pred_np = pred_np * float(y_std.reshape(-1)[0]) + float(y_mean.reshape(-1)[0])
+    note = (
+        f"tcn trained: best_val_mse={best_val:.6g} "
+        f"epochs_used={_ep + 1} n_feat={n_feat} window={window}"
+    )
+    return model, pred_np, note
 
 
 def train_deep_sequence_model(
@@ -140,17 +256,26 @@ def train_deep_sequence_model(
         note = "deep architecture disabled — only baseline trained"
     elif arch == "tcn":
         try:
-            from models.deep_sequence.tcn import TCNSpec, build_tcn  # noqa: F401
+            from models.deep_sequence.tcn import TCNSpec, build_tcn
 
-            # Real TCN training is the operator's responsibility — this
-            # build does not ship a torch-trained model. Surface a
-            # clear note.
-            note = (
-                "tcn architecture requested but no torch trainer is shipped; "
-                "promote_eligible will remain False"
+            deep_model, pred_deep_test, note = _train_tcn(
+                X_train=X_train, y_train=y_train, X_test=X_test,
+                build_tcn=build_tcn,
+                TCNSpec=TCNSpec,
+                config=config,
+                epochs=max(1, int(config.epochs)),
+                batch_size=max(1, int(config.batch_size)),
+                patience=max(1, int(config.patience)),
+                lr=float(config.learning_rate),
+                seed=int(config.seed),
             )
         except RuntimeError as exc:
+            # torch absent → degrade safely to baseline-only (no crash).
             note = f"tcn unavailable: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            note = f"tcn training failed: {exc.__class__.__name__}: {exc}"
+            deep_model = None
+            pred_deep_test = None
     elif arch == "tft":
         try:
             from models.deep_sequence.tft import TFTSpec, build_tft  # noqa: F401

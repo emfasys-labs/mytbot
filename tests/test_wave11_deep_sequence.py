@@ -260,12 +260,17 @@ def test_score_sequence_wrong_shape() -> None:
 
 
 def test_build_tcn_raises_when_torch_unavailable() -> None:
+    # Phase B: the TCN stub was replaced with a real Bai-style torch module.
+    # With torch present build_tcn now BUILDS (no longer NotImplementedError);
+    # with torch absent it must still raise the clear "torch is required"
+    # RuntimeError so callers degrade to the Ridge baseline.
     if tcn_torch_available():
-        # Skip when torch is installed — the stub will raise NotImplementedError
-        # in that case, which is also fine, but the message check below is
-        # specific to the no-torch path.
-        with pytest.raises((RuntimeError, NotImplementedError)):
-            build_tcn(TCNSpec(n_features=2, window=8))
+        import torch
+
+        model = build_tcn(TCNSpec(n_features=2, window=8, channels=(4, 4)))
+        with torch.no_grad():
+            out = model(torch.zeros(1, 8, 2))
+        assert tuple(out.shape) == (1, 1)
         return
     with pytest.raises(RuntimeError, match="torch is required"):
         build_tcn(TCNSpec(n_features=2, window=8))

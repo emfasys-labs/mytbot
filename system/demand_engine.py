@@ -10,11 +10,15 @@ Produces a bounded score in [-1, 1] using:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from system.cross_asset_demand_graph import CrossAssetDemandGraph
+from system.relational_demand_graph import RelationalDemandGraphArtifact, evaluate_relational_shadow
 
 @dataclass
 class DemandSignal:
@@ -74,6 +78,7 @@ class DemandEngine:
         ai_news, ai_macro = self._ai_component(ai_result)
         graph = self._graph.evaluate(feature_map)
         cross_asset = self._clip(graph.score)
+        learned_shadow = self._learned_graph_shadow(feature_map)
 
         w_news = float(self.config.get("weights", {}).get("news", 0.35))
         w_macro = float(self.config.get("weights", {}).get("macro", 0.30))
@@ -96,15 +101,42 @@ class DemandEngine:
         else:
             trend = "flat"
         confidence = min(1.0, abs(score) * 1.3)
+        components = {
+            "ai_news": ai_news,
+            "ai_macro": ai_macro,
+            "cross_asset": cross_asset,
+            "market_volatility": float(graph.market_volatility),
+            "cross_asset_coverage": float(graph.coverage),
+        }
+        components.update(learned_shadow)
         return DemandSignal(
             score=score,
             trend=trend,
             confidence=confidence,
-            components={
-                "ai_news": ai_news,
-                "ai_macro": ai_macro,
-                "cross_asset": cross_asset,
-                "market_volatility": float(graph.market_volatility),
-                "cross_asset_coverage": float(graph.coverage),
-            },
+            components=components,
         )
+
+    def _learned_graph_shadow(self, feature_map: dict[str, pd.DataFrame]) -> dict[str, float | int | bool]:
+        cfg = self.config.get("learned_graph_shadow") or {}
+        if not bool(cfg.get("enabled", False)):
+            return {"learned_cross_asset_shadow_used": False}
+        path = str(cfg.get("artifact_path") or "").strip()
+        if not path:
+            return {"learned_cross_asset_shadow_used": False}
+        artifact = _load_learned_graph_artifact(path)
+        if artifact is None:
+            return {"learned_cross_asset_shadow_used": False}
+        return evaluate_relational_shadow(
+            artifact,
+            feature_map,
+            scale=float(cfg.get("scale", self.config.get("cross_asset_scale", 30.0))),
+        )
+
+
+@lru_cache(maxsize=4)
+def _load_learned_graph_artifact(path: str) -> RelationalDemandGraphArtifact | None:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        return RelationalDemandGraphArtifact.from_dict(raw)
+    except Exception:  # noqa: BLE001
+        return None

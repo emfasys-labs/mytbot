@@ -282,6 +282,40 @@ def enrich_candidate_volume_z(candidate: Any, df: Any) -> None:
         pass
 
 
+def attach_forecast_sequence_history(
+    candidate: Any, df: Any, *, enabled: bool, max_rows: int = 256
+) -> None:
+    """Phase B: stash a recent numeric-feature HISTORY on the candidate so
+    the (sync, pure) forecast bridge can build a contract-aligned sequence
+    window for a TCN member — without any DB I/O in the hot path.
+
+    Gated: when ``enabled`` is False (the default — no sequence forecast
+    member configured/enabled, which is the normal state) this returns
+    immediately with **zero overhead**. The bridge selects the artefact's
+    own feature columns/window from this history, so providing extra
+    columns/rows here is safe and contract-robust. Never raises.
+    """
+    if not enabled:
+        return
+    try:
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return
+        num = df.select_dtypes(include="number")
+        if num is None or num.empty or num.shape[0] < 2:
+            return
+        cols = sorted(str(c) for c in num.columns)  # deterministic order
+        tail = num[cols].tail(int(max_rows))
+        rows = [[float(v) for v in r] for r in tail.to_numpy().tolist()]
+        if not isinstance(getattr(candidate, "metadata", None), dict):
+            candidate.metadata = {}
+        candidate.metadata["forecast_sequence_window"] = {
+            "columns": cols,
+            "rows": rows,
+        }
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def enrich_candidate_liquidity(candidate: Any, df: Any) -> None:
     """Mirror of :func:`enrich_signal_liquidity` for batch candidates."""
     try:

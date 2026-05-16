@@ -45,9 +45,20 @@ class _RegimeClassifierGate:
     min_samples: int = 60
 
 
+@dataclass
+class _RegimeTransitionGate:
+    enabled: bool = False
+    shadow_only: bool = True
+    artifact_path: Optional[Path] = None
+    threshold: float = 0.6
+    feature_names: tuple[str, ...] = ()
+
+
 _CLASSIFIER_GATE_UNLOADED = object()
 _CLASSIFIER_GATE_CACHE: object = _CLASSIFIER_GATE_UNLOADED
 _CLASSIFIER_ARTEFACT_CACHE: object = _CLASSIFIER_GATE_UNLOADED
+_TRANSITION_GATE_CACHE: object = _CLASSIFIER_GATE_UNLOADED
+_TRANSITION_ARTEFACT_CACHE: object = _CLASSIFIER_GATE_UNLOADED
 
 
 def _load_regime_classifier_gate() -> _RegimeClassifierGate:
@@ -78,9 +89,57 @@ def _load_regime_classifier_gate() -> _RegimeClassifierGate:
 
 def reset_regime_classifier_cache() -> None:
     """Test helper — clear cached gate and artefact."""
-    global _CLASSIFIER_GATE_CACHE, _CLASSIFIER_ARTEFACT_CACHE
+    global _CLASSIFIER_GATE_CACHE, _CLASSIFIER_ARTEFACT_CACHE, _TRANSITION_GATE_CACHE, _TRANSITION_ARTEFACT_CACHE
     _CLASSIFIER_GATE_CACHE = _CLASSIFIER_GATE_UNLOADED
     _CLASSIFIER_ARTEFACT_CACHE = _CLASSIFIER_GATE_UNLOADED
+    _TRANSITION_GATE_CACHE = _CLASSIFIER_GATE_UNLOADED
+    _TRANSITION_ARTEFACT_CACHE = _CLASSIFIER_GATE_UNLOADED
+
+
+def _load_regime_transition_gate() -> _RegimeTransitionGate:
+    global _TRANSITION_GATE_CACHE
+    if _TRANSITION_GATE_CACHE is not _CLASSIFIER_GATE_UNLOADED:
+        return _TRANSITION_GATE_CACHE  # type: ignore[return-value]
+    p = REGIME_MODELS_DEFAULT_PATH
+    if not p.exists():
+        _TRANSITION_GATE_CACHE = _RegimeTransitionGate()
+        return _TRANSITION_GATE_CACHE  # type: ignore[return-value]
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        _TRANSITION_GATE_CACHE = _RegimeTransitionGate()
+        return _TRANSITION_GATE_CACHE  # type: ignore[return-value]
+    sect = ((raw.get("regime_models") or {}).get("transition_detector") or {})
+    ap = sect.get("artifact_path")
+    _TRANSITION_GATE_CACHE = _RegimeTransitionGate(
+        enabled=bool(sect.get("enabled", False)),
+        shadow_only=bool(sect.get("shadow_only", True)),
+        artifact_path=Path(ap) if ap else None,
+        threshold=float(sect.get("threshold", 0.6)),
+        feature_names=tuple(sect.get("feature_names") or ()),
+    )
+    return _TRANSITION_GATE_CACHE  # type: ignore[return-value]
+
+
+def _load_regime_transition_artefact(gate: _RegimeTransitionGate):
+    global _TRANSITION_ARTEFACT_CACHE
+    if _TRANSITION_ARTEFACT_CACHE is not _CLASSIFIER_GATE_UNLOADED:
+        return _TRANSITION_ARTEFACT_CACHE
+    if not gate.enabled or gate.artifact_path is None or not gate.artifact_path.exists():
+        _TRANSITION_ARTEFACT_CACHE = None
+        return None
+    try:
+        from risk.regime_transition import RegimeTransitionDetector
+
+        _TRANSITION_ARTEFACT_CACHE = RegimeTransitionDetector.load(gate.artifact_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "regime_state | transition artefact %s could not be loaded: %s",
+            gate.artifact_path,
+            exc,
+        )
+        _TRANSITION_ARTEFACT_CACHE = None
+    return _TRANSITION_ARTEFACT_CACHE
 
 
 def _load_regime_classifier_artefact(gate: _RegimeClassifierGate):
@@ -149,6 +208,71 @@ def _build_classifier_feature_vector(
         "liquidity_state": float(comps.liquidity_state),
     }
     return [float(derived.get(name, 0.0)) for name in feature_names]
+
+
+def _build_transition_feature_vector(
+    *,
+    feature_names: tuple[str, ...],
+    comps: MarketStateComponents,
+    market_state_score: Decimal,
+    breadth_score: Decimal,
+) -> Optional[list[float]]:
+    if not feature_names:
+        return None
+    derived: dict[str, float] = {
+        "trend_strength": float(comps.trend_strength),
+        "breadth_score": float(breadth_score),
+        "market_state_score": float(market_state_score),
+        "chaos_penalty": float(comps.chaos_penalty),
+        "volatility_structure": float(comps.volatility_structure),
+        "anomaly_breadth": float(comps.anomaly_breadth),
+        "correlation_crowding": float(comps.correlation_crowding),
+        "liquidity_state": float(comps.liquidity_state),
+        "news_conflict_score": float(comps.news_conflict_score),
+    }
+    return [float(derived.get(name, 0.0)) for name in feature_names]
+
+
+def _maybe_add_transition_shadow(
+    *,
+    insufficient: bool,
+    comps: MarketStateComponents,
+    market_state_score: Decimal,
+    breadth_score: Decimal,
+    meta: dict,
+) -> None:
+    meta["regime_transition_used"] = False
+    if insufficient:
+        return
+    gate = _load_regime_transition_gate()
+    if not gate.enabled:
+        return
+    artefact = _load_regime_transition_artefact(gate)
+    if artefact is None:
+        meta["regime_transition_reason"] = "artefact_unavailable"
+        return
+    feature_names = tuple(getattr(artefact, "feature_names", None) or gate.feature_names)
+    feats = _build_transition_feature_vector(
+        feature_names=feature_names,
+        comps=comps,
+        market_state_score=market_state_score,
+        breadth_score=breadth_score,
+    )
+    if not feats:
+        meta["regime_transition_reason"] = "no_features_configured"
+        return
+    try:
+        pred = artefact.predict(feats)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("regime_state | transition predict failed: %s", exc)
+        meta["regime_transition_reason"] = "predict_failed"
+        return
+    meta["regime_transition_used"] = True
+    meta["regime_transition_shadow_only"] = bool(gate.shadow_only)
+    meta["regime_transition_probability"] = float(pred.probability)
+    meta["regime_transition_label"] = str(pred.label)
+    meta["regime_transition_threshold"] = float(pred.threshold)
+    meta["regime_transition_model_version"] = str(pred.model_version)
 
 
 def _maybe_apply_classifier(
@@ -335,6 +459,14 @@ def compute_regime_state_from_inputs(
         market_state_score=market_state_score,
         breadth_score=breadth_score,
         news_conflict=news_conflict,
+        meta=meta,
+    )
+
+    _maybe_add_transition_shadow(
+        insufficient=insufficient,
+        comps=comps,
+        market_state_score=market_state_score,
+        breadth_score=breadth_score,
         meta=meta,
     )
 

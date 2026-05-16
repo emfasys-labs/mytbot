@@ -162,10 +162,17 @@ def test_gate_uses_bounded_allocator_edge_proxy_when_forecast_missing() -> None:
     )
 
     assert decision.allow is True
-    assert decision.metadata["wave9_edge_bps"] == pytest.approx(20.0)
+    # Wave-9 lockout fix (#2): proxy ceiling raised max(25,2*fee)→max(200,4*fee).
+    # IBKR fee≈1bps ⇒ cap 200; conviction 0.80 ⇒ 0.80*200 = 160 bps.
+    assert decision.metadata["wave9_edge_bps"] == pytest.approx(160.0)
 
 
 def test_gate_blocks_score_only_trade_without_cost_cushion() -> None:
+    # Safety property still guarded after the lockout fix: a GENUINELY thin
+    # conviction (0.05) must still fail the cost cushion. Previously 0.80
+    # conviction was used and blocked under the old 25 bps cap — that case
+    # is now (intentionally) allowed; this test re-targets the real
+    # negative-EV case so the protection remains covered.
     cfg = Wave9RuntimeConfig(
         enabled=True,
         urgency_policy=UrgencyPolicy(
@@ -186,13 +193,14 @@ def test_gate_blocks_score_only_trade_without_cost_cushion() -> None:
         signal_metadata={
             "daily_volume": 1_000_000.0,
             "daily_volatility": 0.01,
-            "expected_edge": "0.80",
+            "expected_edge": "0.05",  # genuinely thin conviction
         },
     )
 
     assert decision.allow is False
     assert decision.reason == "cost_exceeds_edge"
-    assert decision.metadata["wave9_edge_bps"] == pytest.approx(20.0)
+    # 0.05 conviction × max(200, 4*40) cap = 10 bps — well under Kraken cost.
+    assert decision.metadata["wave9_edge_bps"] == pytest.approx(10.0)
 
 
 def test_gate_penalizes_missing_liquidity_for_score_only_trade() -> None:
@@ -216,7 +224,9 @@ def test_gate_penalizes_missing_liquidity_for_score_only_trade() -> None:
         quantity=10,
         signal_metadata={
             "daily_volatility": 0.01,
-            "expected_edge": "0.80",
+            # Thin conviction so the missing-liquidity penalty still pushes
+            # cost above the (post-lockout-fix) proxy edge and blocks.
+            "expected_edge": "0.05",
         },
     )
 

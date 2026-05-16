@@ -15,6 +15,16 @@
 microstructure:
   enabled: false
 
+  # Phase D: execution-quality shadow. This is observational only: it stamps
+  # order metadata/logs but never blocks, reroutes, resizes, or changes orders.
+  shadow:
+    enabled: true
+    max_spread_bps: 25.0
+    max_vpin_proxy: 0.70
+    max_liquidity_fragility: 2.50
+    max_quote_staleness_seconds: 5.0
+    depth: 5
+
   # Asset-class allow-list — model is only consulted for these classes.
   # Crypto first; equities require deeper book quality than IBKR
   # provides over its standard data feed.

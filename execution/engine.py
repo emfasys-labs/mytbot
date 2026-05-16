@@ -35,6 +35,7 @@ from risk.engine import Signal, RiskDecision, RiskVerdict
 
 from execution.arbitrage_executor import ArbitrageExecutor
 from execution.arbitrage_spot_executor import SpotArbitrageExecutor
+from execution.microstructure_shadow import build_microstructure_shadow_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,29 @@ class ExecutionEngine:
             except Exception:  # noqa: BLE001
                 pass
 
+        async def _stamp_microstructure_shadow(_broker) -> None:
+            md = dict(getattr(order, "instrument_metadata", None) or {})
+            if "microstructure_shadow_used" in md:
+                return
+            try:
+                ac_val = getattr(signal.asset_class, "value", signal.asset_class)
+                shadow = await build_microstructure_shadow_metadata(
+                    broker=_broker,
+                    symbol=str(order.symbol or signal.symbol or ""),
+                    asset_class=str(ac_val or "other"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                shadow = {
+                    "microstructure_shadow_used": False,
+                    "microstructure_shadow_reason": "shadow_exception",
+                    "microstructure_shadow_error": str(exc)[:160],
+                }
+            md.update({k: v for k, v in shadow.items() if isinstance(v, (str, int, float, bool))})
+            try:
+                order.instrument_metadata = md
+            except Exception:  # noqa: BLE001
+                pass
+
         # Paper-mode shortcut for venues without native paper-trading support.
         # Kraken/Binance/Bybit adapters either reject paper orders outright or
         # require a sandbox key path the user hasn't configured. Rather than
@@ -288,6 +312,7 @@ class ExecutionEngine:
         broker_name_l = (signal.broker or "").strip().lower()
         if self.paper_mode and broker_name_l in {"kraken", "binance", "bybit"}:
             broker_for_quote = await self._get_broker(signal.broker)
+            await _stamp_microstructure_shadow(broker_for_quote)
             logger.info(
                 "PAPER FILL (no native paper on %s) | %s %s qty=%s",
                 broker_name_l, signal.symbol, signal.side, signal.suggested_quantity,
@@ -342,6 +367,7 @@ class ExecutionEngine:
                 self.last_skip_reason = "deferred_close_no_quote_venue_down"
                 return None
             if self.paper_mode:
+                await _stamp_microstructure_shadow(None)
                 logger.info(
                     "PAPER FILL (no broker) | %s %s qty=%s broker=%s",
                     signal.symbol, signal.side, signal.suggested_quantity, signal.broker,
@@ -358,6 +384,7 @@ class ExecutionEngine:
 
         order = await self._apply_marketable_limit(order, signal, broker)
         order = self._normalize_order_for_broker(order, signal)
+        await _stamp_microstructure_shadow(broker)
         if order.quantity <= 0:
             logger.warning(
                 "Execution quantity invalid after broker normalization | signal_id=%s symbol=%s broker=%s qty=%s",

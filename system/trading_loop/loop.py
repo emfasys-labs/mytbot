@@ -57,6 +57,7 @@ from system.d015_escalation import (
 )
 from system.d015_portfolio_bridge import portfolio_dict_to_runtime_state
 from system.d015_shadow import log_d015_shadow_for_signal
+from system.fusion_shadow import log_fusion_shadow_for_signal
 from system.dashboard_publish import (
     publish_dashboard_snapshot_d015,
     publish_dashboard_snapshot_global_edge,
@@ -126,6 +127,7 @@ from system.trading_loop.candidate_collection import (
 from system.trading_loop.helpers import (
     apply_saved_mode_to_risk_cfg,
     asset_class_for_symbol,
+    attach_forecast_sequence_history,
     broker_symbol_for,
     d015_legacy_fallback,
     enrich_candidate_liquidity,
@@ -148,6 +150,31 @@ def _decimal_state_value(state: dict[str, Any], key: str, fallback: Decimal) -> 
     except Exception:  # noqa: BLE001
         return fallback
     return value if value >= 0 else fallback
+
+
+_SEQ_FC_ENABLED: bool | None = None
+
+
+def _forecast_sequence_member_enabled() -> bool:
+    """True iff a Phase-B sequence forecast member is configured AND enabled.
+
+    Memoised (config is process-static; a change needs a restart anyway).
+    Default state is False (no sequence member / bridge disabled), so the
+    loop's sequence-history attachment is genuinely zero-overhead until a
+    governed model is registered + activated.
+    """
+    global _SEQ_FC_ENABLED
+    if _SEQ_FC_ENABLED is None:
+        try:
+            from signals.forecast_bridge import ForecastBridgeConfig
+
+            cfg = ForecastBridgeConfig.load()
+            _SEQ_FC_ENABLED = bool(
+                cfg.enabled and any(m.kind == "sequence" for m in cfg.members)
+            )
+        except Exception:  # noqa: BLE001
+            _SEQ_FC_ENABLED = False
+    return _SEQ_FC_ENABLED
 
 
 async def _load_working_order_keys(session_factory: Any) -> set[tuple[str, str]]:
@@ -762,6 +789,20 @@ class TradingLoop:
                         signal.metadata = {}
                     signal.metadata.setdefault("pipeline_symbol", signal.symbol)
                     signal.symbol = native
+                # AI-fusion spine (Phase A/B) shadow — SHARED chokepoint for
+                # BOTH the legacy and D015/global-edge batch paths, so the
+                # shadow audit actually fires in production. OWN env gate
+                # (FUSION_SHADOW, default off), read-only, exception-safe;
+                # reads already-computed metadata (forecast/meta/accumulator/
+                # regime/etc.) and changes no live decision.
+                _fs_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+                await log_fusion_shadow_for_signal(
+                    symbol=signal.symbol,
+                    side=str(getattr(signal, "side", "") or ""),
+                    confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
+                    metadata=dict(_fs_md),
+                    mode=str(_fs_md.get("profile_mode") or "") or None,
+                )
                 portfolio_state = await _load_portfolio_state(
                     session_factory,
                     fallback_portfolio_value=total_equity,
@@ -1617,6 +1658,10 @@ class TradingLoop:
 
                                 enrich_candidate_volume_z(cand, df)
                                 enrich_candidate_liquidity(cand, df)
+                                attach_forecast_sequence_history(
+                                    cand, df,
+                                    enabled=_forecast_sequence_member_enabled(),
+                                )
                                 batch_candidates.append(cand)
                                 sc_log_rows.append(
                                     strategy_candidate_row(
@@ -2781,6 +2826,33 @@ class TradingLoop:
                 mode=mode_raw,
                 capital_pct=float(self.capital_pct),
             )
+            ge_regime = None
+            try:
+                alloc_cfg_ge = load_allocation()
+                async with session_factory() as session:
+                    ge_regime = await compute_regime_state_async(
+                        portfolio_state=ps_ge,
+                        allocation_cfg=alloc_cfg_ge,
+                        session=session,
+                        universe_symbols=list(symbols),
+                        timeframe=self.timeframe,
+                    )
+                    ge_regime.metadata = dict(ge_regime.metadata or {})
+                    ge_regime.metadata["demand_score"] = round(float(demand_score), 6)
+                    ge_regime.metadata["demand_trend"] = demand_trend
+                    ge_regime.metadata["demand_confidence"] = round(float(demand_confidence), 6)
+                    ge_regime.metadata["market_volatility"] = float(
+                        demand_components.get("market_volatility", 0.0)
+                    )
+                    ge_regime.metadata["cross_asset_coverage"] = float(
+                        demand_components.get("cross_asset_coverage", 0.0)
+                    )
+                    if demand_alert is not None:
+                        ge_regime.metadata["demand_alert"] = dict(demand_alert)
+                    if demand_alert_history:
+                        ge_regime.metadata["demand_alert_history"] = list(demand_alert_history[-8:])
+            except Exception as regime_exc:  # noqa: BLE001
+                logger.debug("global_edge | regime shadow unavailable | {}", regime_exc)
             await publish_dashboard_snapshot_global_edge(
                 bus,
                 loop_iteration=self.iterations,
@@ -2789,6 +2861,7 @@ class TradingLoop:
                 strategy_opportunities=new_opps,
                 coordinator_actions=actions,
                 portfolio_state=ps_ge,
+                regime=ge_regime,
                 demand={
                     "score": round(float(demand_score), 6),
                     "trend": demand_trend,

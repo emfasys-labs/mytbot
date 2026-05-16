@@ -139,6 +139,10 @@ strategies:
       - [QQQ, GLD, -1.0]
       - [XLE, TLT, -0.8]
       - [BTC-USD, DXY, -1.0]
+    learned_graph_shadow:
+      enabled: true
+      artifact_path: artifacts/models/demand_graph/latest_phase_e_relational_graph.json
+      scale: 30.0
 
   meta_labeling:
     enabled: true

@@ -59,11 +59,14 @@ def test_system_mutations_require_token_when_configured(monkeypatch):
     monkeypatch.setattr("api.server._write_active_mode", lambda mode: None)
     c = TestClient(app)
 
+    # NOTE: ``POST /system/mode`` is intentionally NOT here. Phase 0 made mode
+    # auto-derived and hard-locked that endpoint to 403 (operator cannot set
+    # mode at all), so it is no longer a token-gated mutation. Its 403 lock is
+    # covered by the dedicated Phase 0 test.
     cases = [
         ("post", "/system/start", {}),
         ("post", "/system/stop", {}),
         ("put", "/system/capital-allocation", {"json": {"pct": 0.5}}),
-        ("post", "/system/mode", {"json": {"mode": "hunter"}}),
     ]
     for method, path, kwargs in cases:
         r = getattr(c, method)(path, **kwargs)
