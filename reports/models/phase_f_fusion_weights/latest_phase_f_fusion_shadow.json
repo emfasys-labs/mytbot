@@ -7,9 +7,9 @@
   "min_useful_ic": 0.02,
   "recommendation": "do_not_promote",
   "regimes": {
-    "range": 619082,
-    "trend_down": 416419,
+    "volatile": 124431,
     "trend_up": 421985,
-    "volatile": 124431
+    "range": 619082,
+    "trend_down": 416419
   }
 }

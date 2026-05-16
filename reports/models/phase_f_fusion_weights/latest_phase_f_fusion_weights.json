@@ -1,46 +1,46 @@
 {
   "by_regime": {
-    "range": {
+    "volatile": {
       "momentum": 0.0,
-      "volume_anomaly": 0.8575135928045852,
-      "news_impact": 0.10898242185495695,
+      "volume_anomaly": 0.2764121026277477,
+      "news_impact": 0.7110894866279508,
       "regime_alignment": 0.0,
       "liquidity_quality": 0.0,
-      "structure_quality": 0.033503985340457954,
-      "relative_strength": 0.0
-    },
-    "trend_down": {
-      "momentum": 0.0,
-      "volume_anomaly": 0.491014300207615,
-      "news_impact": 0.508985699792385,
-      "regime_alignment": 0.0,
-      "liquidity_quality": 0.0,
-      "structure_quality": 0.0,
+      "structure_quality": 0.012498410744301525,
       "relative_strength": 0.0
     },
     "trend_up": {
       "momentum": 0.0,
-      "volume_anomaly": 0.7710819715787537,
-      "news_impact": 0.14881897327994476,
+      "volume_anomaly": 0.771082760225527,
+      "news_impact": 0.1488176302637556,
       "regime_alignment": 0.0,
       "liquidity_quality": 0.0,
-      "structure_quality": 0.08009905514130157,
+      "structure_quality": 0.08009960951071737,
       "relative_strength": 0.0
     },
-    "volatile": {
+    "range": {
       "momentum": 0.0,
-      "volume_anomaly": 0.2764122458852295,
-      "news_impact": 0.7110891073543195,
+      "volume_anomaly": 0.8575129851846915,
+      "news_impact": 0.10898328187708943,
       "regime_alignment": 0.0,
       "liquidity_quality": 0.0,
-      "structure_quality": 0.012498646760451006,
+      "structure_quality": 0.0335037329382191,
+      "relative_strength": 0.0
+    },
+    "trend_down": {
+      "momentum": 0.0,
+      "volume_anomaly": 0.4910180834830489,
+      "news_impact": 0.5089819165169512,
+      "regime_alignment": 0.0,
+      "liquidity_quality": 0.0,
+      "structure_quality": 0.0,
       "relative_strength": 0.0
     }
   },
   "default": {
     "momentum": 0.0,
-    "volume_anomaly": 0.6231323468629208,
-    "news_impact": 0.37686765313707915,
+    "volume_anomaly": 0.6231340616169794,
+    "news_impact": 0.3768659383830207,
     "regime_alignment": 0.0,
     "liquidity_quality": 0.0,
     "structure_quality": 0.0,
@@ -50,10 +50,10 @@
     "promote_eligible": false,
     "n_obs": 1581917,
     "regimes": {
-      "range": 619082,
-      "trend_down": 416419,
+      "volatile": 124431,
       "trend_up": 421985,
-      "volatile": 124431
+      "range": 619082,
+      "trend_down": 416419
     },
     "builder": "phase_f_v1_proxy_components"
   }

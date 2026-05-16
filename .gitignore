@@ -26,6 +26,9 @@ data/cache/
 data/historical/
 data/runtime/
 
+# ML training outputs (regenerate via scripts/train_phase_b_panel.py, etc.)
+artifacts/models/forecast/
+
 # Logs
 logs/
 *.log
