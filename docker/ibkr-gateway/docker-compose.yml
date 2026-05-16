@@ -45,6 +45,13 @@ services:
       TIME_ZONE: ${TIME_ZONE:-Europe/London}
       # Bigger java heap + relogin tolerance helps overnight stability.
       RELOGIN_AFTER_2FA_TIMEOUT: ${RELOGIN_AFTER_2FA_TIMEOUT:-yes}
+      # VNC for the one-time interactive first login (see/clear the dialog
+      # IBC stalls on). Bound to 127.0.0.1:5900 only (never exposed off-box).
+      # This is a LOCAL VIEWER password, not a brokerage secret. Override
+      # via VNC_SERVER_PASSWORD in the environment if you want a different
+      # one. After the first successful login IBC handles all future
+      # logins/restarts headlessly and VNC is no longer needed.
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-vncview1}
     ports:
       # host:container — mytbot connects to the host side.
       #   4002 → Gateway PAPER API   (set IBKR_PORT=4002)
