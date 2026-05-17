@@ -14,3 +14,10 @@ pytest_plugins = ("pytest_asyncio",)
 # DASHBOARD_READ_TOKEN from .env. Tests that assert read-auth behaviour must
 # `monkeypatch.delenv("PYTEST_API_DISABLE_READ_MIDDLEWARE", raising=False)`.
 os.environ.setdefault("PYTEST_API_DISABLE_READ_MIDDLEWARE", "1")
+
+# Execution-mechanics tests paper-fill equity/forex signals with the live
+# wall clock; they must not depend on whether real markets happen to be
+# open when the suite runs. Disable the market-session gate by default.
+# The dedicated `tests/test_market_session.py` re-enables it (module
+# autouse fixture) and drives the logic with explicit timestamps.
+os.environ.setdefault("MARKET_SESSION_GATE", "0")

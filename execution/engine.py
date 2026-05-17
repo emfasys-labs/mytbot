@@ -182,6 +182,32 @@ class ExecutionEngine:
         if (signal.side or "").strip().upper().startswith("ARBITRAGE_"):
             return await self._execute_arbitrage(signal, session_factory=session_factory)
 
+        # ── Market-session validity gate ─────────────────────────────────
+        # A venue physically cannot fill a closed market. In paper mode the
+        # simulator was otherwise filling equity/forex orders on weekends
+        # and overnight against stale prices — manufacturing fake churn and
+        # polluting every P&L/evidence number. A real broker could not have
+        # filled these either, so refusing them is correctness, not a cap.
+        # Crypto (24/7) and unclassifiable instruments are never blocked.
+        try:
+            from core.market_session import is_market_open, market_closed_reason
+
+            if not is_market_open(signal.asset_class, str(signal.symbol or "")):
+                reason = market_closed_reason(
+                    signal.asset_class, str(signal.symbol or "")
+                ) or "market_closed"
+                self.last_skip_reason = reason
+                logger.info(
+                    "MARKET CLOSED — skipping %s %s broker=%s (%s)",
+                    signal.symbol,
+                    signal.side,
+                    signal.broker,
+                    reason,
+                )
+                return None
+        except Exception as exc:  # noqa: BLE001 — gate must never crash exec
+            logger.debug("market-session gate skipped (non-fatal): %s", exc)
+
         # Dedup: if a non-terminal order for (symbol, side, broker) already
         # exists within ``dedup_window_sec``, skip emitting a duplicate. This
         # prevents the allocator from re-submitting the same opportunity each
