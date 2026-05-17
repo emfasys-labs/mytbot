@@ -166,6 +166,11 @@ class BybitAdapter(BrokerAdapter):
         self._order_symbol: dict[str, str] = {}
         self._wallet_account_type: str | None = None
         self._wallet_unavailable: bool = False
+        # Symbols Bybit reports as invalid (ErrCode 10001) — typically equities
+        # probed against the crypto venue. Cache them so we (a) stop hammering
+        # the API with doomed requests and (b) don't spam thousands of identical
+        # WARNING lines that bury real issues.
+        self._invalid_symbols: set[str] = set()
 
     def _candidate_wallet_account_types(self) -> list[str]:
         # Probe order biased by adapter category: linear perps → CONTRACT/UNIFIED first,
@@ -739,6 +744,10 @@ class BybitAdapter(BrokerAdapter):
         if self._client is None:
             return Decimal(0)
         sym = _bybit_symbol(symbol)
+        # Known-invalid (e.g. an equity ticker on the crypto venue): don't even
+        # issue the doomed request again.
+        if sym in self._invalid_symbols:
+            return Decimal(0)
 
         def _go() -> dict[str, Any]:
             assert self._client is not None
@@ -752,7 +761,21 @@ class BybitAdapter(BrokerAdapter):
                 if lp is not None:
                     return _d(lp)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("get_last_price | Bybit | error={}", exc)
+            msg = str(exc).lower()
+            if isinstance(exc, InvalidRequestError) or "symbol invalid" in msg or (
+                "errcode: 10001" in msg
+            ):
+                # Benign + expected: this symbol simply isn't tradable on Bybit.
+                # Cache it and log once at debug instead of warning every cycle.
+                if sym not in self._invalid_symbols:
+                    self._invalid_symbols.add(sym)
+                    logger.debug(
+                        "get_last_price | Bybit | symbol not on venue, "
+                        "suppressing further probes | symbol={}",
+                        sym,
+                    )
+            else:
+                logger.warning("get_last_price | Bybit | error={}", exc)
         return Decimal(0)
 
     async def stream_prices(self, symbols: list[str]) -> AsyncIterator[Tick]:

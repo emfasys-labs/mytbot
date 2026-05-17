@@ -124,6 +124,25 @@ def _is_bad_price(v: object) -> bool:
     return False
 
 
+def _is_disconnect_exc(exc: BaseException) -> bool:
+    """True if *exc* is an IBKR socket/connection drop (expected at maintenance).
+
+    ib_insync raises ``ConnectionError("Socket disconnect")`` when TWS/Gateway
+    closes the socket (notably during its nightly maintenance reset). These are
+    expected, transient, and must degrade gracefully — never a process-killing
+    traceback storm.
+    """
+    if isinstance(exc, (ConnectionError, asyncio.TimeoutError, OSError)):
+        return True
+    msg = str(exc).lower()
+    return (
+        "socket disconnect" in msg
+        or "not connected" in msg
+        or "connection is closed" in msg
+        or "peer closed connection" in msg
+    )
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -195,6 +214,20 @@ class IBKRAdapter(BrokerAdapter):
         self._last_ib_order_snapshot_monotonic: float = -1e9
         self._ib_order_snap_lock = asyncio.Lock()
         self._qualification_cache = IBKRQualificationCache()
+        # Market-data disconnect circuit breaker. IBKR drops its socket during
+        # its nightly maintenance/reset window; rather than letting every
+        # symbol probe raise ``ConnectionError: Socket disconnect`` (a per-symbol
+        # traceback storm that previously crashed the process), we trip a short
+        # cooldown on the first disconnect, log ONCE, and degrade price reads to
+        # ``Decimal(0)`` until the socket recovers. Self-clearing by time.
+        self._md_cooldown_until: float = 0.0
+        self._md_disconnect_logged: bool = False
+        try:
+            self._md_cooldown_sec: float = max(
+                5.0, float(os.getenv("IBKR_MD_DISCONNECT_COOLDOWN_SEC", "60"))
+            )
+        except (TypeError, ValueError):
+            self._md_cooldown_sec = 60.0
 
     def _resolve_account(self) -> str:
         """Return configured account or the sole managed account from IB."""
@@ -1280,6 +1313,12 @@ class IBKRAdapter(BrokerAdapter):
         if self._ib is None or not self._ib.isConnected():
             logger.warning("get_last_price | IBKR | not connected | symbol={}", symbol)
             return Decimal(0)
+        # Circuit breaker: if the socket recently dropped, skip probing the dead
+        # connection entirely until the cooldown elapses (prevents the per-symbol
+        # disconnect traceback storm seen during IBKR's nightly maintenance).
+        now = asyncio.get_event_loop().time()
+        if now < self._md_cooldown_until:
+            return Decimal(0)
         contract = self._symbol_to_contract(symbol)
         try:
             await self._ib.qualifyContractsAsync(contract)
@@ -1294,9 +1333,30 @@ class IBKRAdapter(BrokerAdapter):
                     logger.warning("get_last_price | IBKR | no price | symbol={}", symbol)
                     return Decimal(0)
             self._ib.cancelMktData(contract)
+            # Healthy read → reset the disconnect breaker.
+            self._md_disconnect_logged = False
             return _d(last)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("get_last_price | IBKR | symbol={} | error={}", symbol, exc)
+            if _is_disconnect_exc(exc):
+                # Expected, transient socket drop. Trip the cooldown, log ONCE
+                # per episode (no per-symbol traceback), degrade to no-price.
+                self._md_cooldown_until = (
+                    asyncio.get_event_loop().time() + self._md_cooldown_sec
+                )
+                if not self._md_disconnect_logged:
+                    self._md_disconnect_logged = True
+                    logger.warning(
+                        "get_last_price | IBKR | socket disconnect (likely "
+                        "maintenance window) — pausing price reads for {:.0f}s; "
+                        "supervisor/loop continue uninterrupted | symbol={} | {}",
+                        self._md_cooldown_sec,
+                        symbol,
+                        exc,
+                    )
+            else:
+                logger.exception(
+                    "get_last_price | IBKR | symbol={} | error={}", symbol, exc
+                )
             try:
                 self._ib.cancelMktData(contract)
             except Exception:  # noqa: BLE001
