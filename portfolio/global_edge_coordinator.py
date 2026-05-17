@@ -664,6 +664,34 @@ class GlobalEdgeCoordinator:
         self._cfg = config
         self._logger = logger
 
+    def _attrib_mult(
+        self,
+        symbol: str | None,
+        strategy_name: str | None,
+        kind: str | None = None,
+    ) -> Decimal:
+        """Net-of-cost evidence governor multiplier (≥1.0) for the edge bar.
+
+        Reads the rolling per-bucket / per-symbol attribution the loop
+        injects as ``cfg['edge_attribution']``. A persistently
+        money-losing bucket/symbol widens its required edge steeply
+        (auto-recovering when it turns net-positive). Returns 1.0 — a
+        no-op — when attribution is absent, so every other path/test is
+        unaffected.
+        """
+        attr = self._cfg.get("edge_attribution")
+        if not isinstance(attr, dict) or not attr:
+            return Decimal("1")
+        try:
+            from system.edge_attribution import required_threshold_multiplier
+
+            m = required_threshold_multiplier(
+                symbol, strategy_name, attr, kind=kind
+            )
+            return Decimal(str(max(1.0, float(m))))
+        except Exception:  # noqa: BLE001 — governor must never break ranking
+            return Decimal("1")
+
     def _threshold(self, mode: str) -> Decimal:
         """Edge threshold for the displacement gate.
 
@@ -837,10 +865,23 @@ class GlobalEdgeCoordinator:
         out: list[CoordinatorAction] = []
         emit_trim = bool(self._cfg.get("emit_trim_actions", True))
 
+        emit_trim_cfg = bool(self._cfg.get("emit_trim_actions", True))
         for opp in ranked:
             if len(out) >= cap_n:
                 break
-            if opp.expected_edge <= weakest_edge + thresh:
+            # Net-of-cost evidence governor: a persistently bleeding
+            # bucket/symbol must clear a steeply widened bar (auto-recovers
+            # when net-positive). When a trim will be paired (this path
+            # emits one whenever a held partner exists), also fold in the
+            # trim bucket's bleed so global_edge_trim is throttled too.
+            eff_thresh = thresh * self._attrib_mult(
+                opp.symbol, getattr(opp, "strategy_name", None)
+            )
+            if emit_trim_cfg and held:
+                eff_thresh = eff_thresh * self._attrib_mult(
+                    None, "global_edge_trim", "trim"
+                )
+            if opp.expected_edge <= weakest_edge + eff_thresh:
                 continue
             opp_side = _canonical_position_side(getattr(opp, "side", None))
             if any(
@@ -1088,11 +1129,25 @@ class GlobalEdgeCoordinator:
                 ),
                 None,
             )
+            # Net-of-cost evidence governor: widen the edge bar for a
+            # bucket/symbol that is persistently bleeding (auto-recovers
+            # when it turns net-positive). 1.0 = no-op when no attribution.
+            eff_thresh = thresh * self._attrib_mult(
+                opp.symbol, getattr(opp, "strategy_name", None)
+            )
+            # In displacement mode every qualifying open forces a paired
+            # trim — so the trim bucket's own bleed must also raise the
+            # bar for opening here (throttles the worst churn engine,
+            # global_edge_trim, at its source).
+            if displacement_mode:
+                eff_thresh = eff_thresh * self._attrib_mult(
+                    None, "global_edge_trim", "trim"
+                )
             is_topup = same_side_held is not None and not displacement_mode
             if is_topup:
-                if opp.expected_edge <= thresh:
+                if opp.expected_edge <= eff_thresh:
                     continue
-            elif opp.expected_edge <= weakest_edge + thresh:
+            elif opp.expected_edge <= weakest_edge + eff_thresh:
                 continue
             if same_side_held is not None and not is_topup:
                 continue
@@ -1128,7 +1183,9 @@ class GlobalEdgeCoordinator:
 
         if not qualifying and not displacement_mode and gross_target_capital > 0:
             for h in sorted(held, key=lambda x: x.expected_remaining_edge, reverse=True):
-                if h.expected_remaining_edge <= thresh:
+                if h.expected_remaining_edge <= thresh * self._attrib_mult(
+                    h.symbol, getattr(h, "strategy_name", None)
+                ):
                     continue
                 h_meta = dict(h.metadata or {})
                 h_side = _canonical_position_side(h_meta.get("side"))
@@ -1500,6 +1557,14 @@ class GlobalEdgeCoordinator:
         take_profit_pct = _d("take_profit_pct", "0.02")
         trim_fraction = _d("take_profit_trim_fraction", "0.50")
         dead_edge_floor = _d("dead_edge_floor", "0.01")
+        # Net-of-cost evidence governor: when the capital_recycle bucket is
+        # persistently bleeding (its cull→rebuy cycle is paying spread+fees
+        # to reshuffle weak ideas), SHRINK the dead-edge cull trigger so it
+        # only culls genuinely dead positions — far fewer recycle churns.
+        # Auto-recovers (floor restored) once recycle turns net-positive.
+        _rc_mult = self._attrib_mult(None, "capital_recycle", "recycle")
+        if _rc_mult > Decimal("1"):
+            dead_edge_floor = dead_edge_floor / _rc_mult
         try:
             max_actions = int(cfg.get("max_actions_per_tick", 3))
         except (TypeError, ValueError):
@@ -1630,6 +1695,11 @@ class GlobalEdgeCoordinator:
             min_adv = Decimal(str(raw_adv))
         except Exception:  # noqa: BLE001
             min_adv = self._threshold(mode)
+        # Net-of-cost evidence governor: when the rotation bucket is
+        # persistently bleeding, every rotation must clear a steeply
+        # widened edge advantage (auto-recovers once rotation turns
+        # net-positive). Bucket-level throttle on the worst churn engine.
+        min_adv = min_adv * self._attrib_mult(None, "global_edge_rotation", "rotation")
         try:
             fee_bps = Decimal(str(rot_cfg.get("estimated_round_trip_fee_bps", "20")))
         except Exception:  # noqa: BLE001

@@ -362,6 +362,11 @@ class TradingLoop:
         # only. Opens, holds, arbitrage and — critically — every risk /
         # stop-loss / profit-harvest exit (separate code paths) are NEVER
         # gated. Self-clearing by wall-clock + one completed iteration.
+        # Rolling per-bucket / per-symbol net-of-cost attribution, refreshed
+        # from the DB every EDGE_ATTRIB_REFRESH_EVERY_N iterations and injected
+        # into the coordinator cfg so a persistently bleeding action-class /
+        # symbol faces a steeply widened (auto-recovering) edge bar.
+        self._edge_attrib_cache: dict[str, Any] | None = None
         self._loop_started_monotonic: float | None = None
         try:
             self._warmup_min_sec: float = max(
@@ -2603,9 +2608,45 @@ class TradingLoop:
                 adaptive_edge_cfg["recent_win_rate"] = 0.6 if real > 0 else 0.4
         except Exception as exc:  # noqa: BLE001
             self._swallow("adaptive_edge_outcome_inputs", exc)
+        # Per-bucket / per-symbol net-of-cost evidence governor. Refresh the
+        # rolling attribution from the DB on a cadence (cheap replay of the
+        # trailing window's fills). A persistently net-negative bucket
+        # (trim/recycle/rotation) or symbol (ETH/XRP) then gets a steeply
+        # widened edge bar in the coordinator — near-zero turnover while it
+        # bleeds, automatic full recovery once it proves net-positive.
+        try:
+            _attrib_every_n = max(1, int(os.getenv("EDGE_ATTRIB_REFRESH_EVERY_N", "5")))
+        except (TypeError, ValueError):
+            _attrib_every_n = 5
+        if self._edge_attrib_cache is None or (self.iterations % _attrib_every_n == 0):
+            try:
+                from system.edge_attribution import compute_edge_attribution
+                try:
+                    _attrib_window = float(os.getenv("EDGE_ATTRIB_WINDOW_DAYS", "4") or 4)
+                except (TypeError, ValueError):
+                    _attrib_window = 4.0
+                async with session_factory() as _attrib_sess:
+                    self._edge_attrib_cache = await compute_edge_attribution(
+                        _attrib_sess, window_days=_attrib_window
+                    )
+                if self.iterations % 5 == 0 and isinstance(self._edge_attrib_cache, dict):
+                    _negb = {
+                        k: round(float(v.get("net", 0.0)), 1)
+                        for k, v in (self._edge_attrib_cache.get("buckets") or {}).items()
+                        if float(v.get("net", 0.0)) < 0.0
+                    }
+                    if _negb:
+                        logger.info(
+                            "edge_attribution | net-negative buckets (throttled): {}",
+                            _negb,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                self._swallow("edge_attribution_refresh", exc)
         # Merge onto a shallow copy of the YAML cfg so we don't mutate the
         # underlying loaded dict (other code paths read it).
         coord_cfg = dict(self._global_edge_cfg or {})
+        if isinstance(self._edge_attrib_cache, dict) and self._edge_attrib_cache:
+            coord_cfg["edge_attribution"] = self._edge_attrib_cache
         if adaptive_edge_cfg:
             coord_cfg["adaptive_edge"] = adaptive_edge_cfg
             if self.iterations % 5 == 0:
