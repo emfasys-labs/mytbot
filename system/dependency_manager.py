@@ -46,6 +46,18 @@ def _docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
+def _infra_wait_sec(default: float = 240.0) -> float:
+    """How long to patiently wait for infra to become healthy at boot.
+
+    Generous by design: a restart after a machine wake must self-heal once
+    Docker/Postgres finish settling, not bail to ERROR after a few seconds.
+    """
+    try:
+        return max(20.0, float(os.getenv("MYTBOT_INFRA_WAIT_SEC", str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 async def _run(cmd: str, timeout: float = 60) -> tuple[int, str, str]:
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -181,11 +193,23 @@ class DependencyManager:
             logger.warning("deps | postgres | {}", status.error)
             return
 
+        # Patient wait budget. A supervisor crash-recovery restart after a
+        # machine wake commonly races Docker/Postgres still settling — a
+        # short 30s window would wrongly declare ERROR and leave the system
+        # dead until a human presses START. Wait generously instead; the
+        # autostart retry loop is the outer safety net.
+        infra_wait = _infra_wait_sec()
+
         container = os.getenv("POSTGRES_CONTAINER_NAME", "mytbot_db")
         if await _is_container_running(container):
-            if await _wait_healthy(container, timeout=30):
+            if await _wait_healthy(container, timeout=infra_wait):
                 status.healthy = True
                 logger.info("deps | postgres | container running and healthy")
+                return
+            # Healthcheck may lag even when the port already serves.
+            if await _check_postgres_direct():
+                status.healthy = True
+                logger.info("deps | postgres | container running, port reachable (healthcheck lag)")
                 return
             status.error = "Container running but unhealthy"
             logger.warning("deps | postgres | {}", status.error)
@@ -199,7 +223,7 @@ class DependencyManager:
             return
 
         status.was_started = True
-        if await _wait_healthy(container, timeout=45):
+        if await _wait_healthy(container, timeout=infra_wait):
             status.healthy = True
             logger.info("deps | postgres | started and healthy")
         else:
@@ -223,11 +247,16 @@ class DependencyManager:
             logger.warning("deps | redis | {} — system will run without cache", status.error)
             return
 
+        infra_wait = _infra_wait_sec()
         container = os.getenv("REDIS_CONTAINER_NAME", "mytbot_redis")
         if await _is_container_running(container):
-            if await _wait_healthy(container, timeout=20):
+            if await _wait_healthy(container, timeout=min(60.0, infra_wait)):
                 status.healthy = True
                 logger.info("deps | redis | container running and healthy")
+                return
+            if await _check_redis_direct():
+                status.healthy = True
+                logger.info("deps | redis | container running, port reachable (healthcheck lag)")
                 return
             status.error = "Container running but unhealthy"
             logger.warning("deps | redis | {}", status.error)

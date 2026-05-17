@@ -351,6 +351,26 @@ class TradingLoop:
         self.last_iteration_at: datetime | None = None
         self.iterations: int = 0
         self.last_error: str | None = None
+        # ── Boot warmup churn-guard ──────────────────────────────────────
+        # After ANY process (re)start — supervisor crash-recovery, a machine
+        # wake, a deploy — the very first allocation cycle(s) run with
+        # freshly-rebuilt in-memory + possibly-degraded persisted state. If
+        # the allocator is allowed to cull/recycle/replace immediately it can
+        # close positions and re-open them moments later (the documented
+        # close→reopen bleed, ~$1k/restart). For a short warmup window after
+        # start we therefore suppress *position-reducing* coordinator actions
+        # only. Opens, holds, arbitrage and — critically — every risk /
+        # stop-loss / profit-harvest exit (separate code paths) are NEVER
+        # gated. Self-clearing by wall-clock + one completed iteration.
+        self._loop_started_monotonic: float | None = None
+        try:
+            self._warmup_min_sec: float = max(
+                0.0, float(os.getenv("MYTBOT_WARMUP_MIN_SEC", "120"))
+            )
+        except (TypeError, ValueError):
+            self._warmup_min_sec = 120.0
+        self._warmup_suppress_logged = False
+        self._warmup_cleared_logged = False
         # Rolling signal-density input for the adaptive_mode classifier.
         # Updated at the end of every iteration; read at the start of the
         # next. None on fresh boot so the classifier falls back to defaults.
@@ -478,8 +498,75 @@ class TradingLoop:
             logger.warning("trading_loop | already running")
             return
         self._stop_event.clear()
+        self._loop_started_monotonic = time.monotonic()
+        self._warmup_suppress_logged = False
+        self._warmup_cleared_logged = False
         self._task = asyncio.create_task(self._run(), name="trading-loop")
-        logger.info("trading_loop | started")
+        logger.info(
+            "trading_loop | started (boot warmup churn-guard: {:.0f}s)",
+            self._warmup_min_sec,
+        )
+
+    def _in_boot_warmup(self) -> bool:
+        """True during the post-(re)start window when culling must be held.
+
+        Clears once BOTH a minimum wall-clock has elapsed AND at least one
+        full iteration has completed — i.e. state has been rebuilt and a
+        cycle has run cleanly. A disabled window (``MYTBOT_WARMUP_MIN_SEC=0``)
+        still requires one completed iteration so the first cycle after a
+        crash never culls on un-rebuilt state.
+        """
+        if self._loop_started_monotonic is None:
+            return False
+        if self.iterations < 1:
+            return True
+        elapsed = time.monotonic() - self._loop_started_monotonic
+        return elapsed < self._warmup_min_sec
+
+    @staticmethod
+    def _action_is_position_reducing(action: Any) -> bool:
+        """Cull / recycle / shed / trim / close / flatten — the bleed surface.
+
+        Opens (``open_strategy``) and arbitrage are NOT reducing and pass
+        through. Risk / stop-loss / profit-harvest exits never reach this
+        coordinator-action path, so they are inherently unaffected.
+        """
+        kind = str(getattr(action, "kind", "") or "").strip().lower()
+        if kind in {"trim_symbol", "close_symbol", "flatten_symbol"}:
+            return True
+        if kind.startswith(("close", "flatten", "exit", "trim", "reduce")):
+            return True
+        meta = getattr(action, "metadata", None) or {}
+        sizing_path = str(meta.get("sizing_path", "") or "").strip().lower()
+        if sizing_path in {"capital_recycle", "adaptive_shed_to_target"}:
+            return True
+        if meta.get("capital_recycle_reason"):
+            return True
+        strat = str(getattr(action, "strategy_name", "") or "").strip().lower()
+        return strat in {"capital_recycle", "adaptive_shed"}
+
+    def _suppress_reducing_actions_during_warmup(self, actions: list) -> list:
+        """Drop position-reducing actions while in the boot warmup window.
+
+        This is the bulletproofing against the restart close→reopen bleed:
+        no matter WHY the process restarted (supervisor recovery, machine
+        wake, deploy), it cannot cull-then-rebuy during the fragile first
+        cycle. Holding a position one extra cycle is free; churning it is
+        not. Returns the (possibly filtered) action list.
+        """
+        if not actions or not self._in_boot_warmup():
+            return actions
+        kept = [a for a in actions if not self._action_is_position_reducing(a)]
+        dropped = len(actions) - len(kept)
+        if dropped and not self._warmup_suppress_logged:
+            self._warmup_suppress_logged = True
+            logger.warning(
+                "trading_loop | BOOT WARMUP — suppressing {} position-reducing "
+                "action(s) this cycle (anti-churn after restart); opens, "
+                "arbitrage and all risk/stop-loss exits are unaffected",
+                dropped,
+            )
+        return kept
 
     async def stop(self) -> None:
         if not self.is_running:
@@ -2876,6 +2963,13 @@ class TradingLoop:
             dashboard_snapshot_written = True
         except Exception as pub_exc:  # noqa: BLE001
             logger.warning("dashboard_publish | global_edge | {}", pub_exc)
+
+        # Boot warmup churn-guard: on the first cycle(s) after ANY restart,
+        # drop position-reducing actions so a fresh process cannot cull and
+        # re-buy on un-rebuilt state (the close→reopen restart bleed). Applied
+        # AFTER shed/recycle prepends so those are gated too; opens/arbitrage
+        # pass; risk/stop-loss exits are a separate path and never reach here.
+        actions = self._suppress_reducing_actions_during_warmup(actions)
 
         executed = 0
         planner_cfg = {

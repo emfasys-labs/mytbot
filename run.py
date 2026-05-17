@@ -250,17 +250,55 @@ async def _run() -> None:
             logger.info("mytbot | orchestrator ready (state=off) — autostart disabled")
             return
         await asyncio.sleep(2)  # let the API bind first
+        # Self-healing retry. A supervisor crash-recovery restart after a
+        # machine wake can race the infrastructure coming back (Postgres /
+        # Docker still settling) — the first start() then lands in ERROR. We
+        # must NOT sit dead waiting for a human to press START; retry with
+        # backoff until RUNNING (or until the orchestrator is no longer OFF/
+        # ERROR, e.g. an operator stopped it, or the kill switch is latched —
+        # the orchestrator itself enforces that, autostart never overrides it).
         try:
-            if _orch.state.value == "off":
-                logger.info("mytbot | MYTBOT_AUTOSTART → starting orchestrator")
-                await _orch.start()
-                logger.info("mytbot | autostart complete (state={})", _orch.state.value)
-            else:
+            attempts = max(1, int(os.getenv("MYTBOT_AUTOSTART_MAX_ATTEMPTS", "30")))
+        except (TypeError, ValueError):
+            attempts = 30
+        try:
+            retry_delay = max(2.0, float(os.getenv("MYTBOT_AUTOSTART_RETRY_SEC", "10")))
+        except (TypeError, ValueError):
+            retry_delay = 10.0
+        for attempt in range(1, attempts + 1):
+            try:
+                state = _orch.state.value
+                if state == "running":
+                    logger.info("mytbot | autostart complete (state=running)")
+                    return
+                if state not in ("off", "error"):
+                    logger.info("mytbot | autostart skipped (state={})", state)
+                    return
                 logger.info(
-                    "mytbot | autostart skipped (state={})", _orch.state.value
+                    "mytbot | MYTBOT_AUTOSTART → starting orchestrator "
+                    "(attempt {}/{})", attempt, attempts,
                 )
-        except Exception as exc:  # noqa: BLE001 — never crash boot on autostart
-            logger.error("mytbot | autostart failed: {}", exc)
+                await _orch.start()
+                new_state = _orch.state.value
+                if new_state == "running":
+                    logger.info("mytbot | autostart complete (state=running)")
+                    return
+                logger.warning(
+                    "mytbot | autostart attempt {}/{} did not reach RUNNING "
+                    "(state={}, last_error={}) — retrying in {:.0f}s",
+                    attempt, attempts, new_state,
+                    getattr(_orch, "_last_start_error", None), retry_delay,
+                )
+            except Exception as exc:  # noqa: BLE001 — never crash boot on autostart
+                logger.error(
+                    "mytbot | autostart attempt {}/{} failed: {} — retrying in {:.0f}s",
+                    attempt, attempts, exc, retry_delay,
+                )
+            await asyncio.sleep(retry_delay)
+        logger.error(
+            "mytbot | autostart exhausted {} attempts without reaching RUNNING "
+            "— supervisor/operator intervention required", attempts,
+        )
 
     autostart_task = asyncio.create_task(_maybe_autostart(), name="autostart")
 
