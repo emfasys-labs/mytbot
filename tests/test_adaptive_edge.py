@@ -151,3 +151,73 @@ def test_estimate_cross_venue_cost_returns_none_when_no_inputs() -> None:
         venue_priors=None, slippage_model=None,
         active_brokers=[], active_asset_classes=[],
     ) is None
+
+
+# ── Balanced adaptive turnover governor ─────────────────────────────────
+# These pin the property the operator asked for: the edge bar must start
+# rising *while the book is still green* (as win-rate erodes / realised
+# edge decays), so high-turnover rotation throttles itself before the day
+# turns red — without giving up the strong-trend upside.
+
+
+def _thr(wr, ret, *, cost=50.0, mode="hunter", floor=0.0):
+    return compute_edge_threshold(
+        EdgeThresholdInputs(
+            mode=mode,
+            cross_venue_cost_bps=cost,
+            recent_win_rate=wr,
+            recent_avg_return=ret,
+            static_floor=floor,
+        )
+    )
+
+
+def test_decaying_edge_widens_bar_before_it_goes_negative() -> None:
+    """Strong trend stays aggressive; an eroding (still-positive) regime
+    must already demand MORE edge than the strong-trend case."""
+    strong = _thr(0.62, 0.006)          # printing money on a trend
+    decaying = _thr(0.46, 0.0004)       # win-rate eroding, ret ~flat-positive
+    bleeding = _thr(0.34, -0.003)       # gone red
+    assert strong < decaying < bleeding, (strong, decaying, bleeding)
+
+
+def test_cushion_monotonic_non_increasing_in_win_rate() -> None:
+    prev = None
+    for wr in (0.70, 0.60, 0.52, 0.45, 0.38, 0.30, 0.20):
+        cur = _thr(wr, 0.0)
+        if prev is not None:
+            assert cur >= prev, f"win_rate {wr}: {cur} < {prev}"
+        prev = cur
+
+
+def test_cushion_monotonic_non_increasing_as_return_decays() -> None:
+    prev = None
+    for ret in (0.010, 0.004, 0.001, 0.0, -0.001, -0.004, -0.010):
+        cur = _thr(0.50, ret)
+        if prev is not None:
+            assert cur >= prev, f"avg_ret {ret}: {cur} < {prev}"
+        prev = cur
+
+
+def test_strong_winner_still_relaxes_to_minimum_cushion() -> None:
+    """Trend-day upside is preserved — a clear winner is as aggressive as
+    the old behaviour (cushion floored at _CUSHION_MIN ≈ 0.85)."""
+    cost = 50.0
+    winner = _thr(0.70, 0.010, cost=cost)
+    # 2 × 50 × (1.0 hunter) × 0.85 / 10000 = 0.0085
+    assert winner == Decimal("0.0085")
+
+
+def test_cushion_is_bounded_under_extreme_bleed() -> None:
+    """Even a catastrophic streak cannot explode the threshold."""
+    extreme = _thr(0.01, -0.50, cost=50.0)
+    # cushion clamped at _CUSHION_MAX (2.20): 2 × 50 × 2.2 / 10000 = 0.022
+    assert extreme == Decimal("0.022")
+
+
+def test_missing_outcomes_unchanged_baseline() -> None:
+    """Fresh boot (no statistics) must behave exactly as before."""
+    out = compute_edge_threshold(
+        EdgeThresholdInputs(mode="hunter", cross_venue_cost_bps=50.0, static_floor=0.0)
+    )
+    assert out == Decimal("0.01")  # 2 × 50 × 1.0 / 10000

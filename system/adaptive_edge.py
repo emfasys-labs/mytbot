@@ -30,6 +30,7 @@ exactly as it does today, so the wiring is one-line and reversible.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from decimal import Decimal
@@ -61,6 +62,24 @@ _MIN_THRESHOLD = float(os.getenv("ADAPTIVE_EDGE_MIN", "0.002"))  # 20 bps absolu
 _MAX_THRESHOLD = float(os.getenv("ADAPTIVE_EDGE_MAX", "0.30"))   # 30% absolute ceiling
 _DEFAULT_COST_BPS = float(os.getenv("ADAPTIVE_EDGE_DEFAULT_COST_BPS", "10"))
 
+# ── Balanced adaptive turnover governor ──────────────────────────────────
+# The cushion widens *continuously* as realised edge decays / the regime
+# turns choppy — so churn throttles itself BEFORE the day goes red, not
+# only after. All coefficients are env-tunable; the defaults are
+# deliberately mild ("balanced": damp the downside, keep trend upside) and
+# the result is still floored by ``static_floor`` and clamped, so this can
+# never trade more aggressively than the operator's existing setting.
+_CUSHION_MIN = float(os.getenv("ADAPTIVE_EDGE_CUSHION_MIN", "0.85"))
+_CUSHION_MAX = float(os.getenv("ADAPTIVE_EDGE_CUSHION_MAX", "2.20"))
+# Win-rate pivot: at/above this we don't penalise; below it the cushion
+# grows ~linearly. 0.52 ≈ a touch better than a coin flip after costs.
+_WR_PIVOT = float(os.getenv("ADAPTIVE_EDGE_WR_PIVOT", "0.52"))
+_WR_GAIN = float(os.getenv("ADAPTIVE_EDGE_WR_GAIN", "3.0"))
+# Return scale (fractional). avg_ret is squashed by this: a per-close
+# realised return this size moves the cushion by ~one unit. 0.004 ≈ 40 bps.
+_RET_SCALE = float(os.getenv("ADAPTIVE_EDGE_RET_SCALE", "0.004"))
+_RET_GAIN = float(os.getenv("ADAPTIVE_EDGE_RET_GAIN", "0.9"))
+
 
 def _mode_cushion_bias(mode: str) -> float:
     """Hunter is fast and accepts thinner edges; defender is choosy."""
@@ -75,22 +94,38 @@ def _mode_cushion_bias(mode: str) -> float:
 def _outcome_cushion(win_rate: Optional[float], avg_ret: Optional[float]) -> float:
     """Translate recent realised outcomes into a cushion multiplier.
 
-    Heuristic:
-      * win_rate > 0.55 AND avg_ret > 0 → shrink cushion to 0.85
-        (we're winning; let more setups through)
-      * win_rate < 0.45 OR avg_ret < 0 → expand to 1.4
-        (we're bleeding; raise the bar)
-      * otherwise → 1.0
+    **Balanced adaptive governor.** A *continuous, monotonic* function of
+    recent win-rate and realised per-close return — not the old coarse
+    3-step. The point is that a decaying-but-still-positive edge
+    (+$10k → +$6k → +$2k …) starts lifting the bar *while it is still
+    green*, so high-turnover rotation throttles itself before the day
+    turns red. Properties this guarantees (and the tests pin):
 
-    Returns 1.0 on missing inputs (fresh boot has no statistics yet).
+      * never *decreases* when win-rate falls or avg-return falls
+        (monotone — more decay ⇒ never thinner edge required);
+      * strong winners still relax toward ``_CUSHION_MIN`` (keep the
+        trend-day upside the user explicitly wanted to preserve);
+      * bounded to ``[_CUSHION_MIN, _CUSHION_MAX]``;
+      * returns 1.0 on missing inputs (fresh boot has no statistics).
     """
     if win_rate is None or avg_ret is None:
         return 1.0
-    if win_rate >= 0.55 and avg_ret > 0:
-        return 0.85
-    if win_rate < 0.45 or avg_ret < 0:
-        return 1.4
-    return 1.0
+
+    # Win-rate term: 0 at/above pivot, growing as it drops below.
+    wr_excess = _WR_PIVOT - float(win_rate)          # >0 when below pivot
+    wr_term = _WR_GAIN * max(0.0, wr_excess)
+
+    # Return term: a smooth, bounded S-curve in avg_ret / scale. Strong
+    # positive → negative term (relax toward CUSHION_MIN); as the realised
+    # edge decays toward 0 the term rises through 0 and goes positive
+    # *before* avg_ret turns negative, then keeps widening when it does.
+    x = float(avg_ret) / _RET_SCALE if _RET_SCALE > 0 else 0.0
+    x = max(-50.0, min(50.0, x))                     # overflow guard
+    squashed = math.tanh(x)                          # (-1, 1)
+    ret_term = -_RET_GAIN * squashed                 # winners shrink, decay widens
+
+    cushion = 1.0 + wr_term + ret_term
+    return max(_CUSHION_MIN, min(_CUSHION_MAX, cushion))
 
 
 def compute_edge_threshold(inputs: EdgeThresholdInputs) -> Decimal:
