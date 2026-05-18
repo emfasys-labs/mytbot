@@ -30,6 +30,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from system.portfolio_equity import PortfolioValueSnapshot
+
 from system.orchestrator import Orchestrator
 
 
@@ -54,9 +56,15 @@ async def test_heartbeat_calls_upsert_with_live_equity(monkeypatch) -> None:
         "run_m3._load_portfolio_state",
         AsyncMock(return_value={"portfolio_value": Decimal("1055000")}),
     )
+    # complete=False keeps the one-time opening-NAV record path a clean
+    # early-return so this test stays focused on the upsert contract.
     monkeypatch.setattr(
-        "system.portfolio_equity.live_portfolio_value",
-        AsyncMock(return_value=Decimal("1055000")),
+        "system.portfolio_equity.live_portfolio_snapshot",
+        AsyncMock(
+            return_value=PortfolioValueSnapshot(
+                Decimal("1055000"), False, ("ibkr",), (), {"ibkr": "1055000"}
+            )
+        ),
     )
     fake_engine = MagicMock()
     monkeypatch.setattr(
@@ -85,8 +93,10 @@ async def test_heartbeat_skips_upsert_when_equity_is_zero(monkeypatch) -> None:
         AsyncMock(return_value={"portfolio_value": Decimal("0")}),
     )
     monkeypatch.setattr(
-        "system.portfolio_equity.live_portfolio_value",
-        AsyncMock(return_value=Decimal("0")),
+        "system.portfolio_equity.live_portfolio_snapshot",
+        AsyncMock(
+            return_value=PortfolioValueSnapshot(Decimal("0"), False, (), (), {})
+        ),
     )
     monkeypatch.setattr(
         "storage.db.init_async_database",

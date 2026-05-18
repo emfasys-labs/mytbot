@@ -2409,6 +2409,76 @@ async def diagnostics_strategy_candidates(
     return await fetch_strategy_mix_diagnostics(session_factory, since_hours=since_hours)
 
 
+@app.get("/diagnostics/balances")
+async def diagnostics_balances(
+    response: Response,
+    bus: CommandBus = Depends(_command_bus),
+):
+    """Read-only per-broker NAV: current vs the recorded opening baseline.
+
+    Reuses the *already-connected* live broker_manager (no new broker
+    sessions — safe, never touches IBKR client-id), and reads the
+    immutable ``nav.opening_snapshot`` recorded at startup. Lets you see
+    exactly where capital sits per venue and how it has moved since the
+    baseline.
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch is not None else None
+    snap = await live_portfolio_snapshot(bm) if bm is not None else None
+
+    current_per_broker: dict[str, str] = (
+        dict(getattr(snap, "per_broker", {}) or {}) if snap is not None else {}
+    )
+    current_total = str(snap.value) if snap is not None else "0"
+
+    opening = None
+    try:
+        raw = await bus.get_state("nav.opening_snapshot", None)
+        if isinstance(raw, dict):
+            opening = raw
+    except Exception:  # noqa: BLE001
+        opening = None
+
+    def _dec(v: object) -> Decimal:
+        try:
+            return Decimal(str(v if v is not None else 0))
+        except Exception:  # noqa: BLE001
+            return Decimal("0")
+
+    deltas: dict[str, str] = {}
+    open_pb = (opening or {}).get("per_broker") or {}
+    for b in set(current_per_broker) | set(open_pb):
+        deltas[b] = str(_dec(current_per_broker.get(b)) - _dec(open_pb.get(b)))
+    total_delta = (
+        str(_dec(current_total) - _dec((opening or {}).get("total")))
+        if opening
+        else None
+    )
+
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "current": {
+            "total": current_total,
+            "per_broker": current_per_broker,
+            "complete": bool(getattr(snap, "complete", False)) if snap else False,
+            "included": list(getattr(snap, "included", ()) or ()) if snap else [],
+            "missing": list(getattr(snap, "missing", ()) or ()) if snap else [],
+        },
+        "opening_baseline": opening,
+        "delta_since_opening": {
+            "total": total_delta,
+            "per_broker": deltas or None,
+        },
+        "note": (
+            "Opening baseline is the first COMPLETE broker-NAV observation "
+            "after the instrumentation was deployed — not necessarily the "
+            "original day-0 paper seed. Pre-instrumentation history "
+            "(incl. the fee-unit-bug period) predates it."
+        ),
+    }
+
+
 @app.get("/diagnostics/accounting")
 async def diagnostics_accounting(
     session_factory=Depends(_session_factory),

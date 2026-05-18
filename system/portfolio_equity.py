@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +23,10 @@ class PortfolioValueSnapshot:
     complete: bool
     included: tuple[str, ...]
     missing: tuple[str, ...]
+    # Per-broker contributed equity (broker -> stringified Decimal). Empty by
+    # default so every existing positional constructor stays valid; populated
+    # by ``live_portfolio_snapshot`` for the read-only balances breakdown.
+    per_broker: dict[str, str] = field(default_factory=dict)
 
 
 def _cache_ttl_seconds() -> float:
@@ -159,6 +163,7 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
     total = Decimal(0)
     included: list[str] = []
     missing: list[str] = []
+    per_broker: dict[str, str] = {}
     # Brokers the manager has confirmed ``balance_ready`` are eligible for the
     # extended fallback window — we trust the last good value for longer when
     # the broker manager periodically vouches for the adapter.
@@ -178,6 +183,7 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
             cached = _cached_value(cache, n, now, effective_ttl)
             if cached > 0:
                 total += cached
+                per_broker[n] = str(cached)
             else:
                 missing.append(n)
             continue
@@ -185,12 +191,15 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
         if value > 0:
             cache[n] = (value, now)
             total += value
+            per_broker[n] = str(value)
         elif _zero_balance_is_complete(n, list(balances)):
             total += Decimal(0)
+            per_broker[n] = "0"
         else:
             cached = _cached_value(cache, n, now, effective_ttl)
             if cached > 0:
                 total += cached
+                per_broker[n] = str(cached)
             else:
                 missing.append(n)
     if allow is not None:
@@ -198,7 +207,13 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
         for n in sorted(allow - disabled - known):
             missing.append(n)
     complete = bool(included) and not missing
-    return PortfolioValueSnapshot(total if complete else Decimal(0), complete, tuple(included), tuple(missing))
+    return PortfolioValueSnapshot(
+        total if complete else Decimal(0),
+        complete,
+        tuple(included),
+        tuple(missing),
+        per_broker,
+    )
 
 
 async def live_portfolio_value(broker_manager: Any | None) -> Decimal:

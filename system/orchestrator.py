@@ -681,6 +681,49 @@ class Orchestrator:
             self._nav_heartbeat_loop(), name="nav-heartbeat"
         )
 
+    OPENING_NAV_STATE_KEY = "nav.opening_snapshot"
+
+    async def _maybe_record_opening_nav(self, sf, snap) -> None:
+        """Persist the first *complete* NAV observation, once, forever.
+
+        Records ``{recorded_at, total, per_broker, included}`` to
+        ControlState under ``nav.opening_snapshot`` ONLY when the snapshot
+        is complete (every included broker reported) and no record exists
+        yet. Never overwrites — so it is a true, immutable opening
+        baseline that makes "what did each broker start with?" answerable
+        from now on. Exception-safe; never disrupts the heartbeat.
+        """
+        try:
+            if not getattr(snap, "complete", False) or snap.value <= 0:
+                return
+            from control.command_bus import CommandBus
+
+            bus = CommandBus(sf)
+            existing = await bus.get_state(self.OPENING_NAV_STATE_KEY, None)
+            if isinstance(existing, dict) and existing.get("recorded_at"):
+                return  # immutable — already captured
+            from datetime import datetime, timezone
+
+            payload = {
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "total": str(snap.value),
+                "per_broker": dict(getattr(snap, "per_broker", {}) or {}),
+                "included": list(getattr(snap, "included", ()) or ()),
+                "note": (
+                    "First complete broker-NAV observation after this "
+                    "deployment. NOT necessarily the original day-0 paper "
+                    "seed — earlier history predates this instrumentation."
+                ),
+            }
+            await bus.set_state(self.OPENING_NAV_STATE_KEY, payload)
+            logger.info(
+                "orchestrator | opening-NAV baseline recorded | total={} brokers={}",
+                payload["total"],
+                payload["per_broker"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | opening-nav record skipped: {}", exc)
+
     async def _flush_nav_heartbeat(self) -> None:
         """Upsert today's NAV row once using the current broker-reported equity.
 
@@ -699,13 +742,19 @@ class Orchestrator:
             if sf is None:
                 return
             from run_m3 import _load_portfolio_state, _upsert_daily_pnl
-            from system.portfolio_equity import live_portfolio_value
+            from system.portfolio_equity import live_portfolio_snapshot
 
-            total_equity = await live_portfolio_value(self._broker_manager)
+            snap = await live_portfolio_snapshot(self._broker_manager)
+            total_equity = snap.value
             if total_equity <= 0:
                 # No broker reported a usable equity figure right now. Skip
                 # writing rather than clobber a valid prior row with zero.
                 return
+            # One-time opening-NAV snapshot: the first *complete* (all
+            # included brokers reporting) equity observation is recorded
+            # permanently so per-broker starting capital is never ambiguous
+            # again. Idempotent — never overwrites an existing record.
+            await self._maybe_record_opening_nav(sf, snap)
             portfolio_state = await _load_portfolio_state(
                 sf,
                 fallback_portfolio_value=total_equity,
