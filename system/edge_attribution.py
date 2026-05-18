@@ -81,8 +81,8 @@ async def compute_edge_attribution(
     symbol. Returns a plain dict (JSON-friendly, safe to inject into the
     coordinator cfg / log).
     """
-    from sqlalchemy import select
-    from storage.models import OrderLog, SignalLog
+    from sqlalchemy import and_, func, select
+    from storage.models import OrderLog, PositionLog, SignalLog
 
     now = now or datetime.now(timezone.utc)
     start_dt = now - timedelta(days=float(window_days))
@@ -182,6 +182,52 @@ async def compute_edge_attribution(
             new_avg = fill_price
         state[key] = (new_qty, new_avg)
 
+    # ── Stage 2: opener/unrealised-aware. Fold each symbol's CURRENT open
+    # unrealised P&L (latest snapshot, all brokers) into its net. This
+    # closes the realised-only blind spot: a strategy that keeps OPENING
+    # losing crypto (volatility_regime/mean_reversion on Kraken) never
+    # realises a loss under its own name, but the symbol's open inventory
+    # is deeply red — now the per-symbol governor sees it and clamps every
+    # strategy on that symbol (openers included). Auto-recovers when the
+    # unrealised improves.
+    try:
+        latest = (
+            select(
+                PositionLog.broker.label("broker"),
+                PositionLog.symbol.label("symbol"),
+                func.max(PositionLog.timestamp).label("mx"),
+            )
+            .group_by(PositionLog.broker, PositionLog.symbol)
+            .subquery()
+        )
+        prows = list(
+            (
+                await session.execute(
+                    select(PositionLog).join(
+                        latest,
+                        and_(
+                            PositionLog.broker == latest.c.broker,
+                            PositionLog.symbol == latest.c.symbol,
+                            PositionLog.timestamp == latest.c.mx,
+                        ),
+                    )
+                )
+            ).scalars().all()
+        )
+        for p in prows:
+            try:
+                if Decimal(str(p.quantity or 0)) == 0:
+                    continue
+                u = float(Decimal(str(p.unrealised_pnl or 0)))
+            except (TypeError, ValueError, InvalidOperation):
+                continue
+            sym = _norm_symbol(p.symbol)
+            cur = symbols.setdefault(sym, {"net": 0.0, "n": 0.0})
+            cur["net"] += u
+            cur["unrealised"] = float(cur.get("unrealised", 0.0)) + u
+    except Exception:  # noqa: BLE001 — unrealised overlay is best-effort
+        pass
+
     return {
         "buckets": buckets,
         "symbols": symbols,
@@ -251,5 +297,18 @@ def required_threshold_multiplier(
         mult = max(mult, governor_multiplier(float(b.get("net", 0.0)), float(b.get("n", 0.0))))
     s = (attribution.get("symbols") or {}).get(sym)
     if isinstance(s, dict):
-        mult = max(mult, governor_multiplier(float(s.get("net", 0.0)), float(s.get("n", 0.0))))
+        s_net = float(s.get("net", 0.0))
+        s_n = float(s.get("n", 0.0))
+        mult = max(mult, governor_multiplier(s_net, s_n))
+        # Open-inventory bleed is a real-time signal, NOT statistical noise:
+        # a symbol sitting on a large unrealised loss must clamp every
+        # strategy on it (openers included) even with few realised closes
+        # — bypass the min-samples gate for that component only.
+        s_unreal = float(s.get("unrealised", 0.0))
+        ref_loss = max(1.0, _f("EDGE_ATTRIB_REF_LOSS", 1500.0))
+        max_mult = max(1.0, _f("EDGE_ATTRIB_MAX_MULT", 8.0))
+        unreal_floor = max(1.0, _f("EDGE_ATTRIB_UNREAL_FLOOR", ref_loss))
+        if s_unreal <= -unreal_floor:
+            severity = min(1.0, abs(s_net) / ref_loss)
+            mult = max(mult, 1.0 + severity * (max_mult - 1.0))
     return mult

@@ -339,6 +339,45 @@ class ExecutionEngine:
         if self.paper_mode and broker_name_l in {"kraken", "binance", "bybit"}:
             broker_for_quote = await self._get_broker(signal.broker)
             await _stamp_microstructure_shadow(broker_for_quote)
+            # ── Per-venue capital bound ───────────────────────────────────
+            # The synthetic wallet is real (paper) capital; a crypto venue
+            # may not OPEN beyond its own equity-derived deploy room. Closes
+            # / reduce-only ALWAYS pass (they free room and must never be
+            # blocked — risk/stop-loss exits included). This is the hard,
+            # dynamic stop on the Kraken-style bleed the realised-only
+            # governor was structurally blind to.
+            _cap_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+            _is_close = bool(
+                getattr(order, "reduce_only", False)
+                or getattr(signal, "reduce_only", False)
+                or _cap_md.get("reduce_only")
+                or _cap_md.get("close_only")
+                or str(_cap_md.get("coordinator_kind", "")).strip().lower()
+                in {"trim_symbol", "close_symbol", "flatten_symbol"}
+            )
+            if not _is_close:
+                try:
+                    from system.paper_wallet import venue_deploy_room
+
+                    room = venue_deploy_room(broker_name_l)
+                    if room is not None:
+                        _px = (
+                            signal.suggested_price
+                            or order.limit_price
+                            or Decimal("0")
+                        )
+                        _notional = abs(Decimal(str(order.quantity or 0))) * Decimal(str(_px or 0))
+                        if _notional > room:
+                            self.last_skip_reason = "crypto_venue_capital_exhausted"
+                            logger.warning(
+                                "EXEC SKIP (venue paper capital) | %s %s broker=%s "
+                                "notional=%.2f > room=%.2f — venue wallet bound",
+                                signal.symbol, signal.side, broker_name_l,
+                                float(_notional), float(room),
+                            )
+                            return None
+                except Exception as exc:  # noqa: BLE001 — bound must never crash exec
+                    logger.debug("crypto venue cap check skipped (non-fatal): %s", exc)
             logger.info(
                 "PAPER FILL (no native paper on %s) | %s %s qty=%s",
                 broker_name_l, signal.symbol, signal.side, signal.suggested_quantity,

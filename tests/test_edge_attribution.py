@@ -90,6 +90,26 @@ def test_absent_attribution_is_noop() -> None:
     assert required_threshold_multiplier("ETH-USD", "x", {}) == 1.0
 
 
+def test_large_unrealised_clamps_even_with_few_samples() -> None:
+    """Stage-2 opener blind-spot fix: a symbol sitting on a big OPEN
+    unrealised loss must clamp every strategy on it (openers included)
+    even with too few realised closes to be 'proven'."""
+    attr = {
+        "buckets": {},
+        "symbols": {
+            # 1 realised sample (below min) but -$9k open inventory loss.
+            "ETH-USD": {"net": -9000.0, "n": 1.0, "unrealised": -9000.0},
+        },
+    }
+    # Without the unrealised path this would only be the cautious 1.5
+    # ("unproven"); with it, it must clamp hard (≈ max).
+    m = required_threshold_multiplier("ETH-USD", "volatility_regime", attr)
+    assert m >= 7.0, m
+    # A small open loss stays gentle (not every red tick nukes a symbol).
+    attr2 = {"buckets": {}, "symbols": {"SOL-USD": {"net": -50.0, "n": 1.0, "unrealised": -50.0}}}
+    assert required_threshold_multiplier("SOL-USD", "x", attr2) == 1.5
+
+
 # ── Rolling reconstruction (net of fees) ────────────────────────────────
 
 
@@ -149,6 +169,44 @@ def test_compute_attribution_nets_fees_and_attributes_bucket_symbol() -> None:
     assert round(out["buckets"]["capital_recycle"]["net"], 2) == -102.0
     assert round(out["symbols"]["ETH-USD"]["net"], 2) == -102.0
     assert out["buckets"]["capital_recycle"]["n"] == 1.0
+
+
+class _Seq3Session:
+    """execute() #1 -> orders, #2 -> signal rows, #3 -> open positions."""
+
+    def __init__(self, orders, sig_rows, positions):
+        self._seq = [orders, sig_rows, positions]
+        self._i = 0
+
+    async def execute(self, _stmt):
+        data = self._seq[min(self._i, len(self._seq) - 1)]
+        self._i += 1
+        return _Result(data)
+
+
+def test_compute_attribution_folds_open_unrealised_into_symbol_net() -> None:
+    # No closing fills (pure opener flood) -> realised contributes nothing,
+    # but the symbol carries a big OPEN unrealised loss that MUST surface.
+    orders = [
+        _Row(broker="kraken", symbol="ETH-USD", side="buy", filled_quantity=10,
+             quantity=10, avg_fill_price=100, limit_price=100, fee=1,
+             status="filled", timestamp=1, id=1, signal_id="s1"),
+    ]
+    sig = [("s1", "volatility_regime")]
+    positions = [
+        _Row(broker="kraken", symbol="ETH-USD", quantity=Decimal("10"),
+             unrealised_pnl=Decimal("-7500")),
+        _Row(broker="kraken", symbol="DUST", quantity=Decimal("0"),
+             unrealised_pnl=Decimal("999")),  # closed -> ignored
+    ]
+    out = asyncio.run(
+        compute_edge_attribution(_Seq3Session(orders, sig, positions), window_days=4.0)
+    )
+    eth = out["symbols"]["ETH-USD"]
+    assert round(eth["net"], 1) == -7500.0  # opener loss now visible
+    assert round(eth["unrealised"], 1) == -7500.0
+    # And the governor clamps the opener strategy hard via the symbol path.
+    assert required_threshold_multiplier("ETH-USD", "volatility_regime", out) >= 7.0
 
 
 def test_compute_attribution_empty_is_safe() -> None:

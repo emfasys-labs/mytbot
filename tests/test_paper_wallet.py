@@ -153,6 +153,40 @@ def test_compute_venue_equity_degrades_to_seed_on_error(monkeypatch) -> None:
     assert out["realised"] == "0"
 
 
+def test_venue_deploy_room_bounds_by_equity_minus_deployed(_wallet_file, monkeypatch) -> None:
+    monkeypatch.delenv("CRYPTO_VENUE_DEPLOY_FRACTION", raising=False)
+    # Disabled / non-crypto -> no bound (None).
+    monkeypatch.setenv("CRYPTO_PAPER_WALLET", "0")
+    assert pw.venue_deploy_room("kraken") is None
+    monkeypatch.delenv("CRYPTO_PAPER_WALLET", raising=False)
+    assert pw.venue_deploy_room("ibkr") is None
+    # No snapshot yet -> bounded by seed.
+    assert pw.venue_deploy_room("kraken") == Decimal("50000")
+    # Snapshot: equity 12800, already $10k deployed -> room = 2800.
+    pw.write_snapshot(
+        {
+            "kraken": {
+                "seed": "50000", "realised": "-37000", "unrealised": "-200",
+                "equity": "12800", "gross_position_mv": "10000",
+            }
+        }
+    )
+    assert pw.venue_deploy_room("kraken") == Decimal("2800")
+    # Over-deployed (gross > equity) -> room floored at 0, never negative.
+    pw.write_snapshot(
+        {"kraken": {"equity": "12800", "gross_position_mv": "163000"}}
+    )
+    assert pw.venue_deploy_room("kraken") == Decimal("0")
+
+
+def test_deploy_fraction_env(_wallet_file, monkeypatch) -> None:
+    pw.write_snapshot({"bybit": {"equity": "50000", "gross_position_mv": "0"}})
+    monkeypatch.setenv("CRYPTO_VENUE_DEPLOY_FRACTION", "0.5")
+    assert pw.venue_deploy_room("bybit") == Decimal("25000.0")
+    monkeypatch.setenv("CRYPTO_VENUE_DEPLOY_FRACTION", "garbage")
+    assert pw.venue_deploy_room("bybit") == Decimal("50000")  # safe fallback (1.0)
+
+
 def test_negative_equity_floored_at_zero(monkeypatch) -> None:
     monkeypatch.setenv("CRYPTO_PAPER_WALLET_USD", "100")
     orders = [

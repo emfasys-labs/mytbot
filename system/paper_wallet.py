@@ -171,10 +171,14 @@ async def compute_venue_equity(session: Any, broker: str) -> dict[str, str]:
             ).scalars().all()
         )
         unreal = Decimal("0")
+        gross_mv = Decimal("0")
         for p in prows:
-            if _d(p.quantity) == 0:
+            q = _d(p.quantity)
+            if q == 0:
                 continue
             unreal += _d(p.unrealised_pnl)
+            px = _d(getattr(p, "current_price", 0)) or _d(getattr(p, "avg_entry_price", 0))
+            gross_mv += abs(q) * px
 
         equity = seed + realised + unreal
         return {
@@ -182,6 +186,7 @@ async def compute_venue_equity(session: Any, broker: str) -> dict[str, str]:
             "realised": str(realised),
             "unrealised": str(unreal),
             "equity": str(equity if equity > 0 else Decimal("0")),
+            "gross_position_mv": str(gross_mv),
         }
     except Exception as exc:  # noqa: BLE001 — degrade to seed, never break NAV
         logger.debug("paper_wallet | compute_venue_equity({}) failed: {}", b, exc)
@@ -190,6 +195,7 @@ async def compute_venue_equity(session: Any, broker: str) -> dict[str, str]:
             "realised": "0",
             "unrealised": "0",
             "equity": str(seed),
+            "gross_position_mv": "0",
         }
 
 
@@ -227,6 +233,44 @@ def _read_snapshot() -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _deploy_fraction() -> Decimal:
+    raw = os.getenv("CRYPTO_VENUE_DEPLOY_FRACTION", "1.0")
+    try:
+        v = Decimal(str(raw))
+        return v if Decimal("0") < v <= Decimal("2") else Decimal("1.0")
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("1.0")
+
+
+def venue_deploy_room(broker: str) -> Decimal | None:
+    """Remaining notional a crypto venue may still deploy = equity ×
+    deploy-fraction − current gross open-position market value.
+
+    This turns the synthetic wallet into a **hard, dynamic, market-driven
+    bound**: a venue that has bled its equity (Kraken ≈ $12.8k) or is
+    already fully deployed simply cannot open more — and the room frees
+    automatically as positions close or equity recovers. Not a hardcoded
+    cap; it tracks the venue's own real (paper) capital. ``None`` when the
+    wallet is disabled or the venue isn't a synthetic-paper crypto venue
+    (→ caller applies no extra bound, prior behaviour).
+    """
+    if not crypto_paper_wallet_enabled():
+        return None
+    b = str(broker or "").strip().lower()
+    if b not in CRYPTO_PAPER_BROKERS:
+        return None
+    snap = _read_snapshot()
+    venues = snap.get("venues") if isinstance(snap, dict) else None
+    rec = venues.get(b) if isinstance(venues, dict) else None
+    if not isinstance(rec, dict):
+        # No snapshot yet → bound by the seed (sane until first heartbeat).
+        return seed_for(b) * _deploy_fraction()
+    eq = _d(rec.get("equity", seed_for(b)))
+    gross = _d(rec.get("gross_position_mv", 0))
+    room = eq * _deploy_fraction() - gross
+    return room if room > 0 else Decimal("0")
 
 
 def venue_equity(broker: str) -> Decimal | None:
