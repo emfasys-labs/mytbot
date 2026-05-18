@@ -1366,6 +1366,169 @@ class Orchestrator:
                 except Exception:
                     pass
 
+    async def _run_aggregate_derisk_tick(self) -> None:
+        """Force reduce-only de-risk when the AGGREGATE unrealised loss
+        breaches a dynamic NAV/volatility budget.
+
+        The per-trade stop only fires on a single position > ~1% of NAV;
+        a book bleeding −$7k across 30 small losers trips nothing. This
+        closes the worst losers (reduce-only → exempt from the anti-churn
+        governor, like stop-loss) until projected loss is back in budget.
+        Mirrors the proven stop-loss submission path; gated by
+        AGG_UNREALISED_DERISK (default on)."""
+        from risk.aggregate_derisk import (
+            PositionLoss,
+            aggregate_unrealised,
+            derisk_budget,
+            derisk_enabled,
+            select_derisk_closes,
+        )
+
+        if not derisk_enabled():
+            return
+        tl = self._trading_loop
+        if tl is None:
+            return
+        risk_engine = getattr(tl, "risk_engine", None)
+        execution_engine = getattr(tl, "execution_engine", None)
+        if risk_engine is None or execution_engine is None or self._broker_manager is None:
+            return
+        try:
+            from storage.db import init_async_database, dispose_engine as _dispose
+            from run_m3 import _load_portfolio_state
+            from system.portfolio_equity import live_portfolio_value
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | agg de-risk imports unavailable: {}", exc)
+            return
+        try:
+            close_cooldown_sec = max(5.0, float(os.getenv("STOP_LOSS_CLOSE_COOLDOWN_SEC", "60")))
+        except (TypeError, ValueError):
+            close_cooldown_sec = 60.0
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            nav = await live_portfolio_value(self._broker_manager)
+            if nav <= 0:
+                return
+
+            pls: list[PositionLoss] = []
+            for broker_name, adapter in self._broker_manager.adapters.items():
+                bname = str(broker_name or "").strip().lower()
+                if not bname:
+                    continue
+                if hasattr(risk_engine, "is_broker_disabled") and risk_engine.is_broker_disabled(bname):
+                    continue
+                try:
+                    positions = await adapter.get_positions()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("orchestrator | agg de-risk | positions fetch failed | broker={} | {}", bname, exc)
+                    continue
+                for pos in positions:
+                    try:
+                        qty = Decimal(str(getattr(pos, "quantity", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        qty = Decimal("0")
+                    if qty == 0:
+                        continue
+                    sym = str(getattr(pos, "symbol", "") or "").strip().upper()
+                    if not sym:
+                        continue
+                    try:
+                        entry = Decimal(str(getattr(pos, "avg_entry_price", "0") or "0"))
+                        current = Decimal(str(getattr(pos, "current_price", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    acr = getattr(pos, "asset_class", "equity")
+                    pls.append(
+                        PositionLoss(
+                            broker=bname,
+                            symbol=sym,
+                            quantity=qty,
+                            avg_entry_price=entry,
+                            current_price=current,
+                            asset_class=str(getattr(acr, "value", acr)).lower(),
+                            metadata=dict(getattr(pos, "instrument_metadata", {}) or {}),
+                        )
+                    )
+
+            chosen = select_derisk_closes(pls, nav)
+            if not chosen:
+                return
+            logger.warning(
+                "orchestrator | aggregate de-risk | unrealised=%s budget=-%s — closing %d worst loser(s)",
+                str(aggregate_unrealised(pls)),
+                str(derisk_budget(nav)),
+                len(chosen),
+            )
+            now_ts = datetime.now(timezone.utc).timestamp()
+            for p in chosen:
+                direction = "long" if p.quantity > 0 else "short"
+                close_key = f"{p.broker}:{p.symbol}:{direction}"
+                if now_ts - self._stop_loss_last_close_ts.get(close_key, 0.0) < close_cooldown_sec:
+                    continue
+                side = "sell" if p.quantity > 0 else "buy"
+                signal = RiskSignal(
+                    signal_id=f"aggderisk-{p.symbol}-{int(now_ts)}",
+                    symbol=p.symbol,
+                    side=side,
+                    strategy="aggregate_derisk",
+                    confidence=1.0,
+                    suggested_quantity=abs(p.quantity),
+                    suggested_price=p.current_price if p.current_price > 0 else p.avg_entry_price,
+                    broker=p.broker,
+                    asset_class=p.asset_class,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    metadata={
+                        "reduce_only": True,
+                        "aggregate_derisk": True,
+                        "unrealised": str(p.unrealised),
+                    },
+                )
+                portfolio_state = await _load_portfolio_state(
+                    sf,
+                    fallback_portfolio_value=nav,
+                    signal_price_fallback=signal.suggested_price,
+                    capital_pct=Decimal(str(self.capital_pct)),
+                )
+                risk_engine.update_high_watermark(
+                    Decimal(str(portfolio_state.get("high_watermark_value", nav)))
+                )
+                risk_engine.restore_runtime_state(portfolio_state)
+                risk_decision = await risk_engine.evaluate_and_persist(sf, signal, portfolio_state)
+                if risk_decision.verdict != RiskVerdict.APPROVED:
+                    logger.warning(
+                        "orchestrator | agg de-risk close rejected by risk | {} {} | {}",
+                        p.broker, p.symbol, risk_decision.reason,
+                    )
+                    self._stop_loss_last_close_ts[close_key] = now_ts
+                    continue
+                result = await execution_engine.execute(signal, risk_decision, session_factory=sf)
+                self._stop_loss_last_close_ts[close_key] = now_ts
+                if result is None:
+                    logger.warning(
+                        "orchestrator | agg de-risk close did not execute | {} {}",
+                        p.broker, p.symbol,
+                    )
+                    continue
+                logger.warning(
+                    "orchestrator | agg de-risk close submitted | {} {} side={} qty={} unrealised={}",
+                    p.broker, p.symbol, side, abs(p.quantity), str(p.unrealised),
+                )
+                await self._persist_fill_to_portfolio_state(
+                    sf=sf, signal=signal, result=result, fallback_nav=nav,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | aggregate de-risk tick error (non-fatal): {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
     async def _stop_loss_loop(self) -> None:
         """Periodic post-open stop-loss monitor loop."""
         try:
@@ -1383,6 +1546,10 @@ class Orchestrator:
                 await self._run_stop_loss_tick()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("orchestrator | stop-loss monitor error: {}", exc)
+            try:
+                await self._run_aggregate_derisk_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | aggregate de-risk error: {}", exc)
             try:
                 await self._sleep_cancellable(interval)
             except asyncio.CancelledError:

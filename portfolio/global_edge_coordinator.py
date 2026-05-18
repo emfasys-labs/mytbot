@@ -1557,14 +1557,17 @@ class GlobalEdgeCoordinator:
         take_profit_pct = _d("take_profit_pct", "0.02")
         trim_fraction = _d("take_profit_trim_fraction", "0.50")
         dead_edge_floor = _d("dead_edge_floor", "0.01")
-        # Net-of-cost evidence governor: when the capital_recycle bucket is
-        # persistently bleeding (its cull→rebuy cycle is paying spread+fees
-        # to reshuffle weak ideas), SHRINK the dead-edge cull trigger so it
-        # only culls genuinely dead positions — far fewer recycle churns.
-        # Auto-recovers (floor restored) once recycle turns net-positive.
-        _rc_mult = self._attrib_mult(None, "capital_recycle", "recycle")
-        if _rc_mult > Decimal("1"):
-            dead_edge_floor = dead_edge_floor / _rc_mult
+        # NOTE: the net-of-cost governor must NOT throttle this path. A
+        # dead-edge cull is a reduce-only RISK EXIT of a position with no
+        # remaining edge — exactly what should happen to a loser. An
+        # earlier build shrank ``dead_edge_floor`` when the capital_recycle
+        # bucket was net-negative, but that bucket is *structurally*
+        # net-negative (cutting losers realises losses), so it suppressed
+        # loss-cutting and froze underwater positions for days. Anti-churn
+        # is enforced on the RE-ENTRY side instead — the just-culled symbol
+        # is blocked by ``last_cull_at_by_symbol`` re-entry cooldown +
+        # churn penalty (both governed) — so we cull freely here and stop
+        # the open→reopen churn where it actually occurs.
         try:
             max_actions = int(cfg.get("max_actions_per_tick", 3))
         except (TypeError, ValueError):
