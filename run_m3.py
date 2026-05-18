@@ -666,14 +666,26 @@ async def _refresh_position_marks_and_persist(
                 continue
             qty = Decimal(str(row.quantity or 0))
             avg = Decimal(str(row.avg_entry_price or 0))
-            try:
-                px = await (price_oracle(sym) if price_oracle is not None else _fallback_price(sym))
-            except Exception:  # noqa: BLE001
-                px = Decimal("0")
+            # Price priority: live oracle (venue-native, all asset classes)
+            # → feature-snapshot close (equities only) → last-known mark.
+            # The old code used oracle XOR feature; with feature-only (no
+            # oracle) the ~40 forex/futures/crypto symbols absent from the
+            # M2 feature pipeline NEVER got a real price and were re-stamped
+            # at entry forever (current_price == avg → unrealised stuck at
+            # $0 for 62% of the book). Chaining fixes that at the source.
+            px = Decimal("0")
+            if price_oracle is not None:
+                try:
+                    px = await price_oracle(sym)
+                except Exception:  # noqa: BLE001
+                    px = Decimal("0")
             if px <= 0:
-                # No fresh quote — keep the last-known price; this still
-                # gives a meaningful ``unrealised_pnl`` (vs 0 before this
-                # function existed), just not freshly marked this cycle.
+                try:
+                    px = await _fallback_price(sym)
+                except Exception:  # noqa: BLE001
+                    px = Decimal("0")
+            if px <= 0:
+                # Still nothing — keep the last-known price (best effort).
                 px = Decimal(str(row.current_price or 0))
             unreal = _compute_unrealised_pnl(qty, px, avg)
             new_row = PositionLog(

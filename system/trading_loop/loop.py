@@ -367,6 +367,11 @@ class TradingLoop:
         # into the coordinator cfg so a persistently bleeding action-class /
         # symbol faces a steeply widened (auto-recovering) edge bar.
         self._edge_attrib_cache: dict[str, Any] | None = None
+        # Last-good live price per symbol for the mark-to-market sweep:
+        # {sym: (Decimal, monotonic_ts)}. Lets the persisted mark stay real
+        # for forex/futures/crypto symbols that have no M2 feature bars,
+        # which otherwise carried their entry price forever.
+        self._mark_px_cache: dict[str, tuple[Decimal, float]] = {}
         self._loop_started_monotonic: float | None = None
         try:
             self._warmup_min_sec: float = max(
@@ -572,6 +577,46 @@ class TradingLoop:
                 dropped,
             )
         return kept
+
+    async def _live_price_oracle(self, sym: str) -> Decimal:
+        """Venue-native last price for the mark-to-market sweep.
+
+        Queries connected broker adapters (all asset classes — forex,
+        futures, crypto, equities), first positive quote wins, with a
+        short per-probe timeout. A last-good cache (TTL
+        ``MARK_PX_CACHE_TTL_SEC``, default 180s) bridges transient broker
+        timeouts so a momentary miss never re-stamps a position at its
+        entry price. Returns ``Decimal(0)`` only when truly unknown — the
+        sweep then falls back to feature close / last mark.
+        """
+        bm = self._broker_manager
+        s = str(sym or "").strip()
+        if not s or bm is None:
+            return Decimal("0")
+        adapters = getattr(bm, "adapters", None)
+        if not isinstance(adapters, dict) or not adapters:
+            return Decimal("0")
+        for _name, adapter in list(adapters.items()):
+            try:
+                raw = await asyncio.wait_for(adapter.get_last_price(s), timeout=1.0)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                px = Decimal(str(raw))
+            except Exception:  # noqa: BLE001
+                continue
+            if px > 0:
+                self._mark_px_cache[s] = (px, time.monotonic())
+                return px
+        # All probes missed this cycle → carry the last good quote.
+        try:
+            ttl = max(0.0, float(os.getenv("MARK_PX_CACHE_TTL_SEC", "180")))
+        except (TypeError, ValueError):
+            ttl = 180.0
+        cached = self._mark_px_cache.get(s)
+        if cached is not None and ttl > 0 and (time.monotonic() - cached[1]) <= ttl:
+            return cached[0]
+        return Decimal("0")
 
     async def stop(self) -> None:
         if not self.is_running:
@@ -2201,6 +2246,7 @@ class TradingLoop:
                         refreshed = await _refresh_position_marks_and_persist(
                             session_factory,
                             timeframe=self.timeframe,
+                            price_oracle=self._live_price_oracle,
                         )
                         if refreshed:
                             logger.debug(
