@@ -85,9 +85,44 @@ def test_resolve_portfolio_value_live_wins_over_stale_db(monkeypatch) -> None:
 
 
 def test_resolve_portfolio_value_paper_uses_paper_ledger(monkeypatch) -> None:
-    """Paper mode must not treat small real broker cash as simulated NAV."""
+    """Guard still holds: a live snapshot implausibly low vs the ledger
+    (<50% — transient empty/garbage broker reply) keeps the stable
+    persisted ledger so a fake drawdown can't block opens."""
     monkeypatch.setenv("APP_ENV", "paper")
+    monkeypatch.delenv("PAPER_NAV_LIVE_FLOOR_RATIO", raising=False)
     assert _resolve_portfolio_value_for_state(Decimal("98000"), Decimal("884000")) == Decimal("884000")
+
+
+def test_resolve_portfolio_value_paper_reconciles_to_canonical_live(monkeypatch) -> None:
+    """NEW: in normal paper operation the live snapshot (broker paper +
+    synthetic crypto wallet ≈ headline NAV) is preferred so the persisted
+    daily_pnl.portfolio_value reconciles with the headline (no $82k
+    third-basis gap). Live $1.185M vs ledger $1.103M → returns live."""
+    monkeypatch.setenv("APP_ENV", "paper")
+    monkeypatch.delenv("PAPER_NAV_LIVE_FLOOR_RATIO", raising=False)
+    assert _resolve_portfolio_value_for_state(
+        Decimal("1185545"), Decimal("1102893")
+    ) == Decimal("1185545")
+
+
+def test_resolve_portfolio_value_paper_floor_ratio_env(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "paper")
+    # Ratio 0 disables the guard → always prefer the live snapshot.
+    monkeypatch.setenv("PAPER_NAV_LIVE_FLOOR_RATIO", "0")
+    assert _resolve_portfolio_value_for_state(
+        Decimal("98000"), Decimal("884000")
+    ) == Decimal("98000")
+    # A very high ratio makes the guard strict → keep the ledger even for
+    # a near-equal live value.
+    monkeypatch.setenv("PAPER_NAV_LIVE_FLOOR_RATIO", "5")
+    assert _resolve_portfolio_value_for_state(
+        Decimal("1185545"), Decimal("1102893")
+    ) == Decimal("1102893")
+
+
+def test_resolve_portfolio_value_paper_live_zero_uses_ledger(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "paper")
+    assert _resolve_portfolio_value_for_state(Decimal("0"), Decimal("884000")) == Decimal("884000")
 
 
 def test_resolve_portfolio_value_falls_back_to_db_when_live_zero(monkeypatch) -> None:

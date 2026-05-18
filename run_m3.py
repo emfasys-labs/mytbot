@@ -247,10 +247,29 @@ def _resolve_portfolio_value_for_state(
     paper NAV; using them creates a fake drawdown that blocks all opens.
     """
     is_live = os.getenv("APP_ENV", "paper").strip().lower() == "live"
-    if not is_live and pv_from_db > 0:
-        return pv_from_db
+    if is_live:
+        if fallback_portfolio_value > 0:
+            return fallback_portfolio_value
+        return pv_from_db if pv_from_db > 0 else fallback_portfolio_value
+    # Paper mode. The canonical NAV is the live snapshot (IBKR/Alpaca
+    # paper equity + the synthetic crypto wallet — coherent since the
+    # wallet floors crypto at seed+realised+unrealised, so the old
+    # "raw venue cash = fake drawdown" hazard no longer applies). Prefer
+    # it so the persisted ``daily_pnl.portfolio_value`` reconciles with
+    # the headline NAV (kills the ~$82k third-basis gap Codex flagged).
+    # Guard: if the live snapshot is implausibly low vs the persisted
+    # ledger (transient empty/garbage broker reply), keep the stable
+    # ledger to avoid a fake drawdown that would block opens.
     if fallback_portfolio_value > 0:
-        return fallback_portfolio_value
+        if pv_from_db <= 0:
+            return fallback_portfolio_value
+        try:
+            floor_ratio = Decimal(str(os.getenv("PAPER_NAV_LIVE_FLOOR_RATIO", "0.5")))
+        except (TypeError, ValueError, InvalidOperation):
+            floor_ratio = Decimal("0.5")
+        if floor_ratio <= 0 or fallback_portfolio_value >= pv_from_db * floor_ratio:
+            return fallback_portfolio_value
+        return pv_from_db
     if pv_from_db > 0:
         return pv_from_db
     return fallback_portfolio_value

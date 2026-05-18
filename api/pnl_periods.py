@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,15 @@ from typing import Any
 from sqlalchemy import and_, func, select
 
 from storage.models import DailyPnL
+
+# Production-P&L start. Rows before this are the pre-instrumentation
+# bring-up period: their realised/unrealised/fees were deliberately
+# zeroed (operator-approved rectification), but their fill *counts* are
+# truthful. Including those rows in period rollups makes "month/all-time
+# trades" span a wider window than "month/all-time P&L/fees" — the
+# semantic split Codex flagged. Excluding them from ALL rollups makes
+# every period metric measure the same production window.
+PRODUCTION_PNL_START = os.getenv("PRODUCTION_PNL_START", "2026-05-13")
 
 
 def week_to_date_range(today: date) -> tuple[date, date]:
@@ -39,8 +49,15 @@ def merge_live_today_unrealised_into_period(
 
 
 async def aggregate_daily_pnl_range(session: Any, start: date, end: date) -> dict[str, Any]:
-    start_s = start.isoformat()
+    # Clamp the window start to the production cutoff so counts AND P&L
+    # cover the same period (pre-cutoff non-production rows excluded).
+    start_s = max(start.isoformat(), PRODUCTION_PNL_START)
     end_s = end.isoformat()
+    if start_s > end_s:  # window entirely pre-production → empty rollup
+        return {
+            "realised": "0", "unrealised": "0", "fees": "0", "trades": 0,
+            "period_start": start_s, "period_end": end_s,
+        }
     q = await session.execute(
         select(
             func.coalesce(func.sum(DailyPnL.realised_pnl), 0),
@@ -86,7 +103,7 @@ async def win_rate_from_daily_rows(session: Any, *, limit_days: int = 120) -> fl
     """Among days with at least one trade, fraction with positive realised P&L."""
     q = await session.execute(
         select(DailyPnL.realised_pnl, DailyPnL.trade_count)
-        .where(DailyPnL.trade_count > 0)
+        .where(DailyPnL.trade_count > 0, DailyPnL.date >= PRODUCTION_PNL_START)
         .order_by(DailyPnL.date.desc())
         .limit(limit_days)
     )

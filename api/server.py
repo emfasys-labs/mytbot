@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse
 
 from api.dashboard_layer import gather_ws_events, log_cors_live_warning, merge_risk_parameters_for_api, verify_dashboard_token
 from api.pnl_periods import (
+    PRODUCTION_PNL_START,
     aggregate_daily_pnl_range,
     equity_max_drawdown_pct,
     merge_live_today_unrealised_into_period,
@@ -1903,16 +1904,22 @@ async def get_pnl(
     async with session_factory() as session:
         today_q = await session.execute(select(DailyPnL).where(DailyPnL.date == today).limit(1))
         today_row = today_q.scalars().first()
+        # All-time = production window only (exclude pre-cutoff
+        # non-production rows so the count and the P&L cover the same
+        # period — Codex's semantic-split fix).
         agg_q = await session.execute(
             select(
                 func.coalesce(func.sum(DailyPnL.realised_pnl), 0).label("realised"),
                 func.coalesce(func.sum(DailyPnL.total_fees), 0).label("fees"),
                 func.coalesce(func.sum(DailyPnL.trade_count), 0).label("trades"),
-            )
+            ).where(DailyPnL.date >= PRODUCTION_PNL_START)
         )
         agg = tuple(agg_q.one())
         latest_unrealised_q = await session.execute(
-            select(DailyPnL.unrealised_pnl).order_by(DailyPnL.date.desc()).limit(1)
+            select(DailyPnL.unrealised_pnl)
+            .where(DailyPnL.date >= PRODUCTION_PNL_START)
+            .order_by(DailyPnL.date.desc())
+            .limit(1)
         )
         latest_unrealised_db = Decimal(str(latest_unrealised_q.scalar_one_or_none() or 0))
         ws, we = week_to_date_range(today_d)
@@ -1941,7 +1948,12 @@ async def get_pnl(
         ytd_net_realised = Decimal(str(agg[0] or 0))
         ytd_order_fees = Decimal(str(agg[1] or 0))
         ytd_order_trades = int(agg[2] or 0)
-        pv_q = await session.execute(select(DailyPnL.portfolio_value).order_by(DailyPnL.date.asc()).limit(400))
+        pv_q = await session.execute(
+            select(DailyPnL.portfolio_value)
+            .where(DailyPnL.date >= PRODUCTION_PNL_START)
+            .order_by(DailyPnL.date.asc())
+            .limit(400)
+        )
         pv_vals: list[Decimal] = []
         for x in pv_q.scalars().all():
             if x is None:
@@ -2499,6 +2511,40 @@ async def diagnostics_balances(
         else None
     )
 
+    # Honest delta: the opening baseline was captured BEFORE the synthetic
+    # crypto paper wallet existed (those venues read ~0 at baseline). The
+    # raw delta therefore conflates injected paper SEED capital with real
+    # P&L (Codex's "+$111.7k looks like a gain" — it isn't). Net the seed
+    # out so the true economic change is visible.
+    synthetic_seed = Decimal("0")
+    true_pnl_per_broker: dict[str, str] = {}
+    try:
+        from system.paper_wallet import (
+            CRYPTO_PAPER_BROKERS,
+            crypto_paper_wallet_enabled,
+            seed_for,
+        )
+
+        wallet_on = crypto_paper_wallet_enabled()
+        for b in set(current_per_broker) | set(open_pb):
+            raw = _dec(current_per_broker.get(b)) - _dec(open_pb.get(b))
+            if (
+                wallet_on
+                and b in CRYPTO_PAPER_BROKERS
+                and _dec(open_pb.get(b)) <= Decimal("1")  # ~0 at baseline
+            ):
+                sd = seed_for(b)
+                synthetic_seed += sd
+                true_pnl_per_broker[b] = str(raw - sd)  # = realised+unrealised
+            else:
+                true_pnl_per_broker[b] = str(raw)
+    except Exception:  # noqa: BLE001 — fall back to raw if wallet introspection fails
+        synthetic_seed = Decimal("0")
+        true_pnl_per_broker = dict(deltas)
+    true_pnl_total = (
+        str(_dec(total_delta) - synthetic_seed) if total_delta is not None else None
+    )
+
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "current": {
@@ -2509,15 +2555,26 @@ async def diagnostics_balances(
             "missing": list(getattr(snap, "missing", ()) or ()) if snap else [],
         },
         "opening_baseline": opening,
-        "delta_since_opening": {
+        "delta_since_opening_raw": {
             "total": total_delta,
             "per_broker": deltas or None,
+            "warning": (
+                "RAW — includes synthetic paper-wallet seed injected after "
+                "the baseline; NOT trading profit. Use true_pnl_since_opening."
+            ),
+        },
+        "synthetic_seed_since_opening": str(synthetic_seed),
+        "true_pnl_since_opening": {
+            "total": true_pnl_total,
+            "per_broker": true_pnl_per_broker or None,
+            "note": "Raw delta minus post-baseline synthetic wallet seed = real economic change.",
         },
         "note": (
             "Opening baseline is the first COMPLETE broker-NAV observation "
-            "after the instrumentation was deployed - not necessarily the "
-            "original day-0 paper seed. Pre-instrumentation history "
-            "(incl. the fee-unit-bug period) predates it."
+            "after the instrumentation was deployed - not the original "
+            "day-0 paper seed, and it predates the synthetic crypto wallet. "
+            "delta_since_opening_raw therefore double-counts seed capital; "
+            "true_pnl_since_opening is the honest figure."
         ),
     }
 
