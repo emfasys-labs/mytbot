@@ -41,7 +41,7 @@ export function SystemHeartbeat({
       />
       <span>{statusLabel}</span>
       <span>·</span>
-      <span>{tradesCount} trades today</span>
+      <span>{tradesCount} fills today</span>
       <span>·</span>
       <span>last trade {lastTradeMinutes}m ago</span>
     </div>

@@ -906,3 +906,29 @@ unchanged). To enable, set `USE_ADAPTIVE_SIZING=1` before launching
 `python run.py`. To disable mid-flight, unset and restart the Python
 process — `/system/stop` + `/system/start` does not reload module-level
 imports.
+
+## D106 — Two-agent accounting collision: restored proven state (2026-05-18)
+A second agent (Cursor) made overlapping, uncommitted changes to the
+accounting subsystem while this session's fixes were in flight:
+`system/paper_nav.py` (compounded-paper-NAV model), a `run_m3.py`
+rewrite that replaced `_compute_today_realised_pnl`, an `/pnl` NAV-path
+swap, and it ran `scripts/backfill_daily_pnl.py` which **recomputed**
+pre-2026-05-13 `daily_pnl` from the buggy-fee-era orders — directly
+overwriting the operator's explicit, recorded decision (D-prior:
+"flag pre-instrumentation as non-production and ZERO it"; recompute was
+explicitly rejected).
+
+Resolution (operator-chosen): keep ONE coherent, tested model.
+- Cursor's uncommitted work preserved in `git stash@{0}` (recoverable,
+  not adopted) — working tree restored to committed HEAD `630b337`.
+- DB rectification re-applied (`scripts/rectify_daily_pnl.py --apply`):
+  pre-05-13 re-zeroed; all-time realised = valid post-instrumentation
+  days only. Cursor's recomputed state also backed up.
+- Cherry-picked Cursor's two correct, non-conflicting fixes only:
+  `trade_count` now counts filled `OrderLog` rows (was `SignalLog`,
+  ~2x overcount); UI "Trades today" → "Fills today".
+- NAV remains the synthetic-crypto-wallet + single-source `/pnl` model
+  (`04d736a`/`6b3fd56`), NOT the compounded-paper model.
+
+Governance note: autonomous agents must not run DB-mutating backfills
+that reverse a recorded operator data decision without re-confirmation.

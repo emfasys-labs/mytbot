@@ -125,7 +125,7 @@ export function PerformancePanel({
           </span>
         </span>
         <span>
-          Trades today <span className="text-zinc-300 tabular-nums">{isFlattened ? '—' : tradesToday}</span>
+          Fills today <span className="text-zinc-300 tabular-nums">{isFlattened ? '—' : tradesToday}</span>
         </span>
         <span>
           Last trade{' '}
@@ -149,7 +149,7 @@ export function PerformancePanel({
       {!isFlattened ? (
         <p className="mb-2 text-[9px] leading-snug text-zinc-600">
           P&amp;L uses realised + MTM unrealised. Week/month rollups now include the same live MTM for today as the
-          header. &quot;Trades today&quot; is the daily ledger fill count — you can have MTM P&amp;L with zero fills.
+          header. &quot;Fills today&quot; is the daily ledger fill count — you can have MTM P&amp;L with zero fills.
         </p>
       ) : null}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-zinc-400">

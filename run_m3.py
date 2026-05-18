@@ -364,10 +364,17 @@ async def _load_portfolio_state(
         now = datetime.now(timezone.utc)
         start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
         end = start + timedelta(days=1)
+        # ``trade_count`` must reflect actual FILLS, not signals. Counting
+        # SignalLog overstated it ~2x (every scanned idea, not executed
+        # trades). Count filled/partially-filled OrderLog rows for today.
         trades_q = await session.execute(
             select(func.count())
-            .select_from(SignalLog)
-            .where(SignalLog.timestamp >= start, SignalLog.timestamp < end)
+            .select_from(OrderLog)
+            .where(
+                OrderLog.timestamp >= start,
+                OrderLog.timestamp < end,
+                OrderLog.status.in_(("filled", "partially_filled")),
+            )
         )
         trades_today = int(trades_q.scalar_one() or 0)
 
