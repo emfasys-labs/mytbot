@@ -295,6 +295,22 @@ class BybitAdapter(BrokerAdapter):
         return self._connected
 
     async def get_balance(self) -> list[Balance]:
+        # Synthetic paper wallet (no Bybit-native paper account): in paper
+        # mode report ledger-derived venue equity so crypto P&L flows into
+        # NAV. CRYPTO_PAPER_WALLET=0 disables.
+        if self.paper_mode:
+            from system.paper_wallet import venue_equity
+
+            eq = venue_equity("bybit")
+            if eq is not None:
+                return [
+                    Balance(
+                        currency="USD",
+                        total=eq,
+                        available=eq,
+                        reserved=Decimal("0"),
+                    )
+                ]
         if not self._private_ok or self._client is None:
             return []
         if self._wallet_unavailable:

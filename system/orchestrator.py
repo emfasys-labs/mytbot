@@ -724,6 +724,29 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | opening-nav record skipped: {}", exc)
 
+    async def _refresh_paper_wallets(self, sf) -> None:
+        """Recompute synthetic crypto-venue equity from the authoritative
+        ledger and persist the snapshot the adapters read. Crypto venues
+        have no exchange-native paper account; this is what lets their P&L
+        flow into NAV and reconcile with ``daily_pnl``. Exception-safe."""
+        try:
+            from system.paper_wallet import (
+                CRYPTO_PAPER_BROKERS,
+                compute_venue_equity,
+                crypto_paper_wallet_enabled,
+                write_snapshot,
+            )
+
+            if not crypto_paper_wallet_enabled():
+                return
+            async with sf() as session:
+                out: dict[str, dict[str, str]] = {}
+                for b in sorted(CRYPTO_PAPER_BROKERS):
+                    out[b] = await compute_venue_equity(session, b)
+            write_snapshot(out)
+        except Exception as exc:  # noqa: BLE001 — never disrupt the heartbeat
+            logger.debug("orchestrator | paper-wallet refresh skipped: {}", exc)
+
     async def _flush_nav_heartbeat(self) -> None:
         """Upsert today's NAV row once using the current broker-reported equity.
 
@@ -755,6 +778,7 @@ class Orchestrator:
             # permanently so per-broker starting capital is never ambiguous
             # again. Idempotent — never overwrites an existing record.
             await self._maybe_record_opening_nav(sf, snap)
+            await self._refresh_paper_wallets(sf)
             portfolio_state = await _load_portfolio_state(
                 sf,
                 fallback_portfolio_value=total_equity,

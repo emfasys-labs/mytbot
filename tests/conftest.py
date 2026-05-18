@@ -21,3 +21,9 @@ os.environ.setdefault("PYTEST_API_DISABLE_READ_MIDDLEWARE", "1")
 # The dedicated `tests/test_market_session.py` re-enables it (module
 # autouse fixture) and drives the logic with explicit timestamps.
 os.environ.setdefault("MARKET_SESSION_GATE", "0")
+
+# Crypto-adapter mechanics tests assert the raw get_balance() API path;
+# they must not be short-circuited by the synthetic paper wallet. Disable
+# it by default for the suite. `tests/test_paper_wallet.py` manages this
+# env itself to exercise both the enabled and disabled paths.
+os.environ.setdefault("CRYPTO_PAPER_WALLET", "0")

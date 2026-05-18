@@ -344,6 +344,23 @@ class KrakenAdapter(BrokerAdapter):
             return False
 
     async def get_balance(self) -> list[Balance]:
+        # Synthetic paper wallet: Kraken has no exchange-native paper
+        # account, so in paper mode report the ledger-derived venue equity
+        # (seed + realised + unrealised) so crypto P&L flows into NAV and
+        # reconciles with daily_pnl. CRYPTO_PAPER_WALLET=0 disables this.
+        if self.paper_mode:
+            from system.paper_wallet import venue_equity
+
+            eq = venue_equity("kraken")
+            if eq is not None:
+                return [
+                    Balance(
+                        currency="USD",
+                        total=eq,
+                        available=eq,
+                        reserved=Decimal("0"),
+                    )
+                ]
         if not self._private_ok or self._user is None:
             return []
         try:
