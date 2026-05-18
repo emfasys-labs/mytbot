@@ -487,6 +487,23 @@ async def _latest_feature_prices(session, symbols: list[str]) -> dict[str, Decim
     return out
 
 
+# Last-good live price per symbol: (price, monotonic_ts). IBKR's per-symbol
+# get_last_price is slow (qualify + reqMktData + ~1.2s wait) and
+# disconnect/maintenance-prone, so with 50+ open symbols a *random* subset
+# of probes times out every refresh. Without this cache those symbols
+# vanish from the price map and the unrealised total oscillates between the
+# true MTM and a fabricated near-flat figure (the -$5247 ↔ -$245 flicker).
+# Carrying the last good quote for a short TTL holds the number steady.
+_LAST_GOOD_PX: dict[str, tuple[Decimal, float]] = {}
+
+
+def _last_good_px_ttl() -> float:
+    try:
+        return max(0.0, float(os.getenv("LIVE_PX_LAST_GOOD_TTL_SEC", "90")))
+    except (TypeError, ValueError):
+        return 90.0
+
+
 async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     """Best-effort live last-price lookup via broker adapters.
 
@@ -496,6 +513,11 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     a deterministic median positive quote. The old "first non-zero wins" race
     made Book unrealised totals snap flat when a stale/default quote returned
     a few milliseconds before the genuine market-data source.
+
+    A fresh positive quote refreshes the per-symbol last-good cache; a
+    symbol whose probes all fail/timeout this cycle falls back to its last
+    good quote within ``LIVE_PX_LAST_GOOD_TTL_SEC`` so a transient miss can
+    no longer collapse it (and the unrealised total no longer flickers).
     """
     orch = _get_orchestrator()
     if orch is None:
@@ -554,12 +576,25 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
 
     results = await asyncio.gather(*(_one(sym) for sym in symbol_rows), return_exceptions=True)
     out: dict[str, Decimal] = {}
+    now_m = _time.monotonic()
     for res in results:
         if isinstance(res, Exception):
             continue
         sym, px = res
         if sym and px > 0:
             out[sym] = px
+            _LAST_GOOD_PX[sym] = (px, now_m)  # refresh last-good cache
+    # Carry-forward: any requested symbol whose probes all failed this cycle
+    # but which has a recent good quote keeps that quote, so a transient
+    # IBKR timeout cannot zero it out and flicker the totals.
+    ttl = _last_good_px_ttl()
+    if ttl > 0:
+        for sym in symbol_rows:
+            if sym in out:
+                continue
+            cached = _LAST_GOOD_PX.get(sym)
+            if cached is not None and (now_m - cached[1]) <= ttl and cached[0] > 0:
+                out[sym] = cached[0]
     return out
 
 
@@ -793,7 +828,15 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         if px is None or px <= 0:
             px = feature_prices.get(r.symbol)
         if px is None or px <= 0:
-            px = Decimal(str(r.current_price or avg))
+            # Last persisted mark only — NEVER the average entry price.
+            # Marking a position at its own entry fabricates exactly $0
+            # unrealised, which is what made the headline oscillate between
+            # the true MTM and a fake near-flat figure. If we have no real
+            # mark for this position, omit it (honest "unknown", not a
+            # fabricated "flat") rather than poison the total.
+            px = Decimal(str(r.current_price or 0))
+        if px <= 0 or px == avg:
+            continue
         total += (px - avg) * qty
     return total
 

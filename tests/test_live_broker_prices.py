@@ -16,6 +16,17 @@ from decimal import Decimal
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_last_good_px():
+    """Isolate the module-global last-good-price cache between tests so a
+    quote cached by one test can't carry-forward into another."""
+    import api.server as server
+
+    server._LAST_GOOD_PX.clear()
+    yield
+    server._LAST_GOOD_PX.clear()
+
+
 class _FakePosition:
     def __init__(self, symbol: str, broker: str = "ibkr") -> None:
         self.symbol = symbol
@@ -135,6 +146,30 @@ def test_all_adapters_zero_returns_empty(monkeypatch: pytest.MonkeyPatch) -> Non
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
     assert out == {}
+
+
+def test_last_good_price_carries_forward_on_transient_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fix for the -$5247 <-> -$245 flicker: a symbol priced moments
+    ago must NOT vanish when this cycle's probes all fail/timeout — its
+    last good quote carries forward within TTL so the unrealised total
+    stays steady instead of collapsing to a fabricated near-flat figure."""
+    import api.server as server
+
+    pos = [_FakePosition("AAPL")]
+
+    # Cycle 1: real price -> cached.
+    _install_orch(monkeypatch, _FakeBM({"alpaca": _FakeAdapter(Decimal("100.50"))}))
+    assert asyncio.run(server._live_broker_prices(pos)) == {"AAPL": Decimal("100.50")}
+
+    # Cycle 2: every probe returns 0 (transient outage) -> carry-forward.
+    _install_orch(monkeypatch, _FakeBM({"alpaca": _FakeAdapter(Decimal(0))}))
+    assert asyncio.run(server._live_broker_prices(pos)) == {"AAPL": Decimal("100.50")}
+
+    # With TTL disabled, a miss is NOT carried (old behaviour preserved).
+    monkeypatch.setenv("LIVE_PX_LAST_GOOD_TTL_SEC", "0")
+    assert asyncio.run(server._live_broker_prices(pos)) == {}
 
 
 def test_multiple_positions_each_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
