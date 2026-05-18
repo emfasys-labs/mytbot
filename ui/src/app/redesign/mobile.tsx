@@ -62,7 +62,7 @@ export function MobileApp({
         {tab === 'home' && (
           <>
             <Label>NAV</Label>
-            <NavNumber value={live.nav} accent={accentColor} size={46} />
+            <NavNumber value={live.nav} accent={dayChange >= 0 ? TOKENS.profit : TOKENS.loss} size={46} />
             <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
               <span style={{
                 fontFamily: TOKENS.mono, fontSize: 12,

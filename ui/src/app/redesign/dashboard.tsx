@@ -233,7 +233,7 @@ export function DashboardScreen({
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
               <div>
                 <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
-                <NavNumber value={navValue} accent={accentColor} size={density === 'compact' ? 54 : 68} />
+                <NavNumber value={navValue} accent={dayChange >= 0 ? TOKENS.profit : TOKENS.loss} size={density === 'compact' ? 54 : 68} />
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginTop: 10 }}>
                   <span style={{
                     fontFamily: TOKENS.mono, fontSize: 13,

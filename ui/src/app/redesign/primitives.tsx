@@ -90,8 +90,14 @@ export function Wordmark({
 
 // ─── NavNumber — hero NAV with digit color-flash on change ─────
 export function NavNumber({
-  value, size = 80, currency = CURRENCY_SYMBOL,
+  value, size = 80, currency = CURRENCY_SYMBOL, accent,
 }: { value: number; accent?: string; size?: number; currency?: string }) {
+  // ``accent`` is the RESTING digit colour. Callers pass a P&L-sign tone
+  // (profit/loss) so the hero NAV always *means* something — green when
+  // up on the day, red when down — instead of a cosmetic theme colour or
+  // a constant white that only flickered on per-tick updates. Defaults to
+  // ink0 (white) when no tone is supplied (backward-safe).
+  const baseColor = accent ?? TOKENS.ink0;
   const [display, setDisplay] = useState(value);
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
 
@@ -116,7 +122,7 @@ export function NavNumber({
     }}>
       <span style={{ color: TOKENS.ink3, fontWeight: 200, fontSize: size * 0.55, marginRight: 2, verticalAlign: 'top' }}>{currency}</span>
       <span style={{
-        color: flash === 'up' ? TOKENS.profit : flash === 'down' ? TOKENS.loss : TOKENS.ink0,
+        color: flash === 'up' ? TOKENS.profit : flash === 'down' ? TOKENS.loss : baseColor,
         transition: `color 600ms ${TOKENS.ease}`,
       }}>
         {formatted}
