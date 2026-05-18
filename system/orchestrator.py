@@ -712,7 +712,7 @@ class Orchestrator:
                 "note": (
                     "First complete broker-NAV observation after this "
                     "deployment. NOT necessarily the original day-0 paper "
-                    "seed — earlier history predates this instrumentation."
+                    "seed - earlier history predates this instrumentation."
                 ),
             }
             await bus.set_state(self.OPENING_NAV_STATE_KEY, payload)

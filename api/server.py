@@ -2472,7 +2472,7 @@ async def diagnostics_balances(
         },
         "note": (
             "Opening baseline is the first COMPLETE broker-NAV observation "
-            "after the instrumentation was deployed — not necessarily the "
+            "after the instrumentation was deployed - not necessarily the "
             "original day-0 paper seed. Pre-instrumentation history "
             "(incl. the fee-unit-bug period) predates it."
         ),
