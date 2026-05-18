@@ -45,6 +45,13 @@ def _position_long_loss(symbol: str = "SPY") -> Position:
 async def test_stop_loss_tick_submits_reduce_only_close_when_breached(monkeypatch) -> None:
     orch = Orchestrator()
     orch._broker_manager = _StubBrokerManager({"alpaca": _StubAdapter([_position_long_loss("SPY")])})
+    # Monitor now evaluates against the mark-swept PositionLog (real
+    # prices), NOT adapter.get_positions() (poisoned for IBKR paper).
+    monkeypatch.setattr(
+        orch,
+        "_latest_open_position_rows_by_broker",
+        AsyncMock(return_value={"alpaca": [_position_long_loss("SPY")]}),
+    )
 
     risk_engine = MagicMock()
     risk_engine.config = {"max_loss_per_trade_pct": "0.02"}
@@ -99,6 +106,11 @@ async def test_stop_loss_tick_submits_reduce_only_close_when_breached(monkeypatc
 async def test_stop_loss_tick_no_order_when_not_breached(monkeypatch) -> None:
     orch = Orchestrator()
     orch._broker_manager = _StubBrokerManager({"alpaca": _StubAdapter([_position_long_loss("SPY")])})
+    monkeypatch.setattr(
+        orch,
+        "_latest_open_position_rows_by_broker",
+        AsyncMock(return_value={"alpaca": [_position_long_loss("SPY")]}),
+    )
 
     risk_engine = MagicMock()
     risk_engine.config = {"max_loss_per_trade_pct": "0.02"}

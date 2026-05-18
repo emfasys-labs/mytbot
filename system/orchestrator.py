@@ -1234,17 +1234,17 @@ class Orchestrator:
 
             now_ts = datetime.now(timezone.utc).timestamp()
 
+            # Evaluate against the mark-swept PositionLog (real prices), NOT
+            # adapter.get_positions() (IBKR paper reports entry price when
+            # marketPrice is missing → fabricated $0 loss → never cut).
+            rows_by_broker = await self._latest_open_position_rows_by_broker(sf)
             for broker_name, adapter in self._broker_manager.adapters.items():
                 bname = str(broker_name or "").strip().lower()
                 if not bname:
                     continue
                 if hasattr(risk_engine, "is_broker_disabled") and risk_engine.is_broker_disabled(bname):
                     continue
-                try:
-                    positions = await adapter.get_positions()
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("orchestrator | stop-loss | positions fetch failed | broker={} | {}", bname, exc)
-                    continue
+                positions = rows_by_broker.get(bname, [])
 
                 for pos in positions:
                     try:
@@ -1366,6 +1366,60 @@ class Orchestrator:
                 except Exception:
                     pass
 
+    async def _latest_open_position_rows_by_broker(self, sf) -> dict[str, list]:
+        """Latest mark-swept ``PositionLog`` row per (broker, symbol), open
+        only, grouped by lowercased broker.
+
+        The risk monitors MUST evaluate against this — NOT raw
+        ``adapter.get_positions()``. The IBKR paper adapter returns
+        ``current_price = avgCost`` (the entry price) whenever
+        ``portfolio().marketPrice`` is unavailable, so the monitors saw
+        a fabricated $0 loss and never cut anything. The loop's
+        mark-to-market sweep (live-oracle backed) keeps PositionLog's
+        ``current_price`` real, so this is the trustworthy source —
+        consistent with the dashboard's corrected unrealised."""
+        out: dict[str, list] = {}
+        try:
+            from sqlalchemy import and_, func, select
+            from storage.models import PositionLog
+
+            latest = (
+                select(
+                    PositionLog.broker.label("b"),
+                    PositionLog.symbol.label("s"),
+                    func.max(PositionLog.timestamp).label("mx"),
+                )
+                .group_by(PositionLog.broker, PositionLog.symbol)
+                .subquery()
+            )
+            async with sf() as session:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(PositionLog).join(
+                                latest,
+                                and_(
+                                    PositionLog.broker == latest.c.b,
+                                    PositionLog.symbol == latest.c.s,
+                                    PositionLog.timestamp == latest.c.mx,
+                                ),
+                            )
+                        )
+                    ).scalars().all()
+                )
+            for r in rows:
+                try:
+                    if Decimal(str(r.quantity or 0)) == 0:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                b = str(getattr(r, "broker", "") or "").strip().lower()
+                if b:
+                    out.setdefault(b, []).append(r)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | latest-open-positions query failed: {}", exc)
+        return out
+
     async def _run_aggregate_derisk_tick(self) -> None:
         """Force reduce-only de-risk when the AGGREGATE unrealised loss
         breaches a dynamic NAV/volatility budget.
@@ -1415,17 +1469,16 @@ class Orchestrator:
                 return
 
             pls: list[PositionLoss] = []
+            # Trustworthy mark-swept marks (NOT adapter.get_positions(), which
+            # is poisoned for IBKR paper — see _latest_open_position_rows_by_broker).
+            rows_by_broker = await self._latest_open_position_rows_by_broker(sf)
             for broker_name, adapter in self._broker_manager.adapters.items():
                 bname = str(broker_name or "").strip().lower()
                 if not bname:
                     continue
                 if hasattr(risk_engine, "is_broker_disabled") and risk_engine.is_broker_disabled(bname):
                     continue
-                try:
-                    positions = await adapter.get_positions()
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("orchestrator | agg de-risk | positions fetch failed | broker={} | {}", bname, exc)
-                    continue
+                positions = rows_by_broker.get(bname, [])
                 for pos in positions:
                     try:
                         qty = Decimal(str(getattr(pos, "quantity", "0") or "0"))
