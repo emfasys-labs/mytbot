@@ -39,9 +39,17 @@ To wire this up when the follow-up task is accepted
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
+
+
+def _f(env: str, default: float) -> float:
+    try:
+        return float(os.getenv(env, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,10 @@ class StopLossDecision:
     loss_absolute: Decimal
     structural_stop_price: Decimal | None
     structural_stop_breached: bool
+    # Position-relative stop: position is down more than a volatility-scaled
+    # fraction of its OWN cost basis (independent of NAV size and of
+    # "edge"). Default False keeps every existing caller valid.
+    position_stop_breached: bool = False
 
 
 def evaluate_stop_loss(
@@ -63,6 +75,7 @@ def evaluate_stop_loss(
     nav: Decimal,
     max_loss_per_trade_pct: Decimal,
     metadata: dict[str, Any] | None = None,
+    position_stop_pct: Decimal | None = None,
 ) -> StopLossDecision:
     """Evaluate whether a held position has breached its loss budget.
 
@@ -98,6 +111,36 @@ def evaluate_stop_loss(
     budget = nav * max_loss_per_trade_pct if nav > 0 and max_loss_per_trade_pct > 0 else Decimal("0")
     portfolio_stop_breached = budget > 0 and loss_abs > budget
 
+    # ── Position-relative loss stop ───────────────────────────────────────
+    # Cut a single position when it is down more than a volatility-scaled
+    # fraction of its OWN cost basis — independent of NAV size and of
+    # "edge". This is what actually catches a position down ~20% of itself
+    # that is far below the (NAV-relative) per-trade budget and not
+    # "dead-edge". Volatile names get more room; calm names are held
+    # tighter. ``POSITION_STOP_LOSS_PCT<=0`` disables it (prior behaviour).
+    if position_stop_pct is None:
+        try:
+            position_stop_pct = Decimal(str(_f("POSITION_STOP_LOSS_PCT", 0.08)))
+        except (InvalidOperation, TypeError, ValueError):
+            position_stop_pct = Decimal("0.08")
+    position_notional = abs(quantity) * avg_entry_price
+    position_stop_breached = False
+    if position_stop_pct > 0 and position_notional > 0 and loss_abs > 0:
+        vol_scale = Decimal("1")
+        raw_atr_pct = meta.get("atr_pct")
+        if raw_atr_pct is not None:
+            try:
+                ap = float(raw_atr_pct)
+                ref = max(1e-6, _f("POSITION_STOP_VOL_REF", 0.02))
+                lo = _f("POSITION_STOP_VOL_MIN", 0.7)
+                hi = _f("POSITION_STOP_VOL_MAX", 2.0)
+                vol_scale = Decimal(str(min(hi, max(lo, ap / ref))))
+            except (TypeError, ValueError):
+                vol_scale = Decimal("1")
+        threshold = position_stop_pct * vol_scale
+        loss_frac_of_position = loss_abs / position_notional
+        position_stop_breached = loss_frac_of_position >= threshold
+
     structural_stop_price: Decimal | None = None
     structural_stop_breached = False
 
@@ -128,9 +171,16 @@ def evaluate_stop_loss(
                 structural_stop_price = avg_entry_price + atr_mult * atr_abs
                 structural_stop_breached = current_price >= structural_stop_price
 
-    should_close = portfolio_stop_breached or structural_stop_breached
+    should_close = (
+        portfolio_stop_breached or structural_stop_breached or position_stop_breached
+    )
     if portfolio_stop_breached:
         reason = f"portfolio_loss_budget:{loss_abs} > {budget}"
+    elif position_stop_breached:
+        reason = (
+            f"position_stop:loss={loss_abs} >= "
+            f"{position_stop_pct}x_cost_basis({position_notional})"
+        )
     elif structural_stop_breached:
         reason = f"structural_stop:{structural_stop_price}"
     else:
@@ -144,4 +194,5 @@ def evaluate_stop_loss(
         loss_absolute=loss_abs,
         structural_stop_price=structural_stop_price,
         structural_stop_breached=structural_stop_breached,
+        position_stop_breached=position_stop_breached,
     )
