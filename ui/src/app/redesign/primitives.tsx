@@ -92,25 +92,16 @@ export function Wordmark({
 export function NavNumber({
   value, size = 80, currency = CURRENCY_SYMBOL, accent,
 }: { value: number; accent?: string; size?: number; currency?: string }) {
-  // ``accent`` is the RESTING digit colour. Callers pass a P&L-sign tone
-  // (profit/loss) so the hero NAV always *means* something — green when
-  // up on the day, red when down — instead of a cosmetic theme colour or
-  // a constant white that only flickered on per-tick updates. Defaults to
-  // ink0 (white) when no tone is supplied (backward-safe).
-  const baseColor = accent ?? TOKENS.ink0;
-  const [display, setDisplay] = useState(value);
-  const [flash, setFlash] = useState<'up' | 'down' | null>(null);
-
-  useEffect(() => {
-    if (value === display) return;
-    setFlash(value > display ? 'up' : 'down');
-    setDisplay(value);
-    const t = setTimeout(() => setFlash(null), 600);
-    return () => clearTimeout(t);
-  }, [value, display]);
-
-  const formatted = Math.round(display).toLocaleString();
-  const decimals = ((display % 1).toFixed(2)).slice(1);
+  // Colour is driven SOLELY by the day P&L sign passed via ``accent``
+  // (profit when up on the day, loss when down). There is deliberately
+  // NO per-tick colour flash: the old flash flipped the hero NAV to
+  // "loss" red on every sub-second down-tick and reset its own 600ms
+  // clear-timer on every WebSocket update, so on a live book it sat
+  // permanently salmon even while up on the day. The colour now means
+  // exactly one thing — your day's direction — and is stable.
+  const color = accent ?? TOKENS.ink0;
+  const formatted = Math.round(value).toLocaleString();
+  const decimals = ((value % 1).toFixed(2)).slice(1);
 
   return (
     <div style={{
@@ -122,7 +113,7 @@ export function NavNumber({
     }}>
       <span style={{ color: TOKENS.ink3, fontWeight: 200, fontSize: size * 0.55, marginRight: 2, verticalAlign: 'top' }}>{currency}</span>
       <span style={{
-        color: flash === 'up' ? TOKENS.profit : flash === 'down' ? TOKENS.loss : baseColor,
+        color,
         transition: `color 600ms ${TOKENS.ease}`,
       }}>
         {formatted}
