@@ -1874,21 +1874,30 @@ async def get_pnl(
         latest_unrealised_db = Decimal(str(latest_unrealised_q.scalar_one_or_none() or 0))
         ws, we = week_to_date_range(today_d)
         ms, me = month_to_date_range(today_d)
-        ys = date(today_d.year, 1, 1)
         week_agg = await aggregate_daily_pnl_range(session, ws, we)
         month_agg = await aggregate_daily_pnl_range(session, ms, me)
-        today_net_realised, today_order_fees, today_order_trades = await _filled_order_net_pnl_for_period(
-            session, today_d, today_d
+        # SINGLE SOURCE OF TRUTH. Headline realised/fees/trades come from the
+        # canonical persisted ``daily_pnl`` ledger (computed every loop cycle
+        # by ``_compute_today_realised_pnl`` — a flat-start per-day FIFO
+        # replay). The previous full-history order replay
+        # (``_filled_order_net_pnl_for_period`` over thousands of orders,
+        # seeded from PositionLog) accumulated FIFO/seed drift across
+        # days+restarts and produced a wildly wrong "all-time" (e.g. −$32k
+        # while NAV was flat) — and made this endpoint slow/time out. It is
+        # retained only for per-order annotations (/orders, realised-curve).
+        today_net_realised = (
+            Decimal(str(today_row.realised_pnl or 0)) if today_row else Decimal("0")
         )
-        week_net_realised, week_order_fees, week_order_trades = await _filled_order_net_pnl_for_period(
-            session, ws, we
+        today_order_fees = (
+            Decimal(str(today_row.total_fees or 0)) if today_row else Decimal("0")
         )
-        month_net_realised, month_order_fees, month_order_trades = await _filled_order_net_pnl_for_period(
-            session, ms, me
-        )
-        ytd_net_realised, ytd_order_fees, ytd_order_trades = await _filled_order_net_pnl_for_period(
-            session, ys, today_d
-        )
+        today_order_trades = int(today_row.trade_count or 0) if today_row else 0
+        # All-time = sum of every persisted daily row (``agg`` above is the
+        # unfiltered DailyPnL sum). Drift-free and internally consistent
+        # with today/week/month, which now all read the same ledger.
+        ytd_net_realised = Decimal(str(agg[0] or 0))
+        ytd_order_fees = Decimal(str(agg[1] or 0))
+        ytd_order_trades = int(agg[2] or 0)
         pv_q = await session.execute(select(DailyPnL.portfolio_value).order_by(DailyPnL.date.asc()).limit(400))
         pv_vals: list[Decimal] = []
         for x in pv_q.scalars().all():
@@ -1958,12 +1967,10 @@ async def get_pnl(
                 live_today_unrealised=today_unrealised,
             )
         )
-    week_agg["realised"] = _decimal_str(week_net_realised)
-    week_agg["fees"] = _decimal_str(week_order_fees)
-    week_agg["trades"] = int(week_order_trades)
-    month_agg["realised"] = _decimal_str(month_net_realised)
-    month_agg["fees"] = _decimal_str(month_order_fees)
-    month_agg["trades"] = int(month_order_trades)
+    # week_agg / month_agg keep their ``aggregate_daily_pnl_range`` values
+    # (canonical daily_pnl sums) — no longer overwritten with the drift-prone
+    # full-history order replay, so every period reconciles with each other
+    # and with the loop's persisted realised.
     if not coverage_full:
         # DailyPnL/history rows are whole-book aggregates. When the live NAV is
         # intentionally partial (for example IBKR is offline and excluded), do
