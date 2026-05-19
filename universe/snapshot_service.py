@@ -81,21 +81,71 @@ def _load_pipeline_symbols() -> list[str]:
 
 
 def _pipeline_caps() -> dict[str, int]:
+    """Resolve the active universe-tier caps.
+
+    The static YAML in ``config/data_pipeline.yaml::dynamic_universe`` is
+    the *neutral anchor*. When D117 adaptive caps have been resolved in
+    the most recent pipeline tick (see :mod:`universe.adaptive_state`),
+    we overlay the persisted resolved values so the dashboard and any
+    consumer of ``_pipeline_caps()`` see the same numbers that the
+    UniverseBuilder actually used.
+    """
     p = Path("config/data_pipeline.yaml")
     out = {"max_symbols": 300, "core_max": 50, "scan_max": 250, "candidates": 400}
-    if not p.is_file():
-        return out
+    if p.is_file():
+        try:
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
+            du = (cfg or {}).get("dynamic_universe") or {}
+            rk = du.get("ranking") or {}
+            out["max_symbols"] = int(du.get("max_symbols") or out["max_symbols"])
+            out["core_max"] = int(rk.get("core_max") or out["core_max"])
+            out["scan_max"] = int(rk.get("scan_max") or out["scan_max"])
+            out["candidates"] = int(rk.get("max_candidates_to_score") or out["candidates"])
+        except (OSError, yaml.YAMLError, TypeError, ValueError):
+            pass
+    # D117 overlay — only when adaptive resolved a non-empty state.
     try:
-        cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
-        du = (cfg or {}).get("dynamic_universe") or {}
-        rk = du.get("ranking") or {}
-        out["max_symbols"] = int(du.get("max_symbols") or out["max_symbols"])
-        out["core_max"] = int(rk.get("core_max") or out["core_max"])
-        out["scan_max"] = int(rk.get("scan_max") or out["scan_max"])
-        out["candidates"] = int(rk.get("max_candidates_to_score") or out["candidates"])
-    except (OSError, yaml.YAMLError, TypeError, ValueError):
+        from universe.adaptive_state import load_adaptive_state
+
+        state = load_adaptive_state()
+        resolved = state.resolved if state.enabled else {}
+        if resolved:
+            if resolved.get("candidates"):
+                out["candidates"] = int(resolved["candidates"])
+            if resolved.get("watching"):
+                out["max_symbols"] = int(resolved["watching"])
+            if resolved.get("core"):
+                out["core_max"] = int(resolved["core"])
+            if resolved.get("scan"):
+                out["scan_max"] = int(resolved["scan"])
+    except Exception:  # noqa: BLE001
         pass
     return out
+
+
+def _adaptive_caps_block() -> dict[str, Any] | None:
+    """Surface the persisted adaptive-caps state for the dashboard.
+
+    Returns ``None`` when adaptive caps are disabled or the runtime
+    state file is missing/empty; otherwise returns a structured block
+    with the resolved caps, base anchor, multiplier, regime/pressure
+    context, and the most recent grace-extended symbols.
+    """
+    try:
+        from universe.adaptive_state import load_adaptive_state
+    except Exception:  # noqa: BLE001
+        return None
+    state = load_adaptive_state()
+    if not state.enabled or not state.resolved:
+        return None
+    return {
+        "enabled": True,
+        "updated_at": state.updated_at,
+        "resolved": dict(state.resolved),
+        "context": dict(state.context),
+        "consecutive_misses_count": len(state.consecutive_misses),
+        "last_grace_extended": list(state.last_grace_extended)[:50],
+    }
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -112,6 +162,7 @@ def build_universe_snapshot_dict(
     broker_symbol_totals: dict[str, int] | None = None,
     broker_symbols: dict[str, list[str]] | None = None,
     intelligence_path: Path | None = None,
+    registry_summary_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Assemble JSON for GET /intelligence/universe.
@@ -151,6 +202,7 @@ def build_universe_snapshot_dict(
         scored_count=eligible_count,
         watching_count=watching_count,
         caps=caps,
+        registry_summary_data=registry_summary_data or {},
     )
 
     funnel_template = cfg.get("funnel_display") or {}
@@ -170,6 +222,7 @@ def build_universe_snapshot_dict(
         fallback=funnel_template.get("drops_watching"),
     )
 
+    adaptive_block = _adaptive_caps_block()
     if not enabled:
         promoted_n = min(12, max(0, watching_count // 10))
         active_n = min(7, max(0, watching_count // 40))
@@ -202,6 +255,7 @@ def build_universe_snapshot_dict(
             "build": _build_info(tiers.updated_at if tiers else None, cfg),
             "broker_totals": broker_totals,
             "coverage": source_detail,
+            "adaptive": adaptive_block,
         }
 
     if intel is None:
@@ -236,6 +290,7 @@ def build_universe_snapshot_dict(
             "core_intel": [],
             "cold_scan": [],
             "active_eval": [],
+            "adaptive": adaptive_block,
         }
 
     cold = list(intel.cold_scan)
@@ -286,6 +341,7 @@ def build_universe_snapshot_dict(
         "core_intel": core_intel,
         "cold_scan": cold,
         "active_eval": active_eval,
+        "adaptive": adaptive_block,
     }
 
 
@@ -318,32 +374,86 @@ def _source_detail(
     scored_count: int,
     watching_count: int,
     caps: dict[str, int],
+    registry_summary_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    """Assemble the ``coverage`` block for the universe snapshot.
+
+    D116: when an ``registry_summary_data`` dict is supplied (produced by
+    :func:`instruments.registry.registry_summary`) we annotate each
+    broker with ``registry_known_count`` (total non-unknown rows) and
+    ``registry_covered_count`` (``available`` rows).
+    """
+    by_broker_status = (registry_summary_data or {}).get("by_broker_status") or {}
+    registry_active = int((registry_summary_data or {}).get("active") or 0)
+    coverage: dict[str, Any] = {
         "broker_listing_count": int(sum(broker_totals.values())),
         "unique_normalized_count": int(unique_source_count),
         "scored_candidate_count": int(scored_count),
         "watched_count": int(watching_count),
+        "registry_active_count": registry_active,
         "caps": {
             "candidates": int(caps["candidates"]),
             "watching": int(caps["max_symbols"]),
             "core": int(caps["core_max"]),
             "scan": int(caps["scan_max"]),
         },
-        "by_broker": {
-            broker: {
-                "raw": int(broker_totals.get(broker, 0)),
-                "normalized": len(symbols),
-                "source": "curated_seed" if broker.lower() == "ibkr" else "broker_catalog",
-                "note": (
-                    "IBKR/TWS has no practical list-all endpoint; using curated IBKR tradable seed."
-                    if broker.lower() == "ibkr"
-                    else None
-                ),
-            }
-            for broker, symbols in normalised_by_broker.items()
-        },
     }
+    # D116: detect whether IBKR is allowed to union its curated seed with the
+    # instrument registry. Note and source labels are derived from the actual
+    # raw count rather than the YAML flag alone, so the dashboard reflects the
+    # adapter's true behaviour after a registry rebuild.
+    ibkr_registry_union_enabled = False
+    try:
+        from instruments.builder import load_config as _load_registry_config
+
+        ibkr_registry_union_enabled = bool(
+            _load_registry_config().ibkr_supported_symbols_use_registry
+        )
+    except Exception:
+        ibkr_registry_union_enabled = False
+
+    by_broker: dict[str, Any] = {}
+    for broker, symbols in normalised_by_broker.items():
+        statuses = by_broker_status.get(broker) or by_broker_status.get(broker.lower()) or {}
+        registry_covered = int(statuses.get("available") or 0)
+        registry_known = int(
+            registry_covered
+            + int(statuses.get("requires_qualification") or 0)
+            + int(statuses.get("unavailable") or 0)
+            + int(statuses.get("blocked") or 0)
+        )
+        raw_count = int(broker_totals.get(broker, 0))
+
+        if broker.lower() == "ibkr":
+            if ibkr_registry_union_enabled and raw_count > 200:
+                source_label = "curated_seed+registry"
+                note_label = (
+                    "IBKR has no list-all endpoint — union of curated YAML seed, "
+                    "qualification cache, and D116 instrument registry. Orders "
+                    "still call qualifyContractsAsync before submission."
+                )
+            else:
+                source_label = "curated_seed"
+                note_label = (
+                    "IBKR/TWS has no practical list-all endpoint; using curated "
+                    "IBKR tradable seed. Flip "
+                    "ibkr_supported_symbols_use_registry in "
+                    "config/instrument_registry.yaml to extend coverage."
+                )
+        else:
+            source_label = "broker_catalog"
+            note_label = None
+
+        by_broker[broker] = {
+            "raw": raw_count,
+            "normalized": len(symbols),
+            "source": source_label,
+            "note": note_label,
+            "registry_known_count": registry_known,
+            "registry_covered_count": registry_covered,
+        }
+    coverage["by_broker"] = by_broker
+    return coverage
 
 
 def _build_info(last_at: str | None, cfg: dict[str, Any], *, state: str | None = None) -> dict[str, Any]:

@@ -111,6 +111,9 @@ class Orchestrator:
         self._intraday_derisk_task: asyncio.Task | None = None
         self._order_reconcile_task: asyncio.Task | None = None
         self._zero_alloc_flatten_task: asyncio.Task | None = None
+        # D116 instrument-registry refresh scheduler (constituents + per-broker
+        # availability). None until ``start()`` initialises it.
+        self._instrument_registry_scheduler: Any = None
         # Per-position close throttle to avoid re-emitting closes every monitor tick
         # while broker/order status is still settling.
         self._stop_loss_last_close_ts: dict[str, float] = {}
@@ -324,6 +327,7 @@ class Orchestrator:
                 self._start_intraday_derisk_loop()
                 self._start_order_reconcile_loop()
                 self._start_zero_alloc_flatten_watchdog()
+                await self._start_instrument_registry_scheduler()
 
                 # 4. Data pipeline (background, non-blocking)
                 self._start_pipeline()
@@ -506,6 +510,13 @@ class Orchestrator:
                     pass
                 self._zero_alloc_flatten_task = None
             self._zero_alloc_flatten_last_ts = 0.0
+
+            if self._instrument_registry_scheduler is not None:
+                try:
+                    await self._instrument_registry_scheduler.stop()
+                except Exception as exc:
+                    logger.debug("orchestrator | instrument-registry scheduler stop error: {}", exc)
+                self._instrument_registry_scheduler = None
 
             # 4. Disconnect brokers (cancels reconnect / IBKR background connect)
             try:
@@ -889,6 +900,46 @@ class Orchestrator:
         self._order_reconcile_task = asyncio.create_task(
             self._order_reconcile_loop(), name="order-reconcile"
         )
+
+    async def _start_instrument_registry_scheduler(self) -> None:
+        """Start the D116 instrument-registry background refresh.
+
+        Optional: disabled if the registry is disabled by config or via
+        ``INSTRUMENT_REGISTRY_ENABLED=0``. Self-isolated: any failure here is
+        logged but never blocks orchestrator startup or trading.
+        """
+        if os.getenv("INSTRUMENT_REGISTRY_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return
+        if self._instrument_registry_scheduler is not None:
+            return
+        try:
+            from instruments.builder import load_config
+            from instruments.scheduler import make_scheduler_from_env
+            from storage.db import get_app_database
+
+            cfg = load_config()
+            if not cfg.enabled:
+                logger.info("orchestrator | instrument-registry disabled by config")
+                return
+
+            def _session_factory_provider():
+                _, sf = get_app_database()
+                return sf
+
+            scheduler = make_scheduler_from_env(_session_factory_provider, self._broker_manager)
+            await scheduler.start()
+            self._instrument_registry_scheduler = scheduler
+            try:
+                self._broker_manager.register_connect_callback(scheduler.notify_broker_connected)
+            except AttributeError:
+                logger.debug(
+                    "orchestrator | broker_manager lacks register_connect_callback (pre-D116)"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | could not register broker connect callback: {}", exc)
+            logger.info("orchestrator | instrument-registry scheduler started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("orchestrator | instrument-registry scheduler failed to start: {}", exc)
 
     def _start_zero_alloc_flatten_watchdog(self) -> None:
         """Start a paper-mode guard for zero-allocation flatten.
@@ -2215,6 +2266,21 @@ class Orchestrator:
             from storage.db import init_async_database, dispose_engine as _dispose
             from universe.intelligence_builder import build_and_save_universe_intelligence
             from universe.snapshot_service import load_universe_selection_config
+            # D117 — adaptive universe-caps wiring.
+            from universe.adaptive_caps import (
+                AdaptiveCapsBase,
+                AdaptiveCapsContext,
+                apply_churn_hysteresis,
+                compute_adaptive_caps,
+                load_adaptive_caps_config,
+            )
+            from universe.adaptive_context import build_adaptive_caps_context
+            from universe.adaptive_state import (
+                AdaptiveRuntimeState,
+                load_adaptive_state,
+                save_adaptive_state,
+            )
+            from data.universe_tiers import UniverseTiers, save_universe_tiers
         except ImportError:
             logger.info("orchestrator | data.pipeline not available — skipping pipeline")
             return
@@ -2239,8 +2305,19 @@ class Orchestrator:
         ranking_on = universe_mode == "dynamic" and bool(ranking_cfg.get("enabled", False))
         universe_intel_cfg = load_universe_selection_config()
         universe_intel_on = bool(universe_intel_cfg.get("enabled", False))
+        # D117: cache the static baseline caps separately so the adaptive
+        # multiplier always starts from the YAML neutral anchor — without
+        # this, a previous adaptive cycle's resolved caps would become the
+        # next cycle's "base" and the multiplier would compound.
+        baseline_max_symbols = int(dynamic_cfg.get("max_symbols", 300))
+        baseline_core_max = int(ranking_cfg.get("core_max", 50))
+        baseline_scan_max = int(ranking_cfg.get("scan_max", 250))
+        baseline_candidates = int(ranking_cfg.get("max_candidates_to_score", 400))
+        adaptive_cfg = load_adaptive_caps_config()
+        adaptive_on = bool(adaptive_cfg.enabled) and ranking_on
+        adaptive_state_path = None  # let the helper choose the default path
         universe_builder = UniverseBuilder(
-            max_symbols=int(dynamic_cfg.get("max_symbols", 300)),
+            max_symbols=baseline_max_symbols,
             ranking=ranking_cfg if ranking_on else {},
         )
 
@@ -2254,7 +2331,100 @@ class Orchestrator:
                         logger.info("orchestrator | pipeline | startup flush — running immediately")
                     if universe_mode == "dynamic":
                         if ranking_on:
+                            # D117 — resolve adaptive caps for this tick.
+                            adaptive_result = None
+                            previous_state = load_adaptive_state(adaptive_state_path)
+                            if adaptive_on:
+                                try:
+                                    ctx = await build_adaptive_caps_context(session_factory=sf)
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | adaptive context build failed (non-fatal): {}",
+                                        exc,
+                                    )
+                                    ctx = AdaptiveCapsContext()
+                                base = AdaptiveCapsBase(
+                                    candidates=baseline_candidates,
+                                    watching=baseline_max_symbols,
+                                    core=baseline_core_max,
+                                    scan=baseline_scan_max,
+                                )
+                                adaptive_result = compute_adaptive_caps(
+                                    base=base, context=ctx, config=adaptive_cfg
+                                )
+                                universe_builder.update_caps(
+                                    max_symbols=adaptive_result.watching,
+                                    core_max=adaptive_result.core,
+                                    scan_max=adaptive_result.scan,
+                                    max_candidates_to_score=adaptive_result.candidates,
+                                )
+                                logger.info(
+                                    "orchestrator | adaptive caps | candidates={} watching={} core={} scan={} mult={:.2f} ({})",
+                                    adaptive_result.candidates,
+                                    adaptive_result.watching,
+                                    adaptive_result.core,
+                                    adaptive_result.scan,
+                                    adaptive_result.multiplier,
+                                    ", ".join(adaptive_result.reasons),
+                                )
                             tiers = await universe_builder.build_tiered_universe(self._broker_manager)
+                            # D117 — anti-churn hysteresis: re-include
+                            # symbols that dropped this cycle but were in
+                            # the previous watchlist for up to N misses.
+                            grace_extended: list[str] = []
+                            if adaptive_on and adaptive_result is not None:
+                                hysteresis = apply_churn_hysteresis(
+                                    new_core=tiers.core,
+                                    new_scan=tiers.scan,
+                                    new_light=tiers.light,
+                                    previous_core=previous_state.context.get("previous_core") or [],
+                                    previous_scan=previous_state.context.get("previous_scan") or [],
+                                    consecutive_misses=previous_state.consecutive_misses,
+                                    policy=adaptive_cfg.churn,
+                                )
+                                grace_extended = list(hysteresis.grace_extended)
+                                if hysteresis.grace_extended:
+                                    logger.info(
+                                        "orchestrator | adaptive churn | grace_extended={} (kept in scan tier)",
+                                        len(hysteresis.grace_extended),
+                                    )
+                                    tiers = UniverseTiers(
+                                        core=hysteresis.core,
+                                        scan=hysteresis.scan,
+                                        light=hysteresis.light,
+                                        scores=tiers.scores,
+                                        updated_at=tiers.updated_at,
+                                    )
+                                    # Persist the hysteresis-adjusted tiers
+                                    # so downstream consumers see the same
+                                    # watchlist as the dashboard.
+                                    tiers_path = ranking_cfg.get("tiers_path")
+                                    save_path = None
+                                    if isinstance(tiers_path, str) and tiers_path.strip():
+                                        save_path = Path(tiers_path.strip())
+                                    save_universe_tiers(tiers, path=save_path)
+                                next_state = AdaptiveRuntimeState(
+                                    enabled=True,
+                                    resolved=adaptive_result.as_dict(),
+                                    context={
+                                        "regime_label": ctx.regime_label,
+                                        "breadth_score": ctx.breadth_score,
+                                        "signal_pressure": ctx.signal_pressure,
+                                        "active_cluster_count": ctx.active_cluster_count,
+                                        "note": ctx.note,
+                                        "previous_core": list(tiers.core),
+                                        "previous_scan": list(tiers.scan),
+                                    },
+                                    consecutive_misses=hysteresis.consecutive_misses,
+                                    last_grace_extended=grace_extended,
+                                )
+                                try:
+                                    save_adaptive_state(next_state, path=adaptive_state_path)
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | adaptive state persist failed (non-fatal): {}",
+                                        exc,
+                                    )
                             if universe_intel_on:
                                 try:
                                     from pathlib import Path

@@ -553,8 +553,39 @@ export type IntelligenceUniverseResponse = {
       normalized?: number;
       source?: string;
       note?: string | null;
+      // D116 instrument registry — total registry rows known for the broker,
+      // and the subset already resolved to an actionable availability status.
+      registry_known_count?: number;
+      registry_covered_count?: number;
     }>;
   };
+  // D117 — adaptive universe-tier sizing. Present only when the pipeline
+  // has resolved at least one adaptive cycle and the feature is enabled.
+  adaptive?: {
+    enabled: boolean;
+    updated_at?: string;
+    resolved?: {
+      candidates?: number;
+      watching?: number;
+      core?: number;
+      scan?: number;
+      base?: { candidates?: number; watching?: number; core?: number; scan?: number };
+      multiplier?: number;
+      regime_multiplier?: number;
+      signal_pressure_multiplier?: number;
+      cluster_floor_applied?: boolean;
+      reasons?: string[];
+    };
+    context?: {
+      regime_label?: string;
+      breadth_score?: number | null;
+      signal_pressure?: number | null;
+      active_cluster_count?: number | null;
+      note?: string | null;
+    };
+    consecutive_misses_count?: number;
+    last_grace_extended?: string[];
+  } | null;
 };
 
 export type TradingMode = 'defender' | 'trader' | 'hunter';

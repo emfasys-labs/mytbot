@@ -14,32 +14,21 @@ from data.yfinance_fetch import fetch_history
 
 
 def _to_yf_symbol(symbol: str, broker: str) -> str | None:
+    """Translate a broker-native symbol to its yfinance-canonical form.
+
+    D116 delegates to :mod:`instruments.canonical`, which centralises the
+    multi-broker translation logic. The legacy behaviour of returning
+    ``None`` for unrecognised dotted/underscored tickers is preserved.
+    """
+    from instruments.canonical import to_canonical
+
     s = (symbol or "").strip().upper()
-    b = (broker or "").strip().lower()
     if not s:
-        return None
-    if b in {"kraken", "binance", "bybit"}:
-        if "/" in s:
-            base, quote = s.split("/", 1)
-            if base == "XBT":
-                base = "BTC"
-            if quote in {"USD", "USDT"}:
-                return f"{base}-USD"
-            return None
-        if s.endswith("USD") and len(s) > 3:
-            base = s[:-3]
-            if base == "XBT":
-                base = "BTC"
-            return f"{base}-USD"
-    if b == "ibkr" and "." in s:
-        parts = [p.strip().upper() for p in s.split(".") if p.strip()]
-        if len(parts) == 2 and all(len(p) == 3 and p.isalpha() for p in parts):
-            return f"{parts[0]}{parts[1]}=X"
-    if "." in s:
         return None
     if "_" in s:
         return None
-    return s
+    parsed = to_canonical(s, broker=broker)
+    return parsed.symbol if parsed is not None else None
 
 
 def liquidity_score_for_symbol(symbol: str) -> float:
@@ -82,6 +71,34 @@ class UniverseBuilder:
 
     def ranking_enabled(self) -> bool:
         return bool(self.ranking_cfg.get("enabled", False))
+
+    def update_caps(
+        self,
+        *,
+        max_symbols: int | None = None,
+        core_max: int | None = None,
+        scan_max: int | None = None,
+        max_candidates_to_score: int | None = None,
+    ) -> None:
+        """D117 — retune caps without reconstructing the builder.
+
+        Only fields explicitly supplied are changed; the others retain
+        their previous value so the orchestrator can update one axis at
+        a time. The ranking config dict is updated in-place because
+        :meth:`build_tiered_universe` reads from it at call time.
+        """
+        if max_symbols is not None:
+            self.max_symbols = max(25, int(max_symbols))
+        if not isinstance(self.ranking_cfg, dict):
+            # Preserve the historical contract: ranking may be a plain
+            # dict-like; we want a mutable dict to update.
+            self.ranking_cfg = dict(self.ranking_cfg)
+        if core_max is not None:
+            self.ranking_cfg["core_max"] = max(1, int(core_max))
+        if scan_max is not None:
+            self.ranking_cfg["scan_max"] = max(0, int(scan_max))
+        if max_candidates_to_score is not None:
+            self.ranking_cfg["max_candidates_to_score"] = max(50, int(max_candidates_to_score))
 
     async def build_symbols(self, broker_manager: Any | None) -> list[str]:
         """Flat symbol list (legacy): half equities / half crypto cap, or tier flatten when ranking on."""

@@ -1005,6 +1005,262 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D117 — Adaptive universe-tier sizing (regime + signal pressure + cluster count + anti-churn) (2026-05-19)
+
+The pre-D117 universe funnel used three hard-coded caps in
+`config/data_pipeline.yaml::dynamic_universe` (`max_symbols=300`,
+`ranking.core_max=50`, `ranking.scan_max=250`,
+`ranking.max_candidates_to_score=400`). These were identical in every
+market state — risk-on, risk-off, low-vol, crash — and identical
+regardless of how many high-conviction candidates the allocator was
+actually finding. That had two costs:
+
+1. We spent the same yfinance/feature-ingest budget in calm and noisy
+   periods, even when the allocator had no place to deploy it.
+2. We had no automatic widening when more idiosyncratic correlation
+   clusters appeared (more independent bets available), and no
+   focusing when the active cluster count collapsed.
+
+**Decision.** Add `universe/adaptive_caps.py` — a pure decision module
+that takes
+`(regime_state, signal_pressure, active_cluster_count, config_bounds)`
+and returns the resolved caps `(candidates, watching, core, scan)`,
+clamped to YAML-declared min/max bounds. Each axis contributes a
+multiplier:
+
+- **Regime axis** (`config/data_pipeline.yaml::dynamic_universe.adaptive.regime`):
+  `risk_on=1.25`, `trend_up=1.15`, `volatile=1.30` (more places to
+  fish), `mixed=1.00`, `range=0.90`, `risk_off=0.80`, `crash=0.65`,
+  `insufficient_data=1.00`.
+- **Signal-pressure axis** (`adaptive.signal_pressure`): the recent
+  `dashboard_feed.batch_candidate_count` is read from the persisted
+  `dashboard.snapshot`. When ≥ `high_threshold` (default 8) the scan
+  tier widens by `1.20`; when ≤ `low_threshold` (default 2) it narrows
+  to `0.80`.
+- **Cluster-aware floor** (`adaptive.cluster_aware`): when an honest
+  correlation-cluster count is available
+  (`data/runtime/universe_intelligence.json::clusters`), watching is
+  lifted to at least `max(watching_min_floor, watching_min_factor *
+  active_reps)`, then clamped to the bounds. Default: 150 floor, 3.0
+  factor — so 88 active clusters gets `max(150, 264)=264` watching.
+- **Anti-churn hysteresis** (`adaptive.churn`): a symbol that was in
+  the previous build's watchlist but missing this build is *graced*
+  into the scan tier for up to `min_consecutive_drops` (default 3)
+  consecutive rebuilds before it actually drops to light. Prevents
+  single liquidity blips from churning feature ingest.
+
+Bounds enforce a hard ceiling and floor per tier
+(`candidates 200-800`, `watching 150-600`, `core 25-100`,
+`scan 75-500` by default). Invariants are also enforced post-resolve:
+`core <= watching` and `scan + core <= candidates`.
+
+**Wiring.**
+
+- `_pipeline_runner` in `system/orchestrator.py`: each tick now reads
+  the persisted dashboard snapshot, builds an `AdaptiveCapsContext`
+  via `universe.adaptive_context.build_adaptive_caps_context`,
+  resolves caps via `compute_adaptive_caps`, applies them through
+  `UniverseBuilder.update_caps(...)`, then calls the existing
+  `build_tiered_universe`. After the build, `apply_churn_hysteresis`
+  re-includes graced symbols and re-persists the tier file. Resolved
+  caps + miss counter + grace history land in
+  `data/runtime/universe_adaptive_state.json`.
+- `universe/snapshot_service.py::_pipeline_caps()` overlays the
+  resolved caps so `/intelligence/universe` shows the active values
+  the builder actually used, not the static YAML anchor.
+- `/intelligence/universe` now returns an `adaptive` block with the
+  resolved caps, base anchor, composite multiplier, per-axis
+  multipliers, cluster-floor flag, and reasons. The Universe
+  dashboard renders an `adaptive Nx ↑ widen / ↓ focus / · neutral`
+  badge with a tooltip listing reasons.
+
+**Backward compatibility.** Set `dynamic_universe.adaptive.enabled:
+false` and the resolved caps equal the base caps unconditionally,
+matching pre-D117 behaviour exactly. Missing or malformed YAML, missing
+dashboard snapshot, missing intelligence file → neutral context →
+multiplier 1.0. The risk engine, order routing, and broker availability
+are untouched: D117 is a *discovery-layer* control only.
+
+**Status:** Implemented (`universe/adaptive_caps.py`,
+`universe/adaptive_context.py`, `universe/adaptive_state.py`,
+`config/data_pipeline.yaml::dynamic_universe.adaptive`,
+`data/universe_builder.py::UniverseBuilder.update_caps()`,
+`system/orchestrator.py::_pipeline_runner`,
+`universe/snapshot_service.py`, `ui/src/app/redesign/universe/UniverseScreen.tsx`,
+`ui/src/app/lib/api.ts`). Tests:
+`tests/test_universe_adaptive_caps.py` — 26 tests covering disabled
+fallback, each regime label, signal-pressure axis, bounds clamping,
+cluster-aware floor (lift, max-clamp, no-shrink, disabled),
+hysteresis grace (extend, drop-after-N, reset, no-previous-state),
+config loader (good/missing/malformed YAML), runtime state round-trip,
+and post-resolve invariants.
+
+## D116 — Instrument Registry + Cross-Broker Availability Resolver (2026-05-19)
+
+The hand-maintained per-broker symbol lists (especially IBKR's 61-line
+curated YAML seed) were the binding constraint on universe coverage and
+were not adapting when new brokers were added. The fix is a self-updating
+master instrument table sourced from public maintained references, with
+per-broker availability tracked separately.
+
+Decision:
+
+- A new instrument registry layer is introduced as a strictly read/observe
+  consumer; it does not participate in any signal, risk, or order path.
+  Schema (Postgres):
+    * `instrument_registry` — canonical master (yfinance-style symbol PK,
+      asset class, region, exchange, currency, sector/industry, ISIN,
+      FIGI, first/last/refreshed seen timestamps, retired_at, metadata)
+    * `instrument_source_membership` — one row per `(canonical_symbol,
+      source_id)` with `source_version`, `external_id`, `last_seen_at`,
+      `consecutive_miss_count`, `metadata`
+    * `instrument_broker_availability` — one row per `(canonical_symbol,
+      broker)` with status in `{unknown, available, unavailable,
+      requires_qualification, blocked}`, last-checked timestamps, IBKR
+      qualification payload
+    * `instrument_source_runs` — audit log of every refresh
+  Migration: `alembic/versions/d116a1b2c3d4_instrument_registry.py`.
+
+- Canonical symbol module `instruments/canonical.py` centralises broker
+  ↔ canonical translation. `data/universe_builder.py::_to_yf_symbol`
+  becomes a thin wrapper.
+
+- Source adapters (`instruments/sources/`) cover four families:
+    * `wikipedia.py` (S&P 500 / 400 / 600, Nasdaq-100, Dow 30, FTSE,
+      DAX, CAC, Euro Stoxx, Nikkei, TOPIX Core 30, Hang Seng, ASX 200,
+      TSX 60 — ~20 indices)
+    * `ishares.py` (~40 broad/sector/bond/commodity iShares ETF holdings
+      via public CSV endpoints)
+    * `openfigi.py` (bulk ISIN/FIGI + alternate-ticker enrichment via
+      the OpenFIGI v3 mapping API)
+    * `static_fx.py`, `static_futures.py` (G10 FX pairs + CME futures
+      roots)
+    * `broker_catalog.py` wraps `BrokerAdapter.get_supported_symbols()`
+      for every connected adapter — this is how crypto exchanges feed
+      the registry.
+  All HTTP is funnelled through `instruments/sources/http.py`, a polite
+  client with User-Agent, per-host rate limiting, ETag/Last-Modified
+  caching, retry with jitter, and timeouts. Each source is fault-
+  isolated; one failure cannot taint other sources.
+
+- `instruments/availability.py::resolve_broker_availability(broker,
+  adapter)` walks the canonical registry, attempts broker-side
+  translation (via `instruments.canonical`), and writes a per-broker
+  status row. IBKR uses both the broker catalog and the
+  `brokers/ibkr/qualification.py` cache; symbols with no qualification
+  record yet are marked `requires_qualification` rather than
+  `unavailable`. Operator-pinned and operator-excluded symbols come from
+  `config/instrument_registry.yaml::overrides` and become `blocked` or
+  `available` regardless of catalog state.
+
+- `instruments/builder.py` orchestrates refresh + availability. Retire
+  policy: a symbol is `retired_at` only after
+  `consecutive_miss_count >= min_consecutive_misses` (default 5) across
+  at least `min_sources_missing` independent sources (default 2). No
+  symbol is ever deleted.
+
+- `instruments/scheduler.py` runs four background tasks at boot:
+  constituents refresh, broker availability resolution, OpenFIGI
+  enrichment, and a connect-event consumer. The scheduler subscribes to
+  `BrokerManager.register_connect_callback`, so reconnecting a broker
+  (or wiring up a new one) automatically re-evaluates availability for
+  every canonical symbol on that broker. `system/orchestrator.py` owns
+  the scheduler lifecycle and shuts it down cleanly on stop.
+
+- `brokers/ibkr/adapter.py::get_supported_symbols()` now returns the
+  union of (a) the curated YAML seed, (b) the IBKR qualification cache,
+  and (c) the D116 registry's `available`/`requires_qualification`
+  IBKR rows. Behaviour is gated by
+  `IBKR_SUPPORTED_SYMBOLS_USE_REGISTRY` env var or
+  `config/instrument_registry.yaml::ibkr_supported_symbols_use_registry`
+  feature flag, defaulting to off until the registry is populated.
+  Failures fall back silently to the curated YAML — IBKR's effective
+  symbol list can only grow, never shrink. `place_order()` still calls
+  `qualifyContractsAsync` before submission regardless of source.
+
+- `universe/snapshot_service.py` adds `registry_known_count` and
+  `registry_covered_count` per broker to the existing
+  `coverage.by_broker` dashboard payload, alongside the broker-catalog
+  funnel that drives the headline numbers.
+
+- API additions (read-only): `GET /intelligence/instruments` (summary
+  counts by asset class / region / source / broker availability), `GET
+  /intelligence/instruments/{canonical}` (registry row + per-broker
+  availability + source memberships), `GET /intelligence/instrument-
+  sources` (recent run health per source).
+
+- CLI: `python scripts/build_instrument_registry.py --sources=all
+  --dry-run` for manual / scheduled refresh; `python
+  scripts/qualify_instrument_registry.py --broker=ibkr --limit=100`
+  for IBKR contract qualification cache warm-up.
+
+- `config/instrument_registry.yaml` is the single configuration surface:
+  enable/disable, IBKR feature flag, retire policy, overrides
+  (pinned/excluded), availability timeout, and per-source toggles +
+  cadences + sub-source IDs.
+
+What did NOT change: `brokers/base.py`, `risk/engine.py`,
+`execution/engine.py`, `signals/*`, `strategies/*`, `portfolio/*`,
+`config/ibkr_universe.yaml` (preserved as a curated override layer that
+the registry consumer unions in).
+
+Tests:
+
+- `tests/test_instruments_canonical.py` — 13 cases (symbol normalisation
+  across equities, FX, crypto, futures, IBKR/Alpaca/Kraken/Binance
+  broker translations).
+- `tests/test_instruments_registry.py` — 7 cases (coerce_contribution
+  with valid/invalid inputs, dataclass guarantees).
+- `tests/test_instruments_sources_wikipedia.py` — 4 cases (S&P 500
+  fixture parse, error handling, source-id filtering).
+- `tests/test_instruments_sources_ishares.py` — 4 cases (CSV parse,
+  cash-row filtering, ISIN/sector capture, missing-header errors).
+- `tests/test_instruments_sources_openfigi.py` — 4 cases (mapping
+  enrichment, empty seed, partial batch).
+- `tests/test_instruments_sources_broker_catalog.py` — 5 cases
+  (Kraken/Binance symbol normalisation, dedup, adapter failure
+  isolation, broker exclusion).
+- `tests/test_instruments_availability.py` — 8 cases (alpaca catalog
+  resolution, IBKR `requires_qualification`, blocked override,
+  end-to-end async resolver with mocked DB).
+- `tests/test_instruments_builder.py` — 6 cases (config load defaults,
+  YAML overrides, source build filtering, dry-run audit, failure
+  isolation).
+- `tests/test_instruments_scheduler.py` — 3 cases (broker-connect
+  event consumer, async session factory, start/stop lifecycle).
+- `tests/test_ibkr_supported_symbols_from_registry.py` — 4 cases
+  (curated-seed default, empty-registry fallback, registry union,
+  silent recovery from DB error).
+
+Total: 59 D116 tests passing.
+
+Verification:
+
+- `python -m py_compile` for every new module (canonical, registry,
+  http, wikipedia, ishares, openfigi, static_fx, static_futures,
+  broker_catalog, availability, builder, scheduler, IBKR adapter,
+  broker manager, orchestrator, snapshot service, api/server,
+  scripts/build_instrument_registry.py,
+  scripts/qualify_instrument_registry.py).
+- `python -m pytest` D116-scoped suites → `59 passed`.
+
+Rollout:
+
+1. Migration + module + tests land with `enabled: true` but
+   `ibkr_supported_symbols_use_registry: false` so behaviour is
+   unchanged for IBKR routing.
+2. `python scripts/build_instrument_registry.py --sources=all
+   --dry-run` confirms source health.
+3. First real refresh populates the registry; the orchestrator
+   scheduler keeps it up to date.
+4. Flipping `ibkr_supported_symbols_use_registry: true` (or the env
+   override) grows the IBKR seed beyond the curated 61 names.
+5. `tests/test_ibkr_supported_symbols_from_registry.py` guarantees the
+   fallback path so IBKR remains routable even if the registry/DB is
+   unhealthy.
+
+---
+
 ## D115 — Anti-churn + cluster-aware risk + intraday derisk + stale-price gate (2026-05-19)
 
 Five-tier rectification after the 2026-05-19 paper-trading audit. 224 fills

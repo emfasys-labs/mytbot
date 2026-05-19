@@ -1,0 +1,82 @@
+# D116 — Instrument Registry configuration.
+#
+# Source toggles, cadences, retire policy, operator overrides, and the
+# feature flag that controls whether IBKR's supported-symbol seed is
+# unioned with the registry's available/requires_qualification rows.
+#
+# Safe to edit without code changes. ``instruments.builder.load_config``
+# reloads this file on every refresh cycle, so YAML changes are picked
+# up at the next scheduler tick.
+
+enabled: true
+
+# Feature flag — flipped on 2026-05-19 after the first successful
+# constituents + availability refresh populated the registry with
+# 1,615 active instruments and 1,615 IBKR availability rows
+# (13 ``available`` + 1,602 ``requires_qualification``). IBKR
+# ``get_supported_symbols()`` now unions the curated YAML seed +
+# qualification cache + registry rows. IBKR ordering still calls
+# ``qualifyContractsAsync`` before any submission regardless of this flag.
+ibkr_supported_symbols_use_registry: true
+
+retire:
+  # A canonical symbol is marked retired only after at least
+  # ``min_consecutive_misses`` missed refreshes in at least
+  # ``min_sources_missing`` independent sources, so a single source
+  # outage cannot retire a name.
+  min_consecutive_misses: 5
+  min_sources_missing: 2
+
+overrides:
+  # Operator-pinned canonical symbols (always retained even if all
+  # sources stop reporting them).
+  pinned: []
+  # Operator-blocked canonical symbols (availability resolver marks them
+  # as ``blocked`` for every broker; signal/strategy code is not
+  # affected directly — risk/strategy still drive trade decisions).
+  excluded: []
+
+availability:
+  # Per-broker availability resolver timeout for ``get_supported_symbols``.
+  timeout_sec: 20
+
+sources:
+  wikipedia:
+    enabled: true
+    cadence_sec: 86400        # daily
+    # If you only want a subset, list ``source_id`` here; empty/missing
+    # means every entry in WIKIPEDIA_INDEX_REGISTRY is enabled.
+    enabled_ids: []
+
+  ishares:
+    enabled: true
+    cadence_sec: 86400        # daily
+    enabled_ids: []
+
+  static_fx:
+    enabled: true
+    cadence_sec: 604800       # weekly
+
+  static_futures:
+    enabled: true
+    cadence_sec: 604800       # weekly
+
+  broker_catalog:
+    enabled: true
+    cadence_sec: 3600         # hourly + on broker reconnect
+    excluded_brokers: []      # e.g. ['ibkr'] to skip broker catalog ingestion for IBKR
+
+  openfigi:
+    # Secondary enricher — adds ISIN/FIGI/alternate tickers. Strongly
+    # rate-limited even when an API key is provided; runs weekly by
+    # default. Set ``OPENFIGI_API_KEY`` in .env to lift the quota.
+    enabled: true
+    cadence_sec: 604800       # weekly
+    api_key_env: OPENFIGI_API_KEY
+    max_symbols: 5000
+
+ibkr:
+  # IBKR-specific knobs used by ``scripts/qualify_instrument_registry.py``
+  # when warming the contract qualification cache.
+  qualify_per_cycle: 100
+  qualify_cooldown_sec: 3600

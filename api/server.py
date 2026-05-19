@@ -1522,13 +1522,131 @@ async def get_intelligence_universe(response: Response):
         broker_symbols = {name: syms for name, syms in rows}
         broker_total = {name: len(syms) for name, syms in broker_symbols.items()}
 
+    registry_summary_data: dict[str, Any] | None = None
+    try:
+        from instruments.registry import registry_summary
+        from storage.db import get_app_database
+
+        _, sf = get_app_database()
+        if sf is not None:
+            registry_summary_data = await registry_summary(sf)
+    except Exception:  # noqa: BLE001
+        registry_summary_data = None
+
     payload = build_universe_snapshot_dict(
         broker_symbol_totals=broker_total,
         broker_symbols=broker_symbols,
+        registry_summary_data=registry_summary_data,
     )
     _UNIVERSE_SNAPSHOT_CACHE["payload"] = payload
     _UNIVERSE_SNAPSHOT_CACHE["at"] = now
     return payload
+
+
+@app.get("/intelligence/instruments")
+async def get_intelligence_instruments(response: Response):
+    """D116 — instrument registry summary.
+
+    Reports active vs retired registry counts, breakdown by asset class /
+    region / source / broker availability status. Used by the dashboard
+    so operators can see exactly how many symbols are tracked and which
+    brokers can route them.
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    try:
+        from instruments.registry import registry_summary
+        from storage.db import get_app_database
+
+        _, sf = get_app_database()
+        if sf is None:
+            return {"available": False, "reason": "database unbound"}
+        summary = await registry_summary(sf)
+        return {"available": True, **summary}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": str(exc)}
+
+
+@app.get("/intelligence/instruments/{canonical}")
+async def get_intelligence_instrument_detail(canonical: str, response: Response):
+    """Single instrument row + per-broker availability + source memberships."""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    sym = (canonical or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="canonical symbol required")
+    try:
+        from instruments.registry import (
+            get_registry_row,
+            list_broker_availability,
+            list_source_membership,
+        )
+        from storage.db import get_app_database
+
+        _, sf = get_app_database()
+        if sf is None:
+            raise HTTPException(status_code=503, detail="database unbound")
+        row = await get_registry_row(sf, canonical_symbol=sym)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"instrument {sym} not in registry")
+        availability_rows: list[dict[str, Any]] = []
+        for broker in ("ibkr", "alpaca", "kraken", "binance", "bybit"):
+            try:
+                rows = await list_broker_availability(sf, broker=broker)
+            except Exception:  # noqa: BLE001
+                rows = []
+            for r in rows:
+                if r.canonical_symbol == sym:
+                    availability_rows.append(
+                        {
+                            "broker": broker,
+                            "broker_symbol": r.broker_symbol,
+                            "status": r.status,
+                            "last_checked_at": r.last_checked_at.isoformat() if r.last_checked_at else None,
+                            "last_available_at": r.last_available_at.isoformat() if r.last_available_at else None,
+                            "last_error": r.last_error,
+                        }
+                    )
+                    break
+        sources = await list_source_membership(sf, canonical_symbol=sym)
+        return {
+            "canonical_symbol": row.canonical_symbol,
+            "display_name": row.display_name,
+            "asset_class": row.asset_class,
+            "region": row.region,
+            "exchange": row.exchange,
+            "currency": row.currency,
+            "sector": row.sector,
+            "industry": row.industry,
+            "isin": row.isin,
+            "figi": row.figi,
+            "first_seen_at": row.first_seen_at.isoformat() if row.first_seen_at else None,
+            "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+            "last_refreshed_at": row.last_refreshed_at.isoformat() if row.last_refreshed_at else None,
+            "retired_at": row.retired_at.isoformat() if row.retired_at else None,
+            "metadata": dict(row.metadata or {}),
+            "availability": availability_rows,
+            "sources": sources,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/intelligence/instrument-sources")
+async def get_intelligence_instrument_sources(response: Response):
+    """D116 — last refresh outcome per source."""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    try:
+        from instruments.registry import list_recent_source_runs
+        from storage.db import get_app_database
+
+        _, sf = get_app_database()
+        if sf is None:
+            return {"available": False, "reason": "database unbound"}
+        rows = await list_recent_source_runs(sf, limit_per_source=1)
+        return {"available": True, "sources": rows}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": str(exc)}
 
 
 @app.get("/intelligence/regime")

@@ -24,6 +24,7 @@ alpaca-py==0.25.0               # Alpaca
 numpy>=2.2.6,<3
 pandas>=2.3.2,<4
 pandas-ta==0.4.71b0             # Technical indicators (pre-release wheel on PyPI)
+lxml>=4.9,<7                    # HTML parsing for instrument-registry Wikipedia source (D116)
 yfinance>=0.2.40                # Historical data (research/backtest)
 
 # ── ML & Strategy ─────────────────────────────────────────────────────────────

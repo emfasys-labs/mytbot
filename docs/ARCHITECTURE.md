@@ -223,6 +223,7 @@ portfolio/    Position tracking and P&L only.
 storage/      Database models and queries only.
 api/          FastAPI + WebSocket; thin controllers — domain logic in system/core.
 system/       Orchestrator, trading loop, broker manager, dependency startup.
+instruments/  D116 instrument registry: canonical symbol form, source adapters (Wikipedia, iShares, OpenFIGI, broker catalogs, static FX/futures), persistence, per-broker availability resolver, scheduler. Read-only consumer surface — never on the order path.
 ui/           React (Vite) dashboard; production build → `ui/dist`.
 monitoring/   Alerts and uptime checks only.
 config/       Configuration files only.

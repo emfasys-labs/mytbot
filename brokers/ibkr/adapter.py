@@ -1691,20 +1691,96 @@ class IBKRAdapter(BrokerAdapter):
             return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
 
     async def get_supported_symbols(self) -> list[str]:
-        """Return the curated IBKR seed universe.
+        """Return the IBKR seed universe.
 
         IBKR/TWS does not expose a practical "list every tradeable symbol" API.
-        Returning an empty list made Universe Intelligence look as if the primary
-        broker had no coverage, so we expose the project's explicitly curated
-        IBKR instruments as the supported-symbol seed instead.
+        The base list is the explicitly curated YAML universe
+        (:func:`ibkr_supported_symbol_seed`). When the D116 instrument
+        registry feature flag is enabled and the registry has populated
+        ``instrument_broker_availability`` for IBKR, the registry's
+        ``available``/``requires_qualification`` rows are unioned in. The
+        IBKR contract qualification cache is also unioned so previously
+        qualified contracts persist even if YAML / registry drift.
+
+        Fallbacks: any registry/cache error falls back silently to the
+        curated YAML so IBKR routing always has at least the seed list,
+        and order placement still gates on ``qualifyContractsAsync`` in
+        :meth:`place_order` regardless of this list.
         """
+        seed: list[str] = []
         try:
-            out = ibkr_supported_symbol_seed()
-            logger.debug("get_supported_symbols | IBKR | curated seed symbols={}", len(out))
-            return out
+            seed = list(ibkr_supported_symbol_seed())
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_supported_symbols | IBKR | curated seed unavailable: {}", exc)
+            seed = []
+        seen: set[str] = {s.upper() for s in seed}
+
+        # Union the IBKR contract qualification cache so previously qualified
+        # contracts persist even if YAML / registry drift. Uses the
+        # pre-loaded instance when available; falls back to a fresh read.
+        try:
+            cache = getattr(self, "_qualification_cache", None) or IBKRQualificationCache()
+            for rec in cache.all():
+                if not rec.is_qualified():
+                    continue
+                sym = rec.broker_symbol or rec.symbol
+                if sym and sym.upper() not in seen:
+                    seed.append(sym)
+                    seen.add(sym.upper())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_supported_symbols | IBKR | qualification cache unavailable: {}", exc)
+
+        # Union the D116 instrument-registry availability view when enabled.
+        # Failures are silent — the curated YAML + qualification cache remain
+        # the safe baseline.
+        try:
+            use_registry = self._registry_supported_symbols_enabled()
+            if use_registry:
+                registry_syms = await self._registry_supported_symbols()
+                for sym in registry_syms:
+                    if sym.upper() not in seen:
+                        seed.append(sym)
+                        seen.add(sym.upper())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_supported_symbols | IBKR | registry union skipped: {}", exc)
+
+        logger.debug("get_supported_symbols | IBKR | symbols={}", len(seed))
+        return seed
+
+    @staticmethod
+    def _registry_supported_symbols_enabled() -> bool:
+        import os as _os
+
+        env_flag = _os.getenv("IBKR_SUPPORTED_SYMBOLS_USE_REGISTRY", "").strip().lower()
+        if env_flag in {"1", "true", "yes", "on"}:
+            return True
+        if env_flag in {"0", "false", "no", "off"}:
+            return False
+        try:
+            from instruments.builder import load_config
+
+            return bool(load_config().ibkr_supported_symbols_use_registry)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    async def _registry_supported_symbols() -> list[str]:
+        from storage.db import get_app_database
+        from instruments.registry import list_broker_availability
+
+        _, sf = get_app_database()
+        if sf is None:
             return []
+        rows = await list_broker_availability(
+            sf,
+            broker="ibkr",
+            statuses=("available", "requires_qualification"),
+        )
+        return [
+            r.broker_symbol or r.canonical_symbol
+            for r in rows
+            if r.broker_symbol or r.canonical_symbol
+        ]
 
     async def get_asset_class(self, symbol: str) -> AssetClass:
         """Best-effort asset class from symbol string (contract not qualified)."""

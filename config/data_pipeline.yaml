@@ -19,6 +19,57 @@ dynamic_universe:
     scan_batch_size: 45
     scan_strategy_every_n: 3
 
+  # D117 — Adaptive universe-tier sizing.
+  #
+  # When enabled, the next pipeline tick resolves caps from
+  # (regime_label, signal_pressure, active_cluster_count) and clamps them
+  # to the bounds below. ``ranking.core_max / scan_max / max_candidates_to_score``
+  # and ``max_symbols`` above remain the *neutral anchor* (multiplier = 1.0)
+  # so behaviour pre-D117 is preserved when ``adaptive.enabled: false``.
+  #
+  # Risk / order routing is untouched — this only sizes the *discovery*
+  # funnel (broker listings -> scored -> watching -> active reps).
+  adaptive:
+    enabled: true
+    bounds:
+      candidates: { min: 200, max: 800 }
+      watching:   { min: 150, max: 600 }
+      core:       { min: 25,  max: 100 }
+      scan:       { min: 75,  max: 500 }
+    regime:
+      # Risk-on / trend / volatile regimes get *wider* nets; defensive
+      # regimes (risk_off, crash, range) get *narrower* nets so fee /
+      # feature-ingest load stays focused.
+      risk_on:           { multiplier: 1.25 }
+      trend_up:          { multiplier: 1.15 }
+      volatile:          { multiplier: 1.30 }
+      mixed:             { multiplier: 1.00 }
+      range:             { multiplier: 0.90 }
+      risk_off:          { multiplier: 0.80 }
+      crash:             { multiplier: 0.65 }
+      insufficient_data: { multiplier: 1.00 }
+    signal_pressure:
+      # ``signal_pressure`` is the recent count of allocator candidates
+      # above the conviction threshold (from the live dashboard
+      # snapshot). High pressure widens scan so more non-redundant
+      # edges are visible to the allocator.
+      high_threshold: 8
+      low_threshold: 2
+      high_multiplier: 1.20
+      low_multiplier: 0.80
+    cluster_aware:
+      # Floor watching by ``factor * active_reps`` so a more diverse
+      # market (more correlation clusters) automatically widens the
+      # watchlist. Subject to the bounds above.
+      enabled: true
+      watching_min_factor: 3.0
+      watching_min_floor: 150
+    churn:
+      # A symbol that *was* in the watchlist must miss this many
+      # consecutive rebuilds before it is dropped. Prevents single
+      # liquidity blips from churning the feature-ingest set.
+      min_consecutive_drops: 3
+
 symbols:
   # Equity anchors
   - SPY

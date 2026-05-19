@@ -469,3 +469,115 @@ class StrategyCandidateLog(Base):
     reason = Column(Text, nullable=True)
     winner_strategy = Column(String(50), nullable=True)
     metadata_ = Column("metadata", JSON, nullable=True)
+
+
+class InstrumentRegistry(Base):
+    """Canonical instrument master populated from public maintained sources.
+
+    A row exists per ``canonical_symbol`` (yfinance form). Sources contribute
+    via ``InstrumentSourceMembership``; per-broker tradeability is tracked in
+    ``InstrumentBrokerAvailability``. Retirement is soft (``retired_at`` set)
+    and requires multi-source consensus that the symbol is gone.
+    """
+
+    __tablename__ = "instrument_registry"
+
+    canonical_symbol = Column(String(72), primary_key=True)
+    display_name = Column(String(255), nullable=True)
+    asset_class = Column(String(20), nullable=False, index=True)  # equity|etf|crypto|fx|future|bond|index
+    region = Column(String(16), nullable=True, index=True)        # US|EU|UK|JP|HK|AU|CA|Global
+    exchange = Column(String(32), nullable=True)
+    currency = Column(String(8), nullable=True)
+    sector = Column(String(64), nullable=True)
+    industry = Column(String(64), nullable=True)
+    isin = Column(String(16), nullable=True, index=True)
+    figi = Column(String(16), nullable=True, index=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_refreshed_at = Column(DateTime(timezone=True), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+
+
+class InstrumentSourceMembership(Base):
+    """Per-source contribution to ``InstrumentRegistry``.
+
+    Composite key ``(canonical_symbol, source_id)`` lets the same symbol be
+    contributed by multiple independent sources (e.g. S&P 500 from Wikipedia
+    AND iShares IVV). ``consecutive_miss_count`` is incremented each refresh
+    where the source did not include the symbol; the retire policy compares
+    misses across multiple sources before flagging ``InstrumentRegistry``.
+    """
+
+    __tablename__ = "instrument_source_membership"
+    __table_args__ = (
+        Index("ix_instrument_source_membership_source", "source_id"),
+        Index(
+            "ix_instrument_source_membership_symbol_source",
+            "canonical_symbol",
+            "source_id",
+            unique=True,
+        ),
+    )
+
+    canonical_symbol = Column(String(72), primary_key=True)
+    source_id = Column(String(64), primary_key=True)
+    source_version = Column(String(32), nullable=True)
+    external_id = Column(String(64), nullable=True)  # vendor-specific ID e.g. iShares fund row id
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    consecutive_miss_count = Column(Integer, nullable=False, default=0)
+    metadata_ = Column("metadata", JSON, nullable=True)
+
+
+class InstrumentBrokerAvailability(Base):
+    """Per-(symbol, broker) availability resolution.
+
+    ``status`` values:
+      - ``unknown`` (not evaluated yet)
+      - ``available`` (broker catalog confirms tradeable)
+      - ``unavailable`` (catalog does not contain a translation)
+      - ``requires_qualification`` (IBKR-only: needs contract qualification before order)
+      - ``blocked`` (operator override)
+    Never deleted; transitions only. ``broker_symbol`` holds the broker-native
+    string used for routing.
+    """
+
+    __tablename__ = "instrument_broker_availability"
+    __table_args__ = (
+        Index("ix_instrument_broker_availability_broker", "broker"),
+        Index("ix_instrument_broker_availability_status", "status"),
+    )
+
+    canonical_symbol = Column(String(72), primary_key=True)
+    broker = Column(String(20), primary_key=True)
+    broker_symbol = Column(String(72), nullable=True)
+    status = Column(String(32), nullable=False, default="unknown")
+    last_checked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_available_at = Column(DateTime(timezone=True), nullable=True)
+    qualification_payload = Column(JSON, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+
+class InstrumentSourceRun(Base):
+    """Append-only audit row per source-refresh attempt.
+
+    Captures rows added/updated/missing and the overall outcome so operators
+    can answer 'when did Wikipedia last successfully ingest the S&P 500?'
+    without inspecting logs.
+    """
+
+    __tablename__ = "instrument_source_runs"
+    __table_args__ = (
+        Index("ix_instrument_source_runs_source_started", "source_id", "started_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(String(64), nullable=False, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(16), nullable=False, default="running")  # running|success|partial|failed
+    rows_added = Column(Integer, nullable=True)
+    rows_updated = Column(Integer, nullable=True)
+    rows_missing = Column(Integer, nullable=True)
+    notes = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)

@@ -22,7 +22,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -275,6 +275,11 @@ class BrokerManager:
         self._ibkr_maint_windows = self._parse_maintenance_windows(
             os.getenv("IBKR_MAINTENANCE_WINDOWS", "")
         )
+        # D116: synchronous callbacks invoked whenever a broker (re)connects.
+        # Subscribers must be non-blocking (typically schedule async work on
+        # their own task). A throwing callback is logged but never bubbles up
+        # to interrupt connection management.
+        self._connect_callbacks: list[Callable[[str], None]] = []
 
     @staticmethod
     def _parse_maintenance_windows(raw: str) -> list[tuple[str | None, dtime, dtime]]:
@@ -340,6 +345,36 @@ class BrokerManager:
         if key == "ibkr" and self._in_ibkr_maintenance():
             return False
         return True
+
+    def register_connect_callback(self, fn: Callable[[str], None]) -> None:
+        """Subscribe a callback invoked synchronously when a broker (re)connects.
+
+        Used by the D116 instrument-registry scheduler to trigger an
+        immediate availability resolution for the freshly-connected broker.
+        Callbacks should not block; they typically enqueue async work.
+        """
+        if not callable(fn):
+            return
+        if fn in self._connect_callbacks:
+            return
+        self._connect_callbacks.append(fn)
+
+    def unregister_connect_callback(self, fn: Callable[[str], None]) -> None:
+        try:
+            self._connect_callbacks.remove(fn)
+        except ValueError:
+            pass
+
+    def _emit_connect_callbacks(self, broker_name: str) -> None:
+        if not self._connect_callbacks:
+            return
+        for fn in list(self._connect_callbacks):
+            try:
+                fn(broker_name)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "broker | connect_callback failed for {}: {}", broker_name, exc
+                )
 
     _BROKER_TIMEOUTS: dict[str, float] = {
         "ibkr": 120,
@@ -525,6 +560,7 @@ class BrokerManager:
                     self.adapters["ibkr"] = adapter
                     self._ibkr_fail_count = 0
                     logger.info("broker | ibkr | connected (background)")
+                    self._emit_connect_callbacks("ibkr")
                     await self._mark_balance_ready("ibkr", adapter, status)
                 else:
                     self._ibkr_fail_count += 1
@@ -573,6 +609,7 @@ class BrokerManager:
                 self._broker_ready_state[name] = True
                 self._broker_rate_limit_streak[name] = 0
                 logger.info("broker | {} | connected", name)
+                self._emit_connect_callbacks(name)
                 await self._mark_balance_ready(name, adapter, status)
             else:
                 self._broker_fail_count[name] = self._broker_fail_count.get(name, 0) + 1

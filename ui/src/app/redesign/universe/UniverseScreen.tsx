@@ -376,12 +376,135 @@ function OverviewTab({
               <div style={{ marginTop: 8, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.6 }}>
                 unique normalized {fmtNum(data.coverage.unique_normalized_count ?? 0)}
                 {' · '}candidate cap {fmtNum(data.coverage.caps?.candidates ?? 0)}
+                {(() => {
+                  const baseCand = data.adaptive?.enabled
+                    ? data.adaptive?.resolved?.base?.candidates
+                    : undefined;
+                  if (baseCand != null && baseCand !== data.coverage?.caps?.candidates) {
+                    return ` (base ${fmtNum(baseCand)})`;
+                  }
+                  return '';
+                })()}
                 {' · '}watch cap {fmtNum(data.coverage.caps?.watching ?? 0)}
-                {data.coverage.by_broker?.ibkr?.note ? ` · ibkr ${fmtNum(data.coverage.by_broker.ibkr.raw ?? 0)} curated` : ''}
+                {(() => {
+                  const baseWatch = data.adaptive?.enabled
+                    ? data.adaptive?.resolved?.base?.watching
+                    : undefined;
+                  if (baseWatch != null && baseWatch !== data.coverage?.caps?.watching) {
+                    return ` (base ${fmtNum(baseWatch)})`;
+                  }
+                  return '';
+                })()}
+                {data.coverage.by_broker?.ibkr && (() => {
+                  const ib = data.coverage!.by_broker!.ibkr!;
+                  const src = ib.source ?? 'curated_seed';
+                  const tag = src === 'curated_seed+registry' ? 'curated+registry' : 'curated';
+                  return ` · ibkr ${fmtNum(ib.raw ?? 0)} ${tag}`;
+                })()}
+                {(() => {
+                  const brokers = data.coverage?.by_broker ?? {};
+                  let known = 0;
+                  let covered = 0;
+                  Object.values(brokers).forEach((b) => {
+                    known = Math.max(known, b?.registry_known_count ?? 0);
+                    covered += b?.registry_covered_count ?? 0;
+                  });
+                  if (!known) return '';
+                  return ` · registry ${fmtNum(known)} known / ${fmtNum(covered)} covered`;
+                })()}
               </div>
             )}
+            {data?.coverage?.by_broker && (() => {
+              const brokers = Object.entries(data.coverage!.by_broker!);
+              if (brokers.length === 0) return null;
+              const anyRegistry = brokers.some(([, b]) => (b?.registry_known_count ?? 0) > 0);
+              if (!anyRegistry) return null;
+              return (
+                <div
+                  style={{
+                    marginTop: 10,
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6,
+                    fontFamily: TOKENS.mono,
+                    fontSize: 10,
+                    color: TOKENS.ink3,
+                  }}
+                >
+                  {brokers.map(([name, info]) => {
+                    const raw = info?.raw ?? 0;
+                    const known = info?.registry_known_count ?? 0;
+                    const covered = info?.registry_covered_count ?? 0;
+                    const accent =
+                      known === 0 ? TOKENS.ink3 :
+                      covered === 0 ? TOKENS.caution :
+                      covered >= known ? TOKENS.profit :
+                      TOKENS.info;
+                    return (
+                      <span
+                        key={name}
+                        title={info?.note ?? `${name}: ${raw} listed · ${known} in registry · ${covered} resolved as available`}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: 999,
+                          border: `1px solid ${accent}55`,
+                          background: `${accent}10`,
+                          color: TOKENS.ink2,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        <span style={{ color: TOKENS.ink1, fontWeight: 500 }}>{name}</span>
+                        {' · '}
+                        {fmtNum(raw)} listed
+                        {' · '}
+                        <span style={{ color: accent }}>
+                          {fmtNum(covered)}/{fmtNum(known)}
+                        </span>
+                        {' registry'}
+                      </span>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {data?.adaptive?.enabled && data.adaptive.resolved && (() => {
+              const res = data.adaptive.resolved;
+              const mult = typeof res.multiplier === 'number' ? res.multiplier : 1;
+              const color =
+                mult >= 1.10 ? TOKENS.profit :
+                mult <= 0.90 ? TOKENS.caution :
+                TOKENS.info;
+              const ctx = data.adaptive.context ?? {};
+              const reasons = res.reasons ?? [];
+              const tip = [
+                `multiplier ${mult.toFixed(2)}`,
+                `regime=${ctx.regime_label ?? 'unknown'}`,
+                ctx.signal_pressure != null ? `signal_pressure=${ctx.signal_pressure}` : 'signal_pressure=unknown',
+                ctx.active_cluster_count != null ? `clusters=${ctx.active_cluster_count}` : 'clusters=unknown',
+                ...reasons,
+              ].join(' · ');
+              const direction = mult >= 1.05 ? '↑ widen' : mult <= 0.95 ? '↓ focus' : '· neutral';
+              return (
+                <div
+                  title={tip}
+                  style={{
+                    fontFamily: TOKENS.mono,
+                    fontSize: 10,
+                    color,
+                    padding: '6px 10px',
+                    border: `1px solid ${color}66`,
+                    background: `${color}10`,
+                    borderRadius: 8,
+                    height: 'fit-content',
+                    cursor: 'help',
+                  }}
+                >
+                  adaptive {mult.toFixed(2)}x {direction}
+                </div>
+              );
+            })()}
             <div style={{
               fontFamily: TOKENS.mono,
               fontSize: 10,
