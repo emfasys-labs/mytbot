@@ -13,34 +13,49 @@ import { Card, Label, Spark } from '../primitives';
 import { ACCENTS, Density, TOKENS, type AccentName } from '../tokens';
 import type { LiveData } from '../useLiveSystem';
 
+// D118 — 4-stage funnel; promotions are an overlay on watching, not a stage.
+// ``broker_listings`` is a debug tooltip on ``unique_normalized`` only.
 const STAGE_COLORS: Record<string, string> = {
-  source: '#9ca3af',
-  eligible: '#93c5fd',
+  unique_normalized: '#9ca3af',
+  priority_ranked: '#7dd3fc', // legacy API payloads only
+  scored: '#93c5fd',
   watching: '#a5b4fc',
   promoted: '#fcd34d',
+  active_reps: '#5eead4',
+  // legacy stages kept for back-compat
+  source: '#9ca3af',
+  eligible: '#93c5fd',
   active: '#5eead4',
   banned: '#f87171',
 };
 
 const STAGE_LABELS: Record<string, string> = {
-  source: 'broker listings',
-  eligible: 'scored',
+  unique_normalized: 'unique normalized',
+  priority_ranked: 'priority ranked',
+  scored: 'scored',
   watching: 'watching',
   promoted: 'promoted now',
+  active_reps: 'active reps',
+  source: 'broker listings',
+  eligible: 'scored',
   active: 'active reps',
   banned: 'banned',
 };
 
 const STAGE_DESC: Record<string, string> = {
+  unique_normalized: 'Every unique normalized symbol from connected brokers + registry.',
+  priority_ranked: 'Legacy stage — same pass as scored.',
+  scored: 'Priority top-N picked and yfinance liquidity-scored this cycle (budget N in subtitle).',
+  watching: 'Core + scan watchlist; anomaly boosts (promoted now) are a subset overlay, not a separate filter.',
+  promoted: 'Temporary conviction boost from scan/light (filter instruments tab only).',
+  active_reps: 'Correlation representatives under engine attention.',
   source: 'Raw broker listings plus curated broker seeds.',
   eligible: 'Normalized symbols selected for scoring.',
-  watching: 'Dynamic core + scan from universe_tiers.json.',
-  promoted: 'Recent temporary promotion signals.',
   active: 'Correlation representatives under engine attention.',
   banned: 'Excluded or blocked.',
 };
 
-type UniTab = 'overview' | 'funnel' | 'instruments' | 'config';
+type UniTab = 'overview' | 'funnel' | 'instruments' | 'coverage' | 'transitions' | 'config';
 
 function symbolTitle(row: UniverseSymbolRow): string {
   return (row.description || row.name || row.sym).trim();
@@ -56,6 +71,25 @@ function symbolSubtitle(row: UniverseSymbolRow): string {
 
 function fmtNum(n: number): string {
   return n.toLocaleString();
+}
+
+/** D118 funnel stages shown in the UI (drops legacy / non-funnel stages). */
+function displayFunnelStages(funnel: IntelligenceUniverseResponse['funnel']) {
+  return funnel.filter(
+    (f) => f.stage !== 'banned' && f.stage !== 'priority_ranked' && f.stage !== 'promoted',
+  );
+}
+
+function promotedNowCount(
+  funnel: IntelligenceUniverseResponse['funnel'],
+  promotions?: IntelligenceUniverseResponse['promotions'],
+): number {
+  const watch = funnel.find((f) => f.stage === 'watching');
+  const meta = (watch as { meta?: { promoted_now?: number } } | undefined)?.meta;
+  if (meta?.promoted_now != null) return Number(meta.promoted_now);
+  const legacy = funnel.find((f) => f.stage === 'promoted');
+  if (legacy) return legacy.count;
+  return promotions?.length ?? 0;
 }
 
 function buildState(data: IntelligenceUniverseResponse | null): string {
@@ -141,16 +175,37 @@ export function UniverseScreen({
   const clusters = data?.clusters ?? [];
 
   const heroLine = useMemo(() => {
-    const src = funnel.find((f) => f.stage === 'source');
-    const scored = funnel.find((f) => f.stage === 'eligible');
+    // D118 headline — always read the new stage ids; legacy ids are
+    // fallbacks only when an old API payload is still in cache.
+    const unique =
+      funnel.find((f) => f.stage === 'unique_normalized') ??
+      funnel.find((f) => f.stage === 'source');
+    const scored =
+      funnel.find((f) => f.stage === 'scored') ??
+      funnel.find((f) => f.stage === 'eligible');
     const watch = funnel.find((f) => f.stage === 'watching');
-    const act = funnel.find((f) => f.stage === 'active');
-    const unique = data?.coverage?.unique_normalized_count;
-    const sourceLabel = unique != null
-      ? `${fmtNum(src?.count ?? 0)} listings / ${fmtNum(unique)} unique`
-      : `${fmtNum(src?.count ?? 0)} listings`;
-    return `${sourceLabel} · ${fmtNum(scored?.count ?? 0)} scored · ${fmtNum(watch?.count ?? 0)} watched · ${fmtNum(act?.count ?? 0)} active reps`;
-  }, [data?.coverage?.unique_normalized_count, funnel]);
+    const promotedN = promotedNowCount(funnel, data?.promotions);
+    const act =
+      funnel.find((f) => f.stage === 'active_reps') ??
+      funnel.find((f) => f.stage === 'active');
+    const meta = (unique as { meta?: { broker_listings?: number } } | undefined)?.meta;
+    const brokerListings =
+      meta?.broker_listings ??
+      data?.coverage?.broker_listing_count ??
+      0;
+    const uniqueCount = unique?.count ?? data?.coverage?.unique_normalized_count ?? 0;
+    const scoredMeta = (scored as { meta?: { budget_attempted?: number; target_budget?: number } } | undefined)?.meta;
+    const budgetN = scoredMeta?.budget_attempted ?? scoredMeta?.target_budget;
+    return [
+      `${fmtNum(brokerListings)} listings → ${fmtNum(uniqueCount)} unique`,
+      budgetN != null && budgetN !== scored?.count
+        ? `${fmtNum(scored?.count ?? 0)} scored (budget ${fmtNum(budgetN)})`
+        : `${fmtNum(scored?.count ?? 0)} scored`,
+      `${fmtNum(watch?.count ?? 0)} watching`,
+      promotedN > 0 ? `${fmtNum(promotedN)} promoted now` : null,
+      `${fmtNum(act?.count ?? 0)} active reps`,
+    ].filter(Boolean).join(' · ');
+  }, [funnel, data?.coverage?.broker_listing_count, data?.coverage?.unique_normalized_count, data?.promotions]);
 
   const onJumpTo = (t: UniTab, stage?: string | null) => {
     setTab(t);
@@ -213,7 +268,9 @@ export function UniverseScreen({
       }}>
         {([
           ['overview', 'Overview', 'River at a glance'],
-          ['funnel', 'Funnel', 'Why symbols drop'],
+          ['funnel', 'Funnel', 'Self-tuning rule'],
+          ['coverage', 'Coverage', 'By asset class'],
+          ['transitions', 'Transitions', 'Tier movement'],
           ['instruments', 'Instruments', 'Grid · list'],
           ['config', 'Config', 'Read-only rules'],
         ] as const).map(([k, label, desc]) => (
@@ -310,7 +367,28 @@ export function UniverseScreen({
               />
             )}
             {tab === 'funnel' && (
-              <FunnelTab accentColor={accentColor} funnel={funnel} clusters={clusters} onJumpTo={onJumpTo} />
+              <FunnelTab
+                accentColor={accentColor}
+                funnel={funnel}
+                clusters={clusters}
+                onJumpTo={onJumpTo}
+                priorityRule={data?.priority_rule ?? null}
+                promotions={data?.promotions}
+              />
+            )}
+            {tab === 'coverage' && (
+              <CoverageTab
+                accentColor={accentColor}
+                coverage={data?.asset_class_coverage ?? null}
+                symbols={symbols}
+              />
+            )}
+            {tab === 'transitions' && (
+              <TransitionsTab
+                accentColor={accentColor}
+                transitions={data?.transitions ?? []}
+                onSelect={setSelected}
+              />
             )}
             {tab === 'config' && <ConfigTab data={data} />}
           </div>
@@ -344,6 +422,7 @@ function OverviewTab({
   onJumpTo: (t: UniTab, stage?: string | null) => void;
 }) {
   const total = funnel[0]?.count ?? 1;
+  const promotedN = promotedNowCount(funnel, data?.promotions);
   const banned = funnel.find((f) => f.stage === 'banned');
   const state = buildState(data);
   const statusColor =
@@ -531,11 +610,13 @@ function OverviewTab({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, overflowX: 'auto', paddingBottom: 8 }}>
-          {funnel.filter((f) => f.stage !== 'banned').map((f, i, arr) => {
-            const c = STAGE_COLORS[f.stage] ?? TOKENS.ink3;
+          {displayFunnelStages(funnel).map((f, i, arr) => {
+            const c = STAGE_COLORS[f.stage] ?? accentColor;
             const pct = Math.max(0.04, f.count / total);
             const w = Math.max(80, 100 * Math.sqrt(pct));
             const next = arr[i + 1];
+            const drop = next && f.count > next.count ? f.count - next.count : 0;
+            const stageMeta = (f as { meta?: Record<string, unknown> }).meta;
             return (
               <div key={f.stage} style={{ display: 'flex', alignItems: 'stretch' }}>
                 <button
@@ -545,12 +626,14 @@ function OverviewTab({
                     flex: `1 1 ${w}%`,
                     minWidth: 130,
                     padding: '16px 14px',
-                    background: `linear-gradient(180deg, ${c}12, transparent 80%)`,
-                    border: `1px solid ${TOKENS.line}`,
-                    borderTop: `2px solid ${c}88`,
+                    background: `linear-gradient(165deg, ${c}28 0%, ${c}10 45%, transparent 100%)`,
+                    border: `1px solid ${c}55`,
+                    borderLeft: `3px solid ${c}`,
+                    borderTop: `2px solid ${c}`,
                     borderRadius: 10,
                     cursor: 'pointer',
                     textAlign: 'left',
+                    boxShadow: `0 4px 24px ${c}18`,
                   }}
                 >
                   <Label accent={c}>{STAGE_LABELS[f.stage] ?? f.stage}</Label>
@@ -563,27 +646,63 @@ function OverviewTab({
                   }}>
                     {fmtNum(f.count)}
                   </div>
-                  <div style={{ fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3, marginTop: 4, minHeight: 28 }}>
-                    {(STAGE_DESC[f.stage] ?? '').split('.')[0]}.
+                  <div style={{ fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3, marginTop: 4, minHeight: 36, lineHeight: 1.35 }}>
+                    {f.stage === 'unique_normalized' && stageMeta?.broker_listings != null && (
+                      <span style={{ display: 'block', color: TOKENS.ink2 }}>
+                        dedup from {fmtNum(Number(stageMeta.broker_listings))} listings
+                      </span>
+                    )}
+                    {f.stage === 'scored' && stageMeta && (
+                      <span style={{ display: 'block', color: c }}>
+                        budget {fmtNum(Number(stageMeta.budget_attempted ?? stageMeta.target_budget ?? f.count))}
+                        {stageMeta.binding_constraint != null
+                          ? ` · ${String(stageMeta.binding_constraint)}`
+                          : ''}
+                        {stageMeta.score_failures != null && Number(stageMeta.score_failures) > 0
+                          ? ` · ${fmtNum(Number(stageMeta.score_failures))} timeouts`
+                          : ''}
+                      </span>
+                    )}
+                    {f.stage === 'watching' && (
+                      <span style={{ display: 'block', color: promotedN > 0 ? STAGE_COLORS.promoted : TOKENS.ink3 }}>
+                        {promotedN > 0
+                          ? `${fmtNum(promotedN)} promoted now (anomaly boost)`
+                          : 'no anomaly boosts this cycle'}
+                      </span>
+                    )}
+                    <span>{(STAGE_DESC[f.stage] ?? '').split('.')[0]}.</span>
                   </div>
                 </button>
                 {next && (
                   <div style={{
-                    flex: '0 0 32px',
+                    flex: '0 0 40px',
                     display: 'flex',
+                    flexDirection: 'column',
                     alignItems: 'center',
                     justifyContent: 'center',
+                    gap: 4,
                   }}
                   >
-                    <svg width={32} height={48} style={{ overflow: 'visible' }}>
+                    {drop > 0 && (
+                      <span style={{
+                        fontFamily: TOKENS.mono,
+                        fontSize: 9,
+                        color: TOKENS.caution,
+                        whiteSpace: 'nowrap',
+                      }}
+                      >
+                        −{fmtNum(drop)}
+                      </span>
+                    )}
+                    <svg width={32} height={32} style={{ overflow: 'visible' }}>
                       <line
-                        x1={0} y1={24} x2={32} y2={24}
-                        stroke={TOKENS.lineStrong}
-                        strokeWidth={1}
+                        x1={0} y1={16} x2={32} y2={16}
+                        stroke={drop > 0 ? TOKENS.caution : c}
+                        strokeWidth={1.5}
                         strokeDasharray="2 4"
                         style={{ animation: 'uni-flow 2s linear infinite' }}
                       />
-                      <polygon points="32,24 26,20 26,28" fill={TOKENS.lineStrong} />
+                      <polygon points="32,16 26,12 26,20" fill={drop > 0 ? TOKENS.caution : c} />
                     </svg>
                   </div>
                 )}
@@ -732,18 +851,25 @@ function FunnelTab({
   funnel,
   clusters,
   onJumpTo,
+  priorityRule,
+  promotions,
 }: {
   accentColor: string;
   funnel: IntelligenceUniverseResponse['funnel'];
   clusters: IntelligenceUniverseResponse['clusters'];
   onJumpTo: (t: UniTab, stage?: string | null) => void;
+  priorityRule: IntelligenceUniverseResponse['priority_rule'];
+  promotions?: IntelligenceUniverseResponse['promotions'];
 }) {
-  const stages = funnel.filter((f) => f.stage !== 'banned');
+  const stages = displayFunnelStages(funnel);
   const total = stages[0]?.count || 1;
+  const promotedN = promotedNowCount(funnel, promotions);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <PriorityRuleCard accentColor={accentColor} rule={priorityRule ?? null} />
+
       <Card style={{ padding: 24 }}>
-        <Label accent={TOKENS.ink3}>funnel · why symbols drop</Label>
+        <Label accent={TOKENS.ink3}>funnel · 4-stage selection</Label>
         <h2 style={{ margin: '8px 0 0', fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300, color: TOKENS.ink0 }}>
           {fmtNum(stages[0]?.count ?? 0)} → {fmtNum(stages[stages.length - 1]?.count ?? 0)} pipeline
         </h2>
@@ -753,6 +879,7 @@ function FunnelTab({
             const next = stages[i + 1];
             const drop = next ? f.count - next.count : null;
             const widthPct = Math.max(8, (f.count / total) * 100);
+            const meta = (f as { meta?: Record<string, unknown> | null }).meta ?? null;
             return (
               <div key={f.stage}>
                 <button
@@ -768,15 +895,43 @@ function FunnelTab({
                     cursor: 'pointer',
                     textAlign: 'left',
                   }}
+                  title={
+                    f.stage === 'unique_normalized' && meta?.broker_listings_count
+                      ? `${fmtNum(Number(meta.broker_listings_count))} raw broker listings dedup → ${fmtNum(f.count)} unique normalized`
+                      : undefined
+                  }
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
                       <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: c, textTransform: 'uppercase' }}>
-                        {STAGE_LABELS[f.stage]}
+                        {STAGE_LABELS[f.stage] ?? f.stage}
                       </div>
                       <div style={{ fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3, marginTop: 4 }}>
-                        {STAGE_DESC[f.stage]}
+                        {STAGE_DESC[f.stage] ?? ''}
                       </div>
+                      {f.stage === 'scored' && meta && (
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginTop: 4 }}>
+                          budget {fmtNum(Number(meta.budget_attempted ?? meta.target_budget ?? f.count))}
+                          {meta.binding_constraint
+                            ? ` · binding: ${String(meta.binding_constraint)}`
+                            : ''}
+                          {meta.score_failures != null && Number(meta.score_failures) > 0
+                            ? ` · ${fmtNum(Number(meta.score_failures))} timeouts`
+                            : ''}
+                        </div>
+                      )}
+                      {f.stage === 'unique_normalized' && meta?.broker_listings_count != null && (
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginTop: 4 }}>
+                          dedup from {fmtNum(Number(meta.broker_listings_count))} broker listings
+                        </div>
+                      )}
+                      {f.stage === 'watching' && (
+                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: promotedN > 0 ? STAGE_COLORS.promoted : TOKENS.ink3, marginTop: 4 }}>
+                          {promotedN > 0
+                            ? `${fmtNum(promotedN)} promoted now (overlay)`
+                            : 'no anomaly boosts this cycle'}
+                        </div>
+                      )}
                     </div>
                     <div style={{ fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300 }}>{fmtNum(f.count)}</div>
                   </div>
@@ -814,6 +969,340 @@ function FunnelTab({
         </div>
       </Card>
     </div>
+  );
+}
+
+// D118 — self-tuning priority rule panel. Renders current learned weights,
+// recent weight history sparklines, score-age summary and the current
+// budget controller state with its binding constraint label.
+function PriorityRuleCard({
+  accentColor,
+  rule,
+}: {
+  accentColor: string;
+  rule: NonNullable<IntelligenceUniverseResponse['priority_rule']> | null;
+}) {
+  const weights = rule?.weights ?? {};
+  const history = rule?.weights_history ?? [];
+  const weightKeysJoined = Object.keys(weights).sort().join('|');
+  const histogramByComponent = useMemo(() => {
+    const keys = Object.keys(weights);
+    const map: Record<string, number[]> = {};
+    for (const k of keys) map[k] = [];
+    for (const snap of history) {
+      for (const k of keys) {
+        const v = snap.weights?.[k];
+        if (typeof v === 'number') map[k].push(v);
+      }
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, weightKeysJoined]);
+  if (!rule) {
+    return (
+      <Card style={{ padding: 20 }}>
+        <Label accent={TOKENS.ink3}>self-tuning priority rule</Label>
+        <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+          Waiting for first pipeline cycle…
+        </div>
+      </Card>
+    );
+  }
+  const sortedWeights = Object.keys(rule.weights)
+    .map((k) => ({ key: k, value: rule.weights[k] }))
+    .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  const maxWeight = Math.max(0.001, ...sortedWeights.map((w) => w.value ?? 0));
+
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Label accent={TOKENS.ink3}>self-tuning priority rule · {rule.weights_cycle_count} cycles</Label>
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          binding: <span style={{ color: accentColor }}>{rule.budget.binding_constraint}</span>
+          {' · '}budget {fmtNum(rule.budget.target_budget)}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+        <div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 8 }}>
+            learned weights (sum = 1.0)
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {sortedWeights.map((w) => {
+              const pct = ((w.value ?? 0) / maxWeight) * 100;
+              const series = histogramByComponent[w.key] ?? [];
+              return (
+                <div
+                  key={w.key}
+                  style={{ display: 'grid', gridTemplateColumns: '120px 1fr 50px 60px', gap: 8, alignItems: 'center' }}
+                >
+                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>{w.key}</span>
+                  <div style={{ height: 6, borderRadius: 3, background: TOKENS.bg3, overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        width: `${pct}%`,
+                        height: '100%',
+                        background: accentColor,
+                        opacity: 0.7,
+                        borderRadius: 3,
+                      }}
+                    />
+                  </div>
+                  <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1, textAlign: 'right' }}>
+                    {(w.value ?? 0).toFixed(3)}
+                  </span>
+                  {series.length > 1 ? (
+                    <Spark values={series} color={accentColor} height={14} />
+                  ) : (
+                    <span style={{ fontFamily: TOKENS.mono, fontSize: 9, color: TOKENS.ink3 }}>—</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 8 }}>
+            budget meter
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 12,
+              fontFamily: TOKENS.mono,
+              fontSize: 11,
+              color: TOKENS.ink2,
+            }}
+          >
+            <div>
+              target budget
+              <div style={{ color: TOKENS.ink0, fontSize: 18, marginTop: 2 }}>
+                {fmtNum(rule.budget.target_budget)}
+              </div>
+            </div>
+            <div>
+              cycle count
+              <div style={{ color: TOKENS.ink0, fontSize: 18, marginTop: 2 }}>
+                {fmtNum(rule.budget.cycle_count)}
+              </div>
+            </div>
+            <div>
+              never scored
+              <div style={{ color: TOKENS.ink0, fontSize: 18, marginTop: 2 }}>
+                {fmtNum(rule.score_age_summary.never_scored)}
+              </div>
+            </div>
+            <div>
+              median age
+              <div style={{ color: TOKENS.ink0, fontSize: 18, marginTop: 2 }}>
+                {rule.score_age_summary.median_age_sec > 0
+                  ? `${(rule.score_age_summary.median_age_sec / 60).toFixed(1)} min`
+                  : '—'}
+              </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 12, fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3, lineHeight: 1.5 }}>
+            The budget self-tunes by AIMD throughput + utility saturation.
+            Component weights self-tune by online logistic regression with
+            AdaGrad. There are no operator-tunable numbers.
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// D118 — asset-class coverage tab. Read-only mosaic that aggregates the
+// scored set by ``klass`` so the operator can see whether the
+// self-tuning priority rule is keeping reasonable cross-asset balance.
+function CoverageTab({
+  accentColor,
+  coverage,
+  symbols,
+}: {
+  accentColor: string;
+  coverage: IntelligenceUniverseResponse['asset_class_coverage'];
+  symbols: UniverseSymbolRow[];
+}) {
+  const fallback = useMemo(() => {
+    if (coverage && coverage.by_asset_class.length > 0) return coverage;
+    const counts: Record<string, number> = {};
+    for (const s of symbols) counts[s.klass] = (counts[s.klass] || 0) + 1;
+    const total = symbols.length || 1;
+    const rows = Object.entries(counts)
+      .map(([klass, count]) => ({ klass, count, share: count / total }))
+      .sort((a, b) => b.count - a.count);
+    return { total: symbols.length, by_asset_class: rows };
+  }, [coverage, symbols]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card style={{ padding: 20 }}>
+        <Label accent={TOKENS.ink3}>asset-class coverage</Label>
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3, marginTop: 6 }}>
+          {fmtNum(fallback.total)} symbols selected by the priority rule, by class
+        </div>
+        <div
+          style={{
+            marginTop: 14,
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+            gap: 12,
+          }}
+        >
+          {fallback.by_asset_class.map((row) => {
+            const pct = Math.max(2, row.share * 100);
+            return (
+              <div
+                key={row.klass}
+                style={{
+                  padding: 12,
+                  borderRadius: 8,
+                  background: TOKENS.bg2,
+                  border: `1px solid ${TOKENS.line}`,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {classGlyph(row.klass, 10)}
+                  <span style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink1, fontWeight: 500 }}>
+                    {row.klass}
+                  </span>
+                  <span style={{ marginLeft: 'auto', fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2 }}>
+                    {fmtNum(row.count)}
+                  </span>
+                </div>
+                <div style={{ marginTop: 8, height: 6, borderRadius: 3, background: TOKENS.bg3 }}>
+                  <div
+                    style={{
+                      width: `${pct}%`,
+                      height: '100%',
+                      background: accentColor,
+                      opacity: 0.65,
+                      borderRadius: 3,
+                    }}
+                  />
+                </div>
+                <div style={{ marginTop: 6, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                  {(row.share * 100).toFixed(1)}% share
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// D118 — tier-transitions activity stream. Reads the ring buffer of
+// ``data/runtime/universe_transitions.json`` (sourced from the snapshot
+// service). Filterable by reason; click a row to jump to that symbol.
+function TransitionsTab({
+  accentColor,
+  transitions,
+  onSelect,
+}: {
+  accentColor: string;
+  transitions: NonNullable<IntelligenceUniverseResponse['transitions']>;
+  onSelect: (sym: string) => void;
+}) {
+  const [reasonFilter, setReasonFilter] = useState<string>('all');
+  const reasons = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of transitions) if (t.reason) s.add(t.reason);
+    return ['all', ...Array.from(s).sort()];
+  }, [transitions]);
+  const filtered = useMemo(
+    () => (reasonFilter === 'all' ? transitions : transitions.filter((t) => t.reason === reasonFilter)),
+    [transitions, reasonFilter],
+  );
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Label accent={TOKENS.ink3}>tier transitions · last {fmtNum(transitions.length)}</Label>
+        <select
+          value={reasonFilter}
+          onChange={(e) => setReasonFilter(e.target.value)}
+          style={{
+            background: TOKENS.bg2,
+            color: TOKENS.ink1,
+            border: `1px solid ${TOKENS.line}`,
+            borderRadius: 6,
+            padding: '4px 8px',
+            fontFamily: TOKENS.mono,
+            fontSize: 11,
+          }}
+        >
+          {reasons.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+      </div>
+      <div
+        style={{
+          marginTop: 12,
+          maxHeight: 460,
+          overflow: 'auto',
+          border: `1px solid ${TOKENS.line}`,
+          borderRadius: 8,
+        }}
+      >
+        {filtered.length === 0 && (
+          <div
+            style={{
+              padding: 24,
+              fontFamily: TOKENS.mono,
+              fontSize: 11,
+              color: TOKENS.ink3,
+              textAlign: 'center',
+            }}
+          >
+            No transitions recorded yet.
+          </div>
+        )}
+        {filtered.map((t, idx) => {
+          const ts = t.ts ? new Date(t.ts).toISOString().slice(11, 19) : '—';
+          const delta = t.score_delta;
+          const deltaColor = delta == null ? TOKENS.ink3 : delta >= 0 ? TOKENS.profit : TOKENS.danger;
+          return (
+            <button
+              key={`${t.ts}-${t.symbol}-${idx}`}
+              type="button"
+              onClick={() => onSelect(t.symbol)}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '80px 100px 1fr 1fr 80px',
+                gap: 8,
+                width: '100%',
+                padding: '8px 12px',
+                border: 'none',
+                borderBottom: `1px solid ${TOKENS.line}`,
+                background: 'transparent',
+                color: TOKENS.ink2,
+                fontFamily: TOKENS.mono,
+                fontSize: 11,
+                cursor: 'pointer',
+                textAlign: 'left',
+                alignItems: 'center',
+              }}
+            >
+              <span style={{ color: TOKENS.ink3 }}>{ts}</span>
+              <span style={{ color: accentColor }}>{t.symbol}</span>
+              <span>
+                {t.from_tier} → {t.to_tier}
+              </span>
+              <span style={{ color: TOKENS.ink3 }}>{t.reason}</span>
+              <span style={{ color: deltaColor, textAlign: 'right' }}>
+                {delta == null ? '—' : (delta > 0 ? '+' : '') + delta.toFixed(3)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 
@@ -867,7 +1356,8 @@ function InstrumentsTab({
       <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Card style={{ padding: 14 }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-            {(['all', 'source', 'eligible', 'watching', 'promoted', 'active', 'banned'] as const).map((st) => (
+            {/* D118 — 6-stage funnel plus the legacy ``banned`` chip. */}
+            {(['all', 'unique_normalized', 'priority_ranked', 'scored', 'watching', 'promoted', 'active_reps', 'banned'] as const).map((st) => (
               <button
                 key={st}
                 type="button"
@@ -883,7 +1373,7 @@ function InstrumentsTab({
                   cursor: 'pointer',
                 }}
               >
-                {st} ({stageCounts[st] ?? (st === 'all' ? symbols.length : 0)})
+                {STAGE_LABELS[st] ?? st} ({stageCounts[st] ?? (st === 'all' ? symbols.length : 0)})
               </button>
             ))}
             <input
@@ -942,11 +1432,24 @@ function InstrumentsTab({
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
               {filtered.slice(0, 240).map((s) => {
                 const c = STAGE_COLORS[s.stage] ?? accentColor;
+                // D118 — surface priority breakdown + score age in
+                // the native tooltip so the operator can see why a
+                // symbol was picked without leaving the grid.
+                const ageLine = s.last_scored_at
+                  ? `\nlast scored: ${s.last_scored_at}`
+                  : '\nlast scored: —';
+                const breakdown = s.priority_breakdown
+                  ? `\npriority: ${s.priority_breakdown.priority_score.toFixed(4)}\n` +
+                    Object.entries(s.priority_breakdown.components)
+                      .map(([k, v]) => `  ${k}: ${v.toFixed(3)}`)
+                      .join('\n')
+                  : '';
+                const titleText = `${symbolTitle(s)}${ageLine}${breakdown}`;
                 return (
                   <button
                     key={s.sym}
                     type="button"
-                    title={symbolTitle(s)}
+                    title={titleText}
                     onClick={() => onSelect(s.sym)}
                     style={{
                       padding: 10,
@@ -995,34 +1498,70 @@ function InstrumentsTab({
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>stage</th>
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>conv</th>
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>ρ</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>last scored</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.slice(0, 400).map((s) => (
-                    <tr
-                      key={s.sym}
-                      title={symbolTitle(s)}
-                      onClick={() => onSelect(s.sym)}
-                      style={{ cursor: 'pointer', fontFamily: TOKENS.sans, fontSize: 12 }}
-                    >
-                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.sym}</td>
-                      <td style={{
-                        padding: 8,
-                        borderBottom: `1px solid ${TOKENS.line}`,
-                        color: TOKENS.ink2,
-                        maxWidth: 220,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
+                  {filtered.slice(0, 400).map((s) => {
+                    // D118 — show a compact age stripe + ISO when the
+                    // priority pre-filter has touched this symbol.
+                    let ageLabel = '—';
+                    let ageColor = TOKENS.ink3;
+                    if (s.last_scored_at) {
+                      const t = new Date(s.last_scored_at).getTime();
+                      if (!Number.isNaN(t)) {
+                        const ageSec = Math.max(0, (Date.now() - t) / 1000);
+                        if (ageSec < 60) ageLabel = `${ageSec.toFixed(0)}s`;
+                        else if (ageSec < 3600) ageLabel = `${(ageSec / 60).toFixed(1)}m`;
+                        else if (ageSec < 86400) ageLabel = `${(ageSec / 3600).toFixed(1)}h`;
+                        else ageLabel = `${(ageSec / 86400).toFixed(1)}d`;
+                        ageColor = ageSec < 600 ? TOKENS.profit : ageSec < 3600 ? TOKENS.caution : TOKENS.ink3;
+                      }
+                    }
+                    const breakdown = s.priority_breakdown
+                      ? `priority: ${s.priority_breakdown.priority_score.toFixed(4)}\n` +
+                        Object.entries(s.priority_breakdown.components)
+                          .map(([k, v]) => `  ${k}: ${v.toFixed(3)}`)
+                          .join('\n')
+                      : '';
+                    const titleText = breakdown ? `${symbolTitle(s)}\n${breakdown}` : symbolTitle(s);
+                    return (
+                      <tr
+                        key={s.sym}
+                        title={titleText}
+                        onClick={() => onSelect(s.sym)}
+                        style={{ cursor: 'pointer', fontFamily: TOKENS.sans, fontSize: 12 }}
                       >
-                        {symbolSubtitle(s)}
-                      </td>
-                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.stage}</td>
-                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.conviction}</td>
-                      <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.bookCorr?.toFixed(2)}</td>
-                    </tr>
-                  ))}
+                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.sym}</td>
+                        <td style={{
+                          padding: 8,
+                          borderBottom: `1px solid ${TOKENS.line}`,
+                          color: TOKENS.ink2,
+                          maxWidth: 220,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        >
+                          {symbolSubtitle(s)}
+                        </td>
+                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.stage}</td>
+                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.conviction}</td>
+                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.bookCorr?.toFixed(2)}</td>
+                        <td
+                          style={{
+                            padding: 8,
+                            borderBottom: `1px solid ${TOKENS.line}`,
+                            color: ageColor,
+                            fontFamily: TOKENS.mono,
+                            fontSize: 11,
+                          }}
+                        >
+                          {ageLabel}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

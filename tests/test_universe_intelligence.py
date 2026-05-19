@@ -167,8 +167,13 @@ def test_snapshot_reports_active_count_from_representatives(monkeypatch, tmp_pat
         intelligence_path=p,
     )
     by_stage = {row["stage"]: row["count"] for row in payload["funnel"]}
-    assert by_stage["active"] == 2
-    assert by_stage["promoted"] == 1
+    # D118 renamed the legacy ``active`` stage to ``active_reps`` so the
+    # operator-facing label matches what the orchestrator persists
+    # (correlation representatives in the watching tier).
+    assert by_stage["active_reps"] == 2
+    watching = next(s for s in payload["funnel"] if s["stage"] == "watching")
+    assert watching["meta"]["promoted_now"] == 1
+    assert len(payload["promotions"]) == 1
     assert payload["coverage"]["by_broker"]["ibkr"]["source"] == "curated_seed"
 
 

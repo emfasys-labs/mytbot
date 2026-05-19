@@ -491,6 +491,10 @@ export type UniverseFunnelStage = {
   count: number;
   fresh?: boolean;
   drops?: Array<{ reason: string; count: number }> | null;
+  // D118 — opaque per-stage payload (e.g. budget meter info on
+  // ``priority_ranked``, ``broker_listings`` debug count on
+  // ``unique_normalized``).
+  meta?: Record<string, unknown> | null;
 };
 
 export type UniverseSymbolRow = {
@@ -511,6 +515,66 @@ export type UniverseSymbolRow = {
   tierReason?: string | null;
   pairWatch?: boolean;
   override?: { kind?: string; reason?: string } | null;
+  // D118 — per-symbol score-age telemetry attached by the snapshot
+  // service. ``last_scored_at`` is ISO-8601 UTC; ``last_score`` is the
+  // most recent yfinance liquidity score; ``score_count`` is the
+  // lifetime number of successful scoring events for this symbol.
+  last_scored_at?: string | null;
+  last_score?: number | null;
+  score_count?: number | null;
+  // D118 — priority pre-filter breakdown (component subscores +
+  // weighted total). Present only when this symbol was picked by
+  // the priority pre-filter in the most recent cycle.
+  priority_breakdown?: {
+    priority_score: number;
+    components: Record<string, number>;
+  } | null;
+};
+
+// D118 — self-tuning priority pre-filter telemetry. Carries the live
+// learned weights, recent weight history (sparkline), budget controller
+// state with binding-constraint label, and aggregated score-age
+// summary. Returned by the snapshot service after at least one cycle.
+export type UniversePriorityRule = {
+  enabled: boolean;
+  weights: Record<string, number>;
+  weights_history: Array<{
+    ts: string;
+    cycle: number;
+    weights: Record<string, number>;
+  }>;
+  weights_cycle_count: number;
+  weights_last_update_at?: string | null;
+  budget: {
+    target_budget: number;
+    binding_constraint: string;
+    cycle_count: number;
+    last_observation?: Record<string, unknown> | null;
+    last_update_at?: string | null;
+  };
+  score_age_summary: {
+    total_tracked: number;
+    never_scored: number;
+    median_age_sec: number;
+  };
+};
+
+export type UniverseTransition = {
+  ts: string;
+  symbol: string;
+  from_tier: string;
+  to_tier: string;
+  reason: string;
+  score_delta?: number | null;
+};
+
+export type UniverseAssetClassCoverage = {
+  total: number;
+  by_asset_class: Array<{
+    klass: string;
+    count: number;
+    share: number;
+  }>;
 };
 
 export type IntelligenceUniverseResponse = {
@@ -586,6 +650,12 @@ export type IntelligenceUniverseResponse = {
     consecutive_misses_count?: number;
     last_grace_extended?: string[];
   } | null;
+  // D118 — self-tuning priority pre-filter, tier-transition stream,
+  // and asset-class coverage rollup. ``priority_rule`` is ``null``
+  // before the first pipeline cycle has completed.
+  priority_rule?: UniversePriorityRule | null;
+  transitions?: UniverseTransition[];
+  asset_class_coverage?: UniverseAssetClassCoverage | null;
 };
 
 export type TradingMode = 'defender' | 'trader' | 'hunter';

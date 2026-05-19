@@ -19,6 +19,30 @@ dynamic_universe:
     scan_batch_size: 45
     scan_strategy_every_n: 3
 
+    # D118 — Self-tuning priority pre-filter.
+    #
+    # Replaces the legacy fixed-seed stratified sampler with a
+    # deterministic rule-based selection over EVERY unique normalized
+    # symbol the brokers + D116 registry expose. Six component
+    # subscores (liquidity_prior, anchor_pin, freshness_bonus,
+    # registry_availability, asset_class_balance, region_balance) are
+    # weighted-summed into one priority_score. The weights are NOT in
+    # YAML — they are learned online by data/universe_weight_learner
+    # using "did this pick enter the watching tier?" as supervision.
+    # The scoring budget is itself self-tuned by
+    # data/universe_budget_controller using AIMD throughput + utility
+    # saturation. There are NO operator-visible tuning numbers below;
+    # only kill switches and the persistence directory.
+    #
+    # See docs/DECISIONS.md D118 for the full policy list and safety
+    # bounds (weight clamps, AIMD factors, budget floor) — those are
+    # code constants, not tuning knobs.
+    priority_score:
+      enabled: true                       # master kill switch
+      weight_learning_enabled: true       # freeze weights at uniform when false
+      budget_self_tune_enabled: true      # freeze budget at last-known-good when false
+      state_dir: data/runtime             # where the three state files live
+
   # D117 — Adaptive universe-tier sizing.
   #
   # When enabled, the next pipeline tick resolves caps from

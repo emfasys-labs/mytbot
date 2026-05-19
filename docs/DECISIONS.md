@@ -1005,6 +1005,166 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D118 — Self-tuning priority pre-filter + 6-stage universe funnel (2026-05-19)
+
+The funnel between "every unique normalized symbol from connected brokers
++ the instrument registry" and "the small set we actually score with
+yfinance" was a problem on three axes:
+
+1. **It was opaque.** The operator-visible funnel jumped from
+   `broker_listings` → `eligible` → `watching` → `active_reps` with no
+   visibility into how we narrowed ~16k unique symbols down to the
+   ~400 we sent to yfinance.
+2. **It had hidden randomness.** `_stratified_sample_candidates` did a
+   deterministic but effectively stratified-random pull weighted by
+   broker tier — there was no causal rule the user could read.
+3. **It still relied on hard-coded knobs.** The scoring budget (320),
+   the eligible-vs-pinned cutoffs, and any "weights" that would be
+   added later (liquidity, freshness, asset-class balance) were all
+   tunable numbers in YAML. The operator demanded none of this be
+   manually set.
+
+**Decision.** Replace stratified-random candidate selection with a
+deterministic, self-tuning rule that scores **every** unique
+normalized symbol fast (microseconds per symbol; no I/O), picks the
+top-N by score, and self-adjusts both the weights of the score
+components and N itself based on observed outcomes. There are **no
+operator-tunable numbers** for either the weights or the budget — only
+master kill switches and (fixed, not-tunable) safety bounds in code.
+
+**Four-stage funnel** (`universe/snapshot_service.py::_build_d118_funnel`):
+
+1. `unique_normalized` — every unique broker-listed symbol + every
+   instrument registry symbol after canonicalisation/deduplication.
+   The raw broker-listing count is shown as a debug tooltip but is
+   **not** a stage (the user explicitly rejected the 31k row).
+2. `scored` — top-N priority pick **and** yfinance liquidity scoring in
+   one pipeline pass. The self-tuning budget N and any timeout gap
+   (`budget_attempted` vs count) are exposed on `scored.meta`.
+3. `watching` — `core + scan` tiers from `universe_tiers.json`.
+   Temporary anomaly promotions (`promoted_now`) are metadata on this
+   stage, not a separate funnel step — they overlap scan/light and are
+   not a filter between watching and active reps.
+4. `active_reps` — non-redundant correlation representatives from
+   universe intelligence clustering.
+
+**Priority rule** (`data/universe_prefilter.py::compute_priority_scores`):
+
+A symbol's priority is a weighted sum of six component subscores in
+`[0, 1]`:
+- `liquidity_prior` — registry liquidity bucket, fallback heuristics
+  for crypto / FX / ETFs.
+- `anchor_pin` — 1.0 for `UniverseManager.INITIAL_UNIVERSE` plus the
+  IBKR curated seed, 0.0 otherwise. Anchors are pinned post-rank.
+- `freshness_bonus` — decays from 1.0 (never scored) to ~0.0 (scored
+  in the last 60s); promotes coverage of rarely-touched symbols.
+- `registry_availability` — score is 1.0 when at least one broker has
+  the symbol available, 0.0 when registry says unknown.
+- `asset_class_balance` — boost when the current `unique_normalized`
+  set is light in this asset class.
+- `region_balance` — same idea for region.
+
+**Self-tuning weights**
+(`data/universe_weight_learner.py::WeightLearner`):
+
+Online logistic regression with AdaGrad and EWMA decay. After every
+pipeline cycle, each picked symbol is labelled by "did it actually
+enter `watching` this cycle?". Weights are updated to maximise that
+labelled likelihood, clamped to `[0.05, 0.50]` per component
+(safety bounds, not tunable), then re-normalised to sum to 1.0. State
+persisted atomically to `data/runtime/universe_weights.json`.
+
+**Self-tuning budget**
+(`data/universe_budget_controller.py::BudgetController`):
+
+Two control laws run on every cycle and the smaller of the two values
+wins:
+- **AIMD throughput control** — measured cycle wall-time vs the
+  scoring interval. If we ran in less than the configured throughput
+  share we add `+25` (additive increase); if we overran we multiply by
+  `0.75` (multiplicative decrease).
+- **Utility saturation detection** — track `max_watching_rank` (the
+  deepest priority-ranked index that made it into `watching`). If for
+  several cycles all watching members sat in the top `0.6 * budget`
+  ranks, the marginal symbol scored is not yielding new watching
+  members; we shrink toward that observed cap.
+A hard `[budget_floor, budget_ceiling]` (200–800 by default; safety
+bounds, not tunable knobs) clamps the result. The currently *binding*
+constraint (`aimd_grow` / `aimd_shrink` / `utility_saturation` /
+`floor` / `ceiling` / `stable`) is exposed in the UI so the operator
+can see *why* the budget moved. State persisted atomically to
+`data/runtime/universe_budget.json`.
+
+**Tier-transition stream**
+(`data/universe_transitions.py::TransitionBuffer`):
+
+Every cycle, the new vs previous tier maps are diffed and the changes
+are appended to a ring buffer (default 500 events) with
+`(ts, symbol, from_tier, to_tier, reason, score_delta)`. Reasons
+include `promoted_to_watching`, `demoted_to_light`,
+`promoted_to_active_reps`, `entered_unique_normalized`,
+`removed_from_universe`. State persisted atomically to
+`data/runtime/universe_transitions.json`.
+
+**Per-symbol score-age telemetry**
+(`data/universe_score_ages.py::ScoreAges`):
+
+For every unique normalized symbol we keep
+`(last_scored_at, last_score, score_count, first_seen_at)` with
+atomic JSON persistence and a hard cap on tracked size with a
+deterministic LRU eviction (unscored first, then oldest scored).
+`/intelligence/universe` returns the per-symbol last-score timestamp,
+and the Instruments tab renders a coloured age stripe.
+
+**Wiring.** `_pipeline_runner` in `system/orchestrator.py` now:
+1. Loads `ScoreAges`, `WeightLearner`, `BudgetController`, and the
+   previous tier snapshot.
+2. Computes `priority_scores` over the full `unique_normalized` set.
+3. Calls `BudgetController.compute_next_budget()` for `N`.
+4. Calls `UniverseBuilder.build_tiered_universe(...,
+   priority_scores=..., target_budget=N, anchors=...,
+   telemetry=BuildTelemetry())`.
+5. After the build: updates `ScoreAges` from the telemetry, updates
+   `WeightLearner` from
+   `build_training_rows(picks_breakdowns, watching_now)`, observes a
+   `CycleObservation` into `BudgetController`, diffs old vs new tiers
+   and records transitions. All state is persisted atomically.
+
+**Config surface** (`config/data_pipeline.yaml::dynamic_universe.ranking.priority_score`):
+```
+priority_score:
+  enabled: true
+  weight_learning_enabled: true
+  budget_self_tune_enabled: true
+  state_dir: data/runtime
+```
+Only master kill switches and a state directory. Disabling any switch
+falls back to uniform weights or a fixed budget; the entire `enabled:
+false` path is the legacy `_stratified_sample_candidates` behaviour
+unchanged.
+
+**Backward compatibility.** When the priority rule is disabled (or
+when no scores are passed in), the builder still runs
+`_stratified_sample_candidates` exactly as before. Anchors from
+`UniverseManager.INITIAL_UNIVERSE` continue to be pinned. The risk
+engine, order routing, and broker availability are untouched: D118 is
+a *discovery-layer* control only.
+
+**Status:** Implemented (`data/universe_score_ages.py`,
+`data/universe_prefilter.py`, `data/universe_weight_learner.py`,
+`data/universe_budget_controller.py`, `data/universe_transitions.py`,
+`data/universe_builder.py`, `system/orchestrator.py`,
+`universe/snapshot_service.py`, `ui/src/app/lib/api.ts`,
+`ui/src/app/redesign/universe/UniverseScreen.tsx`,
+`config/data_pipeline.yaml`). Tests:
+`tests/test_universe_score_ages.py`,
+`tests/test_universe_prefilter.py`,
+`tests/test_universe_weight_learner.py`,
+`tests/test_universe_budget_controller.py`,
+`tests/test_universe_transitions.py`,
+`tests/test_universe_builder_priority_selection.py`,
+`tests/test_universe_snapshot_d118.py`.
+
 ## D117 — Adaptive universe-tier sizing (regime + signal pressure + cluster count + anti-churn) (2026-05-19)
 
 The pre-D117 universe funnel used three hard-coded caps in

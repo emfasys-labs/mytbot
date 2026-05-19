@@ -148,6 +148,218 @@ def _adaptive_caps_block() -> dict[str, Any] | None:
     }
 
 
+def _priority_rule_block() -> dict[str, Any] | None:
+    """D118 — surface the self-tuning priority pre-filter telemetry.
+
+    Returns ``None`` when none of the D118 state files exist yet (first
+    boot pre-cycle-1). Otherwise the block carries the current learned
+    weights, the recent weight-history sparkline, the budget controller
+    state with binding-constraint label, and the score-age summary.
+    """
+    try:
+        from data.universe_budget_controller import load_budget_state
+        from data.universe_score_ages import load_score_ages
+        from data.universe_weight_learner import (
+            COMPONENT_NAMES,
+            load_weight_learner_state,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    weights_state = load_weight_learner_state()
+    budget_state = load_budget_state()
+    ages_state = load_score_ages()
+    if (
+        weights_state.cycle_count == 0
+        and budget_state.cycle_count == 0
+        and len(ages_state) == 0
+    ):
+        return None
+    # Surface clamped + renormalised live weights (matches what the
+    # learner exposes to the pre-filter).
+    from data.universe_weight_learner import WeightLearner as _WL
+
+    live_weights = _WL(state=weights_state).current_weights()
+    return {
+        "enabled": True,
+        "weights": {name: float(live_weights.get(name, 0.0)) for name in COMPONENT_NAMES},
+        "weights_history": list(weights_state.history[-30:]),
+        "weights_cycle_count": int(weights_state.cycle_count),
+        "weights_last_update_at": weights_state.last_update_at,
+        "budget": {
+            "target_budget": int(budget_state.target_budget),
+            "binding_constraint": str(budget_state.binding_constraint),
+            "cycle_count": int(budget_state.cycle_count),
+            "last_observation": dict(budget_state.last_observation),
+            "last_update_at": budget_state.last_update_at,
+        },
+        "score_age_summary": ages_state.summary(),
+    }
+
+
+def _transitions_block(limit: int = 100) -> list[dict[str, Any]]:
+    """D118 — surface the most recent tier-transition rows."""
+    try:
+        from data.universe_transitions import load_transitions
+    except Exception:  # noqa: BLE001
+        return []
+    buf = load_transitions()
+    return [row.to_dict() for row in buf.recent(int(limit))]
+
+
+def _score_ages_by_symbol() -> dict[str, dict[str, Any]]:
+    """D118 — load per-symbol score-age + last_score for the UI grid."""
+    try:
+        from data.universe_score_ages import load_score_ages
+    except Exception:  # noqa: BLE001
+        return {}
+    state = load_score_ages()
+    out: dict[str, dict[str, Any]] = {}
+    for sym, row in state.items():
+        out[sym] = {
+            "last_scored_at": row.last_scored_at,
+            "last_score": row.last_score,
+            "score_count": int(row.score_count),
+            "first_seen_at": row.first_seen_at,
+        }
+    return out
+
+
+def _d118_scoring_counts(
+    *,
+    priority_ranked_fallback: int,
+    scored_fallback: int,
+    budget_block: dict[str, Any] | None,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Resolve priority-ranked vs successfully-scored counts for the funnel.
+
+    When the budget controller has completed at least one cycle, we prefer
+    its last observation (``budget`` = symbols picked for yfinance,
+    ``scored`` = symbols that actually returned a score). Otherwise we
+    fall back to tier-file counts.
+    """
+    ranked = int(max(0, priority_ranked_fallback))
+    scored = int(max(0, scored_fallback))
+    drops_scored: list[dict[str, Any]] = []
+    if isinstance(budget_block, dict):
+        last_obs = budget_block.get("last_observation")
+        if isinstance(last_obs, dict):
+            obs_budget = int(last_obs.get("budget") or 0)
+            obs_scored = int(last_obs.get("scored") or 0)
+            if obs_budget > 0:
+                ranked = obs_budget
+            if obs_scored > 0:
+                scored = obs_scored
+        target = int(budget_block.get("target_budget") or 0)
+        if ranked <= 0 and target > 0:
+            ranked = target
+    if ranked > 0 and scored > ranked:
+        scored = ranked
+    if ranked > scored:
+        drops_scored.append(
+            {
+                "reason": "yfinance timeout / no score",
+                "count": int(ranked - scored),
+            }
+        )
+    return ranked, scored, drops_scored
+
+
+def _build_d118_funnel(
+    *,
+    unique_source_count: int,
+    priority_ranked_count: int,
+    scored_count: int,
+    watching_count: int,
+    promoted_count: int,
+    active_count: int,
+    broker_listing_count: int,
+    drops_eligible: list[dict[str, Any]],
+    drops_watching: list[dict[str, Any]],
+    drops_scored: list[dict[str, Any]] | None = None,
+    budget_block: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """D118 — 4-stage discovery funnel (priority pick + yfinance are one step).
+
+    ``unique_normalized`` is the deduped broker+registry universe.
+    ``scored`` is how many symbols received a liquidity score this cycle.
+    ``watching`` is core+scan; ``promoted_now`` (anomaly boosts) is
+    metadata on that stage, not a separate funnel step — promotions
+    overlap scan/light and are not a filter between watching and
+    ``active_reps``. ``active_reps`` is the correlation-representative
+    count from universe intelligence.
+    """
+    ranked = int(max(0, priority_ranked_count))
+    scored = int(max(0, scored_count))
+    if ranked <= 0 and scored > 0:
+        ranked = scored
+    scored_meta: dict[str, Any] | None = None
+    if budget_block or ranked > 0:
+        scored_meta = dict(budget_block) if budget_block else {}
+        if ranked > 0:
+            scored_meta["budget_attempted"] = ranked
+        if ranked > scored:
+            scored_meta["score_failures"] = int(ranked - scored)
+    return [
+        {
+            "stage": "unique_normalized",
+            "count": int(max(1, unique_source_count)),
+            "fresh": True,
+            "drops": drops_eligible,
+            "meta": {
+                "broker_listings": int(broker_listing_count or 0),
+            },
+        },
+        {
+            "stage": "scored",
+            "count": int(max(0, scored)),
+            "fresh": True,
+            "drops": list(drops_scored or []),
+            "meta": scored_meta,
+        },
+        {
+            "stage": "watching",
+            "count": int(max(0, watching_count)),
+            "fresh": True,
+            "drops": drops_watching,
+            "meta": {
+                "promoted_now": int(max(0, promoted_count)),
+            },
+        },
+        {
+            "stage": "active_reps",
+            "count": int(max(0, active_count)),
+            "fresh": True,
+            "drops": None,
+        },
+    ]
+
+
+def _asset_class_coverage_block(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """D118 — aggregate by asset class for the Coverage tab.
+
+    Symbol rows already carry ``klass`` from :func:`_classify_symbol`,
+    so we aggregate by ``klass`` for the UI chip + progress display.
+    """
+    counts: dict[str, int] = {}
+    for row in symbol_rows:
+        if not isinstance(row, dict):
+            continue
+        klass = str(row.get("klass") or "unknown")
+        counts[klass] = counts.get(klass, 0) + 1
+    total = sum(counts.values()) or 0
+    return {
+        "total": int(total),
+        "by_asset_class": [
+            {
+                "klass": klass,
+                "count": int(count),
+                "share": (float(count) / float(total)) if total > 0 else 0.0,
+            }
+            for klass, count in sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+        ],
+    }
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -190,7 +402,10 @@ def build_universe_snapshot_dict(
     scores = dict(tiers.scores) if tiers else {}
 
     watching_count = len(set(core_list + scan_list)) or min(len(pipeline_syms), caps["max_symbols"])
-    scored_count = len(set(core_list + scan_list + light_list)) or min(
+    # Prefer the live scores map (symbols with a yfinance liquidity value);
+    # the core+scan+light union can include stale light-tier rows from an
+    # older, oversized budget cycle and inflates the funnel.
+    scored_count = len(scores) or len(set(core_list + scan_list + light_list)) or min(
         unique_source_count or source_pool or len(pipeline_syms),
         caps["candidates"],
     )
@@ -206,42 +421,76 @@ def build_universe_snapshot_dict(
     )
 
     funnel_template = cfg.get("funnel_display") or {}
+    adaptive_block = _adaptive_caps_block()
+    # D118 — priority pre-filter, transitions, and coverage blocks.
+    priority_rule_block = _priority_rule_block()
+    budget_block = (
+        priority_rule_block.get("budget") if isinstance(priority_rule_block, dict) else None
+    )
+    priority_ranked_n, scored_n, drops_scored = _d118_scoring_counts(
+        priority_ranked_fallback=min(unique_source_count, caps["candidates"]),
+        scored_fallback=scored_count,
+        budget_block=budget_block if isinstance(budget_block, dict) else None,
+    )
     drops_eligible = _drop_rows(
         [
             ("Broker duplicates / unsupported symbol formats", max(0, source_pool - unique_source_count)),
-            (f"Scoring capacity cap ({caps['candidates']} max)", max(0, unique_source_count - eligible_count)),
+            (
+                "Below this cycle's priority cutoff (budget self-tune)",
+                max(0, unique_source_count - priority_ranked_n),
+            ),
         ],
         fallback=funnel_template.get("drops_eligible"),
     )
+    light_count = len(light_list)
     drops_watching = _drop_rows(
         [
-            (f"Watch capacity cap ({caps['max_symbols']} max)", max(0, eligible_count - watching_count)),
-            ("Light tier retained for cold scan", max(0, len(light_list))),
+            (
+                "Assigned to light tier (scored, not core+scan)",
+                max(0, light_count),
+            ),
+            (
+                f"Watch tier cap (core+scan max {caps['max_symbols']})",
+                max(0, scored_n - watching_count - light_count),
+            ),
             ("Correlation overlap (representative kept)", max(0, len((intel.core if intel else []) or []) - watching_count)),
         ],
         fallback=funnel_template.get("drops_watching"),
     )
-
-    adaptive_block = _adaptive_caps_block()
+    drops_scored = list(drops_scored or [])
+    if light_count > 0 and scored_n > watching_count:
+        drops_scored.append(
+            {
+                "reason": "In light tier after scoring (not actively watched)",
+                "count": int(light_count),
+            }
+        )
+    transitions_rows = _transitions_block(limit=200)
+    # Score-age telemetry per symbol so the InstrumentsTab can render
+    # the age stripe + last_scored_at tooltip.
+    score_ages_by_symbol = _score_ages_by_symbol()
     if not enabled:
         promoted_n = min(12, max(0, watching_count // 10))
         active_n = min(7, max(0, watching_count // 40))
-        funnel = [
-            {"stage": "source", "count": max(source_pool or eligible_count, 1), "fresh": True, "drops": None},
-            {"stage": "eligible", "count": max(eligible_count, 1), "fresh": True, "drops": drops_eligible},
-            {
-                "stage": "watching",
-                "count": max(watching_count, 1),
-                "fresh": True,
-                "drops": drops_watching,
-            },
-            {"stage": "promoted", "count": promoted_n, "fresh": True, "drops": None},
-            {"stage": "active", "count": active_n, "fresh": True, "drops": None},
-            {"stage": "banned", "count": 0, "fresh": True, "drops": None},
-        ]
-        symbols_ui = _symbols_fallback(
-            pipeline_syms, core_list + scan_list, scores, caps, cfg, intel_disabled=True, intel=None
+        funnel = _build_d118_funnel(
+            unique_source_count=unique_source_count,
+            priority_ranked_count=priority_ranked_n,
+            scored_count=scored_n,
+            watching_count=watching_count,
+            promoted_count=promoted_n,
+            active_count=active_n,
+            broker_listing_count=source_pool,
+            drops_eligible=drops_eligible,
+            drops_watching=drops_watching,
+            drops_scored=drops_scored,
+            budget_block=budget_block if isinstance(budget_block, dict) else None,
         )
+        symbols_ui = _symbols_fallback(
+            pipeline_syms, core_list + scan_list, scores, caps, cfg,
+            intel_disabled=True, intel=None,
+            score_ages_by_symbol=score_ages_by_symbol,
+        )
+        coverage_d118 = _asset_class_coverage_block(symbols_ui)
         return {
             "enabled": False,
             "fallback": "data_pipeline.yaml + runtime tiers",
@@ -256,29 +505,35 @@ def build_universe_snapshot_dict(
             "broker_totals": broker_totals,
             "coverage": source_detail,
             "adaptive": adaptive_block,
+            "priority_rule": priority_rule_block,
+            "transitions": transitions_rows,
+            "asset_class_coverage": coverage_d118,
         }
 
     if intel is None:
         symbols_ui = _symbols_fallback(
-            pipeline_syms, core_list + scan_list, scores, caps, cfg, intel_disabled=False, intel=None
+            pipeline_syms, core_list + scan_list, scores, caps, cfg,
+            intel_disabled=False, intel=None,
+            score_ages_by_symbol=score_ages_by_symbol,
         )
+        coverage_d118 = _asset_class_coverage_block(symbols_ui)
         return {
             "enabled": True,
             "fallback": "universe intelligence enabled but no build artifact yet",
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "funnel": [
-                {"stage": "source", "count": max(source_pool or eligible_count, 1), "fresh": True, "drops": None},
-                {"stage": "eligible", "count": max(eligible_count, 1), "fresh": True, "drops": drops_eligible},
-                {
-                    "stage": "watching",
-                    "count": max(watching_count, 1),
-                    "fresh": True,
-                    "drops": drops_watching,
-                },
-                {"stage": "promoted", "count": 0, "fresh": False, "drops": None},
-                {"stage": "active", "count": min(32, max(0, watching_count // 40)), "fresh": False, "drops": None},
-                {"stage": "banned", "count": 0, "fresh": True, "drops": None},
-            ],
+            "funnel": _build_d118_funnel(
+                unique_source_count=unique_source_count,
+                priority_ranked_count=priority_ranked_n,
+                scored_count=scored_n,
+                watching_count=watching_count,
+                promoted_count=0,
+                active_count=min(32, max(0, watching_count // 40)),
+                broker_listing_count=source_pool,
+                drops_eligible=drops_eligible,
+                drops_watching=drops_watching,
+                drops_scored=drops_scored,
+                budget_block=budget_block if isinstance(budget_block, dict) else None,
+            ),
             "symbols": symbols_ui,
             "clusters": [],
             "promotions": [],
@@ -291,6 +546,9 @@ def build_universe_snapshot_dict(
             "cold_scan": [],
             "active_eval": [],
             "adaptive": adaptive_block,
+            "priority_rule": priority_rule_block,
+            "transitions": transitions_rows,
+            "asset_class_coverage": coverage_d118,
         }
 
     cold = list(intel.cold_scan)
@@ -301,29 +559,27 @@ def build_universe_snapshot_dict(
     active_count = len(core_intel)
     source_count = max(source_pool or intel.candidate_count, 1)
 
-    funnel = [
-        {"stage": "source", "count": source_count, "fresh": True, "drops": None},
-        {"stage": "eligible", "count": max(len(cold), eligible_count, 1), "fresh": True, "drops": drops_eligible},
-        {
-            "stage": "watching",
-            "count": max(watching_count, len(active_eval), 1),
-            "fresh": True,
-            "drops": drops_watching,
-        },
-        {"stage": "promoted", "count": len(promotions), "fresh": True, "drops": None},
-        {
-            "stage": "active",
-            "count": active_count,
-            "fresh": True,
-            "drops": None,
-        },
-        {"stage": "banned", "count": 0, "fresh": True, "drops": None},
-    ]
+    funnel = _build_d118_funnel(
+        unique_source_count=unique_source_count or source_count,
+        priority_ranked_count=priority_ranked_n,
+        scored_count=scored_n,
+        watching_count=max(watching_count, len(active_eval), 1),
+        promoted_count=len(promotions),
+        active_count=active_count,
+        broker_listing_count=source_pool,
+        drops_eligible=drops_eligible,
+        drops_watching=drops_watching,
+        drops_scored=drops_scored,
+        budget_block=budget_block if isinstance(budget_block, dict) else None,
+    )
 
     symbols_ui = _symbols_fallback(
-        pipeline_syms, core_list + scan_list, scores, caps, cfg, intel_disabled=False, intel=intel
+        pipeline_syms, core_list + scan_list, scores, caps, cfg,
+        intel_disabled=False, intel=intel,
+        score_ages_by_symbol=score_ages_by_symbol,
     )
     stream = _promotion_stream(symbols_ui, promotions)
+    coverage_d118 = _asset_class_coverage_block(symbols_ui)
 
     return {
         "enabled": True,
@@ -342,6 +598,9 @@ def build_universe_snapshot_dict(
         "cold_scan": cold,
         "active_eval": active_eval,
         "adaptive": adaptive_block,
+        "priority_rule": priority_rule_block,
+        "transitions": transitions_rows,
+        "asset_class_coverage": coverage_d118,
     }
 
 
@@ -506,6 +765,7 @@ def _symbols_fallback(
     *,
     intel_disabled: bool,
     intel: UniverseIntelligenceState | None,
+    score_ages_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Lightweight symbol rows for UI grid (not full book)."""
     syms = tier_flat if tier_flat else pipeline_syms
@@ -561,30 +821,39 @@ def _symbols_fallback(
                 description_ui = f"{su} · {klass} · {sec_lbl}"
             else:
                 description_ui = f"{su} · {klass}"
-        out.append(
-            {
-                "sym": su,
-                "name": name_ui,
-                "description": description_ui,
-                "klass": klass,
-                "sector": sector_ui,
-                "stage": stage,
-                "conviction": int(min(100, max(0, sc + (i % 11) - 5))),
-                "trend": "rising" if i % 3 else "steady",
-                "factors": {
-                    "momentum": int(sc) % 100,
-                    "liquidity": int(sc + 10) % 100,
-                    "correlation": int(sc / 2) % 100,
-                    "news": int(sc / 3) % 100,
-                },
-                "spread": round(0.5 + (i % 20) * 0.4, 1),
-                "spark": spark,
-                "bookCorr": round((i % 17) / 33 - 0.5, 2),
-                "tierReason": tier_reason,
-                "override": None,
-                "pairWatch": su in pair_syms,
-            }
+        # D118 — attach per-symbol score-age + last-score telemetry when
+        # available. The UI uses ``last_scored_at`` for the age stripe
+        # and ``priority_breakdown`` (when present on a future API
+        # extension) for the inspector tooltip.
+        age_info = (
+            (score_ages_by_symbol or {}).get(su) if score_ages_by_symbol else None
         )
+        row = {
+            "sym": su,
+            "name": name_ui,
+            "description": description_ui,
+            "klass": klass,
+            "sector": sector_ui,
+            "stage": stage,
+            "conviction": int(min(100, max(0, sc + (i % 11) - 5))),
+            "trend": "rising" if i % 3 else "steady",
+            "factors": {
+                "momentum": int(sc) % 100,
+                "liquidity": int(sc + 10) % 100,
+                "correlation": int(sc / 2) % 100,
+                "news": int(sc / 3) % 100,
+            },
+            "spread": round(0.5 + (i % 20) * 0.4, 1),
+            "spark": spark,
+            "bookCorr": round((i % 17) / 33 - 0.5, 2),
+            "tierReason": tier_reason,
+            "override": None,
+            "pairWatch": su in pair_syms,
+            "last_scored_at": age_info.get("last_scored_at") if isinstance(age_info, dict) else None,
+            "last_score": age_info.get("last_score") if isinstance(age_info, dict) else None,
+            "score_count": age_info.get("score_count") if isinstance(age_info, dict) else None,
+        }
+        out.append(row)
     return out
 
 

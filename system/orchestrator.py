@@ -2261,7 +2261,7 @@ class Orchestrator:
     async def _pipeline_runner(self) -> None:
         """Periodically run the data pipeline (feature ingestion)."""
         try:
-            from data.universe_builder import UniverseBuilder
+            from data.universe_builder import BuildTelemetry, UniverseBuilder
             from data.pipeline import run_once
             from storage.db import init_async_database, dispose_engine as _dispose
             from universe.intelligence_builder import build_and_save_universe_intelligence
@@ -2281,6 +2281,29 @@ class Orchestrator:
                 save_adaptive_state,
             )
             from data.universe_tiers import UniverseTiers, save_universe_tiers
+            # D118 — self-tuning priority pre-filter wiring.
+            from data.universe_score_ages import load_score_ages, save_score_ages
+            from data.universe_prefilter import (
+                AvailabilityHint,
+                compute_priority_scores,
+            )
+            from data.universe_weight_learner import (
+                WeightLearner,
+                build_training_rows,
+                load_weight_learner_state,
+                save_weight_learner_state,
+            )
+            from data.universe_budget_controller import (
+                BudgetController,
+                CycleObservation,
+                load_budget_state,
+                save_budget_state,
+            )
+            from data.universe_transitions import (
+                build_previous_tier_map,
+                diff_tiers,
+                record_transitions,
+            )
         except ImportError:
             logger.info("orchestrator | data.pipeline not available — skipping pipeline")
             return
@@ -2320,6 +2343,30 @@ class Orchestrator:
             max_symbols=baseline_max_symbols,
             ranking=ranking_cfg if ranking_on else {},
         )
+
+        # D118 — self-tuning priority pre-filter config + persisted state.
+        priority_cfg = ranking_cfg.get("priority_score", {}) or {}
+        priority_enabled = bool(priority_cfg.get("enabled", True)) and ranking_on
+        weight_learning_enabled = bool(priority_cfg.get("weight_learning_enabled", True))
+        budget_self_tune_enabled = bool(priority_cfg.get("budget_self_tune_enabled", True))
+        state_dir = Path(str(priority_cfg.get("state_dir") or "data/runtime"))
+        score_ages_path = state_dir / "universe_score_ages.json"
+        weights_path = state_dir / "universe_priority_weights.json"
+        budget_path = state_dir / "universe_budget_state.json"
+        transitions_path = state_dir / "universe_tier_transitions.json"
+        # Curated anchor list — the snapshot fallback already uses these
+        # symbols across the dashboard; D118 simply ensures they are pinned
+        # into the priority-ranked selection even when their learned
+        # liquidity prior is weak.
+        from data.universe import UniverseManager as _UM
+        from data.universe_builder import _to_yf_symbol as _to_yf
+
+        anchor_symbols: list[str] = []
+        for _inst in _UM.INITIAL_UNIVERSE:
+            _sym = _to_yf(_inst.broker_symbol or _inst.symbol, _inst.broker)
+            if _sym:
+                anchor_symbols.append(str(_sym).strip().upper())
+        anchor_symbols = list(dict.fromkeys(anchor_symbols))
 
         first_pipeline_run = True
         while True:
@@ -2367,7 +2414,221 @@ class Orchestrator:
                                     adaptive_result.multiplier,
                                     ", ".join(adaptive_result.reasons),
                                 )
-                            tiers = await universe_builder.build_tiered_universe(self._broker_manager)
+                            # D118 — priority pre-filter + budget controller.
+                            telemetry = BuildTelemetry()
+                            priority_scores_in: dict | None = None
+                            priority_anchors: list[str] = []
+                            budget_for_cycle: int | None = None
+                            score_ages_state = None
+                            weight_learner: WeightLearner | None = None
+                            budget_controller: BudgetController | None = None
+                            previous_tiers_snapshot: dict[str, str] = (
+                                build_previous_tier_map(
+                                    core=list(tiers.core) if "tiers" in dir() else [],
+                                    scan=list(tiers.scan) if "tiers" in dir() else [],
+                                    light=list(tiers.light) if "tiers" in dir() else [],
+                                ) if False else {}  # placeholder; overwritten below
+                            )
+                            try:
+                                from data.universe_tiers import load_universe_tiers as _load_tiers
+
+                                _prev_tiers = _load_tiers()
+                                if _prev_tiers is not None:
+                                    previous_tiers_snapshot = build_previous_tier_map(
+                                        core=list(_prev_tiers.core),
+                                        scan=list(_prev_tiers.scan),
+                                        light=list(_prev_tiers.light),
+                                    )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "orchestrator | D118 prior-tier load failed (non-fatal): {}",
+                                    exc,
+                                )
+                            if priority_enabled:
+                                try:
+                                    score_ages_state = load_score_ages(score_ages_path)
+                                    weight_learner_state = load_weight_learner_state(
+                                        weights_path
+                                    )
+                                    weight_learner = WeightLearner(state=weight_learner_state)
+                                    budget_controller = BudgetController(
+                                        state=load_budget_state(budget_path)
+                                    )
+                                    # Build the unique normalized universe by
+                                    # calling the broker collector through a
+                                    # tiny helper exposed on the builder (the
+                                    # actual call inside ``build_tiered_universe``
+                                    # uses the same coroutine, so we are not
+                                    # paying for two broker scans — the helper
+                                    # just returns the dict).
+                                    by_broker = await universe_builder._collect_candidates_by_broker(
+                                        self._broker_manager
+                                    )
+                                    unique_norm = list(
+                                        dict.fromkeys(
+                                            s
+                                            for rows in by_broker.values()
+                                            for s in rows
+                                        )
+                                    )
+                                    if unique_norm:
+                                        # Track newly-seen symbols so the
+                                        # learner can give them a freshness
+                                        # bonus next cycle.
+                                        score_ages_state.observe_unseen(unique_norm)
+                                        watching_now = list(previous_tiers_snapshot.keys())
+                                        weights_for_cycle = (
+                                            weight_learner.current_weights()
+                                            if weight_learning_enabled
+                                            else {
+                                                # Frozen at uniform when the
+                                                # learning kill switch is off.
+                                                **(weight_learner.current_weights()),
+                                            }
+                                        )
+                                        priority_scores_in = compute_priority_scores(
+                                            unique_norm,
+                                            score_ages=score_ages_state,
+                                            weights=weights_for_cycle,
+                                            anchors=anchor_symbols,
+                                            watching_now=watching_now,
+                                            availability_hints=None,  # registry hints wired below
+                                        )
+                                        # Compute the next budget BEFORE the
+                                        # build so we know how many symbols
+                                        # to score.
+                                        budget_for_cycle = (
+                                            budget_controller.compute_next_budget(
+                                                unique_normalized=len(unique_norm),
+                                                cycle_interval_sec=float(interval),
+                                                concurrency=int(
+                                                    ranking_cfg.get("yf_concurrency", 10)
+                                                    or 10
+                                                ),
+                                            )
+                                            if budget_self_tune_enabled
+                                            else None
+                                        )
+                                        priority_anchors = [
+                                            a for a in anchor_symbols if a in priority_scores_in
+                                        ]
+                                        logger.info(
+                                            "orchestrator | D118 priority pre-filter | unique={} budget={} weights={}",
+                                            len(unique_norm),
+                                            budget_for_cycle,
+                                            {k: round(v, 3) for k, v in weights_for_cycle.items()},
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "orchestrator | D118 pre-filter setup failed (non-fatal, falling back to legacy sampler): {}",
+                                        exc,
+                                    )
+                                    priority_scores_in = None
+                                    budget_for_cycle = None
+                            tiers = await universe_builder.build_tiered_universe(
+                                self._broker_manager,
+                                priority_scores=priority_scores_in,
+                                target_budget=budget_for_cycle,
+                                anchors=priority_anchors,
+                                telemetry=telemetry,
+                            )
+                            # D118 — record cycle telemetry into the score-
+                            # ages persistence + budget controller +
+                            # online weight learner.
+                            if priority_enabled and score_ages_state is not None:
+                                try:
+                                    score_ages_state.record_scores(
+                                        dict(tiers.scores),
+                                        timeouts=telemetry.timed_out,
+                                    )
+                                    save_score_ages(
+                                        score_ages_state, path=score_ages_path
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | D118 score-ages persist failed (non-fatal): {}",
+                                        exc,
+                                    )
+                            if (
+                                priority_enabled
+                                and weight_learner is not None
+                                and weight_learning_enabled
+                                and telemetry.picks_breakdowns
+                            ):
+                                try:
+                                    watching_after = list(
+                                        set(tiers.core) | set(tiers.scan)
+                                    )
+                                    rows = build_training_rows(
+                                        telemetry.picks_breakdowns,
+                                        watching_after,
+                                    )
+                                    weight_learner.update(rows)
+                                    save_weight_learner_state(
+                                        weight_learner.state, path=weights_path
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | D118 weight-learner update failed (non-fatal): {}",
+                                        exc,
+                                    )
+                            if (
+                                priority_enabled
+                                and budget_controller is not None
+                                and budget_self_tune_enabled
+                            ):
+                                try:
+                                    budget_controller.observe(
+                                        CycleObservation(
+                                            budget=int(budget_for_cycle or telemetry.picked),
+                                            scored=int(telemetry.scored),
+                                            measured_duration_sec=float(
+                                                telemetry.measured_duration_sec
+                                            ),
+                                            cycle_interval_sec=float(interval),
+                                            concurrency=int(
+                                                ranking_cfg.get("yf_concurrency", 10)
+                                                or 10
+                                            ),
+                                            max_watching_rank=telemetry.max_watching_rank,
+                                        )
+                                    )
+                                    save_budget_state(
+                                        budget_controller.state, path=budget_path
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | D118 budget controller update failed (non-fatal): {}",
+                                        exc,
+                                    )
+                            if priority_enabled and previous_tiers_snapshot:
+                                try:
+                                    prev_scores: dict[str, float] = {}
+                                    try:
+                                        _prev_tiers2 = _load_tiers()
+                                        if _prev_tiers2 is not None:
+                                            prev_scores = dict(_prev_tiers2.scores)
+                                    except Exception:
+                                        prev_scores = {}
+                                    rows = diff_tiers(
+                                        previous=previous_tiers_snapshot,
+                                        new_core=list(tiers.core),
+                                        new_scan=list(tiers.scan),
+                                        new_light=list(tiers.light),
+                                        scores_previous=prev_scores,
+                                        scores_new=dict(tiers.scores),
+                                    )
+                                    if rows:
+                                        record_transitions(rows, path=transitions_path)
+                                        logger.info(
+                                            "orchestrator | D118 tier transitions recorded | rows={}",
+                                            len(rows),
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "orchestrator | D118 transitions persist failed (non-fatal): {}",
+                                        exc,
+                                    )
                             # D117 — anti-churn hysteresis: re-include
                             # symbols that dropped this cycle but were in
                             # the previous watchlist for up to N misses.
