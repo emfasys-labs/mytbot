@@ -57,6 +57,14 @@ def run_backtest_on_features(
     if features is None or features.empty:
         return BacktestResult(symbol, 0, 0, 0, starting_cash, Decimal("0"), 0.0)
 
+    # D115 — the anti-churn gate compares against wall-clock time, but a
+    # backtest replays many historical bars within milliseconds of real
+    # time. Disable the gate for the duration of this run so historical
+    # signals are not mistaken for live-time duplicates. Restored after.
+    _ac_orig = getattr(signal_engine, "anti_churn", None)
+    if _ac_orig is not None:
+        signal_engine.anti_churn = None
+
     df = features.sort_index().copy()
     cash = Decimal(starting_cash)
     position_qty = Decimal("0")
@@ -132,6 +140,10 @@ def run_backtest_on_features(
             wins += 1
         else:
             losses += 1
+
+    # Restore the anti-churn gate for the caller's engine.
+    if _ac_orig is not None:
+        signal_engine.anti_churn = _ac_orig
 
     net = cash - Decimal(starting_cash)
     wr = (wins / trades) if trades else 0.0

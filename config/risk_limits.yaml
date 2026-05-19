@@ -221,6 +221,84 @@ correlation_scaling:
   high_correlation_scalar: 0.60
   normal_scalar: 1.00
 
+# ── D115 — FX directional cluster cap ────────────────────────────────────
+# An EURUSD long, a GBPUSD long, an AUDUSD long, a USDJPY short, a USDCHF
+# short and a USDCAD short look like six independent positions but are one
+# bet: short USD. When the dollar rallies they all lose. This cap bounds
+# the aggregate signed USD exposure across all held forex positions plus
+# the proposed signal. Direction:
+#   * xxxUSD long  = short USD ; xxxUSD short  = long USD
+#   * USDxxx long = long USD  ; USDxxx short = short USD
+# Pairs without USD (EURGBP etc.) contribute zero to this cluster.
+# Reduce-only / close signals are never blocked here.
+fx_cluster:
+  enabled: true
+  max_usd_directional_exposure_pct: 0.15   # |signed USD notional| <= 15% of NAV
+
+# ── D115 — Broad-market equity index cluster cap ─────────────────────────
+# SPY long + QQQ short + IWM short look like three independent equity
+# positions but they share the same systematic US-equity beta. When the
+# market moves the wrong way for the directional bet they all lose
+# together. This cap bounds the aggregate signed notional across the
+# listed broad-market index ETFs plus the proposed signal. Same rules as
+# fx_cluster: reduce-only never blocked, neutralising legs always allowed.
+equity_index_cluster:
+  enabled: true
+  max_net_exposure_pct: 0.20    # |signed cluster notional| <= 20% of NAV
+
+# ── D115 — Paper-mode stale-price gate ───────────────────────────────────
+# An opening signal whose ``suggested_price`` was generated several minutes
+# ago and the broker quote has since moved against the trade direction has
+# lost its edge. The paper-fill path used to fill at the stale price
+# anyway, producing structural frictional losses (today: 200+ fills at
+# locked-in prices). When the broker shows the market has drifted against
+# the trade by more than ``max_adverse_drift_bps``, reject the paper fill.
+# Reduce-only / close signals are never blocked here.
+stale_price_gate:
+  enabled: true
+  max_adverse_drift_bps: 25         # 0.25%
+
+# ── D115 — Intraday aggregate-derisk monitor ─────────────────────────────
+# Static daily-loss limit (max_daily_loss_pct, default 2%) fires only when
+# two thirds of the day's drawdown is already locked in. The intraday
+# derisk monitor sits BEFORE that limit and graduates the response:
+#   * -0.50% : warn + light trim of the worst loser(s)
+#   * -1.00% : meaningful trim of multiple worst losers
+#   * -1.50% : full close of the worst losers
+# All actions are reduce-only and still pass through the normal
+# SignalEngine + RiskEngine + ExecutionEngine path. The risk engine
+# retains unconditional veto. Cooldown prevents thrashing the same name.
+intraday_derisk:
+  enabled: true
+  monitor_interval_sec: 30
+  close_cooldown_sec: 120
+  tiers:
+    - threshold_pct: -0.0050    # -0.50% intraday day P&L
+      trim_pct: 0.20            # close 20% of the worst losers
+      max_actions: 2
+      min_loss_pct: 0.005       # only trim positions losing > 0.5%
+    - threshold_pct: -0.0100    # -1.00% intraday
+      trim_pct: 0.50
+      max_actions: 4
+      min_loss_pct: 0.003
+    - threshold_pct: -0.0150    # -1.50% intraday
+      trim_pct: 1.00            # full close
+      max_actions: 6
+      min_loss_pct: 0.000
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - DIA
+    - VTI
+    - VOO
+    - IVV
+    - MDY
+    - TQQQ
+    - SQQQ
+    - SPXL
+    - SPXS
+
 minimum_order_sizes_gbp:
   crypto: 10
   equity: 50

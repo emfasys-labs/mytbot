@@ -616,6 +616,26 @@ class ExecutionEngine:
         except Exception:  # noqa: BLE001
             return 0.0
 
+    def _stale_price_cfg(self) -> tuple[bool, Decimal]:
+        """D115 — Paper-mode stale-price gate. Returns ``(enabled, max_drift_bps)``.
+
+        When enabled, ``_simulate_fill`` rejects an opening order whose
+        ``signal.suggested_price`` has drifted against the trade direction
+        by more than ``max_drift_bps``. Reduce-only / close intents are
+        never blocked.
+        """
+        risk_engine = get_risk_engine()
+        cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+        sp_cfg = cfg.get("stale_price_gate") or {}
+        if not isinstance(sp_cfg, dict):
+            return (False, Decimal("25"))
+        enabled = bool(sp_cfg.get("enabled", True))
+        try:
+            max_bps = Decimal(str(sp_cfg.get("max_adverse_drift_bps", 25)))
+        except Exception:  # noqa: BLE001
+            max_bps = Decimal("25")
+        return (enabled, max_bps)
+
     async def _simulate_fill(
         self,
         order: Order,
@@ -665,6 +685,53 @@ class ExecutionEngine:
             except Exception:  # noqa: BLE001
                 return None
             return d if d > 0 else None
+
+        # ── 0. D115 — stale-price gate ────────────────────────────────────────
+        # Opening intents that arrive at execution with a stale
+        # ``signal.suggested_price`` (the broker has since moved against the
+        # trade direction by more than the configured drift threshold) have
+        # already lost their edge. Filling them anyway is the textbook
+        # "frictional-loss" pattern observed today: 200+ fills at fixed
+        # locked-in prices, each one a small structural loss. Reject the
+        # fill so the loop can either re-evaluate at the new price or sit
+        # the trade out. Reduce-only and close intents are never blocked.
+        if not reduce_only:
+            enabled, max_drift_bps = self._stale_price_cfg()
+            if enabled and signal.suggested_price is not None and signal.suggested_price > 0:
+                market_now = await _broker_last_price()
+                if market_now is not None and market_now > 0:
+                    drift_abs = abs(market_now - signal.suggested_price)
+                    drift_bps = drift_abs / signal.suggested_price * Decimal("10000")
+                    if drift_bps > max_drift_bps:
+                        adverse = (
+                            (order.side == OrderSide.BUY and market_now > signal.suggested_price)
+                            or (order.side == OrderSide.SELL and market_now < signal.suggested_price)
+                        )
+                        if adverse:
+                            logger.warning(
+                                "Paper fill REJECTED stale_price | symbol=%s side=%s suggested=%s market=%s drift_bps=%.2f threshold=%s",
+                                order.symbol,
+                                getattr(order.side, "value", order.side),
+                                signal.suggested_price,
+                                market_now,
+                                float(drift_bps),
+                                max_drift_bps,
+                            )
+                            self.last_skip_reason = (
+                                f"stale_signal_price_drift_{int(drift_bps)}bps"
+                            )
+                            return OrderResult(
+                                broker_order_id=f"paper-rej-{uuid.uuid4().hex[:12]}",
+                                client_order_id=order.client_order_id,
+                                status=OrderStatus.REJECTED,
+                                symbol=order.symbol,
+                                side=order.side,
+                                quantity=order.quantity,
+                                filled_quantity=Decimal("0"),
+                                avg_fill_price=None,
+                                fee=Decimal("0"),
+                                timestamp=datetime.now(timezone.utc).isoformat(),
+                            )
 
         # ── 1. Determine base fill price ──────────────────────────────────────
         fill_price: Decimal | None = None

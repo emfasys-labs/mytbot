@@ -22,6 +22,7 @@ import logging
 from core.models_runtime import AssetClass, Side, SignalCandidate
 
 from signals.accumulator import NetSignal, raw_signal_to_input_signal
+from signals.anti_churn import AntiChurnGate
 
 if TYPE_CHECKING:
     from signals.accumulator import SignalAccumulator
@@ -70,6 +71,18 @@ class SignalEngine:
     def __init__(self, config: dict, accumulator: Optional["SignalAccumulator"] = None):
         self.config = config
         self.accumulator = accumulator
+        # D115 — anti-churn gate. Stops same-strategy duplicate signal storm,
+        # cross-strategy long/short contradictions on the same symbol, and
+        # post-fill re-entry churn. Reads ``signal_engine.anti_churn`` from
+        # ``config/strategies.yaml``. All gates default ON; set
+        # ``signal_engine.anti_churn.enabled: false`` to disable wholesale.
+        anti_churn_cfg = config.get("anti_churn") or {}
+        if isinstance(anti_churn_cfg, dict) and not anti_churn_cfg.get("enabled", True):
+            self.anti_churn: Optional[AntiChurnGate] = None
+        else:
+            self.anti_churn = AntiChurnGate(
+                anti_churn_cfg if isinstance(anti_churn_cfg, dict) else None
+            )
         # Wave 2 — trained meta-labeller. Default OFF (heuristic in
         # ``signals/meta_labeler.py`` remains the live filter). When
         # ``signal_engine.use_trained_meta_labeler`` is True we lazy-load
@@ -313,6 +326,17 @@ class SignalEngine:
                 apply_news_overlay=True,
             )
 
+            # D115 anti-churn gate: dedup / cross-strategy / post-fill cooldown.
+            # Only applied to natural strategy signals; operator closes and
+            # allocator-selected opens above are exempt.
+            ac_block = self._anti_churn_check(
+                raw,
+                adjusted_confidence=adjusted_confidence,
+                now=now,
+            )
+            if ac_block is not None:
+                return None
+
         # Size the position.
         #
         # D031 closure — respect coordinator-supplied sizing when present:
@@ -469,6 +493,13 @@ class SignalEngine:
             f"strategy={signal.strategy}"
         )
 
+        if not news_veto and not (is_operator_close or is_allocator_selected):
+            self._anti_churn_record_signal(
+                raw,
+                adjusted_confidence=adjusted_confidence,
+                suggested_price=last_price,
+            )
+
         return signal if not news_veto else None
 
     def _process_arbitrage(
@@ -583,6 +614,9 @@ class SignalEngine:
         )
         if news_veto:
             return None
+        # D115 anti-churn gate (D015 batch path).
+        if self._anti_churn_check(raw, adjusted_confidence=adjusted_confidence, now=now) is not None:
+            return None
         ac = (raw.asset_class or "other").strip().lower()
         if ac not in (
             "equity",
@@ -617,7 +651,7 @@ class SignalEngine:
             )
             raw.metadata = md
             return None
-        return SignalCandidate(
+        candidate = SignalCandidate(
             symbol=raw.symbol,
             asset_class=cast(AssetClass, ac),
             side=side,
@@ -628,6 +662,107 @@ class SignalEngine:
             strategy_name=raw.strategy,
             metadata=md,
         )
+        # D115 — record after a successful build so the gate can dedup later
+        # identical candidates and detect contradictions on this symbol.
+        self._anti_churn_record_signal(
+            raw,
+            adjusted_confidence=adjusted_confidence,
+            suggested_price=self._extract_last_price(md),
+        )
+        return candidate
+
+    # ---------------- D115 anti-churn helpers ----------------
+    def _anti_churn_check(
+        self,
+        raw: "RawSignal",
+        *,
+        adjusted_confidence: float,
+        now: datetime,
+    ) -> Optional[str]:
+        """Run the anti-churn gate. Returns block reason or None."""
+        if self.anti_churn is None:
+            return None
+        try:
+            last_price = self._extract_last_price(raw.metadata or {})
+            price_float: Optional[float] = float(last_price) if last_price is not None else None
+            profile_mode = str((raw.metadata or {}).get("profile_mode") or "hunter")
+            decision = self.anti_churn.check(
+                strategy=str(raw.strategy or ""),
+                symbol=str(raw.symbol or ""),
+                side=raw.side,
+                confidence=float(adjusted_confidence),
+                suggested_price=price_float,
+                broker=str(raw.broker or ""),
+                profile_mode=profile_mode,
+                now=now,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("anti_churn | check failed (passing through): %s", exc)
+            return None
+        if decision.allow:
+            return None
+        # Annotate raw.metadata so candidate-funnel logs can surface the
+        # block reason in the dashboard.
+        try:
+            md = raw.metadata if isinstance(raw.metadata, dict) else {}
+            md["anti_churn_blocked"] = True
+            md["anti_churn_reason"] = decision.reason
+            md["anti_churn_details"] = decision.details
+            raw.metadata = md
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            "anti_churn | BLOCKED %s %s %s conf=%.3f reason=%s",
+            raw.strategy,
+            raw.symbol,
+            raw.side,
+            float(adjusted_confidence),
+            decision.reason,
+        )
+        return decision.reason
+
+    def _anti_churn_record_signal(
+        self,
+        raw: "RawSignal",
+        *,
+        adjusted_confidence: float,
+        suggested_price: Optional[Decimal],
+    ) -> None:
+        if self.anti_churn is None:
+            return
+        try:
+            price_float: Optional[float] = float(suggested_price) if suggested_price is not None else None
+            self.anti_churn.record_signal(
+                strategy=str(raw.strategy or ""),
+                symbol=str(raw.symbol or ""),
+                side=raw.side,
+                confidence=float(adjusted_confidence),
+                suggested_price=price_float,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("anti_churn | record_signal failed: %s", exc)
+
+    def record_fill(
+        self,
+        *,
+        broker: str,
+        symbol: str,
+        side: str,
+        is_reduce_only: bool = False,
+    ) -> None:
+        """Trading loop calls this after every filled order so the gate's
+        post-fill cooldown can start. Safe no-op when the gate is disabled."""
+        if self.anti_churn is None:
+            return
+        try:
+            self.anti_churn.record_fill(
+                broker=str(broker or ""),
+                symbol=str(symbol or ""),
+                side=side,
+                is_reduce_only=bool(is_reduce_only),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("anti_churn | record_fill failed: %s", exc)
 
     def _calculate_quantity(
         self,

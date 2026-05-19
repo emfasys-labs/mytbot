@@ -18,7 +18,7 @@ All thresholds live in config/risk_limits.yaml — editable without code changes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import json
 import logging
@@ -126,6 +126,8 @@ class RiskEngine:
             self._check_max_exposure,
             self._check_concentration,
             self._check_asset_class_limits,
+            self._check_fx_cluster_exposure,
+            self._check_equity_index_cluster_exposure,
             self._check_consecutive_losses,
             self._check_confidence_threshold,
             self._check_theme_uniqueness,
@@ -793,6 +795,226 @@ class RiskEngine:
         pct = self._cfg_decimal(config_key, fallback=Decimal("1.0"))
         allowed = sizing_base * pct
         return (projected <= allowed, "asset_class_limit")
+
+    # ------------------------------------------------------------------
+    # D115 — FX directional cluster cap.
+    #
+    # Six FX positions all betting the same way on USD looked like six
+    # independent risks in the position book but were one concentrated bet.
+    # This check bounds the aggregate signed USD exposure across all held
+    # forex positions plus the proposed signal.
+    # ------------------------------------------------------------------
+    def _check_fx_cluster_exposure(self, signal, portfolio) -> tuple[bool, str]:
+        # Opt-in via ``config/risk_limits.yaml::fx_cluster.enabled``. Default
+        # OFF so unrelated legacy tests / experimental runs that pre-date
+        # this gate behave identically; production YAML turns it on.
+        cfg = self.config.get("fx_cluster") or {}
+        if not bool(cfg.get("enabled", False)):
+            return (True, "fx_cluster")
+
+        asset_class = (getattr(signal, "asset_class", "") or "").strip().lower()
+        if asset_class not in ("forex", "fx"):
+            return (True, "fx_cluster")
+
+        # Exits are never blocked by cluster caps.
+        if self._is_reduce_only_signal(signal):
+            return (True, "fx_cluster")
+
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
+            return (True, "fx_cluster")
+
+        try:
+            max_pct = Decimal(str(cfg.get("max_usd_directional_exposure_pct", "0.15")))
+        except (InvalidOperation, TypeError, ValueError):
+            max_pct = Decimal("0.15")
+        if max_pct <= 0:
+            return (True, "fx_cluster")
+        cap_notional = sizing_base * max_pct
+
+        proposed = self._fx_usd_exposure_from_signal(signal)
+        if proposed == 0:
+            return (True, "fx_cluster")
+
+        current = Decimal("0")
+        positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        if isinstance(positions, dict):
+            for sym, pos in positions.items():
+                if not isinstance(pos, dict):
+                    continue
+                current += self._fx_usd_exposure_from_position(str(sym), pos)
+
+        projected = current + proposed
+        abs_current = abs(current)
+        abs_projected = abs(projected)
+
+        # Never block a position that NEUTRALISES the existing cluster
+        # (i.e. reduces |signed USD exposure|).
+        if abs_projected <= abs_current:
+            return (True, "fx_cluster")
+
+        return (abs_projected <= cap_notional, "fx_cluster")
+
+    @staticmethod
+    def _fx_pair_orientation(symbol: str) -> int:
+        """
+        Return +1 if symbol is USDxxx (long = long USD),
+        -1 if xxxUSD (long = short USD),
+        0 otherwise (no direct USD leg, e.g. EURGBP).
+        """
+        sym = (symbol or "").strip().upper().replace("/", "").replace("-", "").replace("=X", "")
+        if "USD" not in sym:
+            return 0
+        if sym.startswith("USD"):
+            return 1
+        if sym.endswith("USD"):
+            return -1
+        return 0
+
+    @classmethod
+    def _fx_usd_exposure_from_position(cls, symbol: str, pos: dict) -> Decimal:
+        orient = cls._fx_pair_orientation(symbol)
+        if orient == 0:
+            return Decimal("0")
+        try:
+            qty = Decimal(str(pos.get("quantity", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+        if qty == 0:
+            return Decimal("0")
+        price_raw = (
+            pos.get("current_price")
+            or pos.get("avg_entry_price")
+            or pos.get("price")
+            or "0"
+        )
+        try:
+            price = Decimal(str(price_raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+        if price <= 0:
+            return Decimal("0")
+        magnitude = abs(qty) * price
+        side_sign = 1 if qty > 0 else -1
+        return Decimal(orient * side_sign) * magnitude
+
+    @classmethod
+    def _fx_usd_exposure_from_signal(cls, signal) -> Decimal:
+        orient = cls._fx_pair_orientation(getattr(signal, "symbol", ""))
+        if orient == 0:
+            return Decimal("0")
+        try:
+            qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+        if qty == 0:
+            return Decimal("0")
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        if side in ("buy", "long"):
+            side_sign = 1
+        elif side in ("sell", "short"):
+            side_sign = -1
+        else:
+            return Decimal("0")
+        price = (
+            getattr(signal, "suggested_price", None)
+            or (signal.metadata or {}).get("last_price")
+            if hasattr(signal, "metadata") and isinstance(getattr(signal, "metadata", None), dict)
+            else getattr(signal, "suggested_price", None)
+        )
+        try:
+            price_d = Decimal(str(price)) if price is not None else Decimal("0")
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+        if price_d <= 0:
+            return Decimal("0")
+        magnitude = abs(qty) * price_d
+        return Decimal(orient * side_sign) * magnitude
+
+    # ------------------------------------------------------------------
+    # D115 — Broad-market equity index cluster cap.
+    #
+    # Symmetric to ``_check_fx_cluster_exposure`` but for the US equity
+    # index family (SPY/QQQ/IWM/DIA/...). SPY long + QQQ short + IWM short
+    # share systematic equity-beta risk and are not three independent
+    # bets. This bounds the aggregate signed notional within the cluster.
+    # ------------------------------------------------------------------
+    def _check_equity_index_cluster_exposure(self, signal, portfolio) -> tuple[bool, str]:
+        cfg = self.config.get("equity_index_cluster") or {}
+        if not bool(cfg.get("enabled", False)):
+            return (True, "equity_index_cluster")
+
+        cluster_syms = self._normalize_symbol_list(cfg.get("symbols") or [])
+        if not cluster_syms:
+            return (True, "equity_index_cluster")
+
+        signal_sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        if signal_sym not in cluster_syms:
+            return (True, "equity_index_cluster")
+
+        if self._is_reduce_only_signal(signal):
+            return (True, "equity_index_cluster")
+
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
+            return (True, "equity_index_cluster")
+
+        try:
+            max_pct = Decimal(str(cfg.get("max_net_exposure_pct", "0.20")))
+        except (InvalidOperation, TypeError, ValueError):
+            max_pct = Decimal("0.20")
+        if max_pct <= 0:
+            return (True, "equity_index_cluster")
+        cap_notional = sizing_base * max_pct
+
+        # Signed proposed delta from the new signal.
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        if side in ("buy", "long"):
+            sign = 1
+        elif side in ("sell", "short"):
+            sign = -1
+        else:
+            return (True, "equity_index_cluster")
+        try:
+            qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+            price = Decimal(str(getattr(signal, "suggested_price", None) or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return (True, "equity_index_cluster")
+        if qty <= 0 or price <= 0:
+            return (True, "equity_index_cluster")
+        proposed = Decimal(sign) * abs(qty) * price
+
+        # Current signed cluster exposure.
+        current = Decimal("0")
+        positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        if isinstance(positions, dict):
+            for sym, pos in positions.items():
+                norm = str(sym or "").strip().upper()
+                if norm not in cluster_syms or not isinstance(pos, dict):
+                    continue
+                try:
+                    p_qty = Decimal(str(pos.get("quantity", "0") or "0"))
+                    p_px = Decimal(str(pos.get("current_price") or pos.get("avg_entry_price") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if p_qty == 0 or p_px <= 0:
+                    continue
+                current += p_qty * p_px  # qty already carries sign
+
+        projected = current + proposed
+        if abs(projected) <= abs(current):
+            return (True, "equity_index_cluster")
+        return (abs(projected) <= cap_notional, "equity_index_cluster")
+
+    @staticmethod
+    def _normalize_symbol_list(raw) -> set[str]:
+        out: set[str] = set()
+        if isinstance(raw, (list, tuple, set)):
+            for v in raw:
+                s = str(v or "").strip().upper()
+                if s:
+                    out.add(s)
+        return out
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = int(self.config.get("max_consecutive_losses", 0))

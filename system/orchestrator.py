@@ -108,6 +108,7 @@ class Orchestrator:
         self._nav_heartbeat_task: asyncio.Task | None = None
         self._stop_loss_task: asyncio.Task | None = None
         self._profit_harvest_task: asyncio.Task | None = None
+        self._intraday_derisk_task: asyncio.Task | None = None
         self._order_reconcile_task: asyncio.Task | None = None
         self._zero_alloc_flatten_task: asyncio.Task | None = None
         # Per-position close throttle to avoid re-emitting closes every monitor tick
@@ -115,6 +116,7 @@ class Orchestrator:
         self._stop_loss_last_close_ts: dict[str, float] = {}
         self._profit_harvest_last_action_ts: dict[str, float] = {}
         self._profit_harvest_peak_pnl: dict[str, Decimal] = {}
+        self._intraday_derisk_last_action_ts: dict[str, float] = {}
         self._zero_alloc_flatten_last_ts: float = 0.0
 
         self._lock = asyncio.Lock()
@@ -319,6 +321,7 @@ class Orchestrator:
                 self._start_nav_heartbeat_loop()
                 self._start_stop_loss_loop()
                 self._start_profit_harvest_loop()
+                self._start_intraday_derisk_loop()
                 self._start_order_reconcile_loop()
                 self._start_zero_alloc_flatten_watchdog()
 
@@ -477,6 +480,15 @@ class Orchestrator:
                 self._profit_harvest_task = None
             self._profit_harvest_last_action_ts.clear()
             self._profit_harvest_peak_pnl.clear()
+
+            if self._intraday_derisk_task is not None and not self._intraday_derisk_task.done():
+                self._intraday_derisk_task.cancel()
+                try:
+                    await self._intraday_derisk_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._intraday_derisk_task = None
+            self._intraday_derisk_last_action_ts.clear()
 
             if self._order_reconcile_task is not None and not self._order_reconcile_task.done():
                 self._order_reconcile_task.cancel()
@@ -846,6 +858,19 @@ class Orchestrator:
             return
         self._profit_harvest_task = asyncio.create_task(
             self._profit_harvest_loop(), name="profit-harvest-monitor"
+        )
+
+    def _start_intraday_derisk_loop(self) -> None:
+        """Start intraday aggregate-derisk monitor task (D115).
+
+        Graduated portfolio-level defence that fires BEFORE the static
+        ``max_daily_loss_pct`` kill switch. Reduces exposure on the worst
+        losers as intraday drawdown crosses configured tiers.
+        """
+        if self._intraday_derisk_task is not None and not self._intraday_derisk_task.done():
+            return
+        self._intraday_derisk_task = asyncio.create_task(
+            self._intraday_derisk_loop(), name="intraday-derisk-monitor"
         )
 
     def _start_order_reconcile_loop(self) -> None:
@@ -1988,6 +2013,199 @@ class Orchestrator:
                 await self._sleep_cancellable(interval)
             except asyncio.CancelledError:
                 return
+
+    async def _intraday_derisk_loop(self) -> None:
+        """Periodic intraday aggregate-derisk monitor loop (D115)."""
+        interval = self._resolve_intraday_derisk_interval()
+        try:
+            await self._sleep_cancellable(min(5.0, interval))
+        except asyncio.CancelledError:
+            return
+        while True:
+            try:
+                await self._run_intraday_derisk_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | intraday-derisk monitor error: {}", exc)
+            interval = self._resolve_intraday_derisk_interval()
+            try:
+                await self._sleep_cancellable(interval)
+            except asyncio.CancelledError:
+                return
+
+    def _resolve_intraday_derisk_interval(self) -> float:
+        env_raw = os.getenv("INTRADAY_DERISK_INTERVAL_SEC", "").strip()
+        if env_raw:
+            try:
+                v = float(env_raw)
+                if v > 0:
+                    return max(5.0, v)
+            except ValueError:
+                pass
+        tl = self._trading_loop
+        cfg = getattr(getattr(tl, "risk_engine", None), "config", {}) if tl is not None else {}
+        d = cfg.get("intraday_derisk", {}) if isinstance(cfg.get("intraday_derisk", {}), dict) else {}
+        try:
+            return max(5.0, float(d.get("monitor_interval_sec", 30.0)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    async def _run_intraday_derisk_tick(self) -> None:
+        """Evaluate aggregate intraday drawdown and emit reduce-only trims (D115)."""
+        tl = self._trading_loop
+        if tl is None:
+            return
+        risk_engine = getattr(tl, "risk_engine", None)
+        execution_engine = getattr(tl, "execution_engine", None)
+        if risk_engine is None or execution_engine is None:
+            return
+
+        cfg = getattr(risk_engine, "config", {}) or {}
+        d_cfg = cfg.get("intraday_derisk", {}) if isinstance(cfg.get("intraday_derisk", {}), dict) else {}
+        if not bool(d_cfg.get("enabled", False)):
+            return
+
+        try:
+            from risk.intraday_derisk import (
+                evaluate_intraday_derisk,
+                parse_tiers,
+            )
+            from storage.db import init_async_database, dispose_engine as _dispose
+            from run_m3 import _load_portfolio_state
+            from system.portfolio_equity import live_portfolio_value
+            from signals.engine import Signal as RiskSignal
+            from risk.engine import RiskVerdict
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | intraday-derisk imports unavailable: {}", exc)
+            return
+
+        tiers = parse_tiers(d_cfg.get("tiers"))
+        if not tiers:
+            return
+        try:
+            cooldown_sec = max(5.0, float(d_cfg.get("close_cooldown_sec", 120.0)))
+        except (TypeError, ValueError):
+            cooldown_sec = 120.0
+
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            nav = await live_portfolio_value(self._broker_manager)
+            if nav <= 0:
+                return
+            portfolio_state = await _load_portfolio_state(
+                sf,
+                fallback_portfolio_value=nav,
+                capital_pct=Decimal(str(self.capital_pct)),
+            )
+            positions_map = portfolio_state.get("positions") or {}
+            if not positions_map:
+                return
+
+            # Day P&L = realised today + unrealised on currently held book.
+            realised_today = Decimal(str(portfolio_state.get("daily_realized_pnl", "0") or "0"))
+            unrealised_now = Decimal("0")
+            position_rows: list[dict] = []
+            for pos_key, row in positions_map.items():
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    qty = Decimal(str(row.get("quantity", "0") or "0"))
+                    entry = Decimal(str(row.get("avg_entry_price", "0") or "0"))
+                    current = Decimal(str(row.get("current_price", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if qty == 0 or entry <= 0 or current <= 0:
+                    continue
+                upnl = (current - entry) * qty
+                unrealised_now += upnl
+                # Add an unrealised_pnl field plus broker/symbol for the evaluator.
+                broker = str(row.get("broker") or "").strip().lower()
+                sym = str(row.get("symbol") or pos_key).split(":", 1)[-1].strip().upper()
+                position_rows.append(
+                    {
+                        "broker": broker,
+                        "symbol": sym,
+                        "quantity": qty,
+                        "avg_entry_price": entry,
+                        "current_price": current,
+                        "asset_class": row.get("asset_class") or "equity",
+                        "unrealised_pnl": upnl,
+                    }
+                )
+            day_pnl = realised_today + unrealised_now
+            now_ts = datetime.now(timezone.utc).timestamp()
+
+            actions, tier, tier_idx = evaluate_intraday_derisk(
+                nav=Decimal(str(nav)),
+                day_pnl=day_pnl,
+                positions=position_rows,
+                tiers=tiers,
+                cooldown_seconds=cooldown_sec,
+                last_action_ts=self._intraday_derisk_last_action_ts,
+                now_ts=now_ts,
+            )
+            if not actions:
+                return
+            assert tier is not None
+            logger.warning(
+                "orchestrator | intraday-derisk tier {} fired | day_pnl={} ({:.4%} of NAV) | actions={}",
+                tier_idx, day_pnl, float(day_pnl / nav) if nav else 0.0, len(actions),
+            )
+            for action in actions:
+                signal = RiskSignal(
+                    signal_id=f"intraday_derisk-{action.symbol}-{int(now_ts)}",
+                    symbol=action.symbol,
+                    side=action.side,
+                    strategy="intraday_derisk_monitor",
+                    confidence=1.0,
+                    suggested_quantity=action.reduce_quantity,
+                    suggested_price=action.current_price,
+                    broker=action.broker,
+                    asset_class=action.asset_class,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    metadata={
+                        **dict(action.metadata or {}),
+                        "intraday_derisk_tier_idx": int(action.severity_tier_idx),
+                        "intraday_derisk_tier_threshold": str(action.tier_threshold_pct),
+                        "intraday_derisk_trim_fraction": str(action.trim_fraction),
+                        "intraday_derisk_reason": action.reason,
+                    },
+                )
+                cool_key = f"{action.broker}:{action.symbol}"
+                risk_engine.restore_runtime_state(portfolio_state)
+                risk_decision = await risk_engine.evaluate_and_persist(sf, signal, portfolio_state)
+                if risk_decision.verdict != RiskVerdict.APPROVED:
+                    logger.warning(
+                        "orchestrator | intraday-derisk rejected by risk | broker={} symbol={} reason={}",
+                        action.broker, action.symbol, risk_decision.reason,
+                    )
+                    self._intraday_derisk_last_action_ts[cool_key] = now_ts
+                    continue
+                result = await execution_engine.execute(signal, risk_decision, session_factory=sf)
+                self._intraday_derisk_last_action_ts[cool_key] = now_ts
+                if result is None:
+                    logger.warning(
+                        "orchestrator | intraday-derisk did not execute | broker={} symbol={}",
+                        action.broker, action.symbol,
+                    )
+                    continue
+                logger.warning(
+                    "orchestrator | intraday-derisk submitted | broker={} symbol={} side={} qty={} reason={}",
+                    action.broker, action.symbol, action.side, action.reduce_quantity, action.reason,
+                )
+                await self._persist_fill_to_portfolio_state(
+                    sf=sf, signal=signal, result=result, fallback_nav=Decimal(str(nav)),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | intraday-derisk tick error (non-fatal): {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
 
     async def _pipeline_runner(self) -> None:
         """Periodically run the data pipeline (feature ingestion)."""

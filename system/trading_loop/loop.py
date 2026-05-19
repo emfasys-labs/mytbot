@@ -1156,6 +1156,28 @@ class TradingLoop:
                 _apply_signal_to_portfolio_state(post_trade_state, signal)
                 await _persist_position_snapshot(session_factory, post_trade_state)
                 await _upsert_daily_pnl(session_factory, post_trade_state)
+                # D115 — anti-churn post-fill cooldown. Stamp every confirmed
+                # fill (open, add, reduce-only, close) so duplicate strategy
+                # signals on the same (broker, symbol) are blocked for the
+                # configured window. Safe no-op when the gate is disabled.
+                try:
+                    is_reduce_only = bool(
+                        isinstance(signal.metadata, dict)
+                        and (
+                            signal.metadata.get("reduce_only")
+                            or signal.metadata.get("close_only")
+                            or signal.metadata.get("flatten_all")
+                            or str(signal.metadata.get("coordinator_kind", "")).lower() == "trim_symbol"
+                        )
+                    )
+                    self.sig_engine.record_fill(
+                        broker=str(signal.broker or ""),
+                        symbol=str(signal.symbol or ""),
+                        side=str(signal.side or ""),
+                        is_reduce_only=is_reduce_only,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     slip_bps = None
                     avg_fill = getattr(result, "avg_fill_price", None)

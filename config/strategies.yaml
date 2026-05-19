@@ -27,6 +27,31 @@ signal_engine:
     min_scale: 0.25
     max_scale: 2.0
 
+  # D115 — anti-churn gate (see signals/anti_churn.py).
+  # Stops three concrete production bleed patterns:
+  #   * dedup            — same (strategy, symbol, side, conf, price) fired
+  #                        20+ times in one day at locked-in prices.
+  #   * contradiction    — long X by strategy A, short X by strategy B,
+  #                        inventory ping-pongs and only fees survive.
+  #   * post_fill        — same broker:symbol re-traded within seconds of
+  #                        the previous fill (noise re-entry).
+  # All gates are advisory at the signal layer; risk engine still has the
+  # unconditional veto. Operator closes, reduce-only trims, and
+  # allocator-selected opens are exempt from these gates.
+  anti_churn:
+    enabled: true
+    dedup_enabled: true
+    dedup_window_sec: 90              # block identical signal within this window
+    dedup_confidence_dp: 2            # rounded to 2dp before comparison
+    dedup_price_dp: 4                 # rounded to 4dp before comparison
+    contradiction_enabled: true
+    contradiction_window_sec: 300     # opposing-side cooldown after detection
+    post_fill_enabled: true
+    post_fill_cooldown_sec:           # per-mode post-fill cooldown
+      hunter: 120
+      trader: 180
+      defender: 600
+
 backtest:
   starting_cash: 100000
   fee_bps: 10

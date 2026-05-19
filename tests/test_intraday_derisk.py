@@ -1,0 +1,236 @@
+"""
+tests/test_intraday_derisk.py
+==============================
+D115 — Intraday aggregate-derisk decision logic.
+
+Today's incident: NAV bled steadily from open to close losing ~1.4% in a
+session, but the static ``max_daily_loss_pct: 0.02`` kill switch only
+fires at -2%. The intraday derisk monitor must fire BEFORE that, scaling
+the response with severity, and must only ever emit reduce-only actions.
+"""
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+
+from risk.intraday_derisk import (
+    DeriskTier,
+    evaluate_intraday_derisk,
+    parse_tiers,
+)
+
+
+def _tiers() -> list[DeriskTier]:
+    return parse_tiers(
+        [
+            {"threshold_pct": "-0.0050", "trim_pct": "0.20", "max_actions": 2, "min_loss_pct": "0.005"},
+            {"threshold_pct": "-0.0100", "trim_pct": "0.50", "max_actions": 4, "min_loss_pct": "0.003"},
+            {"threshold_pct": "-0.0150", "trim_pct": "1.00", "max_actions": 6, "min_loss_pct": "0.000"},
+        ]
+    )
+
+
+def _pos(symbol, broker, qty, entry, current, asset_class="equity") -> dict:
+    return {
+        "broker": broker,
+        "symbol": symbol,
+        "quantity": Decimal(qty),
+        "avg_entry_price": Decimal(entry),
+        "current_price": Decimal(current),
+        "asset_class": asset_class,
+        "unrealised_pnl": (Decimal(current) - Decimal(entry)) * Decimal(qty),
+    }
+
+
+def test_tiers_sorted_most_severe_first():
+    tiers = _tiers()
+    assert tiers[0].threshold_pct == Decimal("-0.0150")
+    assert tiers[-1].threshold_pct == Decimal("-0.0050")
+
+
+def test_no_action_when_day_pnl_positive():
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("1000000"),
+        day_pnl=Decimal("5000"),
+        positions=[_pos("AAPL", "ibkr", "100", "300", "295")],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert actions == []
+    assert tier is None
+    assert idx == -1
+
+
+def test_no_action_when_drawdown_below_first_tier():
+    actions, tier, _ = evaluate_intraday_derisk(
+        nav=Decimal("1000000"),
+        day_pnl=Decimal("-3000"),  # -0.30%
+        positions=[_pos("AAPL", "ibkr", "100", "300", "298")],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert actions == []
+    assert tier is None
+
+
+def test_tier1_light_trim_at_half_percent_drawdown():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "295"),   # -$500 (1.67% loss, passes min 0.5%)
+        _pos("MSFT", "ibkr", "50", "400", "397"),    # -$150 (0.75% loss, passes)
+        _pos("GLD", "ibkr", "20", "200", "201"),     # +$20 (winner)
+    ]
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-600"),  # -0.60%
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert tier is not None
+    assert idx == 2  # tier 0 in YAML order is tier 2 here (most severe first)
+    assert tier.threshold_pct == Decimal("-0.0050")
+    assert tier.trim_pct == Decimal("0.20")
+    assert len(actions) == 2  # max_actions=2
+    # Worst loser first
+    assert actions[0].symbol == "AAPL"
+    # 20% trim of 100 shares
+    assert actions[0].reduce_quantity == Decimal("20.00000000")
+    assert actions[0].side == "sell"  # closing long
+
+
+def test_tier2_heavier_trim_at_one_percent_drawdown():
+    positions = [
+        _pos("AAPL", "ibkr", "200", "300", "295"),  # -$1000
+        _pos("NVDA", "ibkr", "30", "500", "490"),   # -$300
+        _pos("TSLA", "ibkr", "-10", "200", "205"),  # -$50 (short losing)
+    ]
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1200"),  # -1.20% (above tier1=-0.5%, tier2=-1.0% — picks tier2)
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert tier is not None
+    assert tier.trim_pct == Decimal("0.50")
+    # AAPL is worst loser; trim 50% of 200 = 100
+    assert actions[0].symbol == "AAPL"
+    assert actions[0].reduce_quantity == Decimal("100.00000000")
+
+
+def test_tier3_full_close_at_severe_drawdown():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "295"),
+        _pos("MSFT", "ibkr", "50", "400", "398"),
+    ]
+    actions, tier, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1700"),  # -1.70% → tier3
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert tier is not None
+    assert tier.trim_pct == Decimal("1.00")
+    assert any(a.reduce_quantity == Decimal("100") for a in actions)  # full AAPL
+    # Short positions close with buy
+    # (not in this case, but check side for AAPL long = sell)
+    for a in actions:
+        if a.symbol == "AAPL":
+            assert a.side == "sell"
+
+
+def test_short_position_closed_with_buy():
+    positions = [
+        _pos("AAPL", "ibkr", "-100", "300", "303"),  # short losing -$300
+    ]
+    actions, _, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1700"),  # tier3 full close
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert len(actions) == 1
+    assert actions[0].symbol == "AAPL"
+    assert actions[0].side == "buy"
+    assert actions[0].reduce_quantity == Decimal("100")
+
+
+def test_cooldown_skips_recently_acted_position():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "295"),
+        _pos("MSFT", "ibkr", "50", "400", "397"),
+    ]
+    actions, _, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1200"),
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=300,
+        last_action_ts={"ibkr:AAPL": 1_699_999_900},  # 100s ago
+        now_ts=1_700_000_000,
+    )
+    # AAPL is on cooldown; MSFT becomes the only candidate
+    assert all(a.symbol != "AAPL" for a in actions)
+
+
+def test_min_loss_pct_filters_marginal_losers_at_light_tier():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "299.6"),  # only 0.13% loss → below tier1 min 0.5%
+        _pos("MSFT", "ibkr", "50", "400", "395"),     # 1.25% loss → passes
+    ]
+    actions, _, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-600"),  # tier1
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert {a.symbol for a in actions} == {"MSFT"}
+
+
+def test_winners_never_trimmed():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "310"),  # +$1000 winner
+        _pos("MSFT", "ibkr", "50", "400", "395"),   # -$250 loser
+    ]
+    actions, _, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1700"),
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    # Even at the severe tier, winners are not trimmed by intraday derisk.
+    assert all(a.symbol == "MSFT" for a in actions)
+
+
+def test_empty_positions_no_action():
+    actions, tier, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-2000"),
+        positions=[],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert actions == []

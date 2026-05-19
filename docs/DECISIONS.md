@@ -1005,6 +1005,101 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D115 — Anti-churn + cluster-aware risk + intraday derisk + stale-price gate (2026-05-19)
+
+Five-tier rectification after the 2026-05-19 paper-trading audit. 224 fills
+in 8 hours moved $6.0M of turnover on a $1.18M NAV and ended the session
+at roughly -$5,000 / -0.4% with no individual stop-loss or daily-loss limit
+having fired. The audit traced the bleed to three structural failures
+(unbounded duplicate signals, undetected directional clusters, no graduated
+portfolio-level defence) and one execution-layer leak (stale-price paper
+fills). The risk engine retains unconditional veto power throughout; every
+new gate is either a strict reject layer or a reduce-only emitter routed
+through the normal SignalEngine + RiskEngine + ExecutionEngine path.
+
+Decision:
+
+- `signals/anti_churn.py` adds an `AntiChurnGate` with three production-
+  grade rejects:
+    * dedup        — same `(strategy, symbol, side, conf, price)` within
+                     90s (per-strategy)
+    * contradiction — strategy A long X + strategy B short X within 5min;
+                     lower-confidence side rejected, both sides tombstoned
+    * post_fill   — re-entry on `(broker, symbol)` within mode-aware
+                     cooldown (hunter 120s, trader 180s, defender 600s)
+  Wired into `SignalEngine.process()` and `raw_to_signal_candidate()` BEFORE
+  meta-label, and `record_fill()` is called by `TradingLoop` after every
+  confirmed fill. Operator closes, reduce-only trims, and allocator-
+  selected opens are exempt. Config: `config/strategies.yaml::signal_engine.anti_churn`.
+
+- `risk/engine.py::_check_fx_cluster_exposure` caps aggregate signed USD
+  exposure across all held forex positions plus the proposed signal.
+  Today's six FX legs (EURUSD long, GBPUSD long, AUDUSD long, USDCAD/CHF/
+  JPY short) were one bet on dollar weakness sized as if they were six
+  independent risks. Pair-orientation rules: xxxUSD long = short USD,
+  USDxxx long = long USD. Reduce-only and neutralising legs are never
+  blocked. Config: `config/risk_limits.yaml::fx_cluster`.
+
+- `risk/engine.py::_check_equity_index_cluster_exposure` is the symmetric
+  cap for the US broad-market index family (SPY, QQQ, IWM, DIA, VTI, VOO,
+  IVV, MDY, TQQQ/SQQQ/SPXL/SPXS). Same neutralise/reduce-only rules.
+  Config: `config/risk_limits.yaml::equity_index_cluster`.
+
+- `risk/intraday_derisk.py` implements a graduated portfolio-level defence
+  that sits BEFORE the static `max_daily_loss_pct` kill switch. Three
+  tiers: -0.5% intraday triggers a 20% trim of the worst losers (max 2),
+  -1.0% triggers a 50% trim (max 4), -1.5% triggers a full close (max 6).
+  Cooldown 120s per `(broker, symbol)`. Wired as
+  `Orchestrator._intraday_derisk_loop` / `_run_intraday_derisk_tick`,
+  cancelled on stop. All emitted actions are reduce-only, still routed
+  through SignalEngine + RiskEngine + ExecutionEngine. Config:
+  `config/risk_limits.yaml::intraday_derisk`. Profit-harvest peak
+  persistence (D115 item 8) was already in place via
+  `Orchestrator._persist_profit_harvest_peaks` and survives restart.
+
+- `execution/engine.py::_simulate_fill` rejects an opening paper fill when
+  `signal.suggested_price` has drifted against the trade direction by
+  more than `stale_price_gate.max_adverse_drift_bps` (default 25 bps).
+  Returns a REJECTED OrderResult with `filled_quantity=0` and sets
+  `last_skip_reason`. Reduce-only / close intents are exempt. Config:
+  `config/risk_limits.yaml::stale_price_gate`. Backtest harness disables
+  this and the anti-churn gate for the duration of the run (wall-clock
+  semantics do not apply when replaying historical bars in milliseconds).
+
+- `scripts/flatten_orphaned_remnants.py` is the operator-facing housekeeping
+  tool for the post-incident cleanup. Identifies and (with `--apply`)
+  flattens paper-ledger positions below a configurable notional ceiling
+  (default $25,000) with optional symbol/broker/loss-pct filters. Paper-mode
+  only; refuses live. Dry-run by default. Writes filled close `OrderLog`
+  rows plus zero-quantity `PositionLog` tombstones using the same helper
+  that backs the D070 local-paper-flatten path.
+
+Tests:
+
+- `tests/test_anti_churn_gate.py` — 17 cases (dedup, contradiction,
+  post-fill cooldown, mode-aware cooldowns, operator-close exemption,
+  engine integration).
+- `tests/test_fx_cluster_exposure.py` — 9 cases (orientation helper, signed
+  exposure math, cap enforcement, neutralising / reduce-only / non-FX
+  exemptions, disabled-gate passthrough).
+- `tests/test_equity_index_cluster.py` — 6 cases (cluster membership,
+  additive vs opposite-direction, reduce-only, disabled-gate).
+- `tests/test_intraday_derisk.py` — 11 cases (no-action when positive,
+  tier ladder, short-position close direction, cooldown, min-loss filter,
+  winners never trimmed).
+- `tests/test_stale_price_gate.py` — 7 cases (BUY/SELL adverse rejection,
+  favorable drift fill, sub-threshold fill, reduce-only exemption,
+  disabled-gate passthrough, missing-quote passthrough).
+- `tests/test_flatten_orphaned_remnants.py` — 5 cases (loss-pct math).
+
+Verification:
+- `python -m py_compile signals/anti_churn.py signals/engine.py risk/engine.py risk/intraday_derisk.py execution/engine.py system/orchestrator.py system/trading_loop/loop.py scripts/flatten_orphaned_remnants.py backtest/harness.py`
+- `python -m pytest -q` → `1235 passed, 3 skipped, 1 warning` (the warning
+  is a pre-existing AsyncMock fixture leak in `test_profit_harvest.py`,
+  unchanged by this work).
+- Targeted: anti-churn / FX cluster / equity-index cluster / intraday
+  derisk / stale-price gate / remnants suites → `55 passed`.
+
 ## D114 — Session-exit policy embedded in global-edge decisions (2026-05-19)
 
 Market-session intelligence now includes pre-close position review without
