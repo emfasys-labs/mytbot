@@ -24,7 +24,7 @@ Toggle: ``MARKET_SESSION_GATE=0`` disables the gate entirely (default on).
 from __future__ import annotations
 
 import os
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -238,3 +238,68 @@ def not_tradeable_reason(
     b = str(getattr(broker, "value", broker) or "").strip().lower()
     base = market_closed_reason(asset_class, symbol, now) or "venue_closed"
     return f"{base}:broker={b or 'unknown'}"
+
+
+def session_close_at(
+    broker: object,
+    asset_class: object,
+    symbol: str = "",
+    now: datetime | None = None,
+) -> datetime | None:
+    """Current session close time in UTC, when known and currently open.
+
+    This is for policy, not the execution safety gate. Unknown assets and 24/7
+    venues return ``None`` so a caller never invents an end-of-day flatten for
+    markets that do not have a finite close.
+    """
+    if not _gate_enabled():
+        return None
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+
+    b = str(getattr(broker, "value", broker) or "").strip().lower()
+    smap = _broker_session_map()
+    policy = smap.get(b) or smap.get("__default__", "by_asset_class")
+    if policy == "always":
+        return None
+    if not is_tradeable(broker, asset_class, symbol, now):
+        return None
+
+    ac = _norm_ac(asset_class)
+    if ac in _CRYPTO_AC:
+        return None
+    if ac in _FX_AC:
+        # FX has one continuous weekly session ending Friday 21:00 UTC.
+        days_until_friday = (4 - now.weekday()) % 7
+        close_dt = (now + timedelta(days=days_until_friday)).replace(
+            hour=21, minute=0, second=0, microsecond=0
+        )
+        if close_dt < now:
+            close_dt += timedelta(days=7)
+        return close_dt
+    if ac in _EQUITY_AC:
+        et = now.astimezone(_ET)
+        close_t = time(20, 0) if _extended_hours() else time(16, 0)
+        close_et = datetime.combine(et.date(), close_t, tzinfo=_ET)
+        close_utc = close_et.astimezone(timezone.utc)
+        return close_utc if close_utc >= now else None
+    return None
+
+
+def minutes_to_session_close(
+    broker: object,
+    asset_class: object,
+    symbol: str = "",
+    now: datetime | None = None,
+) -> float | None:
+    """Minutes until the active session closes, or ``None`` if not applicable."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    close_dt = session_close_at(broker, asset_class, symbol, now)
+    if close_dt is None:
+        return None
+    return max(0.0, (close_dt - now).total_seconds() / 60.0)

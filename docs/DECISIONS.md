@@ -1004,3 +1004,33 @@ Honest scope: this is an efficiency/correctness/clarity change (capital
 only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
+
+## D114 — Session-exit policy embedded in global-edge decisions (2026-05-19)
+
+Market-session intelligence now includes pre-close position review without
+becoming a blunt "close everything at the bell" rule.
+
+Decision:
+- `core/market_session.py` exposes `session_close_at()` and
+  `minutes_to_session_close()` as broker-aware timing helpers. 24/7 venues and
+  unknown/closed markets return `None` so no synthetic close is invented.
+- `config/session_exit_policy.yaml` defines the governed pre-close windows and
+  mode/horizon policy. Intraday/scalp positions default to no overnight carry;
+  swing/position trades default to holding through the close.
+- `core/session_exit_policy.py` evaluates each position into one of:
+  `hold_through_close`, `trim_before_close`, `close_before_close`, or
+  `defer_action`, with an explicit reduce fraction and reason.
+- `GlobalEdgeCoordinator.propose_session_exit_actions()` converts only
+  executable close/trim decisions into normal `trim_symbol` reduce-only
+  coordinator actions. These still pass through SignalEngine, RiskEngine,
+  router, and ExecutionEngine; there is no risk bypass and no forced flatten.
+- `TradingLoop._run_global_edge_tick()` prepends session-exit reduce-only
+  actions ahead of ordinary opens/replacements, de-duplicating against other
+  reduce actions already selected in the same loop.
+
+Implication:
+The system can close or trim positions before a venue shuts only when the
+position's own profile says that is appropriate: explicit intraday/no-overnight
+positions close near the bell; defender mode can bank profitable swing exposure;
+normal swing/position theses can remain open overnight/days/weeks. The
+execution gate remains the final binary physics check for closed venues.

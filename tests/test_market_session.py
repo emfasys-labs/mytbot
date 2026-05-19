@@ -19,7 +19,9 @@ from core.market_session import (
     is_market_open,
     is_tradeable,
     market_closed_reason,
+    minutes_to_session_close,
     not_tradeable_reason,
+    session_close_at,
 )
 
 
@@ -191,3 +193,22 @@ def test_broker_policy_yaml_override(tmp_path, monkeypatch) -> None:
 def test_gate_disabled_makes_everything_tradeable(monkeypatch) -> None:
     monkeypatch.setenv("MARKET_SESSION_GATE", "0")
     assert is_tradeable("ibkr", "equity", "AAPL", _utc(2026, 5, 17, 15, 0)) is True
+
+
+def test_equity_session_close_time_is_broker_aware() -> None:
+    now = _utc(2026, 5, 13, 19, 45)  # 15 minutes before 16:00 ET close
+    close_at = session_close_at("ibkr", "equity", "AAPL", now)
+    assert close_at == _utc(2026, 5, 13, 20, 0)
+    assert minutes_to_session_close("ibkr", "equity", "AAPL", now) == 15.0
+
+
+def test_crypto_session_has_no_finite_close() -> None:
+    now = _utc(2026, 5, 17, 15, 0)
+    assert session_close_at("kraken", "crypto", "BTC-USD", now) is None
+    assert minutes_to_session_close("kraken", "crypto", "BTC-USD", now) is None
+
+
+def test_fx_session_close_is_weekly() -> None:
+    now = _utc(2026, 5, 15, 20, 30)  # Friday, 30 minutes before FX weekend close
+    assert session_close_at("ibkr", "forex", "EURUSD", now) == _utc(2026, 5, 15, 21, 0)
+    assert minutes_to_session_close("ibkr", "forex", "EURUSD", now) == 30.0

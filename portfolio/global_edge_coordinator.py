@@ -1934,6 +1934,95 @@ class GlobalEdgeCoordinator:
             )
         return out
 
+    def propose_session_exit_actions(
+        self,
+        held: list[HeldPositionEdge],
+        *,
+        active_mode: str = DEFAULT_MODE,
+        now: datetime | None = None,
+        max_actions: int | None = None,
+    ) -> list[CoordinatorAction]:
+        """Emit pre-close reduce-only actions from the session-exit policy.
+
+        This is deliberately not a close-all-at-close rule. The policy reviews
+        each held position's horizon / overnight permission / mode / P&L and
+        only emits a reduce action when that position profile says it should
+        not be carried, or should be defensively trimmed, through the session
+        boundary.
+        """
+        if not held:
+            return []
+        try:
+            from core.session_exit_policy import evaluate_session_exit
+        except Exception:  # noqa: BLE001
+            return []
+
+        cap_n = max_actions if max_actions is not None else len(held)
+        if cap_n <= 0:
+            return []
+
+        out: list[CoordinatorAction] = []
+        for h in held:
+            if len(out) >= cap_n:
+                break
+            md = dict(h.metadata or {})
+            broker = str(h.broker or md.get("broker") or "").strip().lower()
+            asset_class = str(md.get("asset_class") or "equity").strip().lower()
+            try:
+                qty = Decimal(str(md.get("quantity", "0") or "0"))
+                px = Decimal(str(md.get("close") or md.get("price") or "0"))
+                avg = Decimal(str(md.get("avg_entry_price") or md.get("entry_price") or px or "0"))
+            except Exception:  # noqa: BLE001
+                continue
+            if qty == 0 or px <= 0:
+                continue
+            decision = evaluate_session_exit(
+                broker=broker,
+                asset_class=asset_class,
+                symbol=h.symbol,
+                quantity=qty,
+                avg_entry_price=avg,
+                current_price=px,
+                strategy_name=h.strategy_name,
+                profile_mode=active_mode,
+                metadata=md,
+                now=now,
+            )
+            if not decision.should_submit_order or decision.reduce_fraction <= 0:
+                continue
+            frac = min(Decimal("1"), max(Decimal("0"), decision.reduce_fraction))
+            reduce_notional = (h.notional * frac).quantize(Decimal("0.00000001"))
+            if reduce_notional <= 0:
+                continue
+            close_only = frac >= Decimal("0.999999")
+            meta = dict(md)
+            meta["coordinator_kind"] = "trim_symbol"
+            meta["reduce_only"] = True
+            meta["close_only"] = close_only
+            meta["partial_reduce_only"] = not close_only
+            meta["session_exit"] = True
+            meta["session_exit_action"] = decision.action
+            meta["session_exit_reason"] = decision.reason
+            meta["session_exit_minutes_to_close"] = (
+                None if decision.minutes_to_close is None else round(float(decision.minutes_to_close), 4)
+            )
+            meta["session_exit_reduce_fraction"] = str(frac)
+            meta["target_notional"] = str(reduce_notional)
+            meta["risk_notional_override"] = str(reduce_notional)
+            if broker:
+                meta["broker"] = broker
+            out.append(
+                CoordinatorAction(
+                    kind="trim_symbol",
+                    symbol=h.symbol,
+                    strategy_name="session_exit_policy",
+                    capital=reduce_notional,
+                    priority_score=Decimal("0.99"),
+                    metadata=meta,
+                )
+            )
+        return out
+
 
 def dedupe_opportunities_by_symbol(
     opportunities: list[StrategyOpportunity],
@@ -2050,6 +2139,7 @@ def held_positions_from_portfolio(
             "quantity": str(qty),
             "close": str(px),
             "price": str(px),
+            "avg_entry_price": str(avg),
             "side": side,
             "asset_class": str(row.get("asset_class", "equity") or "equity"),
             "unrealised_return": str(unrl_ret.quantize(Decimal("0.000001"))),

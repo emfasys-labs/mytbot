@@ -1,0 +1,47 @@
+# config/session_exit_policy.yaml
+# ===============================
+# Pre-close position policy. This is not a blunt "close at market close"
+# switch: it decides whether the session boundary should hold, trim, close,
+# or simply annotate a position based on horizon, mode, P&L, and time left.
+
+enabled: true
+
+windows:
+  warning_minutes_before_close: 60
+  decision_minutes_before_close: 20
+  hard_exit_minutes_before_close: 5
+
+defaults:
+  holding_horizon: swing
+  allow_overnight: true
+  allow_weekend_hold: false
+  max_loss_pct_for_hold: "-0.015"
+  min_profit_pct_for_defender_trim: "0.004"
+
+horizons:
+  scalp:
+    allow_overnight: false
+    action: close_before_close
+  intraday:
+    allow_overnight: false
+    action: close_before_close
+  swing:
+    allow_overnight: true
+    action: hold_through_close
+  position:
+    allow_overnight: true
+    action: hold_through_close
+
+modes:
+  defender:
+    trim_fraction: "0.50"
+    trim_profitable_swing_before_close: true
+    close_losing_intraday_in_warning_window: true
+  trader:
+    trim_fraction: "0.25"
+    trim_profitable_swing_before_close: false
+    close_losing_intraday_in_warning_window: true
+  hunter:
+    trim_fraction: "0.00"
+    trim_profitable_swing_before_close: false
+    close_losing_intraday_in_warning_window: false

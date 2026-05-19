@@ -2949,6 +2949,45 @@ class TradingLoop:
                 # opens. Together they bring cash to target.
                 actions = list(shed_actions) + list(actions)
             try:
+                existing_reduce_keys = {
+                    (
+                        str(getattr(a, "symbol", "") or "").strip().upper(),
+                        str((getattr(a, "metadata", None) or {}).get("broker") or "").strip().lower(),
+                    )
+                    for a in actions
+                    if str(getattr(a, "kind", "") or "") == "trim_symbol"
+                }
+                session_exit_actions = [
+                    a
+                    for a in coord.propose_session_exit_actions(
+                        held,
+                        active_mode=mode_for_coord,
+                        now=datetime.now(timezone.utc),
+                    )
+                    if (
+                        str(getattr(a, "symbol", "") or "").strip().upper(),
+                        str((getattr(a, "metadata", None) or {}).get("broker") or "").strip().lower(),
+                    )
+                    not in existing_reduce_keys
+                ]
+            except Exception as exc:  # noqa: BLE001
+                session_exit_actions = []
+                logger.debug("trading_loop | session_exit_policy failed: {}", exc)
+            if session_exit_actions:
+                logger.info(
+                    "trading_loop | session_exit_policy | {} pre-close reduce action(s) | sample={}",
+                    len(session_exit_actions),
+                    [
+                        (
+                            a.symbol,
+                            (a.metadata or {}).get("session_exit_action"),
+                            (a.metadata or {}).get("session_exit_reason"),
+                        )
+                        for a in session_exit_actions[:5]
+                    ],
+                )
+                actions = list(session_exit_actions) + list(actions)
+            try:
                 if repl_ctx is not None and actions:
                     ts = datetime.now(timezone.utc)
 
