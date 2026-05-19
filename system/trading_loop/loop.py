@@ -2030,6 +2030,35 @@ class TradingLoop:
                                         else profile_modes_cfg.defaults.active_mode,
                                         feature_json_by_symbol=feat_extra,
                                     )
+                                # ── Market-hours decision filter ──────────
+                                # Drop opportunities whose venue/asset is
+                                # CLOSED right now BEFORE allocation, so
+                                # capital is only ever allocated to what is
+                                # actually tradeable this cycle (instead of
+                                # selecting it and bouncing at the execution
+                                # gate, distorting the allocation + spamming
+                                # the harvest/stop monitors). Asset class is
+                                # derived from the symbol; session truth is
+                                # the same authority the execution gate uses.
+                                try:
+                                    from core.market_session import is_market_open as _mkt_open
+
+                                    _pre = len(opps)
+                                    opps = [
+                                        o for o in opps
+                                        if _mkt_open(asset_class_for_symbol(o.symbol), o.symbol)
+                                    ]
+                                    _dropped = _pre - len(opps)
+                                    if _dropped and self.iterations % 5 == 0:
+                                        logger.info(
+                                            "market_hours | filtered {} closed-venue "
+                                            "opportunit{} from allocation ({} tradeable)",
+                                            _dropped,
+                                            "y" if _dropped == 1 else "ies",
+                                            len(opps),
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    self._swallow("market_hours_opportunity_filter", exc)
                                 esc_syms = [o.symbol for o in opps if o.metadata.get("d015_escalate_context")]
                                 await enqueue_volume_escalation_symbols(bus, esc_syms, alloc_cfg)
                                 repl_ctx = await load_replacement_context_from_bus(bus)

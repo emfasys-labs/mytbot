@@ -190,11 +190,13 @@ class ExecutionEngine:
         # filled these either, so refusing them is correctness, not a cap.
         # Crypto (24/7) and unclassifiable instruments are never blocked.
         try:
-            from core.market_session import is_market_open, market_closed_reason
+            from core.market_session import is_tradeable, not_tradeable_reason
 
-            if not is_market_open(signal.asset_class, str(signal.symbol or "")):
-                reason = market_closed_reason(
-                    signal.asset_class, str(signal.symbol or "")
+            if not is_tradeable(
+                signal.broker, signal.asset_class, str(signal.symbol or "")
+            ):
+                reason = not_tradeable_reason(
+                    signal.broker, signal.asset_class, str(signal.symbol or "")
                 ) or "market_closed"
                 self.last_skip_reason = reason
                 logger.info(

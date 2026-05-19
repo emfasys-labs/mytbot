@@ -977,3 +977,30 @@ route/screen files, and UI API types in `ui/src/app/lib/api.ts`, with focused co
 `tests/test_api_dashboard_extras.py`. This is a read-only/onboarding inventory
 slice; OAuth flows, generic unknown-protocol adapters, and treasury execution
 are future work.
+
+## D107 — Broker/market operating hours as a first-class decision input (2026-05-19)
+Previously the market-session gate (`core/market_session.is_market_open`)
+acted ONLY at the execution last-mile: the strategy/allocator selected
+positions blind to venue hours, then orders bounced at `execute()`. This
+wasted cycles, distorted allocation (un-tradeable names chosen over
+tradeable ones), and made the harvest/stop monitors re-attempt closed-
+market closes every cycle (the pre-market "389× did not execute" spam;
+winners sat undefended).
+
+Now broker/market hours are a first-class decision input:
+- `config/market_hours.yaml` — declarative per-venue session policy
+  (`always` for 24/7 crypto venues; `by_asset_class` otherwise).
+- `core/market_session.is_tradeable(broker, asset_class, symbol)` — the
+  single broker-aware authority. The proven `is_market_open` asset-class
+  gate is left byte-identical (foundation is purely additive).
+- Wired upstream: (a) the D015 allocator drops closed-venue opportunities
+  BEFORE allocation; (b) profit-harvest / stop-loss / aggregate-de-risk
+  monitors skip closed-venue positions quietly (DEBUG) instead of
+  spamming failed closes — they re-evaluate automatically at reopen;
+  (c) the `execute()` gate upgraded to the same broker-aware authority
+  (defence-in-depth, unchanged role).
+
+Honest scope: this is an efficiency/correctness/clarity change (capital
+only allocated to currently-tradeable instruments; no pre-market spam),
+NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
+invalid YAML → built-in defaults (backward-safe).

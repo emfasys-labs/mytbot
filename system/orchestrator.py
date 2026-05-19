@@ -1256,6 +1256,22 @@ class Orchestrator:
                     sym = str(getattr(pos, "symbol", "") or "").strip().upper()
                     if not sym:
                         continue
+                    # Venue closed → a stop close cannot fill; skip quietly
+                    # (re-evaluates at reopen). The breach persists until
+                    # the market opens regardless — attempting every 15s
+                    # is pure waste.
+                    _ac = getattr(pos, "asset_class", "equity")
+                    _acl = str(getattr(_ac, "value", _ac) or "equity").strip().lower()
+                    try:
+                        from core.market_session import is_tradeable as _is_tradeable
+
+                        if not _is_tradeable(bname, _acl, sym):
+                            logger.debug(
+                                "stop-loss | skip (venue closed) | {} {}", bname, sym
+                            )
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
                     direction = "long" if qty > 0 else "short"
                     close_key = f"{bname}:{sym}:{direction}"
                     last_ts = self._stop_loss_last_close_ts.get(close_key, 0.0)
@@ -1489,6 +1505,18 @@ class Orchestrator:
                     sym = str(getattr(pos, "symbol", "") or "").strip().upper()
                     if not sym:
                         continue
+                    # Exclude closed-venue positions from the de-risk
+                    # candidate set — a reduce-only close can't fill on a
+                    # shut market; it will be reconsidered once it reopens.
+                    _ac = getattr(pos, "asset_class", "equity")
+                    _acl = str(getattr(_ac, "value", _ac) or "equity").strip().lower()
+                    try:
+                        from core.market_session import is_tradeable as _is_tradeable
+
+                        if not _is_tradeable(bname, _acl, sym):
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
                     try:
                         entry = Decimal(str(getattr(pos, "avg_entry_price", "0") or "0"))
                         current = Decimal(str(getattr(pos, "current_price", "0") or "0"))
@@ -1689,6 +1717,21 @@ class Orchestrator:
                 asset_class = str(row.get("asset_class") or "equity").strip().lower()
                 if not sym or not broker:
                     continue
+                # Venue closed → a harvest close cannot fill anyway. Skip
+                # quietly (DEBUG) instead of attempting + logging
+                # "did not execute" every cycle (the pre-market spam).
+                # It re-evaluates automatically once the venue reopens.
+                try:
+                    from core.market_session import is_tradeable as _is_tradeable
+
+                    if not _is_tradeable(broker, asset_class, sym):
+                        logger.debug(
+                            "profit-harvest | skip (venue closed) | {} {}",
+                            broker, sym,
+                        )
+                        continue
+                except Exception:  # noqa: BLE001 — gate must never break the tick
+                    pass
                 side = "sell" if qty > 0 else "buy"
                 harvest_key = f"{broker}:{sym}:{'long' if qty > 0 else 'short'}"
                 active_keys.add(harvest_key)

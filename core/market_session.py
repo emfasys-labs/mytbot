@@ -25,9 +25,48 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, time, timezone
+from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
+
+# ── Per-venue session policy (config/market_hours.yaml) ──────────────────
+# Purely additive: governs only the NEW broker-aware ``is_tradeable``.
+# ``is_market_open`` (the proven, deployed asset-class gate used by the
+# execution safety-net) is intentionally left byte-identical. Built-in
+# defaults below make crypto-only venues 24/7 even with no config file.
+_DEFAULT_BROKER_SESSION: dict[str, str] = {
+    "kraken": "always",
+    "binance": "always",
+    "bybit": "always",
+    "ibkr": "by_asset_class",
+    "alpaca": "by_asset_class",
+}
+
+
+@lru_cache(maxsize=1)
+def _broker_session_map() -> dict[str, str]:
+    """Load broker→session-policy from config/market_hours.yaml, falling
+    back to the built-in defaults. Cached; never raises."""
+    out = dict(_DEFAULT_BROKER_SESSION)
+    try:
+        import yaml  # local import keeps core dependency-light
+
+        p = Path(
+            os.getenv("MARKET_HOURS_CONFIG", "config/market_hours.yaml")
+        )
+        if p.is_file():
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            for b, spec in (cfg.get("brokers") or {}).items():
+                if isinstance(spec, dict) and spec.get("session"):
+                    out[str(b).strip().lower()] = str(spec["session"]).strip().lower()
+            dflt = cfg.get("default")
+            if isinstance(dflt, dict) and dflt.get("session"):
+                out["__default__"] = str(dflt["session"]).strip().lower()
+    except Exception:  # noqa: BLE001 — config is best-effort; defaults stand
+        pass
+    return out
 
 # US equity/ETF/option FULL-DAY closures (NYSE/Nasdaq). A factual calendar,
 # not a tunable knob. Half-days (early closes) are intentionally treated as
@@ -154,3 +193,48 @@ def market_closed_reason(
         f"market_closed:{ac or 'unknown'}:"
         f"{when.strftime('%a %Y-%m-%d %H:%M')}_ET"
     )
+
+
+def is_tradeable(
+    broker: object,
+    asset_class: object,
+    symbol: str = "",
+    now: datetime | None = None,
+) -> bool:
+    """Broker-aware tradeability — the single authority for "can this
+    venue transact this instrument *now*".
+
+    Resolves the broker's session policy from config/market_hours.yaml
+    (built-in defaults otherwise):
+      * ``always``         → 24/7 venue (crypto exchanges) → True.
+      * ``by_asset_class`` → defer to the proven ``is_market_open``
+        (US equity RTH+holidays / FX 24x5 / crypto 24/7).
+
+    Used upstream (candidate/opportunity selection, the harvest/stop/
+    de-risk monitors) AND at the execution gate, so the whole pipeline
+    decides on the same session truth instead of selecting instruments
+    it can't act on and discovering it only at the final reject.
+    Fail-open: gate disabled or unclassifiable → True.
+    """
+    if not _gate_enabled():
+        return True
+    b = str(getattr(broker, "value", broker) or "").strip().lower()
+    smap = _broker_session_map()
+    policy = smap.get(b) or smap.get("__default__", "by_asset_class")
+    if policy == "always":
+        return True
+    return is_market_open(asset_class, symbol, now)
+
+
+def not_tradeable_reason(
+    broker: object,
+    asset_class: object,
+    symbol: str = "",
+    now: datetime | None = None,
+) -> str | None:
+    """Reason string when an instrument is NOT tradeable now, else None."""
+    if is_tradeable(broker, asset_class, symbol, now):
+        return None
+    b = str(getattr(broker, "value", broker) or "").strip().lower()
+    base = market_closed_reason(asset_class, symbol, now) or "venue_closed"
+    return f"{base}:broker={b or 'unknown'}"
