@@ -788,22 +788,34 @@ def _symbols_fallback(
             if isinstance(p, dict) and str(p.get("symbol", "")).strip()
         }
         active_syms = {str(s).upper() for s in (intel.core or [])}
+        # D118 dashboard tabs compare row-level counts against funnel
+        # counts. Keep every active representative and promoted symbol in
+        # the row payload, then append the full current watchlist. The old
+        # 400-row cap made Instruments/Composition disagree with the funnel
+        # whenever watching > 400.
+        syms = list(
+            dict.fromkeys(
+                [s for s in (intel.core or []) if str(s).strip()]
+                + [s for s in promoted_syms if str(s).strip()]
+                + list(syms)
+            )
+        )
 
-    for i, sym in enumerate(syms[: min(len(syms), 400)]):
+    for i, sym in enumerate(syms):
         sc = float(scores.get(sym.upper(), 50.0 + (i % 17)))
         su = sym.upper()
         stage = "watching"
         if intel and su in promoted_syms:
             stage = "promoted"
         elif intel and su in active_syms:
-            stage = "active"
+            stage = "active_reps"
         elif not intel and i < min(7, len(syms) // 15):
-            stage = "active"
+            stage = "active_reps"
         elif not intel and i < min(27, len(syms) // 5):
             stage = "promoted"
         if intel_disabled:
             stage = "watching" if i >= min(7, len(syms) // 15) else stage
-        tier_reason = "core" if i < core_max else "scan"
+        tier_reason = "core" if su in active_syms or i < core_max else "scan"
         klass = _classify_symbol(sym)
         spark = [max(0, min(100, sc + j * 2 - 10)) for j in range(12)]
         cat_name, cat_sector = _catalog_lookup(sym)

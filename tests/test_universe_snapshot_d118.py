@@ -29,10 +29,12 @@ from universe.snapshot_service import (
     _asset_class_coverage_block,
     _build_d118_funnel,
     _priority_rule_block,
+    _symbols_fallback,
     _score_ages_by_symbol,
     _transitions_block,
     build_universe_snapshot_dict,
 )
+from universe.universe_tiers import UniverseIntelligenceState
 
 
 def _utc(year: int, month: int, day: int, hour: int = 0) -> datetime:
@@ -156,6 +158,26 @@ def test_asset_class_coverage_handles_empty():
     coverage = _asset_class_coverage_block([])
     assert coverage["total"] == 0
     assert coverage["by_asset_class"] == []
+
+
+def test_symbol_rows_are_not_truncated_below_watch_count():
+    syms = [f"SYM{i}" for i in range(784)]
+    intel = UniverseIntelligenceState(core=[f"SYM{i}" for i in range(87)])
+    rows = _symbols_fallback(
+        pipeline_syms=[],
+        tier_flat=syms,
+        scores={s: float(i) for i, s in enumerate(syms)},
+        caps={"core_max": 100, "max_symbols": 784, "scan_max": 684, "candidates": 800},
+        cfg={},
+        intel_disabled=False,
+        intel=intel,
+    )
+    assert len(rows) == 784
+    by_stage: dict[str, int] = {}
+    for row in rows:
+        by_stage[row["stage"]] = by_stage.get(row["stage"], 0) + 1
+    assert by_stage["active_reps"] == 87
+    assert by_stage["watching"] == 697
 
 
 # ---------------------------------------------------------------------------

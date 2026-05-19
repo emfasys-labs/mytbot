@@ -611,6 +611,7 @@ export type IntelligenceUniverseResponse = {
     unique_normalized_count?: number;
     scored_candidate_count?: number;
     watched_count?: number;
+    registry_active_count?: number;
     caps?: Record<string, number>;
     by_broker?: Record<string, {
       raw?: number;
