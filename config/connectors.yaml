@@ -164,6 +164,9 @@ ai_providers:
     capabilities:
       advisory_only: true
       local_first: true
+      core_required: true
+      non_disableable: true
+    notes: Deterministic baseline scoring layer; always on and not a removable model provider.
 
   fin_sentiment:
     label: FinBERT sentiment

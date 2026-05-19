@@ -792,6 +792,7 @@ export type ConnectControlRequest = {
   category: string;
   connector_id: string;
   enabled?: boolean;
+  exposure_action?: 'block_new_only';
 };
 
 export type ConnectControlResponse = {

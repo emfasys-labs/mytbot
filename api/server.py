@@ -2321,6 +2321,7 @@ class _ConnectControlBody(BaseModel):
     category: str
     connector_id: str
     enabled: bool | None = None
+    exposure_action: str | None = None
 
 
 @app.post("/auth/dashboard/login")
@@ -2630,6 +2631,45 @@ async def add_connector(
     }
 
 
+async def _broker_exposure_summary(connector_id: str) -> dict[str, Any]:
+    name = str(connector_id or "").strip().lower()
+    if not name:
+        return {"positions": 0, "open_orders": 0, "has_exposure": False}
+    orch = _get_orchestrator()
+    bm = getattr(orch, "_broker_manager", None) if orch is not None else None
+    adapters = getattr(bm, "adapters", {}) if bm is not None else {}
+    adapter = adapters.get(name)
+    if adapter is None:
+        return {"positions": 0, "open_orders": 0, "has_exposure": False}
+    positions_count = 0
+    open_orders_count = 0
+    try:
+        positions = await asyncio.wait_for(adapter.get_positions(), timeout=8.0)
+        for p in positions or []:
+            try:
+                if Decimal(str(getattr(p, "quantity", "0") or "0")) != 0:
+                    positions_count += 1
+            except Exception:  # noqa: BLE001
+                positions_count += 1
+    except Exception:  # noqa: BLE001
+        positions_count = -1
+    try:
+        orders = await asyncio.wait_for(adapter.get_open_orders(), timeout=8.0)
+        open_orders_count = len(orders or [])
+    except Exception:  # noqa: BLE001
+        open_orders_count = -1
+    return {
+        "positions": positions_count,
+        "open_orders": open_orders_count,
+        "has_exposure": positions_count != 0 or open_orders_count != 0,
+    }
+
+
+def _connector_is_non_disableable(manifest: Any) -> bool:
+    caps = getattr(manifest, "capabilities", {}) or {}
+    return bool(caps.get("non_disableable") or caps.get("core_required"))
+
+
 @app.post("/connect/enable")
 async def set_connector_enabled_endpoint(
     body: _ConnectControlBody,
@@ -2646,6 +2686,20 @@ async def set_connector_enabled_endpoint(
     manifest = find_connector_manifest(category=category, connector_id=connector_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="Unknown connector")
+    if not enabled and _connector_is_non_disableable(manifest):
+        raise HTTPException(status_code=409, detail="This connector is a core pipeline component and cannot be disabled")
+    exposure = {"positions": 0, "open_orders": 0, "has_exposure": False}
+    if category == "brokers" and not enabled:
+        exposure = await _broker_exposure_summary(connector_id)
+        if exposure.get("has_exposure") and str(body.exposure_action or "").strip().lower() != "block_new_only":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "broker_has_open_exposure",
+                    "message": "Broker has open positions or working orders. Use the broker flatten/disconnect workflow before disabling, or explicitly choose block_new_only.",
+                    "exposure": exposure,
+                },
+            )
     try:
         set_connector_enabled(category=category, connector_id=connector_id, enabled=enabled)
     except ValueError as exc:
@@ -2677,6 +2731,7 @@ async def set_connector_enabled_endpoint(
         "connector": {"category": category, "id": connector_id, "enabled": enabled},
         "ai_config_updated": ai_config_updated,
         "runtime_applied": runtime_applied,
+        "exposure": exposure,
         "requires_restart": category in {"brokers", "ai_providers", "treasury_accounts"},
         "next_step": (
             "Connector disabled for future starts; broker routing is blocked immediately by risk."
@@ -2700,10 +2755,25 @@ async def delete_connector_endpoint(
     removes the manifest/runtime route but does not silently destroy credentials.
     """
     from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
-    from system.connect_hub import build_connect_hub_snapshot, delete_connector_manifest, set_ai_provider_enabled
+    from system.connect_hub import build_connect_hub_snapshot, delete_connector_manifest, find_connector_manifest, set_ai_provider_enabled
 
     category = str(body.category or "").strip()
     connector_id = str(body.connector_id or "").strip().lower()
+    manifest = find_connector_manifest(category=category, connector_id=connector_id)
+    if manifest is not None and _connector_is_non_disableable(manifest):
+        raise HTTPException(status_code=409, detail="This connector is a core pipeline component and cannot be deleted")
+    exposure = {"positions": 0, "open_orders": 0, "has_exposure": False}
+    if category == "brokers":
+        exposure = await _broker_exposure_summary(connector_id)
+        if exposure.get("has_exposure") and str(body.exposure_action or "").strip().lower() != "block_new_only":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "broker_has_open_exposure",
+                    "message": "Broker has open positions or working orders. Use the broker flatten/disconnect workflow before deleting, or explicitly choose block_new_only.",
+                    "exposure": exposure,
+                },
+            )
     try:
         deleted = delete_connector_manifest(category=category, connector_id=connector_id)
     except ValueError as exc:
@@ -2732,6 +2802,7 @@ async def delete_connector_endpoint(
         "deleted": deleted,
         "ai_config_updated": ai_config_updated,
         "runtime_applied": runtime_applied,
+        "exposure": exposure,
         "requires_restart": category in {"brokers", "ai_providers", "treasury_accounts"},
         "next_step": "Deleted from Connect Hub. Existing secret values remain in .env unless removed manually.",
         "connect_hub": hub,

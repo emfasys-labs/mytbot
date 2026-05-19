@@ -12,6 +12,18 @@ It covers four connector classes:
 - local or paid AI providers
 - treasury or funding accounts
 
+Connector categories are not equal:
+
+- **Trading platforms** are peer venues. Adding/removing one changes venue
+  coverage, not the core system.
+- **Information feeds** are peer evidence sources. More feeds enrich signals;
+  fewer feeds reduce coverage.
+- **AI pipeline components** are layered, not peer connectors. The deterministic
+  rules layer is a core baseline and cannot be disabled. Optional model layers
+  sit above it: sentiment, local reasoning, and premium escalation.
+- **Treasury accounts** are funding sources and require explicit allocation and
+  approval policy before any automatic movement is allowed.
+
 The system must work when a user has one broker, no treasury account, one free
 news feed, and no paid AI. It must also work when another user has multiple
 brokers, premium feeds, several LLMs, and a governed treasury account.
@@ -43,6 +55,9 @@ be implemented first.
 `POST /connect/enable` toggles a connector. Disabling a broker also applies an
 immediate risk-layer broker gate so new orders cannot route there while the
 running process is still alive. The manifest change persists across restart.
+If a broker has open exposure, disabling is treated as "block new routing" and
+the operator should use a dedicated flatten/disconnect workflow before final
+removal.
 
 `POST /connect/delete` removes a connector from Connect Hub. It deliberately
 does not erase `.env` secrets; credentials are left for manual audit/removal.
@@ -198,3 +213,6 @@ Each connector card also has:
 - **Delete** — removes the connector from Connect Hub after confirmation.
   Credentials remain in `.env`; delete is about system participation, not
   silently destroying secrets.
+
+Core AI pipeline components, such as the Rules engine, are shown as always-on
+and do not expose disable/delete controls.

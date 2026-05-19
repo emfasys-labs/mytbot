@@ -194,14 +194,14 @@ function minutesAgo(ts: number): string {
 const CONNECT_CATEGORY_LABELS: Record<string, string> = {
   brokers: 'Trading platforms',
   information_feeds: 'News & information',
-  ai_providers: 'AI providers',
+  ai_providers: 'AI pipeline',
   treasury_accounts: 'Treasury accounts',
 };
 
 const CONNECT_CATEGORY_HINTS: Record<string, string> = {
   brokers: 'Routes orders only through connected venues with usable permissions.',
   information_feeds: 'Feeds standard news, macro, and event context into scoring.',
-  ai_providers: 'Advisory-only models that classify, reason, arbitrate, or explain.',
+  ai_providers: 'Layered intelligence stack: core rules, sentiment, local reasoning, then paid escalation.',
   treasury_accounts: 'Funding inventory only; automatic cash movement is disabled until governed approval exists.',
 };
 
@@ -223,8 +223,13 @@ function connectorStatusLabel(row: ConnectHubConnector): string {
 function capabilityList(row: ConnectHubConnector): string[] {
   return Object.entries(row.capabilities ?? {})
     .filter(([, v]) => !!v)
+    .filter(([k]) => !['non_disableable', 'core_required'].includes(k))
     .map(([k]) => k.replace(/^can_/, '').replace(/^supports_/, '').replace(/_/g, ' '))
     .slice(0, 6);
+}
+
+function isCoreConnector(row: ConnectHubConnector): boolean {
+  return !!(row.capabilities?.core_required || row.capabilities?.non_disableable);
 }
 
 function ConnectorCard({
@@ -242,6 +247,7 @@ function ConnectorCard({
 }) {
   const caps = capabilityList(row);
   const missing = (row.required_secrets ?? []).filter((s) => s.required && !s.configured);
+  const core = isCoreConnector(row);
   return (
     <div style={{
       border: `1px solid ${TOKENS.line}`,
@@ -309,6 +315,11 @@ function ConnectorCard({
           next: {row.next_actions[0].label}
         </div>
       ) : null}
+      {core ? (
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          core pipeline component · always on
+        </div>
+      ) : (
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 34px', gap: 6 }}>
         <button type="button" onClick={() => onConfigure(row)} style={cardButtonStyle()}>
           Configure
@@ -320,6 +331,7 @@ function ConnectorCard({
           ×
         </button>
       </div>
+      )}
     </div>
   );
 }
@@ -369,10 +381,22 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
     }
   };
   const toggleConnector = (row: ConnectHubConnector) => {
+    const exposureAction =
+      row.category === 'brokers' && row.enabled
+        ? 'block_new_only' as const
+        : undefined;
+    if (exposureAction) {
+      const ok = window.confirm(
+        `Disable ${row.label}?\n\nThis immediately blocks new routing to the broker. ` +
+        `If it has open positions, use a dedicated flatten/disconnect workflow to close them before final removal.`,
+      );
+      if (!ok) return;
+    }
     void runControl(row, () => api.setConnectorEnabled({
       category: row.category,
       connector_id: row.id,
       enabled: !row.enabled,
+      exposure_action: exposureAction,
     }));
   };
   const deleteConnector = (row: ConnectHubConnector) => {
@@ -438,7 +462,10 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
       {actionError ? <div style={{ marginBottom: 12 }}><Pill tone="danger">{actionError}</Pill></div> : null}
 
       {categoryOrder.map((category) => {
-        const rows = categories[category] ?? [];
+        const rows = (categories[category] ?? []).filter((row) => {
+          if (category !== 'treasury_accounts') return true;
+          return row.enabled || row.configured || row.connected;
+        });
         const summary = hub?.summary?.[category];
         return (
           <section key={category} style={{ marginBottom: 18 }}>
@@ -461,8 +488,9 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
             </div>
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 260px))',
               gap: 12,
+              alignItems: 'stretch',
             }}>
               {rows.length ? rows.map((row) => (
                 <ConnectorCard
