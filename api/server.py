@@ -2317,6 +2317,12 @@ class _ConnectAddBody(BaseModel):
     scaffold_adapter: bool = False
 
 
+class _ConnectControlBody(BaseModel):
+    category: str
+    connector_id: str
+    enabled: bool | None = None
+
+
 @app.post("/auth/dashboard/login")
 async def dashboard_login(body: _DashboardLoginBody):
     pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -2620,6 +2626,114 @@ async def add_connector(
             if needs_adapter
             else "Use Configure to save credentials, then refresh/restart the relevant runtime if needed."
         ),
+        "connect_hub": hub,
+    }
+
+
+@app.post("/connect/enable")
+async def set_connector_enabled_endpoint(
+    body: _ConnectControlBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """Enable or disable a connector manifest, with best-effort runtime guards."""
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import build_connect_hub_snapshot, find_connector_manifest, set_ai_provider_enabled, set_connector_enabled
+
+    category = str(body.category or "").strip()
+    connector_id = str(body.connector_id or "").strip().lower()
+    enabled = bool(body.enabled)
+    manifest = find_connector_manifest(category=category, connector_id=connector_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="Unknown connector")
+    try:
+        set_connector_enabled(category=category, connector_id=connector_id, enabled=enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    ai_config_updated = False
+    runtime_applied: list[str] = []
+    if category == "ai_providers":
+        ai_config_updated = set_ai_provider_enabled(provider_id=connector_id, enabled=enabled)
+        runtime_applied.append("ai_config")
+    if category == "brokers":
+        risk = get_risk_engine()
+        if risk is not None:
+            if enabled:
+                risk.enable_broker(connector_id)
+            else:
+                risk.disable_broker(connector_id)
+            runtime_applied.append("risk_broker_gate")
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+    hub = build_connect_hub_snapshot(orchestrator=_get_orchestrator(), news_data_providers=npp)
+    return {
+        "ok": True,
+        "connector": {"category": category, "id": connector_id, "enabled": enabled},
+        "ai_config_updated": ai_config_updated,
+        "runtime_applied": runtime_applied,
+        "requires_restart": category in {"brokers", "ai_providers", "treasury_accounts"},
+        "next_step": (
+            "Connector disabled for future starts; broker routing is blocked immediately by risk."
+            if category == "brokers" and not enabled
+            else "Restart or stop/start the system if this connector owns long-lived runtime clients."
+        ),
+        "connect_hub": hub,
+    }
+
+
+@app.post("/connect/delete")
+async def delete_connector_endpoint(
+    body: _ConnectControlBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """
+    Remove a connector from Connect Hub.
+
+    Secret values are intentionally left in `.env`; deleting a connection
+    removes the manifest/runtime route but does not silently destroy credentials.
+    """
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import build_connect_hub_snapshot, delete_connector_manifest, set_ai_provider_enabled
+
+    category = str(body.category or "").strip()
+    connector_id = str(body.connector_id or "").strip().lower()
+    try:
+        deleted = delete_connector_manifest(category=category, connector_id=connector_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ai_config_updated = False
+    runtime_applied: list[str] = []
+    if category == "ai_providers":
+        ai_config_updated = set_ai_provider_enabled(provider_id=connector_id, enabled=False)
+        runtime_applied.append("ai_config")
+    if category == "brokers":
+        risk = get_risk_engine()
+        if risk is not None:
+            risk.disable_broker(connector_id)
+            runtime_applied.append("risk_broker_gate")
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+    hub = build_connect_hub_snapshot(orchestrator=_get_orchestrator(), news_data_providers=npp)
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "ai_config_updated": ai_config_updated,
+        "runtime_applied": runtime_applied,
+        "requires_restart": category in {"brokers", "ai_providers", "treasury_accounts"},
+        "next_step": "Deleted from Connect Hub. Existing secret values remain in .env unless removed manually.",
         "connect_hub": hub,
     }
 

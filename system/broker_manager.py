@@ -165,6 +165,28 @@ def _broker_configs_from_env() -> dict[str, dict[str, Any]]:
 
 
 def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
+    try:
+        from system.connect_hub import find_connector_manifest
+
+        manifest = find_connector_manifest(category="brokers", connector_id=name)
+        if manifest is not None and not manifest.enabled:
+            return False
+        if manifest is None:
+            # When Connect Hub manifests exist, absence from the broker category
+            # means the operator deleted/disabled that connection for future
+            # starts. Preserve legacy behavior only when the manifest file is
+            # missing or unreadable.
+            from pathlib import Path
+            import yaml
+
+            p = Path("config/connectors.yaml")
+            if p.exists():
+                data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                brokers = data.get("brokers") if isinstance(data, dict) else None
+                if isinstance(brokers, dict) and name not in brokers:
+                    return False
+    except Exception:  # noqa: BLE001
+        pass
     if name == "ibkr":
         return True
     if name in {"kraken", "binance", "bybit", "alpaca"}:

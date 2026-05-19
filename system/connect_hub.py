@@ -280,6 +280,27 @@ def set_connector_enabled(
     p.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
+def delete_connector_manifest(
+    *,
+    category: str,
+    connector_id: str,
+    path: str | Path = CONNECTORS_CONFIG_PATH,
+) -> dict[str, Any]:
+    p = Path(path)
+    cfg = _load_yaml(p)
+    rows = cfg.get(category)
+    cid = str(connector_id or "").strip().lower()
+    if not isinstance(rows, dict) or cid not in rows:
+        raise ValueError(f"Unknown connector: {category}/{cid}")
+    row = rows.pop(cid)
+    p.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return {
+        "category": category,
+        "id": cid,
+        "label": str(row.get("label") or cid) if isinstance(row, dict) else cid,
+    }
+
+
 def set_ai_provider_enabled(
     *,
     provider_id: str,

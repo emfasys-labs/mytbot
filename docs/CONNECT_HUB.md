@@ -22,6 +22,8 @@ brokers, premium feeds, several LLMs, and a governed treasury account.
 - `GET /system/status` includes the same payload as `connect_hub`
 - `POST /connect/add`
 - `POST /connect/configure`
+- `POST /connect/enable`
+- `POST /connect/delete`
 
 The payload is read-only and secret-safe. It reports whether required
 environment variables are configured, but never returns secret values.
@@ -37,6 +39,14 @@ row for a new broker, feed, AI provider, or treasury account. For brand-new
 brokers it can also scaffold `brokers/<id>/adapter.py` from the broker template.
 The scaffold is not auto-registered for live trading; the adapter methods must
 be implemented first.
+
+`POST /connect/enable` toggles a connector. Disabling a broker also applies an
+immediate risk-layer broker gate so new orders cannot route there while the
+running process is still alive. The manifest change persists across restart.
+
+`POST /connect/delete` removes a connector from Connect Hub. It deliberately
+does not erase `.env` secrets; credentials are left for manual audit/removal.
+For brokers, delete also applies the same immediate risk-layer broker gate.
 
 ## Connector Manifests
 
@@ -180,3 +190,11 @@ For a new broker, this creates:
 That means a new platform can be represented and tracked immediately, but live
 trading still requires an adapter that translates the broker's native API into
 `brokers/base.py`.
+
+Each connector card also has:
+
+- **Enable / Disable** — toggles the manifest and, for brokers, immediately
+  blocks or unblocks new routing at the risk layer.
+- **Delete** — removes the connector from Connect Hub after confirmation.
+  Credentials remain in `.env`; delete is about system participation, not
+  silently destroying secrets.

@@ -788,6 +788,23 @@ export type ConnectAddResponse = {
   connect_hub: ConnectHubResponse;
 };
 
+export type ConnectControlRequest = {
+  category: string;
+  connector_id: string;
+  enabled?: boolean;
+};
+
+export type ConnectControlResponse = {
+  ok: boolean;
+  connector?: { category: string; id: string; enabled: boolean };
+  deleted?: { category: string; id: string; label: string };
+  ai_config_updated?: boolean;
+  runtime_applied?: string[];
+  requires_restart: boolean;
+  next_step: string;
+  connect_hub: ConnectHubResponse;
+};
+
 export type RoutingBrokerRow = {
   symbol: string;
   broker: string;
@@ -892,6 +909,10 @@ export const api = {
     postJsonBody<ConnectConfigureResponse>('/connect/configure', body),
   addConnector: (body: ConnectAddRequest) =>
     postJsonBody<ConnectAddResponse>('/connect/add', body),
+  setConnectorEnabled: (body: ConnectControlRequest) =>
+    postJsonBody<ConnectControlResponse>('/connect/enable', body),
+  deleteConnector: (body: ConnectControlRequest) =>
+    postJsonBody<ConnectControlResponse>('/connect/delete', body),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND

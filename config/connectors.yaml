@@ -187,7 +187,7 @@ ai_providers:
 
   premium_fallback:
     label: Premium LLM fallback
-    enabled: false
+    enabled: true
     auth_type: api_key
     required_secrets:
       - env: ANTHROPIC_API_KEY

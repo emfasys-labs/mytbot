@@ -99,7 +99,7 @@ providers:
       confidence_boost: 0.15        # bonus confidence when both models agree
 
   premium_fallback:
-    enabled: false          # off by default — enable only if you want paid escalation
+    enabled: true           # paid escalation enabled; still gated by necessity policy
     provider: anthropic
     model_name: claude-sonnet-4-5
     timeout_seconds: 20

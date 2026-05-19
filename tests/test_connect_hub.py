@@ -5,7 +5,14 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from api.server import app
-from system.connect_hub import add_connector_manifest, build_connect_hub_snapshot, load_connector_manifests, update_env_file
+from system.connect_hub import (
+    add_connector_manifest,
+    build_connect_hub_snapshot,
+    delete_connector_manifest,
+    load_connector_manifests,
+    set_connector_enabled,
+    update_env_file,
+)
 
 
 def test_connector_manifest_secret_state_without_secret_values(tmp_path: Path, monkeypatch) -> None:
@@ -224,3 +231,28 @@ def test_add_connector_manifest_creates_custom_feed(tmp_path: Path) -> None:
     assert created["id"] == "my_premium_feed"
     rows = load_connector_manifests(cfg)
     assert any(r.id == "my_premium_feed" and r.category == "information_feeds" for r in rows)
+
+
+def test_enable_disable_and_delete_connector_manifest(tmp_path: Path) -> None:
+    cfg = tmp_path / "connectors.yaml"
+    cfg.write_text(
+        """
+brokers:
+  demo:
+    label: Demo
+    enabled: true
+    required_secrets: []
+information_feeds: {}
+ai_providers: {}
+treasury_accounts: {}
+""",
+        encoding="utf-8",
+    )
+
+    set_connector_enabled(category="brokers", connector_id="demo", enabled=False, path=cfg)
+    row = next(r for r in load_connector_manifests(cfg) if r.id == "demo")
+    assert row.enabled is False
+
+    deleted = delete_connector_manifest(category="brokers", connector_id="demo", path=cfg)
+    assert deleted["id"] == "demo"
+    assert not load_connector_manifests(cfg)

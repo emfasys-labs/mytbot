@@ -227,7 +227,19 @@ function capabilityList(row: ConnectHubConnector): string[] {
     .slice(0, 6);
 }
 
-function ConnectorCard({ row, onConfigure }: { row: ConnectHubConnector; onConfigure: (row: ConnectHubConnector) => void }) {
+function ConnectorCard({
+  row,
+  onConfigure,
+  onToggle,
+  onDelete,
+  busy,
+}: {
+  row: ConnectHubConnector;
+  onConfigure: (row: ConnectHubConnector) => void;
+  onToggle: (row: ConnectHubConnector) => void;
+  onDelete: (row: ConnectHubConnector) => void;
+  busy?: boolean;
+}) {
   const caps = capabilityList(row);
   const missing = (row.required_secrets ?? []).filter((s) => s.required && !s.configured);
   return (
@@ -297,23 +309,17 @@ function ConnectorCard({ row, onConfigure }: { row: ConnectHubConnector; onConfi
           next: {row.next_actions[0].label}
         </div>
       ) : null}
-      <button
-        type="button"
-        onClick={() => onConfigure(row)}
-        style={{
-          marginTop: 2,
-          height: 28,
-          borderRadius: 8,
-          border: `1px solid ${TOKENS.lineStrong}`,
-          background: TOKENS.bg2,
-          color: TOKENS.ink1,
-          fontFamily: TOKENS.sans,
-          fontSize: 11,
-          cursor: 'pointer',
-        }}
-      >
-        Configure
-      </button>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 34px', gap: 6 }}>
+        <button type="button" onClick={() => onConfigure(row)} style={cardButtonStyle()}>
+          Configure
+        </button>
+        <button type="button" disabled={busy} onClick={() => onToggle(row)} style={cardButtonStyle(row.enabled ? TOKENS.caution : TOKENS.profit)}>
+          {row.enabled ? 'Disable' : 'Enable'}
+        </button>
+        <button type="button" disabled={busy} onClick={() => onDelete(row)} title="Delete connector" style={cardButtonStyle(TOKENS.danger)}>
+          ×
+        </button>
+      </div>
     </div>
   );
 }
@@ -326,6 +332,60 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   const categoryOrder = ['brokers', 'information_feeds', 'ai_providers', 'treasury_accounts'];
   const [selected, setSelected] = useState<ConnectHubConnector | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const runControl = async (
+    row: ConnectHubConnector,
+    fn: () => Promise<{ next_step?: string }>,
+  ) => {
+    setActionBusy(`${row.category}:${row.id}`);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      const res = await fn();
+      setActionMessage(res.next_step || 'Saved.');
+      live.refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('(401)')) {
+        const token = window.prompt('Control token required');
+        if (token?.trim()) {
+          setApiControlToken(token.trim());
+          try {
+            const res = await fn();
+            setActionMessage(res.next_step || 'Saved.');
+            live.refresh();
+            return;
+          } catch (retryErr) {
+            setActionError(retryErr instanceof Error ? retryErr.message : String(retryErr));
+            return;
+          }
+        }
+      }
+      setActionError(msg);
+    } finally {
+      setActionBusy(null);
+    }
+  };
+  const toggleConnector = (row: ConnectHubConnector) => {
+    void runControl(row, () => api.setConnectorEnabled({
+      category: row.category,
+      connector_id: row.id,
+      enabled: !row.enabled,
+    }));
+  };
+  const deleteConnector = (row: ConnectHubConnector) => {
+    const ok = window.confirm(
+      `Delete ${row.label} from Connect Hub?\n\nCredentials in .env will be left untouched. ` +
+      `For active brokers, new routing is blocked immediately and restart may be needed to fully disconnect.`,
+    );
+    if (!ok) return;
+    void runControl(row, () => api.deleteConnector({
+      category: row.category,
+      connector_id: row.id,
+    }));
+  };
   return (
     <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
@@ -374,6 +434,8 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
           </Card>
         ))}
       </div>
+      {actionMessage ? <div style={{ marginBottom: 12 }}><Pill tone="profit">{actionMessage}</Pill></div> : null}
+      {actionError ? <div style={{ marginBottom: 12 }}><Pill tone="danger">{actionError}</Pill></div> : null}
 
       {categoryOrder.map((category) => {
         const rows = categories[category] ?? [];
@@ -403,7 +465,14 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
               gap: 12,
             }}>
               {rows.length ? rows.map((row) => (
-                <ConnectorCard key={`${category}-${row.id}`} row={row} onConfigure={setSelected} />
+                <ConnectorCard
+                  key={`${category}-${row.id}`}
+                  row={row}
+                  onConfigure={setSelected}
+                  onToggle={toggleConnector}
+                  onDelete={deleteConnector}
+                  busy={actionBusy === `${row.category}:${row.id}`}
+                />
               )) : (
                 <div style={{
                   border: `1px dashed ${TOKENS.lineStrong}`,
@@ -558,6 +627,19 @@ function primaryButtonStyle(accentColor: string, busy: boolean): CSSProperties {
     height: 34, borderRadius: 8, border: `1px solid ${accentColor}66`,
     background: `${accentColor}18`, color: accentColor, padding: '0 14px',
     cursor: busy ? 'wait' : 'pointer', fontWeight: 600,
+  };
+}
+
+function cardButtonStyle(color = TOKENS.ink1): CSSProperties {
+  return {
+    height: 28,
+    borderRadius: 8,
+    border: `1px solid ${TOKENS.lineStrong}`,
+    background: TOKENS.bg2,
+    color,
+    fontFamily: TOKENS.sans,
+    fontSize: 11,
+    cursor: 'pointer',
   };
 }
 
