@@ -276,6 +276,53 @@ def test_system_status_includes_snapshot_published_at(monkeypatch, client: TestC
         app.dependency_overrides.pop(_command_bus, None)
 
 
+def test_system_status_includes_connect_hub(monkeypatch, client: TestClient):
+    monkeypatch.setenv("DASHBOARD_READ_TOKEN", "")
+
+    class _Orch:
+        def status(self):
+            return {
+                "state": "running",
+                "paper_mode": True,
+                "active_brokers": ["alpaca"],
+                "brokers": {
+                    "alpaca": {
+                        "configured": True,
+                        "connected": True,
+                        "balance_ready": True,
+                        "error": None,
+                    }
+                },
+                "infrastructure": {},
+                "trading": {"running": True},
+                "errors": [],
+                "pipeline_running": False,
+            }
+
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "secret")
+    monkeypatch.setattr("api.server._get_orchestrator", lambda: _Orch())
+
+    def override_bus():
+        class B:
+            async def get_state(self, key: str, default=None):
+                return default
+
+        return B()
+
+    app.dependency_overrides[_command_bus] = override_bus
+    try:
+        r = client.get("/system/status")
+        assert r.status_code == 200
+        data = r.json()
+        hub = data.get("connect_hub")
+        assert isinstance(hub, dict)
+        assert hub["summary"]["brokers"]["connected"] >= 1
+        assert hub["capability_flags"]["can_trade"] is True
+    finally:
+        app.dependency_overrides.pop(_command_bus, None)
+
+
 def test_dashboard_snapshot_ok(monkeypatch, client: TestClient):
     monkeypatch.setenv("DASHBOARD_READ_TOKEN", "tok")
 

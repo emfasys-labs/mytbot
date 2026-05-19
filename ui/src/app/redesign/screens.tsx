@@ -3,11 +3,11 @@
  * All screens are wired to live system data via `LiveData`.
  */
 
-import { Fragment, useMemo } from 'react';
+import { Fragment, useMemo, useState, type CSSProperties } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
-import type { RoutingBrokerRow } from '../lib/api';
+import { api, setApiControlToken, type ConnectHubConnector, type RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 import { formatStrategyDisplayName } from './strategyLabels';
 
@@ -189,6 +189,571 @@ function minutesAgo(ts: number): string {
   if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
   return `${Math.round(secs / 86400)}d ago`;
+}
+
+const CONNECT_CATEGORY_LABELS: Record<string, string> = {
+  brokers: 'Trading platforms',
+  information_feeds: 'News & information',
+  ai_providers: 'AI providers',
+  treasury_accounts: 'Treasury accounts',
+};
+
+const CONNECT_CATEGORY_HINTS: Record<string, string> = {
+  brokers: 'Routes orders only through connected venues with usable permissions.',
+  information_feeds: 'Feeds standard news, macro, and event context into scoring.',
+  ai_providers: 'Advisory-only models that classify, reason, arbitrate, or explain.',
+  treasury_accounts: 'Funding inventory only; automatic cash movement is disabled until governed approval exists.',
+};
+
+function connectorTone(row: ConnectHubConnector): 'profit' | 'caution' | 'danger' | 'neutral' | 'info' {
+  if (row.connected && row.healthy) return 'profit';
+  if (!row.enabled) return 'neutral';
+  if (!row.configured) return 'caution';
+  if (row.connected) return 'info';
+  return 'danger';
+}
+
+function connectorStatusLabel(row: ConnectHubConnector): string {
+  if (!row.enabled) return 'off';
+  if (row.connected && row.healthy) return 'connected';
+  if (!row.configured) return 'needs keys';
+  return row.state || 'ready';
+}
+
+function capabilityList(row: ConnectHubConnector): string[] {
+  return Object.entries(row.capabilities ?? {})
+    .filter(([, v]) => !!v)
+    .map(([k]) => k.replace(/^can_/, '').replace(/^supports_/, '').replace(/_/g, ' '))
+    .slice(0, 6);
+}
+
+function ConnectorCard({ row, onConfigure }: { row: ConnectHubConnector; onConfigure: (row: ConnectHubConnector) => void }) {
+  const caps = capabilityList(row);
+  const missing = (row.required_secrets ?? []).filter((s) => s.required && !s.configured);
+  return (
+    <div style={{
+      border: `1px solid ${TOKENS.line}`,
+      borderRadius: 8,
+      background: TOKENS.bg1,
+      padding: 14,
+      display: 'grid',
+      gap: 10,
+      minHeight: 146,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{
+            fontFamily: TOKENS.sans,
+            fontSize: 14,
+            fontWeight: 550,
+            color: TOKENS.ink0,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {row.label}
+          </div>
+          <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            {row.auth_type || 'api'} · {row.adapter || row.id}
+          </div>
+        </div>
+        <Pill size="sm" tone={connectorTone(row)}>{connectorStatusLabel(row)}</Pill>
+      </div>
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 6,
+        minHeight: 22,
+        alignItems: 'flex-start',
+      }}>
+        {caps.length > 0 ? caps.map((c) => (
+          <Pill key={c} size="sm" tone="neutral">{c}</Pill>
+        )) : (
+          <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no capabilities declared</span>
+        )}
+      </div>
+      {row.roles?.length ? (
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.5 }}>
+          {row.roles.join(' · ')}
+        </div>
+      ) : null}
+      <div style={{
+        marginTop: 'auto',
+        borderTop: `1px solid ${TOKENS.line}`,
+        paddingTop: 9,
+        fontFamily: TOKENS.mono,
+        fontSize: 10,
+        color: missing.length ? TOKENS.caution : TOKENS.ink3,
+        lineHeight: 1.45,
+      }}>
+        {missing.length
+          ? `missing ${missing.map((s) => s.env).join(', ')}`
+          : row.required_secrets?.length
+            ? 'credentials present'
+            : 'no secret required'}
+      </div>
+      {row.next_actions?.[0]?.label ? (
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.45 }}>
+          next: {row.next_actions[0].label}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => onConfigure(row)}
+        style={{
+          marginTop: 2,
+          height: 28,
+          borderRadius: 8,
+          border: `1px solid ${TOKENS.lineStrong}`,
+          background: TOKENS.bg2,
+          color: TOKENS.ink1,
+          fontFamily: TOKENS.sans,
+          fontSize: 11,
+          cursor: 'pointer',
+        }}
+      >
+        Configure
+      </button>
+    </div>
+  );
+}
+
+export function ConnectScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
+  const accentColor = ACCENTS[accent].main;
+  const hub = live.connectHub;
+  const categories = hub?.categories ?? {};
+  const flags = hub?.capability_flags;
+  const categoryOrder = ['brokers', 'information_feeds', 'ai_providers', 'treasury_accounts'];
+  const [selected, setSelected] = useState<ConnectHubConnector | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  return (
+    <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          style={{
+            height: 32,
+            borderRadius: 8,
+            border: `1px solid ${accentColor}66`,
+            background: `${accentColor}14`,
+            color: accentColor,
+            fontFamily: TOKENS.sans,
+            fontSize: 12,
+            fontWeight: 600,
+            padding: '0 12px',
+            cursor: 'pointer',
+          }}
+        >
+          Add connector
+        </button>
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, minmax(150px, 1fr))',
+        gap: 12,
+        marginBottom: 16,
+      }}>
+        {[
+          ['Trade', flags?.can_trade],
+          ['Feeds', flags?.has_information_feed],
+          ['AI', flags?.has_ai_provider],
+          ['Treasury auto-transfer', flags?.can_auto_transfer],
+        ].map(([label, ok]) => (
+          <Card key={String(label)} style={{ borderRadius: 8, padding: 14 }}>
+            <Label>{String(label)}</Label>
+            <div style={{
+              marginTop: 10,
+              fontFamily: TOKENS.sans,
+              fontSize: 18,
+              fontWeight: 560,
+              color: ok ? accentColor : TOKENS.ink3,
+            }}>
+              {ok ? 'available' : 'not active'}
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      {categoryOrder.map((category) => {
+        const rows = categories[category] ?? [];
+        const summary = hub?.summary?.[category];
+        return (
+          <section key={category} style={{ marginBottom: 18 }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+              marginBottom: 10,
+              gap: 12,
+            }}>
+              <div>
+                <Label accent={accentColor}>{CONNECT_CATEGORY_LABELS[category] ?? category}</Label>
+                <div style={{ marginTop: 5, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                  {CONNECT_CATEGORY_HINTS[category] ?? 'Connector capability inventory.'}
+                </div>
+              </div>
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, whiteSpace: 'nowrap' }}>
+                {summary ? `${summary.connected}/${summary.enabled} connected · ${summary.configured} configured` : 'awaiting status'}
+              </div>
+            </div>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
+              gap: 12,
+            }}>
+              {rows.length ? rows.map((row) => (
+                <ConnectorCard key={`${category}-${row.id}`} row={row} onConfigure={setSelected} />
+              )) : (
+                <div style={{
+                  border: `1px dashed ${TOKENS.lineStrong}`,
+                  borderRadius: 8,
+                  padding: 18,
+                  color: TOKENS.ink3,
+                  fontFamily: TOKENS.mono,
+                  fontSize: 11,
+                }}>
+                  No connectors declared for this category.
+                </div>
+              )}
+            </div>
+          </section>
+        );
+      })}
+      {selected && (
+        <ConnectWizard
+          connector={selected}
+          accentColor={accentColor}
+          onClose={() => setSelected(null)}
+          onSaved={() => {
+            setSelected(null);
+            live.refresh();
+          }}
+        />
+      )}
+      {addOpen && (
+        <AddConnectorWizard
+          accentColor={accentColor}
+          onClose={() => setAddOpen(false)}
+          onSaved={() => {
+            setAddOpen(false);
+            live.refresh();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddConnectorWizard({
+  accentColor,
+  onClose,
+  onSaved,
+}: {
+  accentColor: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [category, setCategory] = useState('brokers');
+  const [label, setLabel] = useState('');
+  const [connectorId, setConnectorId] = useState('');
+  const [authType, setAuthType] = useState('api_key');
+  const [requiredEnv, setRequiredEnv] = useState('API_KEY,API_SECRET');
+  const [controlToken, setControlToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const defaultCaps =
+    category === 'brokers'
+      ? { can_trade: true, can_read_balance: true }
+      : category === 'information_feeds'
+        ? { can_ingest_news: true }
+        : category === 'ai_providers'
+          ? { advisory_only: true }
+          : { can_read_balance: true, can_initiate_transfer: false };
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      if (controlToken.trim()) setApiControlToken(controlToken.trim());
+      const envRows = requiredEnv
+        .split(',')
+        .map((x) => x.trim().toUpperCase())
+        .filter(Boolean);
+      const res = await api.addConnector({
+        category,
+        connector_id: connectorId,
+        label,
+        auth_type: authType,
+        required_env: envRows,
+        capabilities: defaultCaps,
+        scaffold_adapter: category === 'brokers',
+      });
+      setMessage(res.next_step);
+      setTimeout(onSaved, 1100);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 91, background: 'rgba(0,0,0,0.58)',
+      backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 560, maxWidth: 'min(560px, 92vw)', borderRadius: 10,
+        border: `1px solid ${TOKENS.lineStrong}`, background: TOKENS.bg1,
+        boxShadow: '0 24px 80px rgba(0,0,0,0.65)', padding: 18,
+      }}>
+        <Label accent={accentColor}>Add connector</Label>
+        <div style={{ marginTop: 8, marginBottom: 14, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.5 }}>
+          Adds the connector to Connect Hub. New brokers get a scaffolded adapter template; trading starts only after that adapter is implemented.
+        </div>
+        <div style={{ display: 'grid', gap: 10 }}>
+          <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle()}>
+            <option value="brokers">Trading platform / broker</option>
+            <option value="information_feeds">News or information feed</option>
+            <option value="ai_providers">AI provider</option>
+            <option value="treasury_accounts">Treasury account</option>
+          </select>
+          <input style={inputStyle()} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Display name, e.g. Deribit" />
+          <input style={inputStyle()} value={connectorId} onChange={(e) => setConnectorId(e.target.value)} placeholder="Connector id, e.g. deribit" />
+          <input style={inputStyle()} value={authType} onChange={(e) => setAuthType(e.target.value)} placeholder="Auth type, e.g. api_key or oauth" />
+          <input style={inputStyle()} value={requiredEnv} onChange={(e) => setRequiredEnv(e.target.value)} placeholder="Env vars, comma-separated" />
+          <input style={inputStyle()} type="password" value={controlToken} onChange={(e) => setControlToken(e.target.value)} placeholder="Control token if required" />
+          {message ? <Pill tone="profit">{message}</Pill> : null}
+          {error ? <Pill tone="danger">{error}</Pill> : null}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button type="button" onClick={onClose} style={secondaryButtonStyle()}>Cancel</button>
+            <button type="button" onClick={save} disabled={busy || !label.trim() || !connectorId.trim()} style={primaryButtonStyle(accentColor, busy)}>
+              {busy ? 'Adding...' : 'Add'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function inputStyle(): CSSProperties {
+  return {
+    height: 36, borderRadius: 8, border: `1px solid ${TOKENS.line}`,
+    background: TOKENS.bg0, color: TOKENS.ink0, padding: '0 10px',
+    fontFamily: TOKENS.mono, fontSize: 12,
+  };
+}
+
+function secondaryButtonStyle(): CSSProperties {
+  return {
+    height: 34, borderRadius: 8, border: `1px solid ${TOKENS.line}`,
+    background: 'transparent', color: TOKENS.ink2, padding: '0 12px', cursor: 'pointer',
+  };
+}
+
+function primaryButtonStyle(accentColor: string, busy: boolean): CSSProperties {
+  return {
+    height: 34, borderRadius: 8, border: `1px solid ${accentColor}66`,
+    background: `${accentColor}18`, color: accentColor, padding: '0 14px',
+    cursor: busy ? 'wait' : 'pointer', fontWeight: 600,
+  };
+}
+
+function ConnectWizard({
+  connector,
+  accentColor,
+  onClose,
+  onSaved,
+}: {
+  connector: ConnectHubConnector;
+  accentColor: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [controlToken, setControlToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const secretRows = connector.required_secrets ?? [];
+  const hasSecrets = secretRows.length > 0;
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      if (controlToken.trim()) setApiControlToken(controlToken.trim());
+      const res = await api.configureConnector({
+        category: connector.category,
+        connector_id: connector.id,
+        secrets: values,
+        enable: true,
+      });
+      setMessage(res.next_step || 'Saved.');
+      setTimeout(onSaved, 900);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 90,
+        background: 'rgba(0,0,0,0.58)',
+        backdropFilter: 'blur(10px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 520,
+          maxWidth: 'min(520px, 92vw)',
+          maxHeight: '86vh',
+          overflow: 'auto',
+          borderRadius: 10,
+          border: `1px solid ${TOKENS.lineStrong}`,
+          background: TOKENS.bg1,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.65)',
+          padding: 18,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Label accent={accentColor}>Connect wizard</Label>
+            <div style={{ marginTop: 6, fontFamily: TOKENS.sans, fontSize: 18, fontWeight: 560, color: TOKENS.ink0 }}>
+              {connector.label}
+            </div>
+            <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+              {connector.category} · {connector.auth_type}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              border: `1px solid ${TOKENS.line}`,
+              background: TOKENS.bg2,
+              color: TOKENS.ink2,
+              borderRadius: 8,
+              width: 30,
+              height: 30,
+              cursor: 'pointer',
+            }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gap: 10 }}>
+          {hasSecrets ? secretRows.map((s) => (
+            <label key={s.env} style={{ display: 'grid', gap: 6 }}>
+              <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                {s.label || s.env}{s.required ? '' : ' · optional'}
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder={s.configured ? 'already configured - enter to replace' : s.env}
+                value={values[s.env] ?? ''}
+                onChange={(e) => setValues((v) => ({ ...v, [s.env]: e.target.value }))}
+                style={{
+                  height: 36,
+                  borderRadius: 8,
+                  border: `1px solid ${TOKENS.line}`,
+                  background: TOKENS.bg0,
+                  color: TOKENS.ink0,
+                  padding: '0 10px',
+                  fontFamily: TOKENS.mono,
+                  fontSize: 12,
+                }}
+              />
+            </label>
+          )) : (
+            <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+              This connector does not need a secret. Saving will enable its manifest where applicable.
+            </div>
+          )}
+
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+              control token · only needed if API_CONTROL_TOKEN is set
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              placeholder="X-Control-Token"
+              value={controlToken}
+              onChange={(e) => setControlToken(e.target.value)}
+              style={{
+                height: 36,
+                borderRadius: 8,
+                border: `1px solid ${TOKENS.line}`,
+                background: TOKENS.bg0,
+                color: TOKENS.ink0,
+                padding: '0 10px',
+                fontFamily: TOKENS.mono,
+                fontSize: 12,
+              }}
+            />
+          </label>
+
+          {connector.notes ? (
+            <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 10, lineHeight: 1.5 }}>
+              {connector.notes}
+            </div>
+          ) : null}
+          {message ? <Pill tone="profit">{message}</Pill> : null}
+          {error ? <Pill tone="danger">{error}</Pill> : null}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                height: 34,
+                borderRadius: 8,
+                border: `1px solid ${TOKENS.line}`,
+                background: 'transparent',
+                color: TOKENS.ink2,
+                padding: '0 12px',
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={save}
+              style={{
+                height: 34,
+                borderRadius: 8,
+                border: `1px solid ${accentColor}66`,
+                background: `${accentColor}18`,
+                color: accentColor,
+                padding: '0 14px',
+                cursor: busy ? 'wait' : 'pointer',
+                fontWeight: 600,
+              }}
+            >
+              {busy ? 'Saving...' : 'Save connection'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function BookScreen({ accent, live }: { accent: AccentName; live: LiveData }) {

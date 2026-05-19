@@ -17,11 +17,14 @@ import {
   type ApiPnlResponse,
   type ApiRealisedCurveResponse,
   type ApiPositionsResponse,
+  type ConnectHubConnector,
   type DashboardSnapshot,
+  type ConnectHubResponse,
   type IntelligenceSignalsResponse,
   type IntelligenceUniverseResponse,
   type RoutingQualityResponse,
   type StrategyCandidateMixResponse,
+  type SystemStatusResponse,
   type SystemState as BackendSystemState,
   type TradingMode,
 } from '../lib/api';
@@ -135,6 +138,7 @@ export interface LiveData {
   newsSourceStats: Record<string, NewsSourceStat>;
   /** NewsAPI / FRED / etc. from ``/system/status`` ``news_data_providers``. */
   newsDataProviders: NewsDataProviderRow[];
+  connectHub: ConnectHubResponse | null;
   orders: ApiOrderRow[];
   intelligence: IntelligenceSignalsResponse | null;
   /** Prefetched /intelligence/universe payload (background polled). */
@@ -166,6 +170,121 @@ function toPositionChanges(pos: ApiPositionsResponse | null): PositionChange[] {
   });
 }
 
+function fallbackConnectHubFromStatus(sys: SystemStatusResponse | null): ConnectHubResponse | null {
+  if (!sys) return null;
+  const brokerRows: ConnectHubConnector[] = Object.entries(sys.brokers ?? {}).map(([id, b]) => ({
+    id,
+    label: id.toUpperCase(),
+    category: 'brokers',
+    enabled: !!b.configured,
+    configured: !!b.configured,
+    connected: !!b.connected,
+    healthy: !!b.connected && b.balance_ready !== false,
+    state: b.connected ? 'connected' : b.configured ? 'unavailable' : 'needs_credentials',
+    adapter: id,
+    auth_type: id === 'ibkr' ? 'gateway' : 'api_key',
+    required_secrets: [],
+    capabilities: {
+      can_trade: true,
+      can_read_balance: true,
+    },
+    roles: [],
+    safety: {},
+    docs_url: null,
+    notes: b.error ?? null,
+    status: { ...b },
+    next_actions: b.connected
+      ? []
+      : [{ kind: b.configured ? 'start_system' : 'set_env', label: b.configured ? 'Reconnect/start system' : 'Add credentials in .env' }],
+  }));
+
+  const feedRows: ConnectHubConnector[] = (sys.news_data_providers ?? []).map((p) => {
+    const state = String(p.state ?? 'off');
+    const connected = state === 'live' || state === 'stale';
+    return {
+      id: p.id,
+      label: p.label,
+      category: 'information_feeds',
+      enabled: true,
+      configured: !!p.configured,
+      connected,
+      healthy: state === 'live',
+      state,
+      adapter: p.id,
+      auth_type: 'api_key',
+      required_secrets: [],
+      capabilities: {
+        can_ingest_news: p.id !== 'fred',
+        can_ingest_macro: p.id === 'fred',
+      },
+      roles: [],
+      safety: {},
+      docs_url: null,
+      notes: p.error ?? null,
+      status: { ...p },
+      next_actions: p.configured
+        ? [{ kind: 'run_pipeline', label: 'Run the data pipeline to refresh this feed' }]
+        : [{ kind: 'set_env', label: 'Add provider credentials in .env' }],
+    };
+  });
+
+  const aiRows: ConnectHubConnector[] = [
+    { id: 'rules', label: 'Rules engine', roles: ['fast_classifier'], capabilities: { advisory_only: true, local_first: true } },
+    { id: 'fin_sentiment', label: 'FinBERT sentiment', roles: ['sentiment_classifier'], capabilities: { advisory_only: true, local_first: true } },
+    { id: 'local_reasoning', label: 'Local LLM', roles: ['reasoning_model', 'fallback_model'], capabilities: { advisory_only: true, local_first: true } },
+  ].map((row) => ({
+    id: row.id,
+    label: row.label,
+    category: 'ai_providers',
+    enabled: true,
+    configured: true,
+    connected: true,
+    healthy: true,
+    state: 'ready',
+    adapter: row.id,
+    auth_type: row.id === 'local_reasoning' ? 'local_endpoint' : 'none',
+    required_secrets: [],
+    capabilities: row.capabilities,
+    roles: row.roles,
+    safety: {},
+    docs_url: null,
+    notes: 'Fallback status derived from /system/status while backend Connect Hub endpoint is unavailable.',
+    status: {},
+    next_actions: [],
+  }));
+
+  const categories: ConnectHubResponse['categories'] = {
+    brokers: brokerRows,
+    information_feeds: feedRows,
+    ai_providers: aiRows,
+    treasury_accounts: [],
+  };
+  const summary: ConnectHubResponse['summary'] = {};
+  for (const [category, rows] of Object.entries(categories)) {
+    summary[category] = {
+      total: rows.length,
+      enabled: rows.filter((r) => r.enabled).length,
+      configured: rows.filter((r) => r.configured).length,
+      connected: rows.filter((r) => r.connected).length,
+      healthy: rows.filter((r) => r.healthy).length,
+      ids: rows.map((r) => r.id),
+      connected_ids: rows.filter((r) => r.connected).map((r) => r.id),
+    };
+  }
+  return {
+    generated_at: new Date().toISOString(),
+    categories,
+    summary,
+    capability_flags: {
+      can_trade: brokerRows.some((r) => r.connected && r.capabilities.can_trade),
+      has_information_feed: feedRows.some((r) => r.configured),
+      has_ai_provider: aiRows.some((r) => r.configured),
+      has_treasury_account: false,
+      can_auto_transfer: false,
+    },
+  };
+}
+
 export function useLiveSystem(): LiveData {
   // ────── core state ──────
   const [backendState, setBackendState] = useState<BackendSystemState>('off');
@@ -195,6 +314,7 @@ export function useLiveSystem(): LiveData {
   const [newsDataProviders, setNewsDataProviders] = useState<NewsDataProviderRow[]>(
     () => defaultNewsDataProviderRows(),
   );
+  const [connectHub, setConnectHub] = useState<ConnectHubResponse | null>(null);
   const [orders, setOrders] = useState<ApiOrderRow[]>([]);
   const [intelligence, setIntelligence] = useState<IntelligenceSignalsResponse | null>(null);
   const [universeIntel, setUniverseIntel] = useState<IntelligenceUniverseResponse | null>(null);
@@ -268,6 +388,7 @@ export function useLiveSystem(): LiveData {
     setNews(null);
     setNewsSourceStats({});
     setNewsDataProviders(defaultNewsDataProviderRows());
+    setConnectHub(null);
     setOrders([]);
     setIntelligence(null);
     setUniverseIntel(null);
@@ -320,6 +441,7 @@ export function useLiveSystem(): LiveData {
         api.getStrategyCandidateMix(24),
         api.getSystemMode(),
         api.getRealisedCurve(400),
+        api.getConnectHub(),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -333,6 +455,7 @@ export function useLiveSystem(): LiveData {
       const mixRes = res[9].status === 'fulfilled' ? res[9].value : null;
       const modeHttpRes = res[10].status === 'fulfilled' ? res[10].value : null;
       const realisedCurveRes = res[11].status === 'fulfilled' ? res[11].value : null;
+      const connectHubRes = res[12].status === 'fulfilled' ? res[12].value : null;
       if (modeHttpRes?.mode) {
         const m = String(modeHttpRes.mode).toLowerCase();
         if (m === 'defender' || m === 'trader' || m === 'hunter') {
@@ -397,6 +520,7 @@ export function useLiveSystem(): LiveData {
         } else {
           setNewsDataProviders(defaultNewsDataProviderRows());
         }
+        setConnectHub(connectHubRes ?? sysRes.connect_hub ?? fallbackConnectHubFromStatus(sysRes));
         if (Array.isArray(sysRes.loaded_strategies)) {
           setLoadedStrategies(
             sysRes.loaded_strategies
@@ -425,6 +549,7 @@ export function useLiveSystem(): LiveData {
         }
       } else {
         setNewsDataProviders(defaultNewsDataProviderRows());
+        setConnectHub(null);
       }
       const effectiveState = shutdownInFlight.current ? 'stopping' : (sysRes?.state ?? stateRef.current);
       const feedsLive = effectiveState === 'running';
@@ -955,6 +1080,7 @@ export function useLiveSystem(): LiveData {
     news: newsRows,
     newsSourceStats,
     newsDataProviders,
+    connectHub,
     orders,
     intelligence,
     universeIntel,

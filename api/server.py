@@ -2297,6 +2297,26 @@ class _DashboardLoginBody(BaseModel):
     password: str
 
 
+class _ConnectConfigureBody(BaseModel):
+    category: str
+    connector_id: str
+    secrets: dict[str, str] = {}
+    enable: bool = True
+
+
+class _ConnectAddBody(BaseModel):
+    category: str
+    connector_id: str
+    label: str
+    auth_type: str = "api_key"
+    required_env: list[str] = []
+    capabilities: dict[str, bool] = {}
+    roles: list[str] = []
+    docs_url: str | None = None
+    notes: str | None = None
+    scaffold_adapter: bool = False
+
+
 @app.post("/auth/dashboard/login")
 async def dashboard_login(body: _DashboardLoginBody):
     pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -2399,6 +2419,7 @@ async def system_status(
 ):
     """Full system status including state, brokers, infrastructure, data providers."""
     from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import build_connect_hub_snapshot
 
     async def _merge_providers(data: dict) -> dict:
         npp: list[dict] = build_news_data_provider_status_env_only()
@@ -2409,7 +2430,11 @@ async def system_status(
                 npp = build_news_data_provider_status_env_only()
         if not npp:
             npp = build_news_data_provider_status_env_only()
-        return {**data, "news_data_providers": npp}
+        hub = build_connect_hub_snapshot(
+            orchestrator=_get_orchestrator(),
+            news_data_providers=npp,
+        )
+        return {**data, "news_data_providers": npp, "connect_hub": hub}
 
     orch = _get_orchestrator()
     if orch is None:
@@ -2449,6 +2474,154 @@ async def system_status(
     except Exception:  # noqa: BLE001
         pass
     return await _merge_providers(out)
+
+
+@app.get("/connect/hub")
+async def get_connect_hub(
+    session_factory=Depends(_optional_session_factory),
+):
+    """
+    Adaptive connector inventory for brokers, information feeds, AI providers,
+    and treasury accounts.
+
+    Read-only: this endpoint exposes onboarding state and capabilities but does
+    not write credentials, initiate OAuth, start brokers, or move treasury cash.
+    """
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import build_connect_hub_snapshot
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+    return build_connect_hub_snapshot(
+        orchestrator=_get_orchestrator(),
+        news_data_providers=npp,
+    )
+
+
+@app.post("/connect/configure")
+async def configure_connector(
+    body: _ConnectConfigureBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """
+    Connect Wizard save step.
+
+    Accepts only secret env vars declared by the selected connector manifest,
+    writes them to the local `.env`, optionally enables the connector manifest
+    (and matching `config/ai.yaml` provider), then returns a fresh hub snapshot.
+    Secret values are never echoed back.
+    """
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import (
+        build_connect_hub_snapshot,
+        find_connector_manifest,
+        set_ai_provider_enabled,
+        set_connector_enabled,
+        update_env_file,
+    )
+
+    category = str(body.category or "").strip()
+    connector_id = str(body.connector_id or "").strip().lower()
+    manifest = find_connector_manifest(category=category, connector_id=connector_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="Unknown connector")
+
+    allowed = {s.env for s in manifest.required_secrets}
+    required = {s.env for s in manifest.required_secrets if s.required}
+    supplied = {str(k or "").strip(): str(v or "").strip() for k, v in (body.secrets or {}).items()}
+    unknown = sorted(k for k in supplied if k not in allowed)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Secret field not allowed for this connector: {', '.join(unknown)}")
+    missing = sorted(k for k in required if not supplied.get(k) and not os.getenv(k, "").strip())
+    if body.enable and missing:
+        raise HTTPException(status_code=400, detail=f"Missing required credential fields: {', '.join(missing)}")
+
+    written = update_env_file({k: v for k, v in supplied.items() if v})
+    if body.enable != manifest.enabled:
+        set_connector_enabled(category=category, connector_id=connector_id, enabled=body.enable)
+    ai_config_updated = False
+    if category == "ai_providers":
+        ai_config_updated = set_ai_provider_enabled(provider_id=connector_id, enabled=body.enable)
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+    hub = build_connect_hub_snapshot(orchestrator=_get_orchestrator(), news_data_providers=npp)
+    return {
+        "ok": True,
+        "connector": {"category": category, "id": connector_id, "enabled": body.enable},
+        "written_env": written,
+        "ai_config_updated": ai_config_updated,
+        "requires_restart": category in {"brokers", "ai_providers", "treasury_accounts"},
+        "next_step": (
+            "Restart the backend or stop/start the system so long-lived adapters reload credentials."
+            if category in {"brokers", "ai_providers", "treasury_accounts"}
+            else "Run the data pipeline to ingest fresh provider data."
+        ),
+        "connect_hub": hub,
+    }
+
+
+@app.post("/connect/add")
+async def add_connector(
+    body: _ConnectAddBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """
+    Add-new-connector wizard.
+
+    Creates a non-secret manifest row. For brand-new brokers it can also
+    scaffold `brokers/<id>/adapter.py` from the template, but the scaffold is
+    not auto-registered for live trading until the adapter methods are actually
+    implemented and added to `brokers/registry.py`.
+    """
+    from data.ingest_telemetry import build_news_data_provider_status, build_news_data_provider_status_env_only
+    from system.connect_hub import add_connector_manifest, build_connect_hub_snapshot
+
+    try:
+        created = add_connector_manifest(
+            category=body.category,
+            connector_id=body.connector_id,
+            label=body.label,
+            auth_type=body.auth_type,
+            required_env=body.required_env,
+            capabilities=body.capabilities,
+            roles=body.roles,
+            docs_url=body.docs_url,
+            notes=body.notes,
+            scaffold_adapter=body.scaffold_adapter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+    hub = build_connect_hub_snapshot(orchestrator=_get_orchestrator(), news_data_providers=npp)
+    needs_adapter = body.category == "brokers"
+    return {
+        "ok": True,
+        "created": created,
+        "requires_adapter_implementation": needs_adapter,
+        "next_step": (
+            "Implement the scaffolded broker adapter and add it to brokers/registry.py, then use Configure to save credentials."
+            if needs_adapter
+            else "Use Configure to save credentials, then refresh/restart the relevant runtime if needed."
+        ),
+        "connect_hub": hub,
+    }
 
 
 @app.get("/diagnostics/strategy-candidates")

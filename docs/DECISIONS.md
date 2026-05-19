@@ -932,3 +932,48 @@ Resolution (operator-chosen): keep ONE coherent, tested model.
 
 Governance note: autonomous agents must not run DB-mutating backfills
 that reverse a recorded operator data decision without re-confirmation.
+
+## D107 — Connect Hub plugin fabric and capability registry (2026-05-19)
+
+myTbot now has a first Connect Hub foundation for adaptive onboarding across
+four external dependency classes: brokers, information feeds, AI providers, and
+treasury accounts.
+
+Decision:
+- External systems are declared in non-secret connector manifests
+  (`config/connectors.yaml`) with category, auth type, required environment
+  variables, roles, capabilities, and safety constraints.
+- The runtime exposes a read-only Connect Hub snapshot via `GET /connect/hub`
+  and embeds the same payload in `GET /system/status` as `connect_hub`.
+- The redesign UI has a Connect screen that renders the same adaptive
+  connector inventory, including next actions such as missing env vars,
+  pipeline runs, broker start, or treasury approval requirements.
+- Connector cards expose a guarded Configure wizard that writes declared
+  credential env vars to `.env`, never echoes secret values, and can enable the
+  connector/provider configuration where applicable.
+- The snapshot adapts to the current user setup: broker rows merge live
+  `BrokerManager` status, information-feed rows merge ingest telemetry,
+  AI-provider rows merge `config/ai.yaml`, and treasury rows remain disabled
+  unless explicitly configured.
+- Secret values are never returned. The API reports only whether each required
+  environment variable is configured.
+- Treasury movement is deliberately metadata-only at this stage. A connector may
+  declare future capabilities, but automatic transfer execution remains disabled
+  by policy and requires a later approval workflow before any cash movement code
+  exists.
+
+Reason:
+The one-button core must not assume that every operator has the same broker,
+news stack, AI stack, or treasury account. The system should scale down to one
+broker/no treasury/no paid AI and scale up to multiple venues, feeds, local and
+paid LLMs, and governed treasury funding without changing allocator, risk, or
+execution logic.
+
+Status:
+Implemented in `system/connect_hub.py`, `connectors/base.py`,
+`config/connectors.yaml`, `api/server.py`, `docs/CONNECT_HUB.md`, redesign UI
+route/screen files, and UI API types in `ui/src/app/lib/api.ts`, with focused coverage in
+`tests/test_connect_hub.py`, `tests/test_connector_contracts.py`, and
+`tests/test_api_dashboard_extras.py`. This is a read-only/onboarding inventory
+slice; OAuth flows, generic unknown-protocol adapters, and treasury execution
+are future work.

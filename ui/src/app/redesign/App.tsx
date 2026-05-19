@@ -16,6 +16,7 @@ import { MobileApp } from './mobile';
 import { Glyph, Label } from './primitives';
 import {
   BookScreen,
+  ConnectScreen,
   RiskScreen,
   SignalsScreen,
   StrategiesScreen,
@@ -39,6 +40,7 @@ const TITLES: Record<Route, string> = {
   risk:    'Risk',
   strat:   'Strategies',
   universe: 'Universe',
+  connect: 'Connect',
   log:     'Trade log',
 };
 
@@ -250,6 +252,9 @@ export default function App() {
           )}
           {effectiveRoute === 'universe' && (
             <UniverseScreen accent={tweaks.accent} density={tweaks.density} live={live} />
+          )}
+          {effectiveRoute === 'connect' && (
+            <ConnectScreen accent={tweaks.accent} live={live} />
           )}
           {effectiveRoute === 'log' && (
             <TradeLogScreen live={live} />

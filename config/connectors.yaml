@@ -1,0 +1,227 @@
+# Connect Hub manifests.
+#
+# This file is intentionally non-secret. It declares which external systems
+# myTbot knows how to onboard and which environment variables must be present.
+# The dashboard/API should adapt to the configured rows instead of assuming a
+# fixed operator setup.
+
+brokers:
+  ibkr:
+    label: Interactive Brokers
+    adapter: ibkr
+    enabled: true
+    auth_type: gateway
+    required_secrets: []
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_options: true
+      supports_forex: true
+      supports_equities: true
+    docs_url: docs/IBKR_CONNECTIVITY.md
+    notes: Uses IB Gateway/TWS connection settings rather than API-key secrets.
+
+  kraken:
+    label: Kraken
+    adapter: kraken
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: KRAKEN_API_KEY
+        label: API key
+      - env: KRAKEN_API_SECRET
+        label: API secret
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_crypto_spot: true
+
+  binance:
+    label: Binance
+    adapter: binance
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: BINANCE_API_KEY
+        label: API key
+      - env: BINANCE_API_SECRET
+        label: API secret
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_crypto_spot: true
+
+  bybit:
+    label: Bybit
+    adapter: bybit
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: BYBIT_API_KEY
+        label: API key
+      - env: BYBIT_API_SECRET
+        label: API secret
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_crypto_derivatives: true
+
+  alpaca:
+    label: Alpaca
+    adapter: alpaca
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: ALPACA_API_KEY
+        label: API key
+      - env: ALPACA_API_SECRET
+        label: API secret
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_equities: true
+      supports_crypto_spot: true
+
+information_feeds:
+  newsapi:
+    label: NewsAPI
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: NEWS_API_KEY
+        label: API key
+    capabilities:
+      can_ingest_news: true
+      provides_symbols: true
+      provides_sentiment_context: true
+
+  alphavantage:
+    label: Alpha Vantage
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: ALPHAVANTAGE_API_KEY
+        label: API key
+    capabilities:
+      can_ingest_news: true
+      provides_symbols: true
+
+  finnhub:
+    label: Finnhub
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: FINNHUB_API_KEY
+        label: API key
+    capabilities:
+      can_ingest_news: true
+      provides_symbols: true
+
+  marketaux:
+    label: Marketaux
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: MARKETAUX_API_TOKEN
+        label: API token
+    capabilities:
+      can_ingest_news: true
+      provides_symbols: true
+
+  fred:
+    label: FRED
+    enabled: true
+    auth_type: api_key
+    required_secrets:
+      - env: FRED_API_KEY
+        label: API key
+    capabilities:
+      can_ingest_macro: true
+      provides_regime_context: true
+
+ai_providers:
+  rules:
+    label: Rules engine
+    enabled: true
+    auth_type: none
+    required_secrets: []
+    roles: [fast_classifier]
+    capabilities:
+      advisory_only: true
+      local_first: true
+
+  fin_sentiment:
+    label: FinBERT sentiment
+    enabled: true
+    auth_type: local_model
+    required_secrets: []
+    roles: [sentiment_classifier]
+    capabilities:
+      advisory_only: true
+      local_first: true
+
+  local_reasoning:
+    label: Local LLM
+    enabled: true
+    auth_type: local_endpoint
+    required_secrets: []
+    roles: [reasoning_model, fallback_model]
+    capabilities:
+      advisory_only: true
+      local_first: true
+
+  premium_fallback:
+    label: Premium LLM fallback
+    enabled: false
+    auth_type: api_key
+    required_secrets:
+      - env: ANTHROPIC_API_KEY
+        label: Anthropic API key
+        required: false
+      - env: OPENAI_API_KEY
+        label: OpenAI API key
+        required: false
+      - env: GOOGLE_API_KEY
+        label: Gemini API key
+        required: false
+    roles: [premium_arbiter, emergency_model]
+    capabilities:
+      advisory_only: true
+      paid_api: true
+
+treasury_accounts:
+  external_treasury:
+    label: External treasury account
+    enabled: false
+    auth_type: api_or_open_banking
+    required_secrets:
+      - env: TREASURY_API_KEY
+        label: Treasury API key
+      - env: TREASURY_ACCOUNT_ID
+        label: Account id
+    capabilities:
+      can_read_balance: true
+      can_initiate_transfer: false
+      can_withdraw_from_broker: false
+      supports_approval_workflow: true
+    safety:
+      transfer_execution_default: disabled
+      require_beneficiary_whitelist: true
+      require_manual_approval_above: "0"
+      audit_every_request: true
+    notes: No automatic treasury movement is enabled by this manifest.

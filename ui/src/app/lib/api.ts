@@ -689,6 +689,103 @@ export type SystemStatusResponse = {
     ok?: boolean;
     error?: string | null;
   }>;
+  /** Connect Hub inventory for brokers, feeds, AI providers, and treasury accounts. */
+  connect_hub?: ConnectHubResponse;
+};
+
+export type ConnectHubSecret = {
+  env: string;
+  label: string;
+  required: boolean;
+  configured: boolean;
+};
+
+export type ConnectHubConnector = {
+  id: string;
+  label: string;
+  category: 'brokers' | 'information_feeds' | 'ai_providers' | 'treasury_accounts' | string;
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  healthy: boolean;
+  state: string;
+  adapter?: string | null;
+  auth_type: string;
+  required_secrets: ConnectHubSecret[];
+  capabilities: Record<string, boolean>;
+  roles: string[];
+  safety: Record<string, unknown>;
+  docs_url?: string | null;
+  notes?: string | null;
+  status?: Record<string, unknown>;
+  next_actions?: Array<{ kind: string; label: string }>;
+};
+
+export type ConnectHubResponse = {
+  generated_at: string;
+  categories: Record<string, ConnectHubConnector[]>;
+  summary: Record<
+    string,
+    {
+      total: number;
+      enabled: number;
+      configured: number;
+      connected: number;
+      healthy: number;
+      ids: string[];
+      connected_ids: string[];
+    }
+  >;
+  capability_flags: {
+    can_trade: boolean;
+    has_information_feed: boolean;
+    has_ai_provider: boolean;
+    has_treasury_account: boolean;
+    can_auto_transfer: boolean;
+  };
+};
+
+export type ConnectConfigureRequest = {
+  category: string;
+  connector_id: string;
+  secrets: Record<string, string>;
+  enable?: boolean;
+};
+
+export type ConnectConfigureResponse = {
+  ok: boolean;
+  connector: { category: string; id: string; enabled: boolean };
+  written_env: string[];
+  ai_config_updated?: boolean;
+  requires_restart: boolean;
+  next_step: string;
+  connect_hub: ConnectHubResponse;
+};
+
+export type ConnectAddRequest = {
+  category: string;
+  connector_id: string;
+  label: string;
+  auth_type?: string;
+  required_env?: string[];
+  capabilities?: Record<string, boolean>;
+  roles?: string[];
+  docs_url?: string | null;
+  notes?: string | null;
+  scaffold_adapter?: boolean;
+};
+
+export type ConnectAddResponse = {
+  ok: boolean;
+  created: {
+    category: string;
+    id: string;
+    label: string;
+    scaffolded_adapter_path?: string | null;
+  };
+  requires_adapter_implementation: boolean;
+  next_step: string;
+  connect_hub: ConnectHubResponse;
 };
 
 export type RoutingBrokerRow = {
@@ -790,6 +887,11 @@ export const api = {
     getJson<ApiNewsResponse>(`/news?limit=${limit}&impactful_only=${impactfulOnly ? 'true' : 'false'}`),
   getStatus: () => getJson<ApiStatusResponse>('/status'),
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
+  getConnectHub: () => getJson<ConnectHubResponse>('/connect/hub'),
+  configureConnector: (body: ConnectConfigureRequest) =>
+    postJsonBody<ConnectConfigureResponse>('/connect/configure', body),
+  addConnector: (body: ConnectAddRequest) =>
+    postJsonBody<ConnectAddResponse>('/connect/add', body),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND
