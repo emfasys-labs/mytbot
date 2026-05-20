@@ -275,7 +275,7 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
   const isFlatten = stagedPct != null && stagedPct < FLATTEN_THRESHOLD;
   const zoneColor = previewBelow ? (isFlatten ? TOKENS.danger : TOKENS.caution) : accent;
 
-  const height = 360;
+  const height = 300;
   const thumbY = (1 - shownPct) * height;
   const workingY = (1 - workingPct) * height;
 
@@ -286,10 +286,10 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          marginBottom: 16,
+          marginBottom: 22,
         }}
       >
-        <Label style={{ color: interactive ? undefined : TOKENS.ink3 }}>Capital allocation</Label>
+        <Label accent={TOKENS.ink3}>Capital allocation</Label>
         <span
           style={{
             fontFamily: TOKENS.mono,

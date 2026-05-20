@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 from typing import Any
 
@@ -717,7 +718,11 @@ def _source_detail(
 
 def _build_info(last_at: str | None, cfg: dict[str, Any], *, state: str | None = None) -> dict[str, Any]:
     rb = cfg.get("rebuild") or {}
-    interval = int(rb.get("interval_sec", 120))
+    # D118: the orchestrator now rebuilds the dynamic universe from the
+    # data-pipeline loop, not the legacy universe_selection.yaml rebuild
+    # timer. Surface the effective pipeline interval so the dashboard
+    # countdown does not claim a 24h refresh cycle.
+    interval = int(os.getenv("PIPELINE_INTERVAL_SEC", "3600"))
     now = datetime.now(timezone.utc)
     last_dt = _parse_dt(last_at)
     if state is None:

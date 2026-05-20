@@ -37,6 +37,9 @@ logs/
 *.db
 *.sqlite
 
+# Local one-off diagnostics (not part of the product)
+scratch/
+
 # Claude / local worktrees (do not commit nested copies)
 .claude/
 

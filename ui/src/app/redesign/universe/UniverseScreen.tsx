@@ -1305,8 +1305,13 @@ function UniverseSummaryPanel({
   const binding = priorityRule?.budget.binding_constraint ?? null;
   const intervalSecRaw = data?.build?.intervalSec ?? data?.config_mirror?.rebuild?.interval_sec;
   const intervalSec = typeof intervalSecRaw === 'number' ? intervalSecRaw : Number(intervalSecRaw || 0);
+  const nextBuildMs = typeof data?.build?.nextBuildAt === 'string' ? new Date(data.build.nextBuildAt).getTime() : NaN;
   const generatedMs = data?.generated_at ? new Date(data.generated_at).getTime() : NaN;
-  const nextMs = Number.isFinite(generatedMs) && intervalSec > 0 ? generatedMs + intervalSec * 1000 : NaN;
+  const nextMs = Number.isFinite(nextBuildMs)
+    ? nextBuildMs
+    : Number.isFinite(generatedMs) && intervalSec > 0
+      ? generatedMs + intervalSec * 1000
+      : NaN;
   const remainingSec = Number.isFinite(nextMs) ? Math.max(0, Math.ceil((nextMs - nowMs) / 1000)) : null;
   const refreshText = remainingSec == null
     ? '—'
