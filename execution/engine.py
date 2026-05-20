@@ -1817,14 +1817,25 @@ class ExecutionEngine:
             logger.warning("Invalid order book top-of-book | symbol=%s", order.symbol)
             return False
 
+        symbol_vol_scalar = Decimal("1.0")
+        if isinstance(order.instrument_metadata, dict) and "symbol_volatility_scalar" in order.instrument_metadata:
+            try:
+                symbol_vol_scalar = Decimal(str(order.instrument_metadata["symbol_volatility_scalar"]))
+            except (TypeError, ValueError, InvalidOperation):
+                pass
+                
+        # D120: Scale spread and slippage allowance by asset volatility
+        max_spread = limits["max_spread_pct"] * max(Decimal("1.0"), symbol_vol_scalar)
+        max_slippage = limits["max_slippage_pct"] * max(Decimal("1.0"), symbol_vol_scalar)
+
         mid = (best_bid + best_ask) / Decimal("2")
         spread_pct = (best_ask - best_bid) / mid if mid > 0 else Decimal("1")
-        if spread_pct > limits["max_spread_pct"]:
+        if spread_pct > max_spread:
             logger.warning(
                 "Spread limit breach | symbol=%s spread_pct=%s max=%s",
                 order.symbol,
                 spread_pct,
-                limits["max_spread_pct"],
+                max_spread,
             )
             return False
 
@@ -1840,12 +1851,12 @@ class ExecutionEngine:
 
         if order.order_type == OrderType.MARKET:
             slippage_pct = self._estimate_market_slippage_pct(order, ob, mid)
-            if slippage_pct > limits["max_slippage_pct"]:
+            if slippage_pct > max_slippage:
                 logger.warning(
                     "Slippage limit breach | symbol=%s slippage_pct=%s max=%s",
                     order.symbol,
                     slippage_pct,
-                    limits["max_slippage_pct"],
+                    max_slippage,
                 )
                 return False
 

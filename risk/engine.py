@@ -650,7 +650,21 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "daily_loss_limit")
-        max_daily_loss_pct = self._provider.get_decimal("max_daily_loss_pct", fallback=Decimal("0"))
+        base_max_daily_loss_pct = self._provider.get_decimal("max_daily_loss_pct", fallback=Decimal("0"))
+        
+        # D120: Dynamic NAV loss guardrails based on market state
+        market_state_score = Decimal("1.0")
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = Decimal(str(pmeta["market_state_score"]))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+                    
+        # In terrible regimes, shrink allowed loss budget down to 10% of base
+        max_daily_loss_pct = base_max_daily_loss_pct * max(Decimal("0.1"), min(Decimal("1.0"), market_state_score))
+        
         # Use whichever loss tracker is worse: runtime or provided portfolio state.
         stated_pnl = self._decimal_from_portfolio(portfolio, "daily_realized_pnl", Decimal("0"))
         state_loss = abs(stated_pnl) if stated_pnl < 0 else Decimal("0")
@@ -701,7 +715,18 @@ class RiskEngine:
         if self._high_watermark <= 0:
             self._high_watermark = portfolio_value
             return (True, "drawdown_limit")
-        max_drawdown_pct = self._provider.get_decimal("max_drawdown_pct", fallback=Decimal("0"))
+        base_max_drawdown_pct = self._provider.get_decimal("max_drawdown_pct", fallback=Decimal("0"))
+        
+        market_state_score = Decimal("1.0")
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = Decimal(str(pmeta["market_state_score"]))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+        
+        max_drawdown_pct = base_max_drawdown_pct * max(Decimal("0.1"), min(Decimal("1.0"), market_state_score))
         drawdown = (self._high_watermark - portfolio_value) / self._high_watermark
         return (drawdown <= max_drawdown_pct, "drawdown_limit")
 
@@ -720,7 +745,18 @@ class RiskEngine:
         portfolio_value = self._decimal_from_portfolio(portfolio, "portfolio_value", Decimal("0"))
         if portfolio_value <= 0:
             return (False, "max_loss_per_trade_pct")
-        max_loss_pct = self._provider.get_decimal("max_loss_per_trade_pct", fallback=Decimal("0"))
+        base_max_loss_pct = self._provider.get_decimal("max_loss_per_trade_pct", fallback=Decimal("0"))
+        
+        market_state_score = Decimal("1.0")
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = Decimal(str(pmeta["market_state_score"]))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+        
+        max_loss_pct = base_max_loss_pct * max(Decimal("0.1"), min(Decimal("1.0"), market_state_score))
         requested_notional = self._requested_notional(signal)
         expected_loss_pct = self._infer_expected_loss_pct(signal)
         if expected_loss_pct is None:
@@ -1079,7 +1115,20 @@ class RiskEngine:
         return (True, "consecutive_losses")
 
     def _check_confidence_threshold(self, signal, portfolio) -> tuple[bool, str]:
-        min_confidence = float(self.config.get("min_signal_confidence", 1.0))
+        base_min_confidence = float(self.config.get("min_signal_confidence", 1.0))
+        
+        market_state_score = 1.0
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = float(pmeta["market_state_score"])
+                except (TypeError, ValueError):
+                    pass
+        
+        # Scale inversely: in terrible market (0.0), threshold raises up to 2x base.
+        min_confidence = base_min_confidence * (2.0 - max(0.1, min(1.0, market_state_score)))
+        
         return (signal.confidence >= min_confidence, "confidence_threshold")
 
     def _check_theme_uniqueness(self, signal, portfolio) -> tuple[bool, str]:
@@ -1145,9 +1194,20 @@ class RiskEngine:
         Modes can raise the threshold (defender) or lower it (hunter).
         Set min_trade_quality_score: 0 to disable entirely.
         """
-        threshold = float(self.config.get("min_trade_quality_score", 0.0))
-        if threshold <= 0.0:
+        base_threshold = float(self.config.get("min_trade_quality_score", 0.0))
+        if base_threshold <= 0.0:
             return (True, "trade_quality")
+
+        market_state_score = 1.0
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = float(pmeta["market_state_score"])
+                except (TypeError, ValueError):
+                    pass
+        
+        threshold = base_threshold * (2.0 - max(0.1, min(1.0, market_state_score)))
 
         confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
         news_raw = float(getattr(signal, "news_score", None) or 0.0)
@@ -1273,6 +1333,25 @@ class RiskEngine:
         arb_cfg = self.config.get("arbitrage")
         if not isinstance(arb_cfg, dict) or not arb_cfg.get("enabled", False):
             return (True, "arbitrage_checks_disabled")
+            
+        # D120: Dynamic arbitrage exposure based on market state
+        market_state_score = Decimal("1.0")
+        if isinstance(portfolio, dict):
+            pmeta = portfolio.get("metadata", {})
+            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
+                try:
+                    market_state_score = Decimal(str(pmeta["market_state_score"]))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+        
+        # Clone the config to avoid mutating global state
+        arb_cfg = dict(arb_cfg)
+        if "max_total_arbitrage_exposure" in arb_cfg:
+            try:
+                base_exp = Decimal(str(arb_cfg["max_total_arbitrage_exposure"]))
+                arb_cfg["max_total_arbitrage_exposure"] = str(base_exp * max(Decimal("0.1"), min(Decimal("1.0"), market_state_score)))
+            except (TypeError, ValueError, InvalidOperation):
+                pass
 
         side_u = (signal.side or "").upper()
         conc_raw = portfolio.get("venue_concentration", {})
