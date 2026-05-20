@@ -124,6 +124,7 @@ class Orchestrator:
 
         self._lock = asyncio.Lock()
         self._last_start_error: str | None = None
+        self._pipeline_wake_event = asyncio.Event()
 
     @classmethod
     def get_instance(cls) -> Orchestrator:
@@ -138,13 +139,31 @@ class Orchestrator:
         logger.info("orchestrator | {} → {}", prev.value, state.value)
 
     @staticmethod
-    async def _sleep_cancellable(total_sec: float, *, chunk_sec: float = 2.0) -> None:
-        """Sleep in small slices so asyncio.Task.cancel() stops the pipeline within ~chunk_sec."""
+    async def _sleep_cancellable(
+        total_sec: float,
+        *,
+        chunk_sec: float = 2.0,
+        wake_event: asyncio.Event | None = None,
+    ) -> None:
+        """Sleep in small slices so asyncio.Task.cancel() stops the pipeline within ~chunk_sec,
+        or wake up immediately when wake_event is set.
+        """
         remaining = max(0.0, float(total_sec))
         ch = max(0.25, min(float(chunk_sec), 30.0))
         while remaining > 0:
+            if wake_event is not None and wake_event.is_set():
+                wake_event.clear()
+                break
             step = min(ch, remaining)
-            await asyncio.sleep(step)
+            if wake_event is not None:
+                try:
+                    await asyncio.wait_for(wake_event.wait(), timeout=step)
+                    wake_event.clear()
+                    break
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+            else:
+                await asyncio.sleep(step)
             remaining -= step
 
     PROFIT_HARVEST_PEAKS_STATE_KEY = "risk.profit_harvest.peaks"
@@ -346,6 +365,7 @@ class Orchestrator:
                     timeframe=os.getenv("TIMEFRAME", "1h"),
                     broker_manager=self._broker_manager,
                     capital_pct=self.capital_pct,
+                    pipeline_wake_event=self._pipeline_wake_event,
                 )
                 await self._trading_loop.start()
 
@@ -2811,6 +2831,6 @@ class Orchestrator:
                     except Exception:
                         pass
             try:
-                await self._sleep_cancellable(float(interval))
+                await self._sleep_cancellable(float(interval), wake_event=self._pipeline_wake_event)
             except asyncio.CancelledError:
                 return

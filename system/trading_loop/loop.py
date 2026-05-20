@@ -315,6 +315,7 @@ class TradingLoop:
         reconcile_interval_sec: int = 300,
         broker_manager: Any = None,
         capital_pct: float = 1.0,
+        pipeline_wake_event: asyncio.Event | None = None,
     ):
         self.broker_configs = broker_configs
         self.available_brokers = list(available_brokers)
@@ -326,6 +327,7 @@ class TradingLoop:
         self.timeframe = timeframe
         self.lookback_bars = lookback_bars
         self.reconcile_interval_sec = reconcile_interval_sec
+        self._pipeline_wake_event = pipeline_wake_event
 
         self._task: asyncio.Task | None = None
         self._control_poll_task: asyncio.Task | None = None
@@ -401,6 +403,108 @@ class TradingLoop:
         self._treasury: Any = None
         self._latency_predictor: LatencyPredictor | None = None
         self._arb_stack: dict[str, Any] | None = None
+
+    def _get_held_cash_used(self, portfolio_dict: dict[str, Any]) -> Decimal:
+        """Calculate the actual capital/cash deployed in the portfolio."""
+        from portfolio.global_edge_coordinator import (
+            held_positions_from_portfolio,
+            cash_factor_for_asset_class as _cf,
+        )
+
+        held = held_positions_from_portfolio(portfolio_dict)
+        _ge_cf_overrides = None
+        if hasattr(self, "_global_edge_cfg") and isinstance(self._global_edge_cfg, dict):
+            _ge_cf_overrides = self._global_edge_cfg.get("cash_factors") or None
+
+        held_cash_used = sum(
+            (
+                h.notional
+                * _cf(
+                    str((h.metadata or {}).get("asset_class") or ""),
+                    _ge_cf_overrides,
+                    symbol=h.symbol,
+                )
+                for h in held
+            ),
+            Decimal("0"),
+        )
+        return held_cash_used
+
+    async def _check_and_trigger_unallocated_capital_discovery(
+        self,
+        *,
+        portfolio_dict: dict[str, Any],
+        total_equity: Decimal,
+        executed_count: int,
+    ) -> None:
+        """Check if we have substantial unallocated capital target and trigger pipeline discovery."""
+        if self.capital_pct <= 0.0:
+            return
+
+        if self._pipeline_wake_event is None:
+            return
+
+        held_cash_used = self._get_held_cash_used(portfolio_dict)
+        
+        # Calculate target cash deployment
+        gross_fraction = Decimal("1.0")
+        if hasattr(self, "_global_edge_cfg") and isinstance(self._global_edge_cfg, dict):
+            _adaptive_cfg = self._global_edge_cfg.get("adaptive") or {}
+            current_mode = self._read_active_mode()
+            _legacy_mode_block = _adaptive_cfg.get("mode")
+            if isinstance(_legacy_mode_block, dict):
+                _mode_raw_cfg = (
+                    _legacy_mode_block.get(current_mode)
+                    or _legacy_mode_block.get("trader")
+                    or {}
+                )
+                _gf_src = _mode_raw_cfg.get("gross_fraction", _adaptive_cfg.get("gross_fraction", "1.0"))
+            else:
+                _gf_src = _adaptive_cfg.get("gross_fraction", "1.0")
+            try:
+                gross_fraction = Decimal(str(_gf_src))
+            except Exception:
+                gross_fraction = Decimal("1.0")
+
+        target_capital = total_equity * Decimal(str(self.capital_pct)) * gross_fraction
+        remaining_cash = target_capital - held_cash_used
+
+        # Dynamic threshold based on default position percentage
+        default_pos_pct = Decimal("0.05")
+        if self.sig_engine is not None and hasattr(self.sig_engine, "config"):
+            try:
+                default_pos_pct = Decimal(str(self.sig_engine.config.get("default_position_pct", "0.05")))
+            except Exception:
+                pass
+
+        # Smart dynamic threshold (we need enough cash to open at least one position)
+        threshold = total_equity * default_pos_pct
+        
+        # Safe bounds: threshold must be between 1% and 10% of NAV
+        threshold = max(total_equity * Decimal("0.01"), min(threshold, total_equity * Decimal("0.10")))
+
+        if remaining_cash > threshold:
+            # Dynamic cooldown equal to current loop cadence
+            cooldown_sec = float(self.loop_interval_sec)
+            now = time.monotonic()
+            last_trigger = getattr(self, "_last_unallocated_discovery_trigger_at", 0.0)
+
+            if now - last_trigger >= cooldown_sec:
+                logger.info(
+                    "trading_loop | unallocated capital detected: held_cash={} target={} remaining={} (threshold={}) | "
+                    "waking pipeline runner to force discovery",
+                    held_cash_used,
+                    target_capital,
+                    remaining_cash,
+                    threshold,
+                )
+                self._last_unallocated_discovery_trigger_at = now
+                self._pipeline_wake_event.set()
+            else:
+                logger.debug(
+                    "trading_loop | unallocated capital exists but discovery is in cooldown ({:.1f}s remaining)",
+                    cooldown_sec - (now - last_trigger),
+                )
 
     @property
     def is_running(self) -> bool:
@@ -2377,6 +2481,23 @@ class TradingLoop:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("adaptive_cadence | failed, falling back to static: {}", exc)
                     iter_interval = base_iter
+
+                # Force discovery if capital is under-allocated
+                try:
+                    _current_pd = await _load_portfolio_state(
+                        session_factory,
+                        fallback_portfolio_value=total_equity,
+                        signal_price_fallback=None,
+                        capital_pct=Decimal(str(self.capital_pct)),
+                    )
+                    await self._check_and_trigger_unallocated_capital_discovery(
+                        portfolio_dict=_current_pd,
+                        total_equity=total_equity,
+                        executed_count=executed if "executed" in locals() else 0,
+                    )
+                except Exception as fd_exc:  # noqa: BLE001
+                    logger.warning("trading_loop | forced discovery check failed (non-fatal): {}", fd_exc)
+
                 try:
                     should_stop = await self._wait_for_next_iteration(iter_interval)
                     if should_stop:
