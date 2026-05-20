@@ -146,6 +146,14 @@ def test_catalog_lookup_resolves_aliases(monkeypatch):
         assert row["sym"] in catalog_syms
 
 
+def test_snapshot_classifies_yahoo_futures_before_fx(monkeypatch):
+    import universe.snapshot_service as ss
+
+    assert ss._classify_symbol("ES=F") == "etf"
+    assert ss._classify_symbol("GC=F") == "etf"
+    assert ss._classify_symbol("EURUSD=X") == "fx"
+
+
 def test_snapshot_reports_active_count_from_representatives(monkeypatch, tmp_path):
     import universe.snapshot_service as ss
     from universe.persistence import save_intelligence_state

@@ -1018,7 +1018,7 @@ class RiskEngine:
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = int(self.config.get("max_consecutive_losses", 0))
-        if self._consecutive_losses >= max_losses:
+        if max_losses > 0 and self._consecutive_losses >= max_losses:
             cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
             self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
             self._persist_runtime_state()

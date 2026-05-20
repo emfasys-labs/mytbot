@@ -373,6 +373,25 @@ def test_rejects_on_consecutive_losses_and_enters_cooldown() -> None:
     assert decision2.checks_failed == ["cooldown"]
 
 
+def test_consecutive_losses_disabled_when_zero_or_missing() -> None:
+    cfg = _risk_cfg()
+    cfg["max_consecutive_losses"] = 0
+    engine = RiskEngine(cfg)
+    engine.record_loss(Decimal("100"))
+    engine.record_loss(Decimal("50"))
+    decision = engine.evaluate(
+        _signal(),
+        {
+            "portfolio_value": Decimal("100000"),
+            "daily_realized_pnl": Decimal("0"),
+            "current_gross_exposure": Decimal("0"),
+            "symbol_exposure": {},
+            "asset_class_exposure": {},
+        },
+    )
+    assert decision.verdict == RiskVerdict.APPROVED
+
+
 def test_rejects_on_confidence_threshold() -> None:
     cfg = _risk_cfg()
     cfg["min_signal_confidence"] = 0.90

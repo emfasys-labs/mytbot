@@ -873,10 +873,10 @@ def _classify_symbol(sym: str) -> str:
     s = sym.upper()
     if "-" in s or s.endswith("USD"):
         return "crypto"
-    if "=" in s or s.endswith("=X"):
-        return "fx"
     if len(s) <= 4 and s in {"ES", "NQ", "YM", "CL", "GC"} or s.endswith("=F"):
         return "etf"
+    if "=" in s or s.endswith("=X"):
+        return "fx"
     etfs = {"SPY", "QQQ", "IWM", "XLK", "XLE", "TLT", "GLD", "EEM"}
     if s in etfs:
         return "etf"

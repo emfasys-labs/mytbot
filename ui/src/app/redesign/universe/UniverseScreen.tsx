@@ -774,50 +774,15 @@ function OverviewTab({
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 18 }}>
-        <Card style={{ padding: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-            <Label accent={TOKENS.ink3}>recent promotions · why now</Label>
-            <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{stream.length} events</span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 480, overflowY: 'auto' }}>
-            {stream.length === 0 && (
-              <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.sans, fontSize: 13 }}>No recent promotion stream.</div>
-            )}
-            {stream.map((p, i) => (
-              <button
-                key={`${p.sym}-${i}`}
-                type="button"
-                onClick={() => onSelect(p.sym)}
-                style={{
-                  display: 'block',
-                  textAlign: 'left',
-                  width: '100%',
-                  padding: 12,
-                  borderRadius: 10,
-                  background: TOKENS.bg2,
-                  border: `1px solid ${TOKENS.line}`,
-                  cursor: 'pointer',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  {classGlyph(p.klass ?? 'equity', 14)}
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: TOKENS.sans, fontSize: 15, fontWeight: 500, color: TOKENS.ink0 }}>{p.sym}</div>
-                    <div style={{ fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3 }}>{p.why ?? '—'}</div>
-                    {p.spark && p.spark.length > 1 && (
-                      <div style={{ marginTop: 6 }}>
-                        <Spark values={p.spark} width={120} height={22} accent={accentColor} />
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.caution }}>
-                    ρ{p.bookCorr != null && p.bookCorr >= 0 ? '+' : ''}{p.bookCorr?.toFixed(2) ?? '—'}
-                  </div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </Card>
+        <UniverseSummaryPanel
+          data={data}
+          symbols={symbols}
+          clusters={clusters}
+          funnel={funnel}
+          priorityRule={data?.priority_rule ?? null}
+          accentColor={accentColor}
+          promotionCount={stream.length}
+        />
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <Card style={{ padding: 16 }}>
@@ -1290,6 +1255,130 @@ function CoverageTab({
         </div>
       </Card>
     </div>
+  );
+}
+
+function UniverseSummaryPanel({
+  data,
+  symbols,
+  clusters,
+  funnel,
+  priorityRule,
+  accentColor,
+  promotionCount,
+}: {
+  data: IntelligenceUniverseResponse | null;
+  symbols: UniverseSymbolRow[];
+  clusters: IntelligenceUniverseResponse['clusters'];
+  funnel: IntelligenceUniverseResponse['funnel'];
+  priorityRule: IntelligenceUniverseResponse['priority_rule'];
+  accentColor: string;
+  promotionCount: number;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const active = useMemo(() => symbols.filter((s) => rowStage(s) === 'active_reps'), [symbols]);
+  const watching = symbols.length;
+  const activeCount = active.length;
+  const avgConviction = activeCount > 0
+    ? active.reduce((acc, s) => acc + (Number(s.conviction) || 0), 0) / activeCount
+    : 0;
+  const representedMembers = clusters.reduce((acc, c) => acc + (Number(c.member_count) || 0), 0);
+  const largestCluster = clusters.slice().sort((a, b) => b.member_count - a.member_count)[0];
+  const classCounts = useMemo(() => {
+    const rows: Array<{ klass: string; count: number; share: number }> = [];
+    const counts: Record<string, number> = {};
+    for (const s of symbols) counts[s.klass] = (counts[s.klass] || 0) + 1;
+    for (const [klass, count] of Object.entries(counts)) {
+      rows.push({ klass, count, share: watching > 0 ? count / watching : 0 });
+    }
+    return rows.sort((a, b) => b.count - a.count);
+  }, [symbols, watching]);
+  const scored = funnel.find((f) => f.stage === 'scored')?.count ?? 0;
+  const unique = funnel.find((f) => f.stage === 'unique_normalized')?.count ?? 0;
+  const attentionRatio = watching > 0 ? activeCount / watching : 0;
+  const compressionRatio = unique > 0 ? activeCount / unique : 0;
+  const budget = priorityRule?.budget.target_budget ?? null;
+  const binding = priorityRule?.budget.binding_constraint ?? null;
+  const intervalSecRaw = data?.build?.intervalSec ?? data?.config_mirror?.rebuild?.interval_sec;
+  const intervalSec = typeof intervalSecRaw === 'number' ? intervalSecRaw : Number(intervalSecRaw || 0);
+  const generatedMs = data?.generated_at ? new Date(data.generated_at).getTime() : NaN;
+  const nextMs = Number.isFinite(generatedMs) && intervalSec > 0 ? generatedMs + intervalSec * 1000 : NaN;
+  const remainingSec = Number.isFinite(nextMs) ? Math.max(0, Math.ceil((nextMs - nowMs) / 1000)) : null;
+  const refreshText = remainingSec == null
+    ? '—'
+    : remainingSec >= 3600
+      ? `${Math.floor(remainingSec / 3600)}h ${Math.floor((remainingSec % 3600) / 60)}m`
+      : remainingSec >= 60
+        ? `${Math.floor(remainingSec / 60)}m ${remainingSec % 60}s`
+        : `${remainingSec}s`;
+
+  const summaryTiles = [
+    { label: 'attention set', value: `${fmtNum(activeCount)} / ${fmtNum(watching)}`, sub: `${(attentionRatio * 100).toFixed(1)}% active reps` },
+    { label: 'next refresh in', value: refreshText, sub: intervalSec > 0 ? `cycle every ${fmtNum(intervalSec)}s` : 'waiting for scheduler' },
+    { label: 'selection pressure', value: `${(compressionRatio * 100).toFixed(2)}%`, sub: `${fmtNum(unique)} unique → ${fmtNum(activeCount)} reps` },
+    { label: 'priority budget', value: budget == null ? '—' : fmtNum(budget), sub: binding ? `binding: ${binding}` : `${fmtNum(scored)} scored` },
+  ];
+
+  return (
+    <Card style={{ padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10, gap: 10, alignItems: 'center' }}>
+        <Label accent={TOKENS.ink3}>universe summary · live</Label>
+        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          {fmtNum(clusters.length)} clusters · {fmtNum(promotionCount)} boosts
+        </span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+        {summaryTiles.map((tile) => (
+          <div key={tile.label} style={{ padding: 12, borderRadius: 8, background: TOKENS.bg2, border: `1px solid ${TOKENS.line}`, minWidth: 0 }}>
+            <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{tile.label}</div>
+            <div style={{ marginTop: 5, fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300, color: TOKENS.ink0, lineHeight: 1.1 }}>{tile.value}</div>
+            <div style={{ marginTop: 5, fontFamily: TOKENS.sans, fontSize: 10, color: TOKENS.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tile.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: '1.15fr 0.85fr', gap: 16 }}>
+        <div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 8 }}>asset mix in watching set</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {classCounts.map((row) => (
+              <div key={row.klass}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink2 }}>
+                  <span>{row.klass}</span>
+                  <span>{fmtNum(row.count)} · {(row.share * 100).toFixed(0)}%</span>
+                </div>
+                <div style={{ marginTop: 3, height: 4, borderRadius: 2, background: TOKENS.bg3 }}>
+                  <div style={{ width: `${Math.max(2, row.share * 100)}%`, height: '100%', borderRadius: 2, background: accentColor, opacity: 0.65 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 8 }}>cluster concentration</div>
+          <div style={{ padding: 12, borderRadius: 8, background: TOKENS.bg2, border: `1px solid ${TOKENS.line}` }}>
+            <div style={{ fontFamily: TOKENS.sans, fontSize: 13, color: TOKENS.ink1 }}>
+              {largestCluster
+                ? `${largestCluster.representative} represents ${fmtNum(largestCluster.member_count)} names`
+                : 'No cluster representatives yet'}
+            </div>
+            <div style={{ marginTop: 8, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.6 }}>
+              represented members {fmtNum(representedMembers)}
+              <br />
+              avg active conviction {avgConviction.toFixed(1)}
+              <br />
+              largest avg|ρ| {largestCluster ? Number(largestCluster.avg_abs_correlation).toFixed(2) : '—'}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

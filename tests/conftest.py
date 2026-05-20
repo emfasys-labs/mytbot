@@ -15,6 +15,10 @@ pytest_plugins = ("pytest_asyncio",)
 # `monkeypatch.delenv("PYTEST_API_DISABLE_READ_MIDDLEWARE", raising=False)`.
 os.environ.setdefault("PYTEST_API_DISABLE_READ_MIDDLEWARE", "1")
 
+# Prevent Telegram lifecycle notification loops from blocking test execution
+os.environ.setdefault("TELEGRAM_START_READY_TIMEOUT_SEC", "0.0")
+os.environ.setdefault("TELEGRAM_STOP_READY_TIMEOUT_SEC", "0.0")
+
 # Execution-mechanics tests paper-fill equity/forex signals with the live
 # wall clock; they must not depend on whether real markets happen to be
 # open when the suite runs. Disable the market-session gate by default.
