@@ -234,3 +234,39 @@ def test_empty_positions_no_action():
         now_ts=1_700_000_000,
     )
     assert actions == []
+
+
+def test_dynamic_scalar_adjusts_thresholds():
+    positions = [
+        _pos("AAPL", "ibkr", "100", "300", "295"),  # -$500 loser
+    ]
+    # At -0.6% drawdown, normally tier 1 (-0.5%) fires.
+    # But if volatility scalar is 2.0, tier 1 threshold becomes -1.0%.
+    # So -0.6% should NO LONGER trigger any derisking.
+    actions, tier, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-600"),  # -0.60%
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        portfolio_volatility_scalar=Decimal("2.0"),
+    )
+    assert tier is None
+    assert actions == []
+    
+    # However, at -1.2% drawdown with scalar 2.0, tier 1 (-1.0% scaled) SHOULD fire.
+    actions, tier, _ = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1200"),  # -1.20%
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        portfolio_volatility_scalar=Decimal("2.0"),
+    )
+    assert tier is not None
+    assert tier.threshold_pct == Decimal("-0.0050")  # The original tier config
+    assert len(actions) == 1

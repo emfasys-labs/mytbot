@@ -163,3 +163,20 @@ async def test_no_broker_quote_does_not_block():
     # No broker passed → _broker_last_price returns None
     result = await eng._simulate_fill(order, sig, broker=None)
     assert result.status == OrderStatus.FILLED
+
+
+@pytest.mark.asyncio
+async def test_dynamic_volatility_expands_drift_threshold():
+    eng = _engine()
+    sig = _signal(symbol="TSLA", side="buy", suggested_price="300.00")
+    
+    # 33 bps drift. Normally 25 bps is the max -> rejected.
+    broker = _FakeBroker("301.00")
+    result1 = await eng._simulate_fill(_order(symbol="TSLA", side=OrderSide.BUY), sig, broker=broker)
+    assert result1.status == OrderStatus.REJECTED
+    
+    # Now provide a volatility scalar of 2.0 (e.g. TSLA is twice as volatile)
+    # The max threshold becomes 25 * 2.0 = 50 bps. 33 bps is now within limits.
+    sig.metadata = {"symbol_volatility_scalar": 2.0}
+    result2 = await eng._simulate_fill(_order(symbol="TSLA", side=OrderSide.BUY), sig, broker=broker)
+    assert result2.status == OrderStatus.FILLED

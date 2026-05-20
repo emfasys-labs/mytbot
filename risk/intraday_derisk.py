@@ -129,6 +129,7 @@ def evaluate_intraday_derisk(
     last_action_ts: Mapping[str, float],
     now_ts: float,
     qty_decimals: int = 8,
+    portfolio_volatility_scalar: Decimal = Decimal("1.0"),
 ) -> tuple[list[DeriskAction], Optional[DeriskTier], int]:
     """Decide which positions to trim/close at current intraday drawdown.
 
@@ -148,10 +149,13 @@ def evaluate_intraday_derisk(
     pnl_pct = day_pnl / nav if nav else _ZERO
 
     # Find the most-severe tier whose threshold is breached.
+    # D120: Scale the threshold dynamically by portfolio volatility.
     active_idx = -1
     active_tier: Optional[DeriskTier] = None
     for idx, tier in enumerate(tiers):
-        if pnl_pct <= tier.threshold_pct:
+        scalar = portfolio_volatility_scalar if portfolio_volatility_scalar > 0 else Decimal("1.0")
+        dynamic_threshold = tier.threshold_pct * scalar
+        if pnl_pct <= dynamic_threshold:
             active_idx = idx
             active_tier = tier
             break

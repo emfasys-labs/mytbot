@@ -2188,6 +2188,14 @@ class Orchestrator:
             day_pnl = realised_today + unrealised_now
             now_ts = datetime.now(timezone.utc).timestamp()
 
+            vol_scalar = Decimal("1.0")
+            pmeta = portfolio_state.get("metadata")
+            if isinstance(pmeta, dict) and "market_volatility_scalar" in pmeta:
+                try:
+                    vol_scalar = Decimal(str(pmeta["market_volatility_scalar"]))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+
             actions, tier, tier_idx = evaluate_intraday_derisk(
                 nav=Decimal(str(nav)),
                 day_pnl=day_pnl,
@@ -2196,6 +2204,7 @@ class Orchestrator:
                 cooldown_seconds=cooldown_sec,
                 last_action_ts=self._intraday_derisk_last_action_ts,
                 now_ts=now_ts,
+                portfolio_volatility_scalar=vol_scalar,
             )
             if not actions:
                 return

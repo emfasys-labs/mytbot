@@ -616,8 +616,8 @@ class ExecutionEngine:
         except Exception:  # noqa: BLE001
             return 0.0
 
-    def _stale_price_cfg(self) -> tuple[bool, Decimal]:
-        """D115 — Paper-mode stale-price gate. Returns ``(enabled, max_drift_bps)``.
+    def _stale_price_cfg(self, signal: Signal | None = None) -> tuple[bool, Decimal]:
+        """D115/D120 — Paper-mode stale-price gate. Returns ``(enabled, max_drift_bps)``.
 
         When enabled, ``_simulate_fill`` rejects an opening order whose
         ``signal.suggested_price`` has drifted against the trade direction
@@ -631,11 +631,24 @@ class ExecutionEngine:
             return (False, Decimal("25"))
         enabled = bool(sp_cfg.get("enabled", True))
         try:
-            max_bps = Decimal(str(sp_cfg.get("max_adverse_drift_bps", 25)))
+            base_bps = Decimal(str(sp_cfg.get("max_adverse_drift_bps", 25)))
         except Exception:  # noqa: BLE001
-            max_bps = Decimal("25")
+            base_bps = Decimal("25")
+            
+        # D120: Dynamic volatility scaling
+        vol_scalar = Decimal("1.0")
+        if signal and signal.metadata:
+            # We can pull 'symbol_volatility_scalar' or fallback to portfolio 'market_volatility_scalar' if we passed it in signal metadata
+            sv = signal.metadata.get("symbol_volatility_scalar")
+            if sv is not None:
+                try:
+                    vol_scalar = Decimal(str(sv))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+            
+        max_bps = base_bps * (vol_scalar if vol_scalar > 0 else Decimal("1.0"))
+        
         return (enabled, max_bps)
-
     async def _simulate_fill(
         self,
         order: Order,
@@ -696,7 +709,7 @@ class ExecutionEngine:
         # fill so the loop can either re-evaluate at the new price or sit
         # the trade out. Reduce-only and close intents are never blocked.
         if not reduce_only:
-            enabled, max_drift_bps = self._stale_price_cfg()
+            enabled, max_drift_bps = self._stale_price_cfg(signal)
             if enabled and signal.suggested_price is not None and signal.suggested_price > 0:
                 market_now = await _broker_last_price()
                 if market_now is not None and market_now > 0:

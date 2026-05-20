@@ -124,3 +124,37 @@ def test_disabled_cluster_check_allows_anything():
     sig = _signal(symbol="QQQ", side="buy", qty="500", price="700.0")
     decision = eng.evaluate(sig, _portfolio(nav="1000000", positions=positions))
     assert decision.verdict.value == "approved"
+
+
+def test_dynamic_cap_shrinks_to_zero_on_terrible_market_state():
+    eng = _engine()
+    positions = {
+        "SPY": {"quantity": "1", "current_price": "100.0"},  # tiny exposure
+    }
+    sig = _signal(symbol="QQQ", side="buy", qty="100", price="700.0")
+    
+    # Portfolio metadata explicitly reports a terrible market state (0.01)
+    port = _portfolio(nav="1000000", positions=positions)
+    port["metadata"] = {"market_state_score": 0.01}
+    
+    decision = eng.evaluate(sig, port)
+    # Cap is 1% of 1M = 10k. 70k is well above cap.
+    assert decision.verdict.value == "rejected"
+    assert "equity_index_cluster" in (decision.reason or "")
+
+
+def test_dynamic_cap_expands_on_excellent_market_state():
+    eng = _engine()
+    positions = {
+        "SPY": {"quantity": "1000", "current_price": "500.0"},  # +500,000 (50% of NAV)
+    }
+    sig = _signal(symbol="QQQ", side="buy", qty="100", price="500.0")  # +50,000 -> 550,000 total
+    
+    # Portfolio metadata explicitly reports an excellent market state (0.80) -> 80% cap
+    port = _portfolio(nav="1000000", positions=positions)
+    port["metadata"] = {"market_state_score": 0.80}
+    
+    decision = eng.evaluate(sig, port)
+    # Cap is 80% of 1M = 800k. 550k is well within cap.
+    assert decision.verdict.value == "approved"
+

@@ -979,10 +979,29 @@ class RiskEngine:
         if sizing_base <= 0:
             return (True, "equity_index_cluster")
 
-        try:
-            max_pct = Decimal(str(cfg.get("max_net_exposure_pct", "0.20")))
-        except (InvalidOperation, TypeError, ValueError):
-            max_pct = Decimal("0.20")
+        # D120 Dynamic Equity Cluster Cap (0 to 100%)
+        # Cap is 1:1 with market_state_score.
+        market_state_score = Decimal("0.20") # Fallback
+        if isinstance(portfolio, dict):
+            metadata = portfolio.get("metadata", {})
+            if isinstance(metadata, dict):
+                mss = metadata.get("market_state_score")
+                if mss is not None:
+                    try:
+                        market_state_score = Decimal(str(mss))
+                    except (TypeError, ValueError, InvalidOperation):
+                        pass
+
+        if getattr(signal, "metadata", None):
+            mss = signal.metadata.get("market_state_score")
+            if mss is not None:
+                try:
+                    market_state_score = Decimal(str(mss))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+
+        # Fully dynamic: 0.0 (0%) to 1.0 (100%)
+        max_pct = max(Decimal("0.0"), min(Decimal("1.0"), market_state_score))
         if max_pct <= 0:
             return (True, "equity_index_cluster")
         cap_notional = sizing_base * max_pct
@@ -1039,7 +1058,21 @@ class RiskEngine:
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = int(self.config.get("max_consecutive_losses", 0))
         if max_losses > 0 and self._consecutive_losses >= max_losses:
-            cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
+            base_cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
+            
+            # D120: Dynamic cooldown scaling based on market volatility
+            vol_scalar = 1.0
+            if isinstance(portfolio, dict):
+                pmeta = portfolio.get("metadata")
+                if isinstance(pmeta, dict) and "market_volatility_scalar" in pmeta:
+                    try:
+                        vol_scalar = float(pmeta["market_volatility_scalar"])
+                    except (TypeError, ValueError):
+                        pass
+                        
+            # Higher volatility = longer cooldown (wait for the chop to subside)
+            cooldown_minutes = int(base_cooldown_minutes * (vol_scalar if vol_scalar > 0 else 1.0))
+            
             self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
             self._persist_runtime_state()
             return (False, "consecutive_losses")
