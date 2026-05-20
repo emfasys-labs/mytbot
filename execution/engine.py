@@ -450,7 +450,7 @@ class ExecutionEngine:
             return None
 
         order = await self._apply_marketable_limit(order, signal, broker)
-        order = self._normalize_order_for_broker(order, signal)
+        order = await self._normalize_order_for_broker(order, signal, broker)
         await _stamp_microstructure_shadow(broker)
         if order.quantity <= 0:
             logger.warning(
@@ -1516,16 +1516,17 @@ class ExecutionEngine:
         )
         return replace(order, limit_price=new_px)
 
-    def _normalize_order_for_broker(self, order: Order, signal: Signal) -> Order:
+    async def _normalize_order_for_broker(self, order: Order, signal: Signal, broker_adapter: Optional[Any] = None) -> Order:
         """
-        Apply venue-specific quantity constraints before placement.
+        Apply venue-specific quantity and price constraints before placement.
+        """
+        broker_name = str(getattr(signal, "broker", "") or "").strip().lower()
+        
+        if broker_adapter is None:
+            broker_adapter = await self._get_broker(broker_name)
 
-        IBKR rejects fractional quantity for many non-crypto instruments (error 10243).
-        Normalize those to whole units to avoid immediate cancel.
-        """
-        broker = str(getattr(signal, "broker", "") or "").strip().lower()
-        asset = str(getattr(signal, "asset_class", "") or "").strip().lower()
         qty = Decimal(str(order.quantity))
+        price = order.limit_price
 
         # Reduce-only/close orders must NOT be floored to whole shares. A
         # fractional residual (e.g. 0.7 sh of an expensive name, common after
@@ -1546,16 +1547,21 @@ class ExecutionEngine:
             or str(getattr(signal, "signal_id", "") or "").strip().lower().startswith(("stoploss-", "stop_loss-", "profitharvest-"))
         )
 
-        if (
-            not is_reduce_only
-            and broker == "ibkr"
-            and asset in {"equity", "etf", "bond", "future", "option"}
-        ):
-            qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        if broker_adapter is not None:
+            if not is_reduce_only:
+                qty = await broker_adapter.quantize_quantity(order.symbol, qty)
+            if price is not None:
+                price = await broker_adapter.quantize_price(order.symbol, price, side=order.side)
+        else:
+            # Fallback legacy logic
+            if (
+                not is_reduce_only
+                and broker_name == "ibkr"
+                and str(getattr(signal, "asset_class", "") or "").strip().lower() in {"equity", "etf", "bond", "future", "option"}
+            ):
+                qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
 
-        if qty == order.quantity:
-            return order
-        return replace(order, quantity=qty)
+        return replace(order, quantity=qty, limit_price=price)
 
     async def _get_broker(self, name: str):
         """Lazy-load broker adapter.
@@ -1839,13 +1845,16 @@ class ExecutionEngine:
             )
             return False
 
+        min_liquidity = limits["min_liquidity_usd"] * max(Decimal("0.1"), symbol_vol_scalar)
         book_liquidity = self._book_liquidity_usd(ob)
-        if book_liquidity < limits["min_liquidity_usd"]:
+        if book_liquidity < min_liquidity:
             logger.warning(
-                "Liquidity limit breach | symbol=%s liquidity=%s min=%s",
+                "Liquidity limit breach | symbol=%s liquidity=%s min=%s (scaled from %s by vol %s)",
                 order.symbol,
                 book_liquidity,
+                min_liquidity,
                 limits["min_liquidity_usd"],
+                symbol_vol_scalar,
             )
             return False
 

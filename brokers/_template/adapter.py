@@ -95,6 +95,12 @@ class NewExchangeAdapter(BrokerAdapter):
     async def get_asset_class(self, symbol: str) -> AssetClass:
         raise NotImplementedError
 
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        return await super().quantize_quantity(symbol, quantity)
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        return await super().quantize_price(symbol, price, side)
+
     # ── Private helpers ───────────────────────────────────────────────────────
     # Keep all exchange-specific translation logic here.
     # The rest of the system never sees raw exchange responses.

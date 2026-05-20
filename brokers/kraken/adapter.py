@@ -696,3 +696,57 @@ class KrakenAdapter(BrokerAdapter):
 
     async def get_asset_class(self, symbol: str) -> AssetClass:
         return AssetClass.CRYPTO
+
+    async def _fetch_symbol_rules(self, symbol: str) -> dict[str, int]:
+        symbol = symbol.strip().upper()
+        if not hasattr(self, "_symbol_rules_cache"):
+            self._symbol_rules_cache = {}
+        if symbol in self._symbol_rules_cache:
+            return self._symbol_rules_cache[symbol]
+
+        rules = {"qty_decimals": 4, "price_decimals": 2}
+        if self._market is None:
+            return rules
+
+        pair = _pair_altname(symbol)
+
+        def _fetch() -> dict[str, Any]:
+            assert self._market is not None
+            return self._market.get_asset_pairs(pair=pair)
+
+        try:
+            raw = await self._run_sync(_fetch)
+            if raw:
+                info = next(iter(raw.values()))
+                ld = info.get("lot_decimals")
+                pd = info.get("pair_decimals")
+                if ld is not None:
+                    rules["qty_decimals"] = int(ld)
+                if pd is not None:
+                    rules["price_decimals"] = int(pd)
+            self._symbol_rules_cache[symbol] = rules
+        except Exception as exc:
+            logger.debug("_fetch_symbol_rules | Kraken | symbol={} | error={}", symbol, exc)
+
+        return rules
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        rules = await self._fetch_symbol_rules(symbol)
+        dec = rules["qty_decimals"]
+        try:
+            from decimal import ROUND_DOWN
+            q = quantity.quantize(Decimal("10") ** -dec, rounding=ROUND_DOWN)
+            return q.normalize()
+        except Exception:
+            return quantity
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        rules = await self._fetch_symbol_rules(symbol)
+        dec = rules["price_decimals"]
+        try:
+            from decimal import ROUND_HALF_UP
+            p = price.quantize(Decimal("10") ** -dec, rounding=ROUND_HALF_UP)
+            return p.normalize()
+        except Exception:
+            return price
+

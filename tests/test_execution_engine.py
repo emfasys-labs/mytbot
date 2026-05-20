@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +148,15 @@ class _FakeBroker:
             fee=Decimal("0"),
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        if self.broker_name == "ibkr" and "-USD" not in symbol:
+            return quantity.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        return quantity
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: OrderSide) -> Decimal:
+        return price
+
 
 
 def _approved_decision() -> RiskDecision:
@@ -861,6 +870,48 @@ async def test_rejects_on_liquidity_and_slippage_limits(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dynamic_liquidity_scaling_by_volatility(monkeypatch) -> None:
+    risk = _FakeRiskEngine(
+        {
+            "max_spread_pct": Decimal("0.05"),
+            "min_liquidity_usd": Decimal("1500"),
+            "max_slippage_pct": Decimal("0.05"),
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+
+    class _CustomLiqBroker(_FakeBroker):
+        async def get_order_book(self, symbol: str, depth: int = 10) -> OrderBook:
+            return OrderBook(
+                symbol=symbol,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                bids=[(Decimal("100"), Decimal("11"))],
+                asks=[(Decimal("100"), Decimal("11"))],
+            )
+
+    broker = _CustomLiqBroker()
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+
+    # Case 1: normal volatility scalar = 1.0 -> scaled min liquidity = 1500 -> passes (1800 usd book)
+    s = _signal()
+    s.metadata = {"symbol_volatility_scalar": "1.0"}
+    engine = ExecutionEngine(broker_configs={}, paper_mode=False)
+    res = await engine.execute(s, _approved_decision())
+    assert res is not None
+    assert broker.place_calls == 1
+
+    # Case 2: high volatility scalar = 2.0 -> scaled min liquidity = 3000 -> fails (1800 usd book)
+    s2 = _signal()
+    s2.metadata = {"symbol_volatility_scalar": "2.0"}
+    broker.place_calls = 0
+    res2 = await engine.execute(s2, _approved_decision())
+    assert res2 is None
+    assert broker.place_calls == 0
+
+
+@pytest.mark.asyncio
+
 async def test_paper_simulate_fill_applies_fee_and_buy_limit_cap() -> None:
     risk = _FakeRiskEngine({"paper_fee_bps": 100})
     set_risk_engine(risk)

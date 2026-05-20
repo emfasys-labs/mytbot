@@ -1093,26 +1093,38 @@ class RiskEngine:
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = int(self.config.get("max_consecutive_losses", 0))
-        if max_losses > 0 and self._consecutive_losses >= max_losses:
-            base_cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
-            
-            # D120: Dynamic cooldown scaling based on market volatility
+        if max_losses > 0:
+            market_state_score = 1.0
             vol_scalar = 1.0
             if isinstance(portfolio, dict):
                 pmeta = portfolio.get("metadata")
-                if isinstance(pmeta, dict) and "market_volatility_scalar" in pmeta:
-                    try:
-                        vol_scalar = float(pmeta["market_volatility_scalar"])
-                    except (TypeError, ValueError):
-                        pass
-                        
-            # Higher volatility = longer cooldown (wait for the chop to subside)
-            cooldown_minutes = int(base_cooldown_minutes * (vol_scalar if vol_scalar > 0 else 1.0))
-            
-            self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
-            self._persist_runtime_state()
-            return (False, "consecutive_losses")
+                if isinstance(pmeta, dict):
+                    if "market_state_score" in pmeta:
+                        try:
+                            market_state_score = float(pmeta["market_state_score"])
+                        except (TypeError, ValueError):
+                            pass
+                    if "market_volatility_scalar" in pmeta:
+                        try:
+                            vol_scalar = float(pmeta["market_volatility_scalar"])
+                        except (TypeError, ValueError):
+                            pass
+
+            # D120: Dynamic max_consecutive_losses scaling based on regime & volatility
+            multiplier = market_state_score / max(1.0, vol_scalar)
+            multiplier = max(0.2, min(1.0, multiplier))
+            scaled_max_losses = max(1, int(round(max_losses * multiplier)))
+
+            if self._consecutive_losses >= scaled_max_losses:
+                base_cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
+                # Higher volatility = longer cooldown (wait for the chop to subside)
+                cooldown_minutes = int(base_cooldown_minutes * (vol_scalar if vol_scalar > 0 else 1.0))
+                
+                self._cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=max(0, cooldown_minutes))
+                self._persist_runtime_state()
+                return (False, "consecutive_losses")
         return (True, "consecutive_losses")
+
 
     def _check_confidence_threshold(self, signal, portfolio) -> tuple[bool, str]:
         base_min_confidence = float(self.config.get("min_signal_confidence", 1.0))

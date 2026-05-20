@@ -247,8 +247,31 @@ class BrokerAdapter(ABC):
         """Return the asset class for a given symbol."""
         ...
 
+    # ── Quantization ──────────────────────────────────────────────────────────
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        """
+        Quantize/round the order quantity to meet the exchange's lot-size/precision rules.
+        Default implementation rounds to 4 decimal places.
+        """
+        try:
+            return Decimal(str(round(float(quantity), 4)))
+        except (ValueError, TypeError):
+            return quantity
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        """
+        Quantize/round the order price to meet the exchange's tick-size rules.
+        Default implementation rounds to 2 decimal places.
+        """
+        try:
+            return Decimal(str(round(float(price), 2)))
+        except (ValueError, TypeError):
+            return price
+
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def __repr__(self) -> str:
         mode = "PAPER" if self.paper_mode else "LIVE"
         return f"<{self.__class__.__name__} broker={self.broker_name} mode={mode}>"
+

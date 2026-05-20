@@ -1279,18 +1279,6 @@ class Orchestrator:
             return
 
         try:
-            max_loss_pct = Decimal(str(getattr(risk_engine, "config", {}).get("max_loss_per_trade_pct", "0")))
-        except Exception:  # noqa: BLE001
-            max_loss_pct = Decimal("0")
-        if max_loss_pct <= 0:
-            return
-
-        try:
-            close_cooldown_sec = max(5.0, float(os.getenv("STOP_LOSS_CLOSE_COOLDOWN_SEC", "60")))
-        except (TypeError, ValueError):
-            close_cooldown_sec = 60.0
-
-        try:
             from storage.db import init_async_database, dispose_engine as _dispose
             from run_m3 import _load_portfolio_state
             from system.portfolio_equity import live_portfolio_value
@@ -1307,6 +1295,57 @@ class Orchestrator:
             nav = await live_portfolio_value(self._broker_manager)
             if nav <= 0:
                 return
+
+            # D120: Load portfolio state early to get regime & volatility
+            portfolio_state = await _load_portfolio_state(
+                sf,
+                fallback_portfolio_value=nav,
+                signal_price_fallback=Decimal("0"),
+                capital_pct=Decimal(str(self.capital_pct)),
+            )
+
+            # Restoring risk engine runtime state early so it's fully populated
+            risk_engine.update_high_watermark(
+                Decimal(str(portfolio_state.get("high_watermark_value", nav)))
+            )
+            risk_engine.restore_runtime_state(portfolio_state)
+
+            pmeta = portfolio_state.get("metadata", {})
+            market_state_score = float(pmeta.get("market_state_score", 1.0))
+            vol_scalar = float(pmeta.get("market_volatility_scalar", 1.0))
+
+            try:
+                base_max_loss_pct = Decimal(str(getattr(risk_engine, "config", {}).get("max_loss_per_trade_pct", "0")))
+            except Exception:  # noqa: BLE001
+                base_max_loss_pct = Decimal("0")
+
+            if base_max_loss_pct <= 0:
+                return
+
+            # For position_stop_loss_pct, load from env, then from risk_engine config, default to 0.08
+            env_pos_stop = os.getenv("POSITION_STOP_LOSS_PCT")
+            if env_pos_stop is not None:
+                try:
+                    base_position_stop_pct = Decimal(env_pos_stop)
+                except Exception:
+                    base_position_stop_pct = Decimal("0.08")
+            else:
+                try:
+                    base_position_stop_pct = Decimal(str(getattr(risk_engine, "config", {}).get("position_stop_loss_pct", "0.08")))
+                except Exception:
+                    base_position_stop_pct = Decimal("0.08")
+
+            # Scale limits dynamically: tighter when regime is poor or volatility is high
+            multiplier = Decimal(str(market_state_score)) / max(Decimal("1.0"), Decimal(str(vol_scalar)))
+            multiplier = max(Decimal("0.1"), min(Decimal("1.0"), multiplier))
+
+            max_loss_pct = base_max_loss_pct * multiplier
+            position_stop_pct = base_position_stop_pct * multiplier
+
+            try:
+                close_cooldown_sec = max(5.0, float(os.getenv("STOP_LOSS_CLOSE_COOLDOWN_SEC", "60")))
+            except (TypeError, ValueError):
+                close_cooldown_sec = 60.0
 
             now_ts = datetime.now(timezone.utc).timestamp()
 
@@ -1369,6 +1408,7 @@ class Orchestrator:
                         nav=nav,
                         max_loss_per_trade_pct=max_loss_pct,
                         metadata=md,
+                        position_stop_pct=position_stop_pct,
                     )
                     if not decision.should_close:
                         continue

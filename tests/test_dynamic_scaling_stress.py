@@ -86,3 +86,56 @@ def test_dynamic_confidence_threshold_rises_in_poor_market() -> None:
     assert decision.verdict.value == "approved"
 
 
+def test_dynamic_consecutive_losses() -> None:
+    cfg = _default_cfg()
+    cfg["max_consecutive_losses"] = 5
+    cfg["cooldown_minutes"] = 10
+    eng = RiskEngine(cfg)
+
+    # Perfect market state (1.0) and normal volatility (1.0) -> scaled_max_losses = 5
+    portfolio = {
+        "portfolio_value": "10000",
+        "consecutive_losses": 4,
+        "metadata": {
+            "market_state_score": 1.0,
+            "market_volatility_scalar": 1.0,
+        }
+    }
+    sig = _signal()
+    eng.restore_runtime_state(portfolio)
+    decision = eng.evaluate(sig, portfolio)
+    assert decision.verdict.value == "approved"
+
+    # consecutive_losses = 5 -> rejected
+    portfolio["consecutive_losses"] = 5
+    eng.restore_runtime_state(portfolio)
+    decision = eng.evaluate(sig, portfolio)
+    assert decision.verdict.value == "rejected"
+    assert "consecutive_losses" in (decision.reason or "")
+
+    # Poor market state (0.5) and high volatility (2.0)
+    # multiplier = 0.5 / 2.0 = 0.25
+    # scaled_max_losses = round(5 * 0.25) = round(1.25) = 1
+    portfolio2 = {
+        "portfolio_value": "10000",
+        "consecutive_losses": 0,
+        "metadata": {
+            "market_state_score": 0.5,
+            "market_volatility_scalar": 2.0,
+        }
+    }
+    eng2 = RiskEngine(cfg)
+    eng2.restore_runtime_state(portfolio2)
+    decision = eng2.evaluate(sig, portfolio2)
+    assert decision.verdict.value == "approved"
+
+    # consecutive_losses = 1 -> rejected (since limit is now 1)
+    portfolio2["consecutive_losses"] = 1
+    eng2.restore_runtime_state(portfolio2)
+    decision = eng2.evaluate(sig, portfolio2)
+    assert decision.verdict.value == "rejected"
+    assert "consecutive_losses" in (decision.reason or "")
+
+
+
+

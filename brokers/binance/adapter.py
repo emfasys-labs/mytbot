@@ -607,3 +607,58 @@ class BinanceAdapter(BrokerAdapter):
 
     async def get_asset_class(self, symbol: str) -> AssetClass:
         return AssetClass.CRYPTO
+
+    async def _fetch_symbol_rules(self, symbol: str) -> dict[str, Decimal]:
+        symbol = _binance_symbol(symbol)
+        if not hasattr(self, "_symbol_rules_cache"):
+            self._symbol_rules_cache = {}
+        if symbol in self._symbol_rules_cache:
+            return self._symbol_rules_cache[symbol]
+
+        rules = {"qty_step": Decimal("0.0001"), "tick_size": Decimal("0.01")}
+        if self._client is None:
+            return rules
+
+        def _go():
+            assert self._client is not None
+            return self._client.get_symbol_info(symbol=symbol)
+
+        try:
+            info = await self._run_sync(_go)
+            if info:
+                for filt in info.get("filters", []):
+                    ftype = filt.get("filterType")
+                    if ftype == "PRICE_FILTER":
+                        ts = filt.get("tickSize")
+                        if ts:
+                            rules["tick_size"] = Decimal(str(ts))
+                    elif ftype == "LOT_SIZE":
+                        qs = filt.get("stepSize")
+                        if qs:
+                            rules["qty_step"] = Decimal(str(qs))
+            self._symbol_rules_cache[symbol] = rules
+        except Exception as exc:
+            logger.debug("_fetch_symbol_rules | Binance | symbol={} | error={}", symbol, exc)
+
+        return rules
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        from decimal import ROUND_DOWN
+        rules = await self._fetch_symbol_rules(symbol)
+        step = rules["qty_step"]
+        try:
+            q = (quantity / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+            return q.normalize()
+        except Exception:
+            return quantity
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        from decimal import ROUND_HALF_UP
+        rules = await self._fetch_symbol_rules(symbol)
+        tick = rules["tick_size"]
+        try:
+            p = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+            return p.normalize()
+        except Exception:
+            return price
+

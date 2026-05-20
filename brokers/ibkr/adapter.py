@@ -1794,3 +1794,30 @@ class IBKRAdapter(BrokerAdapter):
         if len(s) == 6 and s.isalpha():
             return AssetClass.FOREX
         return AssetClass.EQUITY
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        asset_class = await self.get_asset_class(symbol)
+        if asset_class == AssetClass.CRYPTO:
+            try:
+                return Decimal(str(round(float(quantity), 4)))
+            except (ValueError, TypeError):
+                return quantity
+        qty_dec = Decimal(str(quantity))
+        return qty_dec.to_integral_value(rounding=ROUND_DOWN)
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        asset_class = await self.get_asset_class(symbol)
+        p = Decimal(str(price))
+        if asset_class == AssetClass.OPTION:
+            return Decimal(str(round(float(p), 2)))
+        elif asset_class == AssetClass.FOREX:
+            if "JPY" in symbol.upper():
+                return Decimal(str(round(float(p), 3)))
+            return Decimal(str(round(float(p), 5)))
+        elif asset_class == AssetClass.CRYPTO:
+            return Decimal(str(round(float(p), 4)))
+        else:
+            if p < Decimal("1.00"):
+                return Decimal(str(round(float(p), 4)))
+            return Decimal(str(round(float(p), 2)))
+

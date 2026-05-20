@@ -43,6 +43,7 @@ def _position_long_loss(symbol: str = "SPY") -> Position:
 
 @pytest.mark.asyncio
 async def test_stop_loss_tick_submits_reduce_only_close_when_breached(monkeypatch) -> None:
+    monkeypatch.setenv("MARKET_SESSION_GATE", "0")
     orch = Orchestrator()
     orch._broker_manager = _StubBrokerManager({"alpaca": _StubAdapter([_position_long_loss("SPY")])})
     # Monitor now evaluates against the mark-swept PositionLog (real
@@ -104,6 +105,7 @@ async def test_stop_loss_tick_submits_reduce_only_close_when_breached(monkeypatc
 
 @pytest.mark.asyncio
 async def test_stop_loss_tick_no_order_when_not_breached(monkeypatch) -> None:
+    monkeypatch.setenv("MARKET_SESSION_GATE", "0")
     orch = Orchestrator()
     orch._broker_manager = _StubBrokerManager({"alpaca": _StubAdapter([_position_long_loss("SPY")])})
     monkeypatch.setattr(
@@ -167,3 +169,72 @@ async def test_stop_loss_loop_is_cancellable(monkeypatch) -> None:
         await task
     except asyncio.CancelledError:
         pass
+
+
+@pytest.mark.asyncio
+async def test_dynamic_stop_loss_parameter_calculation(monkeypatch) -> None:
+    monkeypatch.setenv("MARKET_SESSION_GATE", "0")
+    orch = Orchestrator()
+    position = _position_long_loss("SPY")
+    orch._broker_manager = _StubBrokerManager({"alpaca": _StubAdapter([position])})
+    monkeypatch.setattr(
+        orch,
+        "_latest_open_position_rows_by_broker",
+        AsyncMock(return_value={"alpaca": [position]}),
+    )
+
+    risk_engine = MagicMock()
+    risk_engine.config = {"max_loss_per_trade_pct": "0.02"}
+    risk_engine.is_broker_disabled.return_value = False
+    risk_engine.update_high_watermark = MagicMock()
+    risk_engine.restore_runtime_state = MagicMock()
+
+    execution_engine = MagicMock()
+    orch._trading_loop = MagicMock(risk_engine=risk_engine, execution_engine=execution_engine)
+
+    mock_eval = MagicMock(
+        return_value=StopLossDecision(
+            should_close=False,
+            reason="within_budget",
+            loss_pct=Decimal("0"),
+            loss_absolute=Decimal("0"),
+            structural_stop_price=None,
+            structural_stop_breached=False,
+        )
+    )
+    monkeypatch.setattr("system.orchestrator.evaluate_stop_loss", mock_eval)
+
+    monkeypatch.setattr(
+        "storage.db.init_async_database",
+        AsyncMock(return_value=(MagicMock(), MagicMock(name="sf"))),
+    )
+    monkeypatch.setattr("storage.db.dispose_engine", AsyncMock(return_value=None))
+
+    monkeypatch.setattr(
+        "run_m3._load_portfolio_state",
+        AsyncMock(
+            return_value={
+                "portfolio_value": Decimal("100000"),
+                "high_watermark_value": Decimal("100000"),
+                "metadata": {
+                    "market_state_score": 0.5,
+                    "market_volatility_scalar": 2.0,
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "system.portfolio_equity.live_portfolio_value",
+        AsyncMock(return_value=Decimal("100000")),
+    )
+
+    await orch._run_stop_loss_tick()
+
+    mock_eval.assert_called_once()
+    kwargs = mock_eval.call_args.kwargs
+
+    # Max loss per trade pct: base 0.02 * multiplier 0.25 = 0.005 (0.5%)
+    assert kwargs["max_loss_per_trade_pct"] == Decimal("0.005")
+    # Position stop pct: default base 0.08 * multiplier 0.25 = 0.02 (2.0%)
+    assert kwargs["position_stop_pct"] == Decimal("0.02")
+

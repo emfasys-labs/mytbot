@@ -899,3 +899,60 @@ class BybitAdapter(BrokerAdapter):
             "bid": _d(bid) if bid is not None else Decimal("0"),
             "ask": _d(ask) if ask is not None else Decimal("0"),
         }
+
+    async def _fetch_symbol_rules(self, symbol: str) -> dict[str, Decimal]:
+        symbol = _bybit_symbol(symbol)
+        if not hasattr(self, "_symbol_rules_cache"):
+            self._symbol_rules_cache = {}
+        if symbol in self._symbol_rules_cache:
+            return self._symbol_rules_cache[symbol]
+
+        rules = {"qty_step": Decimal("0.0001"), "tick_size": Decimal("0.01")}
+        if self._client is None:
+            return rules
+
+        def _go():
+            assert self._client is not None
+            return self._client.get_instruments_info(category=self.category, symbol=symbol)
+
+        try:
+            raw = await self._run_sync(_go)
+            lst = (raw.get("result", {}) or {}).get("list") or []
+            if lst:
+                info = lst[0]
+                pf = info.get("priceFilter", {})
+                ts = pf.get("tickSize")
+                if ts:
+                    rules["tick_size"] = Decimal(str(ts))
+                lf = info.get("lotSizeFilter", {})
+                qs = lf.get("qtyStep")
+                if qs:
+                    rules["qty_step"] = Decimal(str(qs))
+                else:
+                    bp = lf.get("basePrecision")
+                    if bp:
+                        rules["qty_step"] = Decimal(str(bp))
+            self._symbol_rules_cache[symbol] = rules
+        except Exception as exc:
+            logger.debug("_fetch_symbol_rules | Bybit | symbol={} | error={}", symbol, exc)
+
+        return rules
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        rules = await self._fetch_symbol_rules(symbol)
+        step = rules["qty_step"]
+        try:
+            q = (quantity / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+            return q.normalize()
+        except Exception:
+            return quantity
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        rules = await self._fetch_symbol_rules(symbol)
+        tick = rules["tick_size"]
+        try:
+            p = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+            return p.normalize()
+        except Exception:
+            return price
+

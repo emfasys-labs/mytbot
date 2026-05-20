@@ -930,3 +930,43 @@ class AlpacaAdapter(BrokerAdapter):
             return _alp_asset_class_to_base(a.asset_class)
 
         return await self._run_sync(_go)
+
+    async def quantize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        symbol = symbol.strip().upper()
+        if not hasattr(self, "_fractionable_cache"):
+            self._fractionable_cache = {}
+
+        if _is_crypto_symbol(symbol):
+            try:
+                return Decimal(str(round(float(quantity), 8)))
+            except (ValueError, TypeError):
+                return quantity
+
+        fractionable = self._fractionable_cache.get(symbol)
+        if fractionable is None:
+            try:
+                tc = self._require_trading()
+                def _go():
+                    a = tc.get_asset(symbol)
+                    return getattr(a, "fractionable", False)
+                fractionable = await self._run_sync(_go)
+                self._fractionable_cache[symbol] = fractionable
+            except Exception:
+                fractionable = True
+
+        qty_dec = Decimal(str(quantity))
+        if fractionable:
+            try:
+                return Decimal(str(round(float(qty_dec), 4)))
+            except (ValueError, TypeError):
+                return qty_dec
+        else:
+            return qty_dec.to_integral_value(rounding=ROUND_DOWN)
+
+    async def quantize_price(self, symbol: str, price: Decimal, side: Optional[OrderSide] = None) -> Decimal:
+        alp_side = AlpOrderSide.BUY
+        if side is not None:
+            if side == OrderSide.SELL or (isinstance(side, str) and side.lower() == "sell"):
+                alp_side = AlpOrderSide.SELL
+        return _round_price_to_tick(symbol, price, side=alp_side, is_stop=False)
+
