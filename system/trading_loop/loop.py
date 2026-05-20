@@ -1383,6 +1383,34 @@ class TradingLoop:
                     total_equity = Decimal(str(self.portfolio_value))
                 tradable = total_equity * Decimal(str(self.capital_pct))
                 effective_value = float(tradable)
+
+                # D122 — dynamic threshold context. Computed once per
+                # loop iteration and stamped on each raw signal so
+                # downstream gates (meta-labeler, Wave 9) can resolve
+                # thresholds against live regime + operator-deployment
+                # intent without any static numbers in YAML.
+                _pmeta = portfolio_state.get("metadata") if isinstance(portfolio_state, dict) else None
+                _pmeta = _pmeta if isinstance(_pmeta, dict) else {}
+                try:
+                    _ctx_mss = float(_pmeta.get("market_state_score", 1.0))
+                except (TypeError, ValueError):
+                    _ctx_mss = 1.0
+                try:
+                    _ctx_vol = float(_pmeta.get("market_volatility_scalar", 1.0))
+                except (TypeError, ValueError):
+                    _ctx_vol = 1.0
+                try:
+                    _ctx_gross = float(portfolio_state.get("current_gross_exposure", 0) or 0)
+                    _ctx_nav = float(total_equity)
+                    _ctx_deployed = (_ctx_gross / _ctx_nav) if _ctx_nav > 0 else 0.0
+                except (TypeError, ValueError, ZeroDivisionError):
+                    _ctx_deployed = 0.0
+                _ctx_deploy_pressure = max(0.0, min(1.0, float(self.capital_pct) - _ctx_deployed))
+                dynamic_threshold_ctx: dict[str, float] = {
+                    "market_state_score": _ctx_mss,
+                    "market_volatility_scalar": _ctx_vol,
+                    "deployment_pressure": _ctx_deploy_pressure,
+                }
                 if meta_enabled and (self.iterations % meta_adapt_every_n == 0):
                     try:
                         dyn_bias, dyn_diag = await compute_dynamic_strategy_bias(
@@ -1685,6 +1713,13 @@ class TradingLoop:
                                     )
                                 )
 
+                            # D122 — stamp dynamic threshold context on the
+                            # legacy single-signal path as well.
+                            _rm = dict(getattr(raw, "metadata", {}) or {})
+                            if dynamic_threshold_ctx:
+                                for _k, _v in dynamic_threshold_ctx.items():
+                                    _rm.setdefault(_k, _v)
+                                raw.metadata = _rm
                             signal = self.sig_engine.process(
                                 raw,
                                 portfolio_value=Decimal(str(effective_value)),
@@ -1889,6 +1924,16 @@ class TradingLoop:
                             )
 
                             for raw in raw_candidates:
+                                # D122 — stamp dynamic threshold context onto
+                                # raw.metadata so the trained meta-labeller +
+                                # Wave 9 gate can compute regime / deployment-
+                                # aware thresholds per-candidate (no static
+                                # numbers downstream).
+                                _rm = dict(getattr(raw, "metadata", {}) or {})
+                                if dynamic_threshold_ctx:
+                                    for _k, _v in dynamic_threshold_ctx.items():
+                                        _rm.setdefault(_k, _v)
+                                    raw.metadata = _rm
                                 cand = self.sig_engine.raw_to_signal_candidate(
                                     raw,
                                     news_score=(ai_result.news_scores.get(symbol) if ai_result else None),
@@ -1944,6 +1989,12 @@ class TradingLoop:
                         # Cross-symbol relative-value opportunities (pairs) are
                         # generated once per cycle after all feature windows load.
                         for pair_raw in pairs_trading.generate_signals(feature_map):
+                            # D122 — same dynamic context stamp for pairs.
+                            _pm = dict(getattr(pair_raw, "metadata", {}) or {})
+                            if dynamic_threshold_ctx:
+                                for _k, _v in dynamic_threshold_ctx.items():
+                                    _pm.setdefault(_k, _v)
+                                pair_raw.metadata = _pm
                             pair_cand = self.sig_engine.raw_to_signal_candidate(
                                 pair_raw,
                                 news_score=(

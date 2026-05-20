@@ -177,6 +177,20 @@ class SignalEngine:
         from signals.trained_meta_labeler import evaluate_features
         from models.schemas import Mode
 
+        # Extract dynamic context for the threshold resolver. These keys
+        # are stamped on the candidate metadata by upstream (opportunity
+        # engine / coordinator / trading loop). Missing fields fall back
+        # to neutral values, so behaviour degrades gracefully when the
+        # heartbeat hasn't yet published a regime snapshot.
+        def _ctx_float(key: str, default: float) -> float:
+            try:
+                v = md.get(key)
+                if v is None:
+                    return default
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
         try:
             decision = evaluate_features(
                 features=features,
@@ -184,6 +198,9 @@ class SignalEngine:
                 config=cfg,
                 regime=md.get("regime_label"),
                 portfolio_mode=md.get("profile_mode"),
+                market_state_score=_ctx_float("market_state_score", 1.0),
+                market_volatility_scalar=_ctx_float("market_volatility_scalar", 1.0),
+                deployment_pressure=_ctx_float("deployment_pressure", 0.0),
             )
         except Exception as exc:  # noqa: BLE001
             # Defensive: never let the meta-labeller take down signal

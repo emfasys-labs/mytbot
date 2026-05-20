@@ -52,6 +52,41 @@ DEFAULT_CONFIG_PATH = Path("config/execution_models.yaml")
 
 
 @dataclass
+class DynamicSafetyConfig:
+    """Anchors + weights for the regime-aware edge/cost safety cushion.
+
+    The previous design pinned ``edge_to_cost_safety`` to a frozen
+    ``2.0`` (with a single high-fee override to ``1.3``). This violated
+    the project rule that no operational threshold may be an absolute
+    constant. The new design treats safety as a *break-even multiple*
+    that scales with regime risk and volatility:
+
+        safety = base_anchor
+               * (1 + risk_off_weight * (1 - market_state_score))
+               * (1 + vol_weight * max(0, vol_scalar - 1))
+               * (1 + high_fee_lift * max(0, (fee_bps - fee_anchor) / fee_anchor))
+
+    Clamped to ``[safety_min, safety_max]``. ``base_anchor`` is the
+    break-even cushion at neutral regime (mss=1, vol=1, low-fee venue):
+    1.0 means "cost must equal edge"; 2.0 means "edge must be twice
+    cost". Default 1.2 (a 20% cushion over break-even) is the
+    project's calibration anchor — gentle but not negative-EV-friendly.
+
+    ``high_fee_lift`` raises the cushion on expensive venues
+    (replacement for the static high_fee override). Above the anchor
+    the cushion grows linearly with the *fee ratio*, not a binary flip.
+    """
+
+    base_anchor: float = 1.2
+    risk_off_weight: float = 0.8
+    vol_weight: float = 0.5
+    fee_anchor_bps: float = 5.0
+    high_fee_lift: float = 0.0  # set >0 to *increase* cushion on high-fee venues; 0 = no lift
+    safety_min: float = 0.8
+    safety_max: float = 2.5
+
+
+@dataclass
 class Wave9RuntimeConfig:
     enabled: bool = False
     impact_coefficients: dict[str, float] = field(
@@ -61,14 +96,13 @@ class Wave9RuntimeConfig:
     venue_priors: VenuePriors = field(default_factory=VenuePriors)
     slippage_model: SlippageModel = field(default_factory=SlippageModel)
     unknown_liquidity_penalty_bps: float = 5.0
-    # Venue-aware edge/cost cushion: above this fee tier the static
-    # ``edge_to_cost_safety`` is too strict (cost dominates so much that
-    # almost no real-world quant edge can clear it). For these venues we
-    # relax the cushion so cost-aware routing still trades — typically
-    # crypto-only exchanges like Kraken (40 bps taker). Set the relaxed
-    # value to 0 to disable this override and keep the static cushion.
-    high_fee_threshold_bps: float = 25.0
-    high_fee_edge_to_cost_safety: float = 1.3
+    dynamic_safety: DynamicSafetyConfig = field(default_factory=DynamicSafetyConfig)
+    # ``urgency_policy.edge_to_cost_safety`` is now ignored at runtime
+    # for the gate's central decision — the dynamic resolver computes
+    # safety per-candidate. The field is still parsed for backward
+    # compatibility (and used as ``base_anchor`` fallback when the
+    # ``dynamic_safety`` block is absent).
+    high_fee_threshold_bps: float = 25.0  # deprecated; retained for legacy YAML
 
     @classmethod
     def from_dict(cls, raw: Optional[Mapping[str, Any]]) -> "Wave9RuntimeConfig":
@@ -108,6 +142,21 @@ class Wave9RuntimeConfig:
         )
         priors.slippage = slip
 
+        # Dynamic safety block. When absent, fall back to a sensible
+        # base_anchor derived from the legacy urgency_policy field
+        # (preserves backward compat for older YAML files).
+        ds_block = sect.get("dynamic_safety") or {}
+        ds_base = float(ds_block.get("base_anchor", policy.edge_to_cost_safety or 1.2))
+        ds = DynamicSafetyConfig(
+            base_anchor=ds_base,
+            risk_off_weight=float(ds_block.get("risk_off_weight", 0.8)),
+            vol_weight=float(ds_block.get("vol_weight", 0.5)),
+            fee_anchor_bps=float(ds_block.get("fee_anchor_bps", 5.0)),
+            high_fee_lift=float(ds_block.get("high_fee_lift", 0.0)),
+            safety_min=float(ds_block.get("safety_min", 0.8)),
+            safety_max=float(ds_block.get("safety_max", 2.5)),
+        )
+
         return cls(
             enabled=bool(sect.get("enabled", False)),
             impact_coefficients=coefs,
@@ -115,8 +164,8 @@ class Wave9RuntimeConfig:
             venue_priors=priors,
             slippage_model=slip,
             unknown_liquidity_penalty_bps=float(sect.get("unknown_liquidity_penalty_bps", 5.0)),
+            dynamic_safety=ds,
             high_fee_threshold_bps=float(sect.get("high_fee_threshold_bps", 25.0)),
-            high_fee_edge_to_cost_safety=float(sect.get("high_fee_edge_to_cost_safety", 1.3)),
         )
 
     @classmethod
@@ -218,6 +267,9 @@ def _extract_signal_inputs(
         "signal_urgency": _safe_float(md.get("urgency_score") or md.get("opportunity_urgency"), 0.5),
         "demand_alignment": _safe_float(md.get("demand_alignment"), 0.0),
         "regime_label": md.get("regime_label") or md.get("market_state_label"),
+        # Inputs to the dynamic safety cushion.
+        "market_state_score": _safe_float(md.get("market_state_score"), 1.0),
+        "market_volatility_scalar": _safe_float(md.get("market_volatility_scalar"), 1.0),
     }
 
 
@@ -282,26 +334,26 @@ def pre_flight_cost_gate(
         regime_label = meta_in["regime_label"]
         regime_str = str(regime_label) if regime_label is not None else None
 
-        # Venue-aware edge/cost cushion. On high-fee venues (e.g. Kraken at
-        # 40 bps taker), the configured ``edge_to_cost_safety`` (default 2x)
-        # is so strict that real signals can never clear it and the venue
-        # gets locked out entirely. When the broker's base fee exceeds the
-        # configured threshold, swap in the relaxed safety just for this
-        # decision — the rest of the policy is unchanged.
-        effective_policy = config.urgency_policy
-        venue_relaxed = False
-        if (
-            config.high_fee_threshold_bps > 0
-            and config.high_fee_edge_to_cost_safety > 0
-            and fee_bps >= config.high_fee_threshold_bps
-            and config.high_fee_edge_to_cost_safety < config.urgency_policy.edge_to_cost_safety
-        ):
-            from dataclasses import replace as _dc_replace
-            effective_policy = _dc_replace(
-                config.urgency_policy,
-                edge_to_cost_safety=config.high_fee_edge_to_cost_safety,
-            )
-            venue_relaxed = True
+        # Dynamic edge/cost cushion (replaces the legacy static
+        # ``edge_to_cost_safety = 2.0`` + binary high-fee override). The
+        # cushion scales with regime risk, volatility, and venue cost,
+        # all continuous — see DynamicSafetyConfig.
+        ds = config.dynamic_safety
+        mss = _safe_float(meta_in.get("market_state_score"), 1.0)
+        vol = _safe_float(meta_in.get("market_volatility_scalar"), 1.0)
+        risk_off_lift = ds.risk_off_weight * max(0.0, 1.0 - mss)
+        vol_lift = ds.vol_weight * max(0.0, vol - 1.0)
+        fee_lift = 0.0
+        if ds.high_fee_lift > 0 and ds.fee_anchor_bps > 0 and fee_bps > ds.fee_anchor_bps:
+            fee_lift = ds.high_fee_lift * ((fee_bps - ds.fee_anchor_bps) / ds.fee_anchor_bps)
+        dyn_safety = ds.base_anchor * (1.0 + risk_off_lift) * (1.0 + vol_lift) * (1.0 + fee_lift)
+        dyn_safety = max(ds.safety_min, min(ds.safety_max, dyn_safety))
+
+        from dataclasses import replace as _dc_replace
+        effective_policy = _dc_replace(
+            config.urgency_policy,
+            edge_to_cost_safety=dyn_safety,
+        )
 
         verdict = decide_urgency(
             expected_cost_bps=cost.total_bps,
@@ -330,7 +382,12 @@ def pre_flight_cost_gate(
             "wave9_broker": broker,
             "wave9_asset_class": ac,
             "wave9_edge_to_cost_safety_applied": effective_policy.edge_to_cost_safety,
-            "wave9_venue_relaxed": venue_relaxed,
+            "wave9_safety_base_anchor": ds.base_anchor,
+            "wave9_safety_risk_off_lift": risk_off_lift,
+            "wave9_safety_vol_lift": vol_lift,
+            "wave9_safety_fee_lift": fee_lift,
+            "wave9_market_state_score": mss,
+            "wave9_market_volatility_scalar": vol,
             "wave9_fee_bps": fee_bps,
         }
 

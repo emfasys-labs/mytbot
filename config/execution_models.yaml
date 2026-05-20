@@ -20,15 +20,29 @@ execution_models:
   enabled: true
   unknown_liquidity_penalty_bps: 5.0
 
-  # Venue-aware edge/cost cushion. The default ``edge_to_cost_safety`` of
-  # 2.0 is calibrated for low-fee venues like IBKR (1 bps). On high-fee
-  # crypto venues (Kraken at 26 bps taker) it is so strict that real signals
-  # never clear cost — the venue gets de-facto blocked. When the broker's
-  # taker fee is >= ``high_fee_threshold_bps`` the gate swaps in the
-  # relaxed safety instead. Set ``high_fee_edge_to_cost_safety`` to 0 to
-  # disable and keep the static cushion for all venues.
-  high_fee_threshold_bps: 25.0
-  high_fee_edge_to_cost_safety: 1.3
+  # ── Dynamic edge/cost safety cushion ──────────────────────────────────
+  # Replaces the legacy static ``edge_to_cost_safety = 2.0`` (+ binary
+  # ``high_fee_*`` overrides). The cushion is recomputed per-candidate
+  # from regime, volatility, and venue cost:
+  #
+  #   safety = base_anchor
+  #          * (1 + risk_off_weight * (1 - market_state_score))
+  #          * (1 + vol_weight      * max(0, vol_scalar - 1))
+  #          * (1 + high_fee_lift   * max(0, (fee_bps - fee_anchor) / fee_anchor))
+  #   clamp to [safety_min, safety_max]
+  #
+  # base_anchor=1.2 means "demand 20% headroom over cost" at neutral
+  # regime. risk-off (mss → 0) lifts toward 2.0; high vol lifts further;
+  # high-fee venues lift proportionally if ``high_fee_lift`` > 0.
+  # The hard bounds prevent runaway in extreme regimes.
+  dynamic_safety:
+    base_anchor: 1.2
+    risk_off_weight: 0.8
+    vol_weight: 0.5
+    fee_anchor_bps: 5.0
+    high_fee_lift: 0.0
+    safety_min: 0.8
+    safety_max: 2.5
 
   # ── Square-root impact coefficients (Almgren / Kissell) ──────────────
   impact:

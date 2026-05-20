@@ -51,6 +51,16 @@ models:
       artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.1.0.pkl
       dataset_manifest: data/research/meta_label/20260427_meta_label_v0_1_0/manifest.json
       paper_candidate: true
+      # Calibration table from the validation report — the dynamic
+      # threshold resolver maps a target win-rate to the lowest
+      # predicted-probability bin meeting it. This is the *only*
+      # legitimate source for "what threshold = what win rate".
+      calibration_table:
+        - {predicted: 0.294, observed: 0.032, n: 94}
+        - {predicted: 0.362, observed: 0.267, n: 1226}
+        - {predicted: 0.443, observed: 0.450, n: 1943}
+        - {predicted: 0.520, observed: 0.732, n: 310}
+        - {predicted: 0.625, observed: 1.000, n: 106}
       activation_gates:
         feature_contract_frozen: true
         registered_in_db: true

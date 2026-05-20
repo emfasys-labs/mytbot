@@ -37,8 +37,15 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
+from models.meta_label.calibration import CalibrationTable
 from models.meta_label.infer import MetaLabelDecision, score_features
-from models.meta_label.thresholds import ThresholdConfig, threshold_for
+from models.meta_label.thresholds import (
+    DynamicThresholdConfig,
+    ThresholdConfig,
+    ThresholdContext,
+    resolve_threshold,
+    threshold_for,
+)
 from models.meta_label.train import TrainedMetaLabel
 from models.registry import (
     ModelNotApprovedError,
@@ -61,7 +68,10 @@ class TrainedMetaLabelerConfig:
     model_version: Optional[str] = None
     artifact_path: Optional[Path] = None
     write_predictions: bool = True
-    thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
+    # Accepts both the new ``DynamicThresholdConfig`` (preferred) and the
+    # legacy ``ThresholdConfig`` (kept for backward compatibility). The
+    # resolver dispatches on type.
+    thresholds: Any = field(default_factory=DynamicThresholdConfig)
 
     @classmethod
     def from_dict(cls, raw: Optional[Mapping[str, Any]]) -> "TrainedMetaLabelerConfig":
@@ -76,7 +86,7 @@ class TrainedMetaLabelerConfig:
             model_version=(str(sect["model_version"]) if sect.get("model_version") else None),
             artifact_path=(Path(ap) if ap else None),
             write_predictions=bool(sect.get("write_predictions", True)),
-            thresholds=ThresholdConfig.from_dict(sect.get("thresholds")),
+            thresholds=DynamicThresholdConfig.from_dict(sect.get("thresholds")),
         )
 
     @classmethod
@@ -102,6 +112,9 @@ def evaluate_features(
     registry: Optional[ModelRegistry] = None,
     regime: Optional[str] = None,
     portfolio_mode: Optional[str] = None,
+    market_state_score: float = 1.0,
+    market_volatility_scalar: float = 1.0,
+    deployment_pressure: float = 0.0,
     artefact_loader=None,
 ) -> MetaLabelDecision:
     """
@@ -116,11 +129,26 @@ def evaluate_features(
     - Artefact path missing / load failure       → pass-through with reason="artefact_unavailable".
     - All checks pass                            → kept = (probability >= threshold).
     """
+    ctx = ThresholdContext(
+        mode=portfolio_mode,
+        regime=regime,
+        market_state_score=float(market_state_score),
+        market_volatility_scalar=float(market_volatility_scalar),
+        deployment_pressure=float(deployment_pressure),
+    )
+
+    def _passthrough_threshold(calibration: Optional[CalibrationTable] = None) -> float:
+        # Dispatch on config type — legacy ThresholdConfig uses static
+        # lookup; DynamicThresholdConfig uses the dynamic resolver.
+        if isinstance(config.thresholds, ThresholdConfig):
+            return config.thresholds.lookup(mode=portfolio_mode, regime=regime)
+        return resolve_threshold(config.thresholds, context=ctx, calibration=calibration).threshold
+
     if not config.enabled:
         return MetaLabelDecision(
             kept=True,
             probability=None,
-            threshold=threshold_for(config.thresholds, mode=portfolio_mode, regime=regime),
+            threshold=_passthrough_threshold(),
             reason="disabled",
         )
 
@@ -128,7 +156,7 @@ def evaluate_features(
         return MetaLabelDecision(
             kept=True,
             probability=None,
-            threshold=threshold_for(config.thresholds, mode=portfolio_mode, regime=regime),
+            threshold=_passthrough_threshold(),
             reason="no_model_passthrough",
         )
 
@@ -142,15 +170,12 @@ def evaluate_features(
             version=config.model_version,
         )
     except ModelNotApprovedError:
-        # In LIVE the registry's require_for_mode already raised.
-        # Re-raising preserves the contract: a model that is not
-        # approved cannot run in live mode under any circumstances.
         if Mode(mode) is Mode.LIVE if isinstance(mode, str) else mode is Mode.LIVE:
             raise
         return MetaLabelDecision(
             kept=True,
             probability=None,
-            threshold=threshold_for(config.thresholds, mode=portfolio_mode, regime=regime),
+            threshold=_passthrough_threshold(),
             reason="not_approved",
             model_name=config.model_name,
             model_version=config.model_version,
@@ -163,11 +188,13 @@ def evaluate_features(
         return MetaLabelDecision(
             kept=True,
             probability=None,
-            threshold=threshold_for(config.thresholds, mode=portfolio_mode, regime=regime),
+            threshold=_passthrough_threshold(),
             reason="not_registered",
             model_name=config.model_name,
             model_version=config.model_version,
         )
+
+    calibration = _load_calibration_for(contract)
 
     artefact = _load_artefact(config, contract, artefact_loader)
     if artefact is None:
@@ -179,7 +206,7 @@ def evaluate_features(
         return MetaLabelDecision(
             kept=True,
             probability=None,
-            threshold=threshold_for(config.thresholds, mode=portfolio_mode, regime=regime),
+            threshold=_passthrough_threshold(calibration),
             reason="artefact_unavailable",
             model_name=contract.name,
             model_version=contract.version,
@@ -192,7 +219,24 @@ def evaluate_features(
     probs = score_features(artefact, _atleast_2d(row))
     p = float(probs[0])
 
-    thr = threshold_for(config.thresholds, mode=portfolio_mode, regime=regime)
+    # Threshold dispatch: legacy static config vs dynamic resolver.
+    if isinstance(config.thresholds, ThresholdConfig):
+        thr = config.thresholds.lookup(mode=portfolio_mode, regime=regime)
+        meta_extra: dict[str, Any] = {"threshold_source": "legacy_static"}
+    else:
+        resolution = resolve_threshold(config.thresholds, context=ctx, calibration=calibration)
+        thr = resolution.threshold
+        meta_extra = {
+            "threshold_source": "dynamic",
+            "target_win_rate": resolution.target_win_rate,
+            "target_pre_clamp": resolution.target_pre_clamp,
+            "calibration_used": resolution.calibration_used,
+            "threshold_floor": resolution.floor,
+            "threshold_ceiling": resolution.ceiling,
+            "regime_caution": resolution.regime_caution,
+            "vol_caution": resolution.vol_caution,
+            "deployment_relief": resolution.deployment_relief,
+        }
     kept = p >= thr
     reason = "approved" if kept else "below_threshold"
 
@@ -207,11 +251,36 @@ def evaluate_features(
         metadata={
             "classifier_kind": getattr(artefact, "classifier_kind", "unknown"),
             "calibration_method": getattr(artefact, "calibration_method", "none"),
+            **meta_extra,
         },
     )
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _load_calibration_for(contract: "ModelContract") -> Optional[CalibrationTable]:
+    """Resolve the calibration table for a registered model contract.
+
+    Order of resolution:
+      1. ``contract.metadata["calibration_table"]`` — structured list
+         in the registry YAML (preferred, explicit, inspectable).
+      2. ``contract.metadata["activation_gates"]["validation_report_path"]``
+         → parse the markdown file (legacy fallback).
+    Returns ``None`` if neither source yields a usable table; the
+    threshold resolver falls back to its operator-configured bounds.
+    """
+    md = contract.metadata or {}
+    structured = md.get("calibration_table")
+    table = CalibrationTable.from_dict(structured) if structured else None
+    if table is not None:
+        return table
+    gates = md.get("activation_gates") if isinstance(md, dict) else None
+    if isinstance(gates, dict):
+        report_path = gates.get("validation_report_path")
+        if report_path:
+            return CalibrationTable.from_validation_markdown(report_path)
+    return None
 
 
 def _atleast_2d(values: list[float]):

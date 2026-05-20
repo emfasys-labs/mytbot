@@ -5,42 +5,76 @@
 # Current state: ENABLED for paper soak only with the registered
 # `mytbot_meta_labeler@0.1.0` baseline. It is not micro-live/live approved.
 #
-# Activation steps (manual, deliberate):
-#   1. Train an artefact:
-#        python scripts/train_meta_labeler.py
-#   2. Add a row to config/model_registry.yaml with approval_status: paper.
-#   3. Insert a matching row in `model_versions` (Alembic schema landed
-#      in Wave 1 migration b3a07f1e9c10).
-#   4. Set `trained_meta_labeler.enabled: true` here.
-#   5. Watch the Wave 13 dashboard "model health" panel for the soak
-#      window. Promote to micro_live only after rules in
-#      docs/MODEL_GOVERNANCE.md are satisfied.
+# ── Threshold philosophy (project rule) ───────────────────────────────────
+# No absolute operational threshold lives here. The probability cut-point
+# applied to each candidate is computed *dynamically* by mapping a
+# target win-rate to the lowest predicted-probability bin in the model's
+# own validation calibration table (see config/model_registry.yaml ::
+# metadata.calibration_table). The dials below shape that target as a
+# function of mode, regime, market-state score, volatility scalar, and
+# deployment pressure (how far below the operator's slider target the
+# actual deployment sits).
+#
+# Resolution flow:
+#
+#   target = base_anchor
+#          + by_mode_offset[mode]
+#          + by_regime_offset[regime]            (or by_mode_regime_offset)
+#          + regime_caution_weight * (1 - market_state_score)
+#          + vol_caution_weight    * max(0, vol_scalar - 1)
+#          - deployment_relief_weight * deployment_pressure
+#   target = clamp(target, target_floor, calibration.best_observed)
+#   threshold = calibration.lowest_threshold_for(target)
+#
+# When deployment lags the slider, target_win_rate drops by up to
+# deployment_relief_weight (default 0.20), naturally lowering the
+# threshold and letting the system honour the operator's capital intent.
+# When market_state_score falls (risk-off) or volatility rises,
+# target_win_rate climbs and the gate tightens. No operator retune is
+# required to traverse the spectrum.
 
 trained_meta_labeler:
   enabled: true
   model_name: mytbot_meta_labeler
   model_version: 0.1.0
-  # Path to the pickle artefact produced by `models.meta_label.train`.
-  # If null, the loader falls back to <metadata.artifact_dir>/<name>-<version>.pkl
-  # from the model_registry entry.
   artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.1.0.pkl
-  # Persist every prediction to model_predictions when True (recommended).
   write_predictions: true
 
-  # Per-mode / per-regime probability thresholds. See
-  # models/meta_label/thresholds.py for resolution precedence.
   thresholds:
-    default: 0.42
-    by_mode:
-      defender: 0.45
-      trader: 0.42
-      hunter: 0.35
-    by_regime:
-      crash: 0.60
-      volatile: 0.45
-      trend: 0.40
-      range: 0.42
-    # Combined keys, e.g. "hunter.crash" overrides both "hunter" and "crash".
-    by_mode_regime:
-      hunter.crash: 0.50
-      defender.volatile: 0.50
+    target_win_rate:
+      # Anchor: ~validation base rate (0.418). The clamp pins the
+      # operational target to calibrated bins, so anchor drift is
+      # bounded by evidence, not configuration.
+      base_anchor: 0.42
+
+      # Mode offsets. Hunter is permissive (lower target) because mode
+      # is the operator's primary risk-appetite dial; defender demands
+      # a higher win rate. These are *offsets*, not thresholds — they
+      # shape the target, which is then mapped via calibration.
+      by_mode_offset:
+        defender: 0.10
+        trader:   0.03
+        hunter:   -0.05
+
+      # Regime tilt. The mode-regime override replaces both mode and
+      # regime offsets when both keys match (rare; for emergencies).
+      by_regime_offset:
+        crash:    0.15
+        volatile: 0.05
+        trend:    -0.02
+        range:    0.00
+      by_mode_regime_offset:
+        hunter.crash: 0.08
+
+      # Dynamic premiums (the project's no-absolutes rule).
+      regime_caution_weight: 0.30       # risk-off (mss → 0) → +0.30 target
+      vol_caution_weight: 0.10          # vol_scalar 2.0 → +0.10 target
+      deployment_relief_weight: 0.20    # slider gap 1.0 → -0.20 target
+
+      # Clamp bounds. ``target_floor`` is the absolute hard floor;
+      # the calibration table's base-rate-derived floor (≈0.7×base)
+      # takes over when stricter. ``target_ceiling`` is capped by the
+      # model's best calibrated bin, so we never demand more than the
+      # model has ever delivered in validation.
+      target_floor: 0.20
+      target_ceiling: 0.85
