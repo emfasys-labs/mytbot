@@ -34,6 +34,7 @@ from signals.d015_weights import (
     concentration_exponent_for_mode,
     replacement_sensitivity_for_mode,
 )
+from portfolio.adaptive_sizing import compute_adaptive_max_weight
 
 logger = logging.getLogger(__name__)
 
@@ -266,12 +267,18 @@ def build_allocation_decision(
     s = sum(raw_ws) or 1.0
     norm_ws = [w / s for w in raw_ws]
 
-    max_w = Decimal(str(profile_cfg.safety_bounds.absolute_max_single_position_weight.get(mode, 0.6)))
     targets: list[AllocationTarget] = []
     pos_set = {p.symbol for p in portfolio_state.positions}
     open_syms: list[str] = []
     for rank, (o, nw) in enumerate(zip(sorted_opps, norm_ws, strict=True), start=1):
-        tw = clip_decimal(Decimal(str(nw)) * ge, Decimal("0"), max_w)
+        dynamic_max_w = compute_adaptive_max_weight(
+            opportunity=o,
+            regime_state=regime_state,
+            mode=mode,
+            profile_cfg=profile_cfg,
+            target_risk_budget=0.015,
+        )
+        tw = clip_decimal(Decimal(str(nw)) * ge, Decimal("0"), dynamic_max_w)
         tn = clip_decimal(portfolio_state.nav * tw, Decimal("0"), portfolio_state.nav * max_ge)
         omd = dict(o.metadata) if isinstance(o.metadata, dict) else {}
         sn = omd.get("strategy")
