@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CapitalPanel } from './capital';
 import { Conviction, Coverage, LiveEvent, Position } from './data';
-import { prettySymbol } from './mapping';
+import { capitalAtWork, prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } from './tokens';
 import type { BackendSystemState } from '../lib/api';
@@ -56,6 +56,101 @@ function shortDayLabel(iso: string): string {
   // "2026-05-14" → "5/14"
   const [, m, d] = iso.split('-');
   return m && d ? `${Number(m)}/${Number(d)}` : iso;
+}
+
+function shortDateLabel(iso: string | null): string {
+  if (!iso) return 'history';
+  const [y, m, d] = iso.split('-');
+  return y && m && d ? `${Number(d)} ${new Date(`${y}-${m}-01T00:00:00Z`).toLocaleString(undefined, { month: 'short', timeZone: 'UTC' })}` : iso;
+}
+
+function fmtPct(value: number | null, digits = 1): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(digits)}%`;
+}
+
+function fmtRatio(value: number | null, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return value.toFixed(digits);
+}
+
+function ymdUtc(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function performanceStats(
+  history: Array<{ date: string; value: number }>,
+  navNow: number,
+): {
+  returnPct: number | null;
+  returnLabel: string;
+  sharpe: number | null;
+  sharpeRaw: number | null;
+  sampleCount: number;
+  maxDrawdownPct: number | null;
+  drawdownLabel: string;
+} {
+  const today = ymdUtc(new Date());
+  const clean = [...(history ?? [])]
+    .filter((p) => p.date && Number.isFinite(p.value) && p.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (Number.isFinite(navNow) && navNow > 0) {
+    const last = clean[clean.length - 1];
+    if (!last || last.date < today) clean.push({ date: today, value: navNow });
+    else clean[clean.length - 1] = { date: last.date, value: navNow };
+  }
+  if (clean.length === 0) {
+    return {
+      returnPct: null,
+      returnLabel: 'waiting for history',
+      sharpe: null,
+      sharpeRaw: null,
+      sampleCount: 0,
+      maxDrawdownPct: null,
+      drawdownLabel: 'waiting for history',
+    };
+  }
+  const ytdStart = `${new Date().getUTCFullYear()}-01-01`;
+  const first = clean[0];
+  const hasYtdBaseline = first.date <= ytdStart;
+  const returnRows = hasYtdBaseline ? clean.filter((p) => p.date >= ytdStart) : clean;
+  const returnBase = returnRows[0]?.value ?? first.value;
+  const returnPct = returnBase > 0 && navNow > 0 ? ((navNow / returnBase) - 1) * 100 : null;
+  const returnLabel = hasYtdBaseline ? 'YTD' : `since ${shortDateLabel(first.date)}`;
+
+  let peak = clean[0].value;
+  let maxDd = 0;
+  for (const p of clean) {
+    peak = Math.max(peak, p.value);
+    if (peak > 0) maxDd = Math.min(maxDd, (p.value / peak) - 1);
+  }
+
+  const returns: number[] = [];
+  for (let i = 1; i < clean.length; i += 1) {
+    const prev = clean[i - 1].value;
+    const cur = clean[i].value;
+    if (prev > 0 && cur > 0) returns.push((cur / prev) - 1);
+  }
+  let sharpeRaw: number | null = null;
+  if (returns.length >= 3) {
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((a, r) => a + (r - mean) ** 2, 0) / Math.max(1, returns.length - 1);
+    const sd = Math.sqrt(variance);
+    sharpeRaw = sd > 0 ? (mean / sd) * Math.sqrt(252) : null;
+  }
+  return {
+    returnPct,
+    returnLabel,
+    sharpe: sharpeRaw,
+    sharpeRaw,
+    sampleCount: returns.length,
+    maxDrawdownPct: maxDd * 100,
+    drawdownLabel: `since ${shortDateLabel(first.date)}`,
+  };
 }
 
 /**
@@ -161,17 +256,18 @@ export function DashboardScreen({
     () => buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, pnlWindow, live.pnlRollups.d),
     [live.realisedSeries, live.realisedTodaySamples, pnlWindow, live.pnlRollups.d],
   );
-  // Mini-stat nets share the same order-derived series as the graph so the
-  // numbers always agree with whatever window is plotted.
-  const realisedNets = useMemo(() => ({
-    week: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'week', live.pnlRollups.d).net,
-    month: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'month', live.pnlRollups.d).net,
-    ytd: buildRealisedWindow(live.realisedSeries, live.realisedTodaySamples, 'ytd', live.pnlRollups.d).net,
-  }), [live.realisedSeries, live.realisedTodaySamples, live.pnlRollups.d]);
-
   const topConviction = live.conviction[0];
   const tradable = live.tradableCapital;
   const navPending = state !== 'off' && !live.navReady;
+  const perf = useMemo(
+    () => performanceStats(live.equitySeries, navValue),
+    [live.equitySeries, navValue],
+  );
+  const deploymentPct = useMemo(() => {
+    if (navValue <= 0) return null;
+    const working = capitalAtWork(live.positions, live.orders).working;
+    return Math.max(0, (working / navValue) * 100);
+  }, [live.positions, live.orders, navValue]);
 
   return (
     <div style={{
@@ -253,20 +349,15 @@ export function DashboardScreen({
 
               <div style={{ flex: 1 }} />
 
-              <div style={{ display: 'flex', gap: 28 }}>
-                <MiniStat label="Week"  value={realisedNets.week} />
-                <MiniStat label="Month" value={realisedNets.month} />
-                <MiniStat label="YTD"   value={realisedNets.ytd} />
-              </div>
-
-              <div style={{ width: 1, height: 48, background: TOKENS.line }} />
-
-              <ExposureRing
-                gross={live.exposure.gross}
-                net={live.exposure.net}
-                accent={accentColor}
-                navBasis={live.exposure.navBasis}
-                navDivergencePct={live.exposure.navDivergencePct}
+              <PerformanceStrip
+                returnPct={perf.returnPct}
+                returnLabel={perf.returnLabel}
+                sharpe={perf.sharpe}
+                sharpeRaw={perf.sharpeRaw}
+                sampleCount={perf.sampleCount}
+                maxDrawdownPct={perf.maxDrawdownPct}
+                drawdownLabel={perf.drawdownLabel}
+                deploymentPct={deploymentPct}
               />
             </div>
 
@@ -563,117 +654,104 @@ function NavPendingPanel({
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
-  const pos = value >= 0;
-  return (
-    <div>
-      <Label style={{ marginBottom: 4 }}>{label}</Label>
-      <div style={{
-        fontFamily: TOKENS.sans, fontSize: 20, fontWeight: 300,
-        color: pos ? TOKENS.profit : TOKENS.loss,
-        fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em',
-      }}>
-        {pos ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-      </div>
-    </div>
-  );
-}
-
-function ExposureRing({
-  gross,
-  net,
-  accent,
-  navBasis,
-  navDivergencePct,
+function PerformanceStrip({
+  returnPct,
+  returnLabel,
+  sharpe,
+  sharpeRaw,
+  sampleCount,
+  maxDrawdownPct,
+  drawdownLabel,
+  deploymentPct,
 }: {
-  gross: number;
-  net: number;
-  accent: string;
-  navBasis: 'snapshot' | 'pnl_today_portfolio_value' | 'none';
-  navDivergencePct: number | null;
+  returnPct: number | null;
+  returnLabel: string;
+  sharpe: number | null;
+  sharpeRaw: number | null;
+  sampleCount: number;
+  maxDrawdownPct: number | null;
+  drawdownLabel: string;
+  deploymentPct: number | null;
 }) {
-  // ``gross``/``net`` are *true* ratios (gross_notional / NAV). Margined
-  // paper books regularly run >1.0; the ring used to clamp those to 100%
-  // and silently hide the over-leverage. We now:
-  //   - cap the visual arc at one full revolution (it can't go further);
-  //   - display the real percentage (e.g. "221%");
-  //   - flip the colour to ``danger`` and pulse when ratio > 1.0 so an
-  //     over-leveraged book cannot be missed at a glance.
-  const r = 22;
-  const c = 2 * Math.PI * r;
-  const grossArc = Math.max(0, Math.min(1, gross));   // visual cap only
-  const overLev = gross > 1.0;
-  const ringColor = overLev ? TOKENS.danger : accent;
-  const numColor = overLev ? TOKENS.danger : TOKENS.ink1;
-  const grossPct = (gross * 100).toFixed(0);
-  const netPct = (net * 100).toFixed(0);
-  const fallback = navBasis === 'pnl_today_portfolio_value';
-  const navMismatch = navDivergencePct != null && navDivergencePct > 0.15;
+  const returnColor = returnPct == null ? TOKENS.ink3 : returnPct >= 0 ? TOKENS.profit : TOKENS.loss;
+  const sharpeColor = sharpe == null
+    ? TOKENS.ink3
+    : sharpe >= 2
+      ? TOKENS.profit
+      : sharpe >= 1
+        ? TOKENS.info
+        : TOKENS.caution;
+  const drawdownColor = maxDrawdownPct == null
+    ? TOKENS.ink3
+    : maxDrawdownPct <= -12
+      ? TOKENS.loss
+      : maxDrawdownPct <= -6
+        ? TOKENS.caution
+        : TOKENS.ink1;
+  const deploymentColor = deploymentPct == null
+    ? TOKENS.ink3
+    : deploymentPct >= 90
+      ? TOKENS.caution
+      : TOKENS.info;
+  const sharpeSub = sampleCount > 0 ? drawdownLabel : 'waiting for history';
+  const metrics = [
+    { label: 'Return', value: fmtPct(returnPct, 1), sub: returnLabel, color: returnColor },
+    {
+      label: 'Sharpe',
+      value: fmtRatio(sharpe, 2),
+      sub: sharpeSub,
+      color: sharpeColor,
+      titleExtra: sampleCount > 0 ? `${sampleCount} daily returns` : '',
+    },
+    { label: 'Max DD', value: fmtPct(maxDrawdownPct, 1), sub: drawdownLabel, color: drawdownColor },
+    { label: 'Deployment', value: fmtPct(deploymentPct, 0), sub: 'capital at work', color: deploymentColor },
+  ];
   return (
-    <div
-      style={{ display: 'flex', alignItems: 'center', gap: 12 }}
-      title={overLev
-        ? `Over-leveraged: gross ${grossPct}% of NAV. Positions exceed equity via margin.`
-        : `Gross ${grossPct}% · Net ${netPct}% of NAV`}
-    >
-      <svg width="60" height="60" viewBox="0 0 60 60">
-        <circle cx="30" cy="30" r={r} fill="none" stroke={TOKENS.line} strokeWidth="3" />
-        <circle
-          cx="30" cy="30" r={r} fill="none" stroke={ringColor} strokeWidth="3"
-          strokeDasharray={`${c * grossArc} ${c}`} strokeLinecap="round"
-          transform="rotate(-90 30 30)"
-          style={{ transition: `stroke-dasharray 600ms ${TOKENS.ease}, stroke 300ms ${TOKENS.ease}` }}
-        />
-        {overLev && (
-          // Inner accent stroke as a "second lap" marker so it visually
-          // reads as "more than full" rather than being indistinguishable
-          // from a healthy 100%.
-          <circle
-            cx="30" cy="30" r={r - 5} fill="none" stroke={ringColor} strokeWidth="1.5"
-            strokeDasharray={`${(2 * Math.PI * (r - 5)) * Math.min(1, gross - 1)} ${2 * Math.PI * (r - 5)}`}
-            strokeLinecap="round" transform="rotate(-90 30 30)" opacity="0.6"
-          />
-        )}
-        <text x="30" y="33" textAnchor="middle" fontSize="11" fontFamily="Geist Mono"
-              fill={numColor} fontWeight="400">
-          {grossPct}
-        </text>
-      </svg>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <Label accent={overLev ? TOKENS.danger : undefined}>
-          {overLev ? 'Gross · over-lev' : 'Gross'}
-        </Label>
-        <span style={{
-          fontFamily: TOKENS.mono, fontSize: 12, color: numColor,
-          fontVariantNumeric: 'tabular-nums', fontWeight: overLev ? 500 : 400,
-        }}>
-          {grossPct}%
-        </span>
-        <span style={{
-          fontFamily: TOKENS.mono, fontSize: 10,
-          color: overLev ? TOKENS.danger : TOKENS.ink3,
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          net {netPct}%
-        </span>
-        {(fallback || navMismatch) && (
-          <span
-            style={{
-              fontFamily: TOKENS.mono,
-              fontSize: 9,
-              color: TOKENS.caution,
-              letterSpacing: '0.02em',
-            }}
-            title={
-              fallback
-                ? 'Exposure uses /pnl NAV fallback because snapshot NAV looked stale/invalid.'
-                : 'Snapshot NAV and /pnl NAV differ materially; exposure may be temporarily noisy.'
-            }
-          >
-            {fallback ? 'nav source: pnl' : 'nav mismatch'}
-          </span>
-        )}
-      </div>
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, minmax(88px, 1fr))',
+      gap: 8,
+      minWidth: 430,
+      maxWidth: 560,
+    }}>
+      {metrics.map((m) => (
+        <div
+          key={m.label}
+          title={`${m.label}: ${m.value} · ${m.sub}${'titleExtra' in m && m.titleExtra ? ` · ${m.titleExtra}` : ''}`}
+          style={{
+            minHeight: 76,
+            padding: '10px 11px',
+            borderRadius: 7,
+            border: `1px solid ${TOKENS.line}`,
+            background: 'rgba(255,255,255,0.025)',
+            boxShadow: `inset 2px 0 0 ${m.color}`,
+          }}
+        >
+          <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>{m.label}</Label>
+          <div style={{
+            fontFamily: TOKENS.sans,
+            fontSize: 22,
+            lineHeight: 1,
+            fontWeight: 300,
+            color: m.color,
+            fontVariantNumeric: 'tabular-nums',
+            letterSpacing: 0,
+          }}>
+            {m.value}
+          </div>
+          <div style={{
+            marginTop: 8,
+            fontFamily: TOKENS.mono,
+            fontSize: 9,
+            color: TOKENS.ink3,
+            lineHeight: 1.25,
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+          }}>
+            {m.sub}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
