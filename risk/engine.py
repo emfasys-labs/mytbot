@@ -824,10 +824,30 @@ class RiskEngine:
         if sizing_base <= 0:
             return (True, "fx_cluster")
 
-        try:
-            max_pct = Decimal(str(cfg.get("max_usd_directional_exposure_pct", "0.15")))
-        except (InvalidOperation, TypeError, ValueError):
-            max_pct = Decimal("0.15")
+        # D120 Dynamic FX Cap (0 to 100%)
+        # No fixed numbers. Cap is 1:1 with market_state_score.
+        market_state_score = Decimal("0.15") # Fallback
+        if isinstance(portfolio, dict):
+            metadata = portfolio.get("metadata", {})
+            if isinstance(metadata, dict):
+                mss = metadata.get("market_state_score")
+                if mss is not None:
+                    try:
+                        market_state_score = Decimal(str(mss))
+                    except (TypeError, ValueError, InvalidOperation):
+                        pass
+
+        if getattr(signal, "metadata", None):
+            mss = signal.metadata.get("market_state_score")
+            if mss is not None:
+                try:
+                    market_state_score = Decimal(str(mss))
+                except (TypeError, ValueError, InvalidOperation):
+                    pass
+
+        # Fully dynamic: 0.0 (0%) to 1.0 (100%)
+        max_pct = max(Decimal("0.0"), min(Decimal("1.0"), market_state_score))
+
         if max_pct <= 0:
             return (True, "fx_cluster")
         cap_notional = sizing_base * max_pct

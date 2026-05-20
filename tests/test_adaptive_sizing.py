@@ -39,7 +39,7 @@ def test_adaptive_sizing_high_volatility():
     )
     
     cfg = MockProfileConfig()
-    max_w = compute_adaptive_max_weight(opp, regime, "hunter", cfg, target_risk_budget=0.015)
+    max_w = compute_adaptive_max_weight(opp, regime, None, "hunter", cfg, target_risk_budget=0.015)
     
     assert max_w == Decimal("0.15")
 
@@ -69,7 +69,7 @@ def test_adaptive_sizing_low_liquidity():
     )
     
     cfg = MockProfileConfig()
-    max_w = compute_adaptive_max_weight(opp, regime, "hunter", cfg, target_risk_budget=0.015)
+    max_w = compute_adaptive_max_weight(opp, regime, None, "hunter", cfg, target_risk_budget=0.015)
     
     # 0.2 * 1.5 = 0.3
     assert max_w == Decimal("0.3")
@@ -97,7 +97,7 @@ def test_adaptive_sizing_crash_regime():
     )
     
     cfg = MockProfileConfig()
-    max_w = compute_adaptive_max_weight(opp, regime, "hunter", cfg, target_risk_budget=0.015)
+    max_w = compute_adaptive_max_weight(opp, regime, None, "hunter", cfg, target_risk_budget=0.015)
     
     # Vol cap = 1.0, liq = 1.0, crash = 1.0 * 0.25 = 0.25
     assert max_w == Decimal("0.25")

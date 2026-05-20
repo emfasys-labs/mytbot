@@ -274,6 +274,7 @@ def build_allocation_decision(
         dynamic_max_w = compute_adaptive_max_weight(
             opportunity=o,
             regime_state=regime_state,
+            portfolio_state=portfolio_state,
             mode=mode,
             profile_cfg=profile_cfg,
             target_risk_budget=0.015,
