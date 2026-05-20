@@ -56,6 +56,39 @@ def coordinator_action_to_raw_signal(action: CoordinatorAction, *, nav: Decimal)
     # actual order notional about to be placed.
     md.setdefault("sizing_final_capital_required", str(action.capital))
 
+    # Stamp expected_edge_bps so the Wave 9 cost gate has a concrete edge
+    # figure for coordinator-issued opens. Without this, Wave 9 falls back
+    # to an inferred proxy that is often zero for held-position resize /
+    # rotation actions, producing spurious ``cost_exceeds_edge`` rejections.
+    # Resolution order: explicit forecast > explicit bps > priority_score
+    # proxy > expected_edge proxy. Proxy scaling matches Wave 9's own
+    # cap (max(200, 4·fee_bps)) so behaviour is consistent if either side
+    # of the gate has to fall back.
+    if "expected_edge_bps" not in md:
+        try:
+            _fer = float(md.get("forecast_expected_return") or 0.0)
+        except (TypeError, ValueError):
+            _fer = 0.0
+        if _fer > 0:
+            md["expected_edge_bps"] = _fer * 10_000.0
+        else:
+            try:
+                _ps = float(action.priority_score or 0)
+            except (TypeError, ValueError):
+                _ps = 0.0
+            try:
+                _ee = float(md.get("expected_edge") or 0.0)
+            except (TypeError, ValueError):
+                _ee = 0.0
+            _proxy = max(_ps, _ee)
+            if _proxy > 0:
+                # 200 bps cap matches Wave 9's low-fee venue ceiling. Wave 9
+                # itself will apply venue-specific fee-aware capping when
+                # this value flows through; we just ensure it is non-zero
+                # so the gate has real data instead of falling to zero.
+                md["expected_edge_bps"] = min(200.0, _proxy * 200.0)
+                md["expected_edge_bps_source"] = "coordinator_proxy"
+
     if action.kind == "trim_symbol":
         md["reduce_only"] = True
         if not bool(md.get("partial_reduce_only")):

@@ -254,7 +254,25 @@ class ExecutionEngine:
         # ceiling. Disabled by default — module returns ``allow=True,
         # used=False`` and the engine proceeds unmodified.
         wave9_metadata: dict = {}
-        if self._wave9_cfg is not None and getattr(self._wave9_cfg, "enabled", False):
+        # Wave 9 exemptions. The edge/cost cushion exists to refuse
+        # *speculative new opens* that don't clear cost. It should not block:
+        #   1. reduce_only / close_only legs (shedding risk is never -EV)
+        #   2. topup-of-existing-position legs (the allocator sizing a
+        #      working held conviction up to the operator's gross-exposure
+        #      slider target — these carry the decayed "remaining hold edge"
+        #      ~5–15 bps, which is by design below cost cushion; treating
+        #      them as new speculative opens locks the slider below 100%)
+        # Risk engine + cluster caps still apply on every path.
+        _w9_sig_md = dict(signal.metadata or {})
+        _w9_reduce_only = bool(
+            getattr(signal, "reduce_only", False)
+            or _w9_sig_md.get("reduce_only")
+            or _w9_sig_md.get("close_only")
+            or _w9_sig_md.get("coordinator_kind") == "trim_symbol"
+        )
+        _w9_topup_existing = bool(_w9_sig_md.get("sizing_topup_existing"))
+        _w9_exempt = _w9_reduce_only or _w9_topup_existing
+        if self._wave9_cfg is not None and getattr(self._wave9_cfg, "enabled", False) and not _w9_exempt:
             from execution.wave9_runtime import pre_flight_cost_gate
             from brokers.base import AssetClass as _AssetClass
 

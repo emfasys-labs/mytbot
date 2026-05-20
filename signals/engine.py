@@ -613,9 +613,16 @@ class SignalEngine:
             apply_news_overlay=True,
         )
         if news_veto:
+            _md = dict(raw.metadata or {})
+            _md["_filter_reason"] = "news_veto"
+            raw.metadata = _md
             return None
         # D115 anti-churn gate (D015 batch path).
-        if self._anti_churn_check(raw, adjusted_confidence=adjusted_confidence, now=now) is not None:
+        ac_reason = self._anti_churn_check(raw, adjusted_confidence=adjusted_confidence, now=now)
+        if ac_reason is not None:
+            _md = dict(raw.metadata or {})
+            _md["_filter_reason"] = f"anti_churn:{ac_reason}"
+            raw.metadata = _md
             return None
         ac = (raw.asset_class or "other").strip().lower()
         if ac not in (
@@ -649,6 +656,7 @@ class SignalEngine:
                 md.get("meta_label_probability"),
                 md.get("meta_label_threshold"),
             )
+            md["_filter_reason"] = f"meta_label_below_threshold:{md.get('meta_label_reason') or 'low_prob'}"
             raw.metadata = md
             return None
         candidate = SignalCandidate(

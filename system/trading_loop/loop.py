@@ -1895,6 +1895,8 @@ class TradingLoop:
                                     profile_mode=mode_raw,
                                 )
                                 if cand is None:
+                                    _raw_md = dict(getattr(raw, "metadata", {}) or {})
+                                    _reason = str(_raw_md.get("_filter_reason") or "news_veto_or_gate")
                                     sc_log_rows.append(
                                         strategy_candidate_row(
                                             symbol=symbol,
@@ -1902,9 +1904,9 @@ class TradingLoop:
                                             side=str(raw.side) if raw.side else None,
                                             confidence=raw.confidence,
                                             status="filtered_signal_engine",
-                                            reason="news_veto_or_gate",
+                                            reason=_reason,
                                             loop_iteration=self.iterations,
-                                            metadata=dict(getattr(raw, "metadata", {}) or {}) or None,
+                                            metadata=_raw_md or None,
                                         )
                                     )
                                     continue
