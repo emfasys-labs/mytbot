@@ -73,6 +73,7 @@ def _apply_wave8_vol_targeting_overlay(
     regime_state: RegimeState,
     portfolio_state: PortfolioState,
     cfg,  # PortfolioOptimisationConfig
+    u: Decimal = Decimal("0"),
 ) -> tuple[Decimal, dict[str, float | bool]]:
     """
     Multiply the gross-exposure target by ``combined_scale`` from
@@ -120,10 +121,12 @@ def _apply_wave8_vol_targeting_overlay(
                 "wave8_vol_overlay_used": False,
                 "wave8_vol_overlay_reason": "non_positive_scale",
             }
-        new_ge = ge * Decimal(str(scale))
+        scale_eff = scale * (1.0 - float(u)) + 1.0 * float(u)
+        new_ge = ge * Decimal(str(scale_eff))
         meta: dict[str, float | bool] = {
             "wave8_vol_overlay_used": True,
-            "wave8_vol_overlay_scale": scale,
+            "wave8_vol_overlay_scale": scale_eff,
+            "wave8_vol_overlay_raw_scale": scale,
         }
         if result.vol_component is not None:
             meta["wave8_vol_overlay_vol_component"] = float(result.vol_component)
@@ -220,6 +223,14 @@ def build_allocation_decision(
         )
 
     cap_slider = _capital_slider(portfolio_state)
+    
+    # Unleash logic: if cap_slider > 0.9, we interpolate dampening multipliers to 1.0.
+    # At cap_slider = 1.0, u = 1.0, all dampening multipliers are exactly 1.0.
+    u = Decimal("0")
+    if cap_slider > Decimal("0.9"):
+        u = (cap_slider - Decimal("0.9")) / Decimal("0.1")
+        u = clip_decimal(u, Decimal("0"), Decimal("1"))
+
     agg = aggression_multiplier_for_mode(profile_cfg, mode, regime_state)
     best = max((o.opportunity_score for o in opportunities), default=Decimal("0"))
     sh = allocation_cfg.gross_exposure.shaping
@@ -230,9 +241,19 @@ def build_allocation_decision(
     ge_shape = bounded_sigmoid(
         clip_decimal(sig_arg, Decimal(str(sh.sigmoid_clip_min)), Decimal(str(sh.sigmoid_clip_max)))
     )
-    ge = cap_slider * agg * ge_shape * regime_state.execution_quality * regime_state.drawdown_throttle
+
+    # Apply unleash interpolation to each modifier
+    agg_eff = agg * (Decimal("1") - u) + Decimal("1") * u
+    ge_shape_eff = ge_shape * (Decimal("1") - u) + Decimal("1") * u
+    eq_eff = regime_state.execution_quality * (Decimal("1") - u) + Decimal("1") * u
+    dt_eff = regime_state.drawdown_throttle * (Decimal("1") - u) + Decimal("1") * u
+
+    ge = cap_slider * agg_eff * ge_shape_eff * eq_eff * dt_eff
+
     vol_overlay, vol_meta = _volatility_overlay(regime_state)
-    ge = ge * vol_overlay
+    vol_overlay_eff = vol_overlay * (Decimal("1") - u) + Decimal("1") * u
+    ge = ge * vol_overlay_eff
+
     # Wave 8 — optional vol-targeting + drawdown overlay (gated off by default).
     wave8_cfg = _get_default_portfolio_optimisation_config()
     wave8_meta: dict[str, float | bool] = {"wave8_vol_overlay_used": False}
@@ -242,6 +263,7 @@ def build_allocation_decision(
             regime_state=regime_state,
             portfolio_state=portfolio_state,
             cfg=wave8_cfg,
+            u=u,
         )
     try:
         demand_score = float((regime_state.metadata or {}).get("demand_score", 0.0) or 0.0)
@@ -382,6 +404,7 @@ def build_allocation_decision(
             "d015": True,
             "opportunity_count": len(opportunities),
             "position_count": len(portfolio_state.positions),
+            "unleash_u": float(u),
             **vol_meta,
             **wave8_meta,
             "demand_score": demand_score,

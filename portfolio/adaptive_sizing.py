@@ -107,6 +107,22 @@ def compute_adaptive_max_weight(
         
     final_cap = regime_cap * confidence
     
+    # 5.5 Unleash logic: if cap_slider > 0.5, we interpolate final_cap to nuclear_max.
+    # This allows larger single position weights to fill capital when slider is high.
+    cap_slider = None
+    if portfolio_state and portfolio_state.metadata:
+        raw_cap = portfolio_state.metadata.get("capital_pct")
+        if raw_cap is not None:
+            try:
+                cap_slider = float(raw_cap)
+            except (TypeError, ValueError):
+                pass
+            
+    if cap_slider is not None and cap_slider > 0.9:
+        u = (cap_slider - 0.9) / 0.1
+        u = max(0.0, min(1.0, u))
+        final_cap = final_cap * (1.0 - u) + nuclear_max * u
+        
     # 6. Final safety clip
     final_cap = max(0.01, min(nuclear_max, final_cap))
     final_cap_str = f"{final_cap:.4f}"
