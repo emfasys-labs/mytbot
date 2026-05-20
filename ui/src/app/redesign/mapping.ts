@@ -263,7 +263,7 @@ function cashFactor(assetClass: string | null | undefined, symbol: string | null
   switch (inferAssetClass(assetClass, symbol)) {
     case 'forex':
     case 'fx':
-      return 0.05;
+      return 0.20;
     case 'future':
       return 0.15;
     case 'bond':
