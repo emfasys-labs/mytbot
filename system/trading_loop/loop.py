@@ -1384,6 +1384,13 @@ class TradingLoop:
                 tradable = total_equity * Decimal(str(self.capital_pct))
                 effective_value = float(tradable)
 
+                portfolio_state = await _load_portfolio_state(
+                    session_factory,
+                    fallback_portfolio_value=total_equity,
+                    signal_price_fallback=None,
+                    capital_pct=Decimal(str(self.capital_pct)),
+                )
+
                 # D122 — dynamic threshold context. Computed once per
                 # loop iteration and stamped on each raw signal so
                 # downstream gates (meta-labeler, Wave 9) can resolve

@@ -36,8 +36,12 @@
 trained_meta_labeler:
   enabled: true
   model_name: mytbot_meta_labeler
-  model_version: 0.1.0
-  artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.1.0.pkl
+  # v0.2.0 — paper candidate from 2026-05-21 retrain. Addresses the
+  # news_score / accumulator_score duplication that pinned 98.4% of
+  # live candidates in known-loser calibration bins under v0.1.0.
+  # Rollback: switch model_version + artifact_path back to 0.1.0.
+  model_version: 0.2.0
+  artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.2.0.pkl
   write_predictions: true
 
   thresholds:

@@ -40,7 +40,13 @@ FEATURE_COLUMNS = [
     "strategy_confidence",
     "raw_confidence",
     "side_sign",
-    "news_score",
+    # v0.2.0 dedup fix: `news_score` removed from the feature set.
+    # Empirically `sig.news_score` and `accumulator_score` are 0.97-correlated
+    # in the live signal log because the accumulator's AI news rollup is what
+    # populates both columns. Keeping both doubled the logreg's effective
+    # weight on a single underlying signal. The accumulator carries the news
+    # information; the standalone field can return when an independent
+    # point-in-time AI news source is wired in.
     "accumulator_score",
     "accumulator_confidence",
     "atr_pct",
@@ -100,7 +106,7 @@ def _side_sign(side: str) -> int:
 
 
 def _feature_value(md: dict[str, Any], bar_features: dict[str, Any], key: str) -> float:
-    if key in {"strategy_confidence", "raw_confidence", "side_sign", "news_score"}:
+    if key in {"strategy_confidence", "raw_confidence", "side_sign"}:
         return 0.0
     if key in md:
         return _as_float(md.get(key))
@@ -199,7 +205,6 @@ def _dataset_rows(
         features["strategy_confidence"] = conf
         features["raw_confidence"] = conf
         features["side_sign"] = float(side)
-        features["news_score"] = _as_float(sig.news_score, _as_float(md.get("ai_news_score")))
 
         x_rows.append(features)
         y_rows.append(y)

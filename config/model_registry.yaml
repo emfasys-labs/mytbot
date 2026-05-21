@@ -93,3 +93,77 @@ models:
         horizon_bars: 10
         pt_mult: 2.0
         sl_mult: 1.5
+
+  - name: mytbot_meta_labeler
+    version: 0.2.0
+    task: classification
+    target: triple_barrier_profit_before_stop
+    horizon_seconds: null
+    horizon_bars: 10
+    # New 19-feature contract: `news_score` was removed (it was
+    # duplicating `accumulator_score` byte-for-byte at v0.1.0 build time
+    # and is still 0.967-correlated with it in the live signal log;
+    # see reports/models/mytbot_meta_labeler/0.2.0/validation.md §2).
+    feature_contract_hash: e1d439adc21b8a120b22186b5f79a7261389e4155ad15254eb42df0ccbb8d9d6
+    validation_method: purged_kfold_embargo
+    calibration_method: platt
+    min_sample_size: 200
+    approval_status: paper
+    notes: |
+      v0.2.0 retrain — dedup fix (news_score dropped) + fresh 30-day window
+      (13,215 rows vs v0.1.0's 3,679). Addresses the 2026-05-21 audit finding
+      that 98.4% of live candidates landed in v0.1.0's "known loser" bins.
+      Paper soak only; do not promote to micro_live/live before 2026-06-04.
+    metadata:
+      artifact_dir: artifacts/models/meta_label
+      artifact_path: artifacts/models/meta_label/mytbot_meta_labeler-0.2.0.pkl
+      dataset_manifest: data/research/meta_label/20260521_meta_label_v0_2_0/manifest.json
+      paper_candidate: true
+      # OOS calibration bins (n >= 100) from the held-out 30% temporal
+      # split. The dynamic threshold resolver (D122) maps target
+      # win-rate to the lowest predicted-probability bin meeting it.
+      calibration_table:
+        - {predicted: 0.228, observed: 0.456, n: 136}
+        - {predicted: 0.273, observed: 0.265, n: 181}
+        - {predicted: 0.327, observed: 0.160, n: 607}
+        - {predicted: 0.374, observed: 0.244, n: 496}
+        - {predicted: 0.427, observed: 0.055, n: 742}
+        - {predicted: 0.469, observed: 0.134, n: 763}
+        - {predicted: 0.515, observed: 0.383, n: 227}
+        - {predicted: 0.573, observed: 0.069, n: 259}
+        - {predicted: 0.616, observed: 0.054, n: 168}
+        - {predicted: 0.741, observed: 0.638, n: 138}
+      activation_gates:
+        feature_contract_frozen: true
+        registered_in_db: false
+        validation_report_path: reports/models/mytbot_meta_labeler/0.2.0/validation.md
+        validation_metric_value: 0.5651
+        validation_metric_threshold: 0.45
+        validation_metric_name: hit_rate_lift_best_bin_n>=90
+        paper_soak_start: "2026-05-21T09:30:00+00:00"
+        paper_soak_min_days: 14
+        paper_soak_anomalies: []
+        risk_rejection_review_signed_off: false
+        risk_rejection_rate: null
+        risk_rejection_rate_max: 0.40
+        realised_slippage_bps_p95: null
+        expected_slippage_bps: null
+        slippage_tolerance_multiplier: 1.5
+        rollback_documented: true
+        rollback_test_passed: false
+        config_flag_path: config/meta_labeler.yaml:trained_meta_labeler.model_version
+        config_flag_value: "0.2.0"
+    training_dataset:
+      name: meta_label_signals_1h
+      version: "20260521"
+      start_ts: "2026-04-21T00:00:00+00:00"
+      end_ts: "2026-05-21T09:08:00+00:00"
+      feature_contract_hash: e1d439adc21b8a120b22186b5f79a7261389e4155ad15254eb42df0ccbb8d9d6
+      row_count: 13215
+      metadata:
+        timeframe: 1h
+        horizon_bars: 10
+        pt_mult: 2.0
+        sl_mult: 1.5
+        signal_rows_source: 22622
+        feature_snapshot_rows_source: 1697248

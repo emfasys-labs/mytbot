@@ -1005,6 +1005,97 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D123 — Meta-labeler v0.2.0: dedup fix + 30-day retrain + auto-training task (2026-05-21)
+
+**Decision:** Retrain `mytbot_meta_labeler` as v0.2.0 with two construction
+fixes and install the daily auto-training scheduled task.
+
+**Why.** A 12-hour live sample (3,672 candidates) showed v0.1.0 placed 67%
+of candidates in calibration bin 0.25–0.30 (3.2% historical hit rate) and
+only 1.6% above 0.40 — pinning live capital deployment at ~45% despite
+the operator's 100% slider. Audit traced this to two defects, neither
+of which is a D122 dynamic-threshold tuning issue:
+
+1. **Feature duplication.** `scripts/build_meta_label_dataset.py` wrote
+   both `news_score` and `accumulator_score` into the v0.1.0 CSV. At
+   build time `sig.news_score` was `None`, the script fell back to
+   `md["ai_news_score"]`, and that field was being populated from the
+   accumulator's own AI-news rollup — so the two columns were
+   byte-identical (`mean=0.3167, std=0.2176` for both). The logistic
+   regression's effective weight on that signal was doubled.
+2. **Stale, narrow window.** v0.1.0 was built 2026-04-27 from 3,679
+   rows dominated by `mean_reversion`. Live distribution since has
+   broadened to momentum/volume/volatility/event/regime/pairs, and
+   `accumulator_score` has drifted from training mean +0.317 to live
+   mean ~−0.014 — a 1.5σ shift that alone moves logreg predictions
+   from ~0.42 to ~0.30.
+
+**What changed.**
+
+- `scripts/build_meta_label_dataset.py`: `news_score` removed from
+  `FEATURE_COLUMNS`. With `sig.news_score` only (no `md` fallback),
+  the live correlation between `news_score` and `accumulator_score`
+  is still 0.967 — independence cannot be guaranteed today, so the
+  column is dropped entirely. Accumulator carries the news
+  information. The column can return in v0.3.0 when an independent
+  point-in-time AI-news source is wired in.
+- Fresh dataset: `data/research/meta_label/20260521_meta_label_v0_2_0`
+  — 13,215 leakage-safe rows from 22,622 signal-log rows over the
+  prior 30 days × 1,697,248 feature-snapshot rows.
+- Artefact: `artifacts/models/meta_label/mytbot_meta_labeler-0.2.0.pkl`
+  (logreg + Platt, 5-fold purged CV, embargo 10 bars). New
+  `feature_contract_hash`:
+  `e1d439adc21b8a120b22186b5f79a7261389e4155ad15254eb42df0ccbb8d9d6`.
+- `config/model_registry.yaml`: v0.2.0 registered at
+  `approval_status: paper`, `calibration_table` populated from the
+  held-out 30% temporal-split OOS bins with `n≥100`. D122 reads
+  this table directly.
+- `config/meta_labeler.yaml`: `model_version: 0.2.0`,
+  `artifact_path` updated. Rollback is single-key.
+- Windows scheduled task `mytbot-auto-training` registered
+  (daily 03:20 local, runs `scripts/auto_train_models.py` via venv
+  python). Verified `State=Ready`; `config/auto_training.yaml`
+  was declaring the cadence but the task itself had never been
+  installed prior to this commit.
+- Validation report:
+  `reports/models/mytbot_meta_labeler/0.2.0/validation.md`.
+
+**OOS results (temporal 70/30 split).** Brier 0.221 ≤ 0.25 (pass).
+High-confidence lift: v0.2.0 best populated bin (predicted 0.758, n=93)
+delivers observed 0.763 — vs v0.1.0 best populated bin (predicted
+0.618, n=93) observed 0.419, on the same test slice. D122
+simulation: at `target_win_rate=0.42`, v0.2.0 deploys ~95% of
+candidates against a calibrated bin (predicted 0.228, observed 0.456,
+n=136), where v0.1.0's equivalent threshold (0.330) lands on a noise
+spike in a bin with no reliable mid-band signal.
+
+**Known caveats (paper-soak monitoring).**
+
+- Train→test base-rate drift (0.41 → 0.20) in the last 9 days drives
+  high OOS ECE (0.259). The 30-day window straddles a regime shift.
+- Mid-band calibration (predicted 0.43–0.62) over-predicts. D122
+  `target_floor=0.20` keeps the operational gate below this band;
+  do not raise the floor above 0.45 without a fresh calibration.
+- Trainer convergence warnings (lbfgs hit `max_iter=400` on all 5
+  CV folds + final fit) — features are not standardised in
+  `models/meta_label/train.py::_make_classifier`. Out of scope for
+  v0.2.0; flag for a future trainer-side StandardScaler step.
+
+**Non-changes.** D122 dynamic threshold resolver and its config are
+untouched. `target_floor` was not lowered (per non-goal: do not mask
+calibration evidence). v0.1.0's row remains in the registry for
+rollback; promotion to micro_live/live blocked until ≥14 days of paper
+soak per `docs/MODEL_GOVERNANCE.md`.
+
+**Status:** Implemented and live on the trading loop after restart.
+Verification gate during paper soak: live candidate probability
+histogram should center near ~0.43 (training mean) rather than v0.1.0's
+~0.29; deployment % should organically climb toward 70–85% in neutral
+regime at 100% slider. If deployment remains <60% in neutral regime,
+escalate as a data-quality investigation (drift, not threshold-tuning).
+
+---
+
 ## D118 — Self-tuning priority pre-filter + 6-stage universe funnel (2026-05-19)
 
 The funnel between "every unique normalized symbol from connected brokers
