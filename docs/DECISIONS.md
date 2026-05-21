@@ -1005,6 +1005,102 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D126 — Fills ledger + phantom-oversell root-cause fix + data reset (2026-05-21)
+
+**Decision:** Replace the corrupted, un-attributable trading history
+with a clean append-only `fills` ledger, fix the root cause of the
+phantom oversells, and wipe the corrupted tables for a 100%-accurate
+restart.
+
+**The corruption.** The `orders` table could not be reconciled:
+79,910 BALL shares sold against only 10,586 ever bought; AAPL oversold
+by ~10%; $148M of gross turnover on a $1.18M book in 30 days. Per-symbol
+and per-broker P&L were unrecoverable.
+
+**Root cause.** `PositionLog` is append-only with "latest row per
+`(broker, symbol)` by `max(timestamp)`" as the current position. Five+
+independent coroutines (main loop, stop-loss, profit-harvest,
+intraday-derisk, aggregate-derisk, mark-refresh sweep, reconciler) each
+do a **non-atomic read-modify-write**: load latest → mutate → append a
+new row. When coroutine B loaded the snapshot *before* coroutine A's
+sell persisted, B's later-timestamped row resurrected the pre-sell
+quantity — erasing A's sell. The next derisk tick saw the full position
+again and sold it a second time. No lock, no version, and critically no
+"can't sell more than you hold" guard. D125 #2 fixed the *concurrent*
+(within-30s) case; this defect operates over hours.
+
+**The fix — fills ledger as the race-free authority.**
+
+- New `fills` table (`storage/models.py::FillLog`, migration
+  `d126f1a2b3c4_fills_ledger.py`): append-only, one row per confirmed
+  fill. A position's quantity for `(broker, symbol)` is exactly
+  `SUM(signed_quantity)` over its fills — pure appends never conflict,
+  so the resurrection race cannot occur. Columns cover the full
+  analytics surface: realised P&L (weighted-average cost), cost basis,
+  position-qty-after, holding period, strategy, signal id +
+  confidence, mode, notional, asset class, side, order type,
+  reduce-only, is-paper, run-session id, derisk source.
+- `storage/fills_ledger.py`: `record_fill` (the single write-path,
+  serialized under one `asyncio.Lock` — read-prior-state /
+  compute-WAC / append is atomic), `available_quantity` and
+  `position_state` (race-free SUM queries).
+- **Oversell guard** (`ExecutionEngine._clamp_reduce_only_to_holdings`,
+  called in `execute()` before order build): every reduce-only /
+  closing order is clamped to the fills-ledger holding. It can never
+  sell more than is held; if the ledger shows the position flat, the
+  order is skipped entirely. When the ledger has no rows for a symbol
+  yet (only possible pre-reset) it is non-authoritative and the guard
+  no-ops. This sidesteps the snapshot race rather than trying to
+  serialize every PositionLog writer — the money-critical decision no
+  longer trusts the racy snapshot at all.
+- Write-path: `ExecutionEngine._persist_result` → `_persist_fill_to_ledger`
+  appends a `fills` row after every confirmed fill (the single
+  chokepoint all execution paths already pass through). Arbitrage
+  fills are skipped (bundle-level P&L doesn't fit the single-symbol
+  WAC model).
+
+**Data reset.** `scripts/reset_trading_data.py` (dry-run by default,
+`--execute` to perform, refuses `APP_ENV=live`). TRUNCATEs
+`orders, positions, fills, daily_pnl, signals, risk_decisions,
+strategy_candidate_log, thesis_log, anomaly_log`; deletes all
+`control_state` keys except the operator/config whitelist
+(`paper.nav_seed`, `system.capital_allocation`, `strategy.enabled.*`,
+`auto_training.last_run_at`); removes `data/runtime/risk_state.json`.
+NAV resets to `paper.nav_seed` ($1,072,898.74 — the original paper
+capital; the phantom-inflated +10.5% is discarded as untrustworthy).
+Keeps feature snapshots, price history, instrument registry, models,
+news, macro, parameter log, config.
+
+**WAC accounting.** `realised_pnl` is GROSS trading P&L; `fee` is a
+separate column. Net P&L for any slice = `SUM(realised_pnl) - SUM(fee)`.
+Realised P&L and holding period are populated only on
+position-decreasing fills.
+
+**Tests.** `tests/test_d126_fills_ledger.py` — 17 tests: WAC math
+(open / add / partial close / full close / long→short flip / short
+cover), DB-backed ledger (accumulation, realised P&L, bad-input
+rejection, race-free SUM), and the oversell guard (empty-ledger
+allow, within-holdings pass, over-holdings clamp, flat-skip,
+wrong-direction skip). All pass.
+
+**Deploy sequence (operator).** 1) stop the trading system; 2) the
+D126 code is already on disk and the migration has run; 3)
+`python scripts/reset_trading_data.py --execute`; 4) restart
+`python run.py`. From the first fill onward the `fills` ledger is the
+complete, accurate record — by-broker / by-strategy / by-symbol
+analytics all reconcile against NAV.
+
+**Residual / follow-up.** The `positions` snapshot table still has the
+multi-writer race — but it is now display-only; the oversell guard
+makes it incapable of causing money loss. A future change could
+rebuild `positions` from the fills ledger each reconcile cycle to
+eliminate display drift too. Out of scope for D126.
+
+**Status:** Code + migration + tests landed; `fills` table created.
+Data wipe is pending operator go (system must be stopped first).
+
+---
+
 ## D125 — BF-B concentration fix bundle (2026-05-21)
 
 **Decision:** Five hardening changes triggered by the 2026-05-21 BF-B

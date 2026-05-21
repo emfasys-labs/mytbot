@@ -121,6 +121,11 @@ class ExecutionEngine:
         # Counters for ops visibility on the Wave 13 dashboard.
         self.wave9_gate_blocked = 0
         self.wave9_gate_passed = 0
+        # D126 — per-process run-session id stamped on every fills-ledger
+        # row, so analytics can isolate a single `python run.py` lifetime.
+        self._run_session_id = uuid.uuid4().hex[:16]
+        # D126 — oversell guard counter (ops visibility).
+        self.oversell_guard_clamped = 0
         set_execution_engine(self)
 
     def reload_wave9_config(self) -> None:
@@ -318,6 +323,19 @@ class ExecutionEngine:
                 return None
             if gate.used and gate.allow:
                 self.wave9_gate_passed += 1
+
+        # D126 — oversell guard. A reduce-only / closing order may never
+        # sell more than the position actually holds. `available_quantity`
+        # is the race-free SUM(signed_quantity) over the fills ledger,
+        # immune to the snapshot-resurrection race that let the pre-D126
+        # system re-sell the same lot across ticks (BALL: 79,910 shares
+        # sold vs 10,586 ever bought). On a brand-new ledger (post-reset)
+        # this is exact. Clamps the signal quantity in place; skips
+        # entirely when there is nothing left to reduce.
+        if _w9_reduce_only and session_factory is not None:
+            if not await self._clamp_reduce_only_to_holdings(session_factory, signal):
+                self.last_skip_reason = "oversell_guard_nothing_to_reduce"
+                return None
 
         order = self._build_order(signal)
         if wave9_metadata:
@@ -943,6 +961,59 @@ class ExecutionEngine:
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
+    async def _clamp_reduce_only_to_holdings(self, session_factory, signal: Signal) -> bool:
+        """D126 oversell guard. Clamp a reduce-only signal to held quantity.
+
+        Returns True to proceed (quantity left unchanged or clamped down),
+        False to skip the order entirely (nothing left to reduce).
+
+        The fills ledger is the race-free authority. When it has no rows
+        for the symbol yet (``fill_count == 0`` — only possible before
+        the data-reset clean slate), it has no opinion and we fall back
+        to legacy behaviour rather than blocking a legitimate close.
+        """
+        try:
+            from storage.fills_ledger import position_state
+        except Exception:  # noqa: BLE001
+            return True
+        try:
+            held, fill_count = await position_state(
+                session_factory, signal.broker, str(signal.symbol or "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("oversell guard | ledger read failed (%s); allowing order", exc)
+            return True
+        if fill_count == 0:
+            # Ledger not authoritative for this symbol yet — don't block.
+            return True
+
+        requested = abs(Decimal(str(getattr(signal, "suggested_quantity", 0) or 0)))
+        if requested <= 0:
+            return False
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        # A SELL reduces a long (held > 0); a BUY reduces a short (held < 0).
+        if side in ("sell", "short") and held > 0:
+            reducible = held
+        elif side in ("buy", "long") and held < 0:
+            reducible = abs(held)
+        else:
+            # Order would not reduce the position (flat, or same side as
+            # holding). A reduce-only order in that state is a no-op.
+            logger.warning(
+                "oversell guard | %s %s broker=%s | nothing to reduce (held=%s) — skipping",
+                signal.symbol, side, signal.broker, held,
+            )
+            return False
+
+        if requested > reducible:
+            logger.warning(
+                "oversell guard | %s %s broker=%s | clamped %s -> %s (held=%s)",
+                signal.symbol, side, signal.broker, requested, reducible, held,
+            )
+            signal.suggested_quantity = reducible
+            self.oversell_guard_clamped += 1
+        return True
+
     async def _persist_result(
         self, session_factory, order: Order, result: OrderResult, signal: Signal
     ) -> None:
@@ -964,6 +1035,80 @@ class ExecutionEngine:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Order log persistence failed | signal_id=%s | %s", signal.signal_id, exc)
+        # D126 — append to the clean fills ledger (one row per confirmed
+        # fill, with WAC realised P&L). Best-effort: a ledger failure must
+        # never break execution, but it is logged loudly.
+        await self._persist_fill_to_ledger(session_factory, order, result, signal)
+
+    async def _persist_fill_to_ledger(
+        self, session_factory, order: Order, result: OrderResult, signal: Signal
+    ) -> None:
+        try:
+            status = getattr(result, "status", None)
+            if status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                return
+            filled_qty = Decimal(str(getattr(result, "filled_quantity", 0) or 0))
+            if filled_qty <= 0:
+                return
+            avg_px = getattr(result, "avg_fill_price", None)
+            px = Decimal(str(avg_px)) if avg_px is not None else Decimal("0")
+            if px <= 0:
+                return
+            # Arbitrage fills are bundle-level P&L and don't fit the
+            # single-symbol WAC model — skip ledger recording for them.
+            if str(getattr(signal, "side", "") or "").strip().upper().startswith("ARBITRAGE_"):
+                return
+            from storage.fills_ledger import record_fill
+
+            sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+            reduce_only = bool(
+                getattr(order, "reduce_only", False)
+                or getattr(signal, "reduce_only", False)
+                or sig_md.get("reduce_only")
+                or sig_md.get("close_only")
+                or str(sig_md.get("coordinator_kind", "")).strip().lower()
+                in {"trim_symbol", "close_symbol", "flatten_symbol"}
+            )
+            strategy = str(getattr(signal, "strategy", "") or "") or None
+            derisk_source = None
+            if strategy in {
+                "intraday_derisk_monitor", "aggregate_derisk",
+                "stop_loss_monitor", "profit_harvest",
+            }:
+                derisk_source = strategy
+            order_type = getattr(order, "order_type", None)
+            order_type_s = getattr(order_type, "value", order_type)
+            await record_fill(
+                session_factory,
+                broker=signal.broker,
+                symbol=str(signal.symbol or ""),
+                side=str(signal.side or ""),
+                quantity=filled_qty,
+                fill_price=px,
+                fee=getattr(result, "fee", 0),
+                asset_class=str(getattr(signal, "asset_class", "") or ""),
+                order_type=str(order_type_s or ""),
+                reduce_only=reduce_only,
+                strategy=strategy,
+                signal_id=str(getattr(signal, "signal_id", "") or "") or None,
+                signal_confidence=getattr(signal, "confidence", None),
+                mode=str(sig_md.get("mode") or sig_md.get("sizing_mode") or "") or None,
+                is_paper=self.paper_mode,
+                run_session_id=self._run_session_id,
+                derisk_source=derisk_source,
+                order_id=str(getattr(order, "client_order_id", "") or "") or None,
+                broker_order_id=str(getattr(result, "broker_order_id", "") or "") or None,
+                instrument_metadata=(
+                    order.instrument_metadata
+                    if isinstance(getattr(order, "instrument_metadata", None), dict)
+                    else None
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "fills ledger persistence failed | signal_id=%s | %s",
+                getattr(signal, "signal_id", "?"), exc,
+            )
 
     async def _maybe_notify_fill(
         self, order: Order, result: OrderResult, signal: Signal

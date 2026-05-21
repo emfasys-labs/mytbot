@@ -78,6 +78,60 @@ class OrderLog(Base):
     instrument_metadata = Column(JSON, nullable=True)
 
 
+class FillLog(Base):
+    """D126 — clean append-only ledger of confirmed fills.
+
+    One row per confirmed fill. Unlike ``orders`` (an order-lifecycle
+    log that also holds cancelled / rejected states and is contaminated
+    by the pre-D126 phantom-oversell bug), this table is BOTH the
+    authoritative analytics ledger and the race-free source of truth
+    for position quantity: a position's quantity for ``(broker, symbol)``
+    is ``SUM(signed_quantity)`` over its fills. Pure appends never
+    conflict, so the snapshot-resurrection race that produced phantom
+    oversells cannot occur here.
+
+    Every confirmed fill writes exactly one row. ``realised_pnl`` and
+    ``holding_period_sec`` are populated only on position-decreasing
+    (closing) fills, computed via weighted-average cost basis.
+    """
+    __tablename__ = "fills"
+    __table_args__ = (
+        Index("ix_fills_broker_symbol_ts", "broker", "symbol", "timestamp"),
+    )
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp           = Column(DateTime(timezone=True), nullable=False, index=True)
+    broker              = Column(String(20), nullable=False, index=True)
+    symbol              = Column(String(72), nullable=False, index=True)
+    asset_class         = Column(String(20), nullable=False, default="")
+    side                = Column(String(8), nullable=False)            # buy / sell
+    order_type          = Column(String(20), nullable=False, default="")
+    quantity            = Column(Numeric(20, 8), nullable=False)       # absolute filled qty
+    signed_quantity     = Column(Numeric(20, 8), nullable=False)       # +buy / -sell; position qty = SUM(this)
+    fill_price          = Column(Numeric(20, 8), nullable=False)
+    notional            = Column(Numeric(20, 8), nullable=False, default=0)
+    fee                 = Column(Numeric(20, 8), nullable=False, default=0)
+    reduce_only         = Column(Boolean, nullable=False, default=False)
+    # Realised P&L (weighted-average cost). Non-zero only on closing
+    # (position-decreasing) fills.
+    realised_pnl        = Column(Numeric(20, 8), nullable=False, default=0)
+    avg_cost_basis      = Column(Numeric(20, 8), nullable=True)        # WAC of the position at fill time
+    position_qty_after  = Column(Numeric(20, 8), nullable=False)       # signed position qty after this fill
+    holding_period_sec  = Column(Numeric(20, 2), nullable=True)        # lot age when closed (closing fills only)
+    # Strategy / signal context
+    strategy            = Column(String(64), nullable=True, index=True)
+    signal_id           = Column(String, nullable=True, index=True)
+    signal_confidence   = Column(Numeric(10, 6), nullable=True)
+    mode                = Column(String(16), nullable=True)            # hunter / trader / defender
+    # Audit / reconciliation
+    is_paper            = Column(Boolean, nullable=False, default=True)
+    run_session_id      = Column(String(40), nullable=True, index=True)
+    derisk_source       = Column(String(32), nullable=True)            # intraday_derisk / aggregate_derisk / stop_loss / profit_harvest
+    order_id            = Column(String, nullable=True, index=True)    # links to orders.id
+    broker_order_id     = Column(String, nullable=True)
+    instrument_metadata = Column(JSON, nullable=True)
+
+
 class PositionLog(Base):
     """Snapshot of positions at regular intervals."""
     __tablename__ = "positions"
