@@ -27,9 +27,14 @@ auto_training:
       microstructure: 1000
 
   schedule:
-    # The helper script can be installed with Windows Task Scheduler. The
-    # schedule is documented here so the automation remains auditable in git.
-    windows_task_name: mytbot-auto-training
+    # The embedded scheduler (system/orchestrator.py::_auto_training_loop)
+    # reads this block and shells out to scripts/auto_train_models.py as
+    # a subprocess once per day at start_time_local (interpreted in the
+    # `timezone` field above). It replaced the standalone Windows
+    # scheduled task in D124 so the one-button principle holds
+    # (`python run.py` starts everything). last-run timestamp is
+    # persisted to ControlState under `auto_training.last_run_at` so
+    # an orchestrator restart cannot trigger a duplicate run.
     cadence: daily
     start_time_local: "03:20"
 

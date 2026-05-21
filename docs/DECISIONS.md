@@ -1005,6 +1005,74 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D124 — Auto-training embedded in orchestrator (2026-05-21)
+
+**Decision:** Move daily auto-training from a standalone Windows
+scheduled task into the orchestrator as a background coroutine.
+Delete the `scripts/install_auto_training_task.ps1` installer and
+unregister the existing `mytbot-auto-training` Task Scheduler entry.
+
+**Why.** D123 installed the Windows task that
+`config/auto_training.yaml` had been declaring for weeks without
+anyone noticing it was never actually registered — that silent drift
+is exactly the failure mode the one-button principle exists to
+prevent. The separate scheduled task also:
+- broke "`python run.py` starts everything" (CLAUDE.md rule),
+- was invisible to `/system/status` and the UI,
+- required re-installation on every new machine
+  (`docs/NEW_MACHINE_SETUP.md`),
+- and gave no real isolation benefit since the same `.venv` + `.env`
+  was loaded anyway.
+
+The original isolation arguments (crash containment, missed-run
+recovery, ability to run while trading is OFF) are addressed by
+running training as a subprocess from the orchestrator coroutine:
+`asyncio.create_subprocess_exec(sys.executable,
+"scripts/auto_train_models.py")`. A training crash dies in the
+subprocess and the orchestrator logs the non-zero exit code; the
+trading loop is unaffected.
+
+**What changed.**
+
+- `system/orchestrator.py`: new `_start_auto_training_loop` /
+  `_auto_training_loop` / `_auto_training_tick` /
+  `_run_auto_training_job` / `_resolve_auto_training_config` /
+  `_persist_auto_training_last_run` /
+  `_load_persisted_auto_training_last_run`. Wakes once per minute,
+  checks `config/auto_training.yaml::auto_training.{enabled,
+  schedule.start_time_local, timezone}`, fires once per local day
+  after the configured time. Last-run timestamp persists to
+  `ControlState` under `auto_training.last_run_at` (new key
+  `Orchestrator.AUTO_TRAINING_STATE_KEY`) so a restart cannot
+  trigger duplicate runs.
+- `config/auto_training.yaml`: `schedule.windows_task_name` removed
+  (no longer relevant); comment block updated to describe the
+  embedded scheduler.
+- `scripts/install_auto_training_task.ps1`: deleted.
+- Windows Task Scheduler `mytbot-auto-training`: unregistered.
+- `tests/test_auto_training_scheduler.py`: 8 unit tests covering
+  enabled-flag gating, before/after scheduled time, prior-run-today
+  vs prior-run-yesterday, subprocess-already-running guard, and YAML
+  resolver.
+
+**Operational notes.**
+
+- The trading loop starts the scheduler in `start()` right after
+  `_start_zero_alloc_flatten_watchdog()` and cancels it in `stop()`.
+- The scheduler stays alive across `/system/stop` → `/system/start`
+  cycles only if the trading loop itself stays up; this matches
+  every other background task. If the operator wants training to
+  run even while trading is OFF, leave `python run.py` alive (the
+  scheduler runs inside the orchestrator process, not the trading
+  loop, so it survives ON/OFF toggles of the trading loop).
+- New-machine setup no longer requires installing a scheduled
+  task; updating `docs/NEW_MACHINE_SETUP.md` to drop that step is
+  a follow-up.
+
+**Status:** Implemented. Restart `python run.py` to activate.
+
+---
+
 ## D123 — Meta-labeler v0.2.0: dedup fix + 30-day retrain + auto-training task (2026-05-21)
 
 **Decision:** Retrain `mytbot_meta_labeler` as v0.2.0 with two construction

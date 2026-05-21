@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import enum
 import os
+import sys
 from collections.abc import Awaitable
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -111,6 +113,12 @@ class Orchestrator:
         self._intraday_derisk_task: asyncio.Task | None = None
         self._order_reconcile_task: asyncio.Task | None = None
         self._zero_alloc_flatten_task: asyncio.Task | None = None
+        # Embedded auto-training scheduler (replaces the standalone Windows
+        # scheduled task). One-button principle: `python run.py` is the
+        # only command needed; auto-training rides along.
+        self._auto_training_task: asyncio.Task | None = None
+        self._auto_training_last_run_at: datetime | None = None
+        self._auto_training_proc_running: bool = False
         # D116 instrument-registry refresh scheduler (constituents + per-broker
         # availability). None until ``start()`` initialises it.
         self._instrument_registry_scheduler: Any = None
@@ -346,6 +354,7 @@ class Orchestrator:
                 self._start_intraday_derisk_loop()
                 self._start_order_reconcile_loop()
                 self._start_zero_alloc_flatten_watchdog()
+                self._start_auto_training_loop()
                 await self._start_instrument_registry_scheduler()
 
                 # 4. Data pipeline (background, non-blocking)
@@ -530,6 +539,14 @@ class Orchestrator:
                     pass
                 self._zero_alloc_flatten_task = None
             self._zero_alloc_flatten_last_ts = 0.0
+
+            if self._auto_training_task is not None and not self._auto_training_task.done():
+                self._auto_training_task.cancel()
+                try:
+                    await self._auto_training_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._auto_training_task = None
 
             if self._instrument_registry_scheduler is not None:
                 try:
@@ -903,6 +920,192 @@ class Orchestrator:
         self._intraday_derisk_task = asyncio.create_task(
             self._intraday_derisk_loop(), name="intraday-derisk-monitor"
         )
+
+    AUTO_TRAINING_STATE_KEY = "auto_training.last_run_at"
+
+    def _start_auto_training_loop(self) -> None:
+        """Start the embedded auto-training scheduler.
+
+        Replaces the legacy standalone Windows scheduled task. Wakes once
+        per minute, reads ``config/auto_training.yaml``, and shells out to
+        ``scripts/auto_train_models.py`` in a subprocess (process isolation
+        so a training crash cannot take down the trading loop) when the
+        configured local start time has passed and we have not already
+        run since today's start time.
+        """
+        if self._auto_training_task is not None and not self._auto_training_task.done():
+            return
+        self._auto_training_task = asyncio.create_task(
+            self._auto_training_loop(), name="auto-training-scheduler"
+        )
+
+    async def _auto_training_loop(self) -> None:
+        await self._load_persisted_auto_training_last_run()
+        # Stagger initial wake so we don't fight startup for resources.
+        try:
+            await self._sleep_cancellable(30.0)
+        except asyncio.CancelledError:
+            return
+        while True:
+            try:
+                await self._auto_training_tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | auto-training tick error: {}", exc)
+            try:
+                await self._sleep_cancellable(60.0)
+            except asyncio.CancelledError:
+                return
+
+    def _resolve_auto_training_config(self) -> tuple[bool, str, str] | None:
+        """Return (enabled, start_time_local 'HH:MM', tz_name) or None on miss."""
+        try:
+            import yaml  # type: ignore
+        except Exception:  # noqa: BLE001
+            return None
+        cfg_path = Path("config") / "auto_training.yaml"
+        if not cfg_path.is_file():
+            return None
+        try:
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | auto-training config read failed: {}", exc)
+            return None
+        section = raw.get("auto_training") if isinstance(raw, dict) else None
+        if not isinstance(section, dict):
+            return None
+        enabled = bool(section.get("enabled", False))
+        sched = section.get("schedule") if isinstance(section.get("schedule"), dict) else {}
+        start_str = str(sched.get("start_time_local", "03:20")).strip()
+        tz_name = str(section.get("timezone", "UTC")).strip() or "UTC"
+        return enabled, start_str, tz_name
+
+    async def _auto_training_tick(self) -> None:
+        if self._auto_training_proc_running:
+            return
+        resolved = self._resolve_auto_training_config()
+        if resolved is None:
+            return
+        enabled, start_str, tz_name = resolved
+        if not enabled:
+            return
+        try:
+            hh, mm = (int(x) for x in start_str.split(":", 1))
+        except (ValueError, AttributeError):
+            logger.warning(
+                "orchestrator | auto-training start_time_local '{}' is malformed; expected HH:MM",
+                start_str,
+            )
+            return
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        now_local = datetime.now(tz)
+        scheduled_today = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now_local < scheduled_today:
+            return
+        last = self._auto_training_last_run_at
+        if last is not None:
+            last_local = last.astimezone(tz) if last.tzinfo else last.replace(tzinfo=timezone.utc).astimezone(tz)
+            if last_local >= scheduled_today:
+                return
+        await self._run_auto_training_job(now_local.astimezone(timezone.utc))
+
+    async def _run_auto_training_job(self, started_utc: datetime) -> None:
+        """Launch scripts/auto_train_models.py as a subprocess."""
+        self._auto_training_proc_running = True
+        try:
+            cmd = [sys.executable, "scripts/auto_train_models.py"]
+            logger.info("orchestrator | auto-training: launching {}", " ".join(cmd))
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(Path(".").resolve()),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("orchestrator | auto-training: subprocess launch failed: {}", exc)
+                return
+            try:
+                stdout_bytes, _ = await proc.communicate()
+            except asyncio.CancelledError:
+                proc.terminate()
+                raise
+            rc = proc.returncode
+            tail = (stdout_bytes or b"").decode("utf-8", errors="replace").splitlines()[-20:]
+            if rc == 0:
+                logger.info(
+                    "orchestrator | auto-training: completed rc=0 (tail: {})",
+                    " | ".join(tail[-3:]),
+                )
+            else:
+                logger.warning(
+                    "orchestrator | auto-training: exited rc={} (tail: {})",
+                    rc,
+                    " | ".join(tail[-5:]),
+                )
+            self._auto_training_last_run_at = started_utc
+            await self._persist_auto_training_last_run()
+        finally:
+            self._auto_training_proc_running = False
+
+    async def _persist_auto_training_last_run(self) -> None:
+        try:
+            from control.command_bus import CommandBus
+            from storage.db import init_async_database, dispose_engine as _dispose
+        except Exception:  # noqa: BLE001
+            return
+        if self._auto_training_last_run_at is None:
+            return
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            await CommandBus(sf).set_state(
+                self.AUTO_TRAINING_STATE_KEY,
+                {"last_run_at": self._auto_training_last_run_at.isoformat()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | auto-training persist failed: {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
+
+    async def _load_persisted_auto_training_last_run(self) -> None:
+        try:
+            from control.command_bus import CommandBus
+            from storage.db import init_async_database, dispose_engine as _dispose
+        except Exception:  # noqa: BLE001
+            return
+        eng = None
+        try:
+            eng, sf = await init_async_database()
+            if sf is None:
+                return
+            raw = await CommandBus(sf).get_state(self.AUTO_TRAINING_STATE_KEY, None)
+            if isinstance(raw, dict) and isinstance(raw.get("last_run_at"), str):
+                try:
+                    self._auto_training_last_run_at = datetime.fromisoformat(raw["last_run_at"])
+                    logger.info(
+                        "orchestrator | auto-training last_run_at restored: {}",
+                        self._auto_training_last_run_at.isoformat(),
+                    )
+                except ValueError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | auto-training restore failed: {}", exc)
+        finally:
+            if eng is not None:
+                try:
+                    await _dispose(eng)
+                except Exception:
+                    pass
 
     def _start_order_reconcile_loop(self) -> None:
         """Start the stuck-order reconciliation task.
