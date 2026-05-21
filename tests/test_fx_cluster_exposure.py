@@ -38,6 +38,14 @@ def _engine(**overrides) -> RiskEngine:
         "max_drawdown_pct": 1.0,
         "max_loss_per_trade_pct": 1.0,
         "fx_cluster": {"enabled": True, "max_usd_directional_exposure_pct": "0.15"},
+        # D125 fix #1 / #5 — these tests pre-date the unconditional
+        # single-name + cumulative-add gates. The FX cluster scenarios
+        # use $58k notionals on a $1M book to exercise the cluster
+        # logic, which now also trips the 5% single-name cap. Disable
+        # the unrelated gates so each test remains a focused FX
+        # cluster regression.
+        "single_name_notional": {"enabled": False},
+        "intraday_symbol_adds": {"enabled": False},
     }
     cfg.update(overrides)
     return RiskEngine(cfg)

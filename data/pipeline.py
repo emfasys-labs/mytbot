@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +43,41 @@ def _clean_api_key(raw: str | None) -> str:
     if not v or v.startswith("#"):
         return ""
     return v
+
+
+def _is_non_retryable_provider_error(exc: Exception) -> bool:
+    """
+    External feed quota/payment failures are deterministic for the current
+    billing window. Retrying them burns more quota-adjacent calls and clutters
+    telemetry without improving the outcome.
+    """
+    msg = str(exc).lower()
+    non_retryable_markers = (
+        "402 payment required",
+        "payment required",
+        "daily rate limit",
+        "rate limit is 25 requests per day",
+        "standard api rate limit",
+        "quota",
+        "request limit",
+        "limit reached",
+    )
+    return any(marker in msg for marker in non_retryable_markers)
+
+
+def _safe_provider_error(exc: Exception) -> str:
+    text = str(exc)
+    replacements = (
+        (r"(api_token=)[^&\s'\"]+", r"\1***"),
+        (r"(apikey=)[^&\s'\"]+", r"\1***"),
+        (r"(api_key=)[^&\s'\"]+", r"\1***"),
+        (r"(token=)[^&\s'\"]+", r"\1***"),
+        (r"(detected your api key as )([A-Za-z0-9_\-]+)", r"\1***"),
+    )
+    safe = text
+    for pattern, repl in replacements:
+        safe = re.sub(pattern, repl, safe, flags=re.IGNORECASE)
+    return safe
 
 
 def load_pipeline_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -88,6 +124,13 @@ async def _to_thread_with_retry(
             return await asyncio.to_thread(fn, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            if _is_non_retryable_provider_error(exc):
+                logger.warning(
+                    "data | retry | {} | non_retryable=true | error={}",
+                    op_name,
+                    _safe_provider_error(exc),
+                )
+                break
             if attempt >= attempts:
                 break
             delay = min(max_delay_sec, min_delay_sec * (2 ** (attempt - 1)))
@@ -98,7 +141,7 @@ async def _to_thread_with_retry(
                 attempt,
                 attempts,
                 delay,
-                exc,
+                _safe_provider_error(exc),
             )
             await asyncio.sleep(delay)
     assert last_exc is not None
@@ -293,10 +336,11 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
         ("marketaux", results[3]),
     ):
         if isinstance(result, Exception):
-            logger.warning("data | news | source failed | source={} | {}", source, result)
+            safe_error = _safe_provider_error(result)
+            logger.warning("data | news | source failed | source={} | {}", source, safe_error)
             try:
                 await record_provider_ingest(
-                    session_factory, source, ok=False, error=str(result)[:2000]
+                    session_factory, source, ok=False, error=safe_error[:2000]
                 )
             except Exception:  # noqa: BLE001
                 pass

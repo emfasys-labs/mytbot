@@ -13,6 +13,8 @@ import time
 from types import SimpleNamespace
 import pytest
 
+from data.pipeline import _safe_provider_error, _to_thread_with_retry
+from system.orchestrator import Orchestrator
 from system.trading_loop.loop import TradingLoop
 
 
@@ -199,3 +201,55 @@ async def test_check_and_trigger_unallocated_capital_discovery_threshold_clampin
     )
     
     assert not event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sleep_cancellable_reports_forced_wake() -> None:
+    event = asyncio.Event()
+    event.set()
+
+    woke = await Orchestrator._sleep_cancellable(30.0, wake_event=event)
+
+    assert woke is True
+    assert not event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sleep_cancellable_reports_timeout() -> None:
+    woke = await Orchestrator._sleep_cancellable(0.01, chunk_sec=0.01)
+
+    assert woke is False
+
+
+@pytest.mark.asyncio
+async def test_provider_quota_error_is_not_retried() -> None:
+    calls = 0
+
+    def fail_quota() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("Marketaux error 402 Payment Required: daily request limit reached")
+
+    with pytest.raises(RuntimeError):
+        await _to_thread_with_retry(
+            fail_quota,
+            op_name="marketaux:test",
+            attempts=5,
+            min_delay_sec=0.01,
+            max_delay_sec=0.01,
+        )
+
+    assert calls == 1
+
+
+def test_provider_error_redacts_api_tokens() -> None:
+    safe = _safe_provider_error(
+        RuntimeError(
+            "Client error for url 'https://example.test/news?api_token=secret123&limit=100'; "
+            "We have detected your API key as ABC123XYZ"
+        )
+    )
+
+    assert "secret123" not in safe
+    assert "ABC123XYZ" not in safe
+    assert "api_token=***" in safe

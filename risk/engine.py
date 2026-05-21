@@ -87,6 +87,12 @@ class RiskEngine:
         self._is_killed = False
         self._disabled_brokers: set[str] = set()
         self._high_watermark = Decimal("0")
+        # D125 fix #5 — per-UTC-day cumulative-add tracker. Optimistic
+        # (incremented at signal approval, not at fill). Reset on first
+        # access after a UTC date change. See `_check_intraday_symbol_adds`
+        # and `record_open_signal_notional`.
+        self._intraday_added_notional: dict[str, Decimal] = {}
+        self._intraday_adds_day_key: str = ""
         explicit_runtime_path = config.get("runtime_state_path") or os.getenv("RISK_RUNTIME_STATE_PATH")
         self._runtime_state_path = Path(str(explicit_runtime_path or "data/runtime/risk_state.json"))
         self._runtime_state_enabled = bool(config.get("persist_runtime_state", True))
@@ -128,6 +134,13 @@ class RiskEngine:
             self._check_asset_class_limits,
             self._check_fx_cluster_exposure,
             self._check_equity_index_cluster_exposure,
+            # D125 fix #1 / #5 — single-name notional cap + per-day
+            # cumulative-add cap. Hard rails that bind regardless of
+            # ``enforce_static_exposure_caps`` (which is False by
+            # default and disables every legacy per-symbol limit).
+            # Reduce-only signals are exempt inside each check.
+            self._check_single_name_notional,
+            self._check_intraday_symbol_adds,
             self._check_consecutive_losses,
             self._check_confidence_threshold,
             self._check_theme_uniqueness,
@@ -186,6 +199,18 @@ class RiskEngine:
             logger.warning(f"RISK REJECTED {signal.signal_id} | {arb_label}")
             return decision
         checks_passed.append(arb_label)
+
+        # D125 fix #5 — record the approved open notional against the
+        # per-UTC-day cumulative-add tracker so the next signal on the
+        # same symbol can see this one even before it's filled.
+        # Reduce-only is skipped (it lowers exposure, not adds it).
+        if not self._is_reduce_only_signal(signal):
+            try:
+                proposed = self._requested_notional(signal)
+                if proposed > 0:
+                    self.record_open_signal_notional(str(signal.symbol or ""), proposed)
+            except Exception:  # noqa: BLE001 — recording is non-fatal
+                pass
 
         logger.info(f"RISK APPROVED {signal.signal_id} | {signal.symbol} {signal.side}")
         return RiskDecision(
@@ -1090,6 +1115,203 @@ class RiskEngine:
                 if s:
                     out.add(s)
         return out
+
+    # ------------------------------------------------------------------
+    # D125 fix #1 — Single-name notional cap.
+    #
+    # Hard ceiling on per-symbol exposure as a fraction of NAV, evaluated
+    # at signal-submission time. Enforced UNCONDITIONALLY (does not
+    # consult ``enforce_static_exposure_caps``), because the legacy
+    # ``max_single_stock_pct`` is documented as inert by default and the
+    # 2026-05-21 BF-B audit showed a single common equity reaching 28.5%
+    # of NAV via 38 consecutive volume_flow buys without any cap firing.
+    # The intended "adaptive sizing replaces fixed caps" philosophy has
+    # no portfolio-awareness inside the per-signal sizer, so a hard
+    # boundary at the risk engine is required.
+    #
+    # Reduce-only signals are exempt — exits must always be allowed
+    # through, especially on names already past the cap.
+    # ------------------------------------------------------------------
+    def _check_single_name_notional(self, signal, portfolio) -> tuple[bool, str]:
+        cfg = self.config.get("single_name_notional") or {}
+        if not bool(cfg.get("enabled", True)):
+            return (True, "single_name_notional")
+
+        if self._is_reduce_only_signal(signal):
+            return (True, "single_name_notional")
+
+        # Arbitrage bundles are evaluated separately by
+        # `_check_arbitrage_bundle`; per-leg notional doesn't represent
+        # the true exposure of the bundle.
+        if self._is_arbitrage_signal(signal):
+            return (True, "single_name_notional")
+
+        # Options are option-premium denominated and have a separate
+        # `options_trading` policy gate; skip here.
+        if self._is_option_signal(signal):
+            return (True, "single_name_notional")
+
+        try:
+            max_pct = Decimal(str(cfg.get("max_pct_nav", "0.05")))
+        except (InvalidOperation, TypeError, ValueError):
+            max_pct = Decimal("0.05")
+        if max_pct <= 0:
+            return (True, "single_name_notional")
+
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
+            return (True, "single_name_notional")
+
+        cap_notional = sizing_base * max_pct
+        signal_sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        if not signal_sym:
+            return (True, "single_name_notional")
+
+        proposed = self._requested_notional(signal)
+        if proposed <= 0:
+            return (True, "single_name_notional")
+
+        # Existing position notional on the same symbol (signed magnitude
+        # — we compare |projected| against the cap, so direction-agnostic
+        # for net new exposure).
+        existing = Decimal("0")
+        positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        if isinstance(positions, dict):
+            for pos_key, pos in positions.items():
+                if not isinstance(pos, dict):
+                    continue
+                # Position keys are sometimes "broker:SYMBOL" or just "SYMBOL".
+                k_sym = str(pos.get("symbol") or pos_key).split(":", 1)[-1].strip().upper()
+                if k_sym != signal_sym:
+                    continue
+                try:
+                    qty = Decimal(str(pos.get("quantity", "0") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if qty == 0:
+                    continue
+                price_raw = (
+                    pos.get("current_price")
+                    or pos.get("avg_entry_price")
+                    or pos.get("price")
+                    or "0"
+                )
+                try:
+                    price = Decimal(str(price_raw))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                existing += abs(qty) * price
+
+        projected = existing + proposed
+        if projected <= cap_notional:
+            return (True, "single_name_notional")
+
+        logger.warning(
+            "RISK single_name_notional REJECT | %s | existing=%s + proposed=%s = %s > cap=%s (%.2f%% of NAV %s)",
+            signal_sym,
+            str(existing),
+            str(proposed),
+            str(projected),
+            str(cap_notional),
+            float(max_pct * Decimal("100")),
+            str(sizing_base),
+        )
+        return (False, "single_name_notional")
+
+    # ------------------------------------------------------------------
+    # D125 fix #5 — Per-UTC-day cumulative-add cap per symbol.
+    #
+    # A complement to the single-name cap above. The 2026-05-21 audit
+    # found 38 BF-B buy signals over 35 hours, each individually under
+    # the per-action cap but jointly compounding to a 28% concentration.
+    # This bounds the cumulative net-add notional per symbol per UTC
+    # day; reduce-only is exempt.
+    #
+    # Bookkeeping is optimistic (incremented at risk APPROVAL not at
+    # fill) so the cap is conservative — if approved signals don't
+    # actually fill, the tracker overestimates and the cap binds a
+    # tick earlier than strictly necessary. That's the safe direction
+    # for a defensive limit.
+    # ------------------------------------------------------------------
+    def _check_intraday_symbol_adds(self, signal, portfolio) -> tuple[bool, str]:
+        cfg = self.config.get("intraday_symbol_adds") or {}
+        if not bool(cfg.get("enabled", True)):
+            return (True, "intraday_symbol_adds")
+
+        if self._is_reduce_only_signal(signal):
+            return (True, "intraday_symbol_adds")
+        if self._is_arbitrage_signal(signal):
+            return (True, "intraday_symbol_adds")
+        if self._is_option_signal(signal):
+            return (True, "intraday_symbol_adds")
+
+        try:
+            max_pct = Decimal(str(cfg.get("max_pct_nav", "0.10")))
+        except (InvalidOperation, TypeError, ValueError):
+            max_pct = Decimal("0.10")
+        if max_pct <= 0:
+            return (True, "intraday_symbol_adds")
+
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
+            return (True, "intraday_symbol_adds")
+
+        cap_notional = sizing_base * max_pct
+        signal_sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        if not signal_sym:
+            return (True, "intraday_symbol_adds")
+
+        proposed = self._requested_notional(signal)
+        if proposed <= 0:
+            return (True, "intraday_symbol_adds")
+
+        self._roll_intraday_adds_day_if_needed()
+        already = self._intraday_added_notional.get(signal_sym, Decimal("0"))
+        projected = already + proposed
+        if projected <= cap_notional:
+            return (True, "intraday_symbol_adds")
+
+        logger.warning(
+            "RISK intraday_symbol_adds REJECT | %s | added_today=%s + proposed=%s = %s > cap=%s (%.2f%% of NAV %s)",
+            signal_sym,
+            str(already),
+            str(proposed),
+            str(projected),
+            str(cap_notional),
+            float(max_pct * Decimal("100")),
+            str(sizing_base),
+        )
+        return (False, "intraday_symbol_adds")
+
+    def _roll_intraday_adds_day_if_needed(self) -> None:
+        """Reset the per-day cumulative-add tracker on UTC date change."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        if today != self._intraday_adds_day_key:
+            self._intraday_added_notional.clear()
+            self._intraday_adds_day_key = today
+
+    def record_open_signal_notional(self, symbol: str, notional: Decimal) -> None:
+        """Update the optimistic per-day cumulative-add tracker.
+
+        Called from ``evaluate()`` right after all gates pass (and the
+        signal is about to be returned APPROVED). Reduce-only signals
+        are not recorded — they reduce exposure, not add to it.
+        """
+        try:
+            sym = (symbol or "").strip().upper()
+            if not sym:
+                return
+            d = Decimal(str(notional))
+            if d <= 0:
+                return
+            self._roll_intraday_adds_day_if_needed()
+            self._intraday_added_notional[sym] = (
+                self._intraday_added_notional.get(sym, Decimal("0")) + d
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _check_consecutive_losses(self, signal, portfolio) -> tuple[bool, str]:
         max_losses = int(self.config.get("max_consecutive_losses", 0))

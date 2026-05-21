@@ -119,6 +119,14 @@ class Orchestrator:
         self._auto_training_task: asyncio.Task | None = None
         self._auto_training_last_run_at: datetime | None = None
         self._auto_training_proc_running: bool = False
+        # D125 fix #2 — single shared registry of in-flight derisk closes
+        # across the intraday-derisk AND aggregate-derisk loops. The
+        # 2026-05-21 BF-B audit caught both loops submitting an identical
+        # sell qty=6598.5 within 4.5 seconds — overselling the position
+        # by 2×. Key: `f"{broker}:{symbol}"` (direction-agnostic; only
+        # one derisk action per symbol allowed per cooldown window).
+        # Value: float epoch seconds of last submitted action.
+        self._derisk_inflight_ts: dict[str, float] = {}
         # D116 instrument-registry refresh scheduler (constituents + per-broker
         # availability). None until ``start()`` initialises it.
         self._instrument_registry_scheduler: Any = None
@@ -152,27 +160,29 @@ class Orchestrator:
         *,
         chunk_sec: float = 2.0,
         wake_event: asyncio.Event | None = None,
-    ) -> None:
+    ) -> bool:
         """Sleep in small slices so asyncio.Task.cancel() stops the pipeline within ~chunk_sec,
-        or wake up immediately when wake_event is set.
+        or wake up immediately when wake_event is set. Returns True when a wake
+        event interrupted the sleep, otherwise False.
         """
         remaining = max(0.0, float(total_sec))
         ch = max(0.25, min(float(chunk_sec), 30.0))
         while remaining > 0:
             if wake_event is not None and wake_event.is_set():
                 wake_event.clear()
-                break
+                return True
             step = min(ch, remaining)
             if wake_event is not None:
                 try:
                     await asyncio.wait_for(wake_event.wait(), timeout=step)
                     wake_event.clear()
-                    break
+                    return True
                 except (asyncio.TimeoutError, TimeoutError):
                     pass
             else:
                 await asyncio.sleep(step)
             remaining -= step
+        return False
 
     PROFIT_HARVEST_PEAKS_STATE_KEY = "risk.profit_harvest.peaks"
 
@@ -1107,6 +1117,39 @@ class Orchestrator:
                 except Exception:
                     pass
 
+    def _derisk_inflight_window_sec(self) -> float:
+        """D125 fix #2 — cross-loop derisk dedup window.
+
+        After ANY derisk loop (intraday-derisk or aggregate-derisk)
+        successfully submits a close/trim on `(broker, symbol)`, both
+        loops must skip that symbol for this many seconds. Prevents
+        the 4.5-second double-sell race observed in the 2026-05-21
+        BF-B audit. Tunable via env for ops; default 30s comfortably
+        covers a paper-fill round trip and a normal IBKR ack.
+        """
+        try:
+            return max(1.0, float(os.getenv("DERISK_INFLIGHT_WINDOW_SEC", "30")))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @staticmethod
+    def _symbol_is_tradeable_now(broker: str, asset_class: str, symbol: str) -> bool:
+        """D125 fix #4 — defer derisk action when the venue session is closed.
+
+        Pre-market US equity submissions are guaranteed to bounce off
+        the `core.market_session` gate inside the execution engine;
+        firing them anyway burns DB writes, log noise, and risk-engine
+        cycles. Crypto (24/7) and any asset class the session module
+        doesn't recognise default to tradeable so we never falsely
+        block a legitimate close.
+        """
+        try:
+            from core.market_session import is_tradeable
+
+            return bool(is_tradeable(str(broker or ""), str(asset_class or ""), str(symbol or "")))
+        except Exception:  # noqa: BLE001 — gate must never crash the loop
+            return True
+
     def _start_order_reconcile_loop(self) -> None:
         """Start the stuck-order reconciliation task.
 
@@ -1889,6 +1932,27 @@ class Orchestrator:
                 close_key = f"{p.broker}:{p.symbol}:{direction}"
                 if now_ts - self._stop_loss_last_close_ts.get(close_key, 0.0) < close_cooldown_sec:
                     continue
+                # D125 fix #2 — also honour the cross-loop derisk lock so
+                # we don't oversell when intraday-derisk already fired a
+                # trim/close on this symbol seconds earlier.
+                inflight_key = f"{p.broker}:{p.symbol}"
+                if now_ts - self._derisk_inflight_ts.get(inflight_key, 0.0) < self._derisk_inflight_window_sec():
+                    logger.info(
+                        "orchestrator | agg de-risk skipped | {} {} | another derisk action within cross-loop lock window",
+                        p.broker, p.symbol,
+                    )
+                    continue
+                # D125 fix #4 — never submit a derisk action to a closed
+                # session venue. Pre-open we'd burn DB writes + log noise
+                # for guaranteed-rejected orders (the 2026-05-21 BF-B
+                # pattern: 8 failed derisk attempts between 13:00–13:30
+                # UTC before NYSE open). Crypto / forex never blocked.
+                if not self._symbol_is_tradeable_now(p.broker, p.asset_class, p.symbol):
+                    logger.info(
+                        "orchestrator | agg de-risk deferred | {} {} | venue session closed",
+                        p.broker, p.symbol,
+                    )
+                    continue
                 side = "sell" if p.quantity > 0 else "buy"
                 signal = RiskSignal(
                     signal_id=f"aggderisk-{p.symbol}-{int(now_ts)}",
@@ -1937,6 +2001,10 @@ class Orchestrator:
                     "orchestrator | agg de-risk close submitted | {} {} side={} qty={} unrealised={}",
                     p.broker, p.symbol, side, abs(p.quantity), str(p.unrealised),
                 )
+                # D125 fix #2 — mark the cross-loop lock so intraday-derisk
+                # cannot also fire a close/trim on this symbol inside the
+                # cooldown window.
+                self._derisk_inflight_ts[inflight_key] = now_ts
                 await self._persist_fill_to_portfolio_state(
                     sf=sf, signal=signal, result=result, fallback_nav=nav,
                 )
@@ -2477,6 +2545,27 @@ class Orchestrator:
                 tier_idx, day_pnl, float(day_pnl / nav) if nav else 0.0, len(actions),
             )
             for action in actions:
+                # D125 fix #2 — honour the cross-loop derisk lock so
+                # aggregate-derisk doesn't fire a second close on a
+                # symbol intraday-derisk just acted on (the BF-B 4.5s
+                # double-sell pattern).
+                inflight_key = f"{action.broker}:{action.symbol}"
+                if now_ts - self._derisk_inflight_ts.get(inflight_key, 0.0) < self._derisk_inflight_window_sec():
+                    logger.info(
+                        "orchestrator | intraday-derisk skipped | {} {} | another derisk action within cross-loop lock window",
+                        action.broker, action.symbol,
+                    )
+                    continue
+                # D125 fix #4 — never submit a derisk action to a closed
+                # session venue. The 2026-05-21 BF-B audit found ~8
+                # failed pre-market attempts before the first successful
+                # post-open trim — pure log noise + DB churn.
+                if not self._symbol_is_tradeable_now(action.broker, action.asset_class, action.symbol):
+                    logger.info(
+                        "orchestrator | intraday-derisk deferred | {} {} | venue session closed",
+                        action.broker, action.symbol,
+                    )
+                    continue
                 signal = RiskSignal(
                     signal_id=f"intraday_derisk-{action.symbol}-{int(now_ts)}",
                     symbol=action.symbol,
@@ -2518,6 +2607,9 @@ class Orchestrator:
                     "orchestrator | intraday-derisk submitted | broker={} symbol={} side={} qty={} reason={}",
                     action.broker, action.symbol, action.side, action.reduce_quantity, action.reason,
                 )
+                # D125 fix #2 — set the cross-loop lock so aggregate-derisk
+                # cannot fire a second close on this symbol in the window.
+                self._derisk_inflight_ts[inflight_key] = now_ts
                 await self._persist_fill_to_portfolio_state(
                     sf=sf, signal=signal, result=result, fallback_nav=Decimal(str(nav)),
                 )
@@ -2641,6 +2733,7 @@ class Orchestrator:
         anchor_symbols = list(dict.fromkeys(anchor_symbols))
 
         first_pipeline_run = True
+        forced_discovery_cycle = False
         while True:
             eng = None
             try:
@@ -2648,6 +2741,10 @@ class Orchestrator:
                 if sf is not None:
                     if first_pipeline_run:
                         logger.info("orchestrator | pipeline | startup flush — running immediately")
+                    elif forced_discovery_cycle:
+                        logger.info(
+                            "orchestrator | pipeline | forced discovery wake — skipping news and macro feeds"
+                        )
                     if universe_mode == "dynamic":
                         if ranking_on:
                             # D117 — resolve adaptive caps for this tick.
@@ -3021,12 +3118,24 @@ class Orchestrator:
                                     "orchestrator | pipeline dynamic universe | symbols={}",
                                     len(pipeline_cfg["symbols"]),
                                 )
-                    await run_once(sf, pipeline_cfg, backfill=False)
-                    logger.info("orchestrator | pipeline cycle complete | first_run={}", first_pipeline_run)
+                    await run_once(
+                        sf,
+                        pipeline_cfg,
+                        backfill=False,
+                        include_news=not forced_discovery_cycle,
+                        include_fred=not forced_discovery_cycle,
+                    )
+                    logger.info(
+                        "orchestrator | pipeline cycle complete | first_run={} forced_discovery={}",
+                        first_pipeline_run,
+                        forced_discovery_cycle,
+                    )
                     first_pipeline_run = False
+                    forced_discovery_cycle = False
             except Exception as exc:
                 logger.warning("orchestrator | pipeline error (non-fatal): {}", exc)
                 first_pipeline_run = False  # don't retry-loop on error
+                forced_discovery_cycle = False
             finally:
                 if eng is not None:
                     try:
@@ -3034,6 +3143,9 @@ class Orchestrator:
                     except Exception:
                         pass
             try:
-                await self._sleep_cancellable(float(interval), wake_event=self._pipeline_wake_event)
+                forced_discovery_cycle = await self._sleep_cancellable(
+                    float(interval),
+                    wake_event=self._pipeline_wake_event,
+                )
             except asyncio.CancelledError:
                 return

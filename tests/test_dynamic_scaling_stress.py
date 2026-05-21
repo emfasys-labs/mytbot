@@ -11,7 +11,12 @@ def _default_cfg() -> dict:
         "arbitrage": {
             "enabled": True,
             "max_total_arbitrage_exposure": "0.20"
-        }
+        },
+        # D125 caps are tested separately in tests/test_d125_risk_caps.py;
+        # this suite exercises dynamic daily-loss / confidence scaling and
+        # uses 10% NAV per signal, which would otherwise trip D125.
+        "single_name_notional": {"enabled": False},
+        "intraday_symbol_adds": {"enabled": False},
     }
 
 def _signal(

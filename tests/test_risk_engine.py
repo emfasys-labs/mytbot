@@ -521,6 +521,11 @@ def test_static_order_caps_are_opt_in_legacy_guardrails() -> None:
     cfg["enforce_static_order_caps"] = False
     cfg["max_order_notional_usd"] = "100000"
     cfg["max_allocator_notional_multiple"] = "3"
+    # D125 introduced unconditional single-name and cumulative-add
+    # caps. They're a separate hard rail (and have their own tests),
+    # not in the "legacy opt-in" family this test pins down.
+    cfg["single_name_notional"] = {"enabled": False}
+    cfg["intraday_symbol_adds"] = {"enabled": False}
     engine = RiskEngine(cfg)
     decision = engine.evaluate(
         _signal(
@@ -545,6 +550,9 @@ def test_static_order_caps_are_opt_in_legacy_guardrails() -> None:
 def test_static_exposure_caps_are_opt_in_legacy_guardrails() -> None:
     cfg = _risk_cfg()
     cfg["enforce_static_exposure_caps"] = False
+    # See D125 note above.
+    cfg["single_name_notional"] = {"enabled": False}
+    cfg["intraday_symbol_adds"] = {"enabled": False}
     engine = RiskEngine(cfg)
     decision = engine.evaluate(
         _signal(qty="1200", price="100"),

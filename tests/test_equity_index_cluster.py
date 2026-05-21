@@ -35,6 +35,12 @@ def _engine(**overrides) -> RiskEngine:
             "max_net_exposure_pct": "0.20",
             "symbols": ["SPY", "QQQ", "IWM", "DIA", "VTI"],
         },
+        # D125 fix #1 / #5 — disable the unconditional single-name and
+        # cumulative-add gates so these tests stay focused on cluster
+        # logic; their scenarios use 10%+ single-name notionals that
+        # would otherwise trip the 5% per-name cap.
+        "single_name_notional": {"enabled": False},
+        "intraday_symbol_adds": {"enabled": False},
     }
     cfg.update(overrides)
     return RiskEngine(cfg)

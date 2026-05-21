@@ -1005,6 +1005,118 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D125 — BF-B concentration fix bundle (2026-05-21)
+
+**Decision:** Five hardening changes triggered by the 2026-05-21 BF-B
+audit, where a single common equity reached 28.5% of NAV via 38
+consecutive volume_flow buys and the resulting trim was double-sold by
+two independent derisk loops.
+
+**Audit summary.**
+
+- BF-B grew from $0 to $341,930 over 35 hours (05-20 02:54 → 05-21 03:26
+  UTC) through 38 buy signals, all volume_flow with conf 0.71–0.79.
+- Per-action sizing was bounded (~$39k pre-mode), but hunter mode
+  amplified each action up to 17× (cap $640k) and `topup=True`
+  exempted them from any "we already own a lot of this" check.
+- All legacy single-stock caps were inert by design
+  (`enforce_static_exposure_caps: false` is the documented default).
+- The intraday-derisk monitor fired every ~10 minutes pre-NYSE-open
+  trying to trim BF-B — 8 silent rejections between 13:00–13:30 UTC
+  because the market-session gate inside `execute()` bounced them.
+- At 13:39:28 UTC (post-open) intraday-derisk finally submitted
+  `sell qty=6598.5`. **4.5 seconds later** aggregate-derisk submitted
+  an identical `sell qty=6598.5`. Net result: position closed
+  completely (13,197 shares sold against a 6,598.5-share intent),
+  then re-bought 2,242 shares by a fresh mean_reversion signal four
+  minutes later.
+- The "MARKET CLOSED" / "EXECUTING" / "PAPER FILL" / "EXEC SKIP" /
+  "SIZING GUARD REJECT" lines from `execution.engine` were
+  invisible across 10MB of `logs/mytbot.log` over many hours — the
+  module uses `logging.getLogger(__name__)` and the loguru file sink
+  had no bridge to receive stdlib records.
+
+**Changes.**
+
+1. **Single-name notional cap** (`risk/engine.py::_check_single_name_notional`,
+   `config/risk_limits.yaml::single_name_notional`). Hard ceiling at
+   5% of NAV per symbol on any new open, evaluated against
+   `existing_position_notional + proposed_signal_notional`. Enforced
+   UNCONDITIONALLY (does not consult `enforce_static_exposure_caps`).
+   Reduce-only / arbitrage / options exempt.
+2. **Cross-loop derisk dedup**
+   (`Orchestrator._derisk_inflight_ts` + `_derisk_inflight_window_sec`).
+   Single shared registry keyed by `(broker, symbol)`. Both
+   intraday-derisk and aggregate-derisk loops check the lock before
+   submitting a close/trim and set it on success. Default 30s window
+   covers a paper-fill round trip and a normal IBKR ack; tunable via
+   env `DERISK_INFLIGHT_WINDOW_SEC`.
+3. **stdlib→loguru bridge** (`run.py::_LoguruInterceptHandler` +
+   `logging.basicConfig(handlers=[...], force=True)`). All stdlib
+   `logging` records (execution.engine, execution.router, execution.planner,
+   execution.wave9_runtime, ai.fusion, brokers.permissions, …) now
+   forward into the loguru file sink with correct module / function /
+   line attribution. The 24+ silent execution-path log statements
+   that hid the BF-B reject pattern are visible again.
+4. **Closed-session derisk deferral**
+   (`Orchestrator._symbol_is_tradeable_now` invoked inside both derisk
+   tick handlers). Per-symbol filter that drops derisk actions whose
+   venue session is closed at the time of the tick, deferring with an
+   INFO log instead of submitting a guaranteed-to-bounce order.
+   Crypto / unrecognised classes default to tradeable so a real close
+   is never falsely blocked. Gate failsafes return True on exception.
+5. **Per-UTC-day cumulative-add cap**
+   (`risk/engine.py::_check_intraday_symbol_adds` +
+   `RiskEngine.record_open_signal_notional` +
+   `config/risk_limits.yaml::intraday_symbol_adds`). Cumulative cap at
+   10% of NAV per symbol per UTC day. Bookkeeping is optimistic —
+   incremented at risk APPROVAL not at fill (overestimating cumulative
+   adds is the safe direction for a defensive cap). Tracker resets at
+   UTC midnight via `_roll_intraday_adds_day_if_needed`. Reduce-only /
+   arbitrage / options exempt.
+
+**Why each cap is unconditional.** The "adaptive sizing replaces fixed
+caps" philosophy embedded in `enforce_static_exposure_caps: false` has
+no portfolio-level awareness — the per-signal sizer can't tell that
+this is the 38th buy on the same ticker. D125 reintroduces the smallest
+useful set of hard rails as separate, opt-out config blocks (rather
+than reviving the legacy `max_single_stock_pct` family) so a future
+operator who wants pure adaptive sizing can set `enabled: false` on
+each without surprising the rest of the engine.
+
+**What did NOT change.** Adaptive sizing, mode amplification, hunter
+mode's `max_notional_fraction_per_action`, accumulator integration,
+meta-labeler v0.2.0, D122 dynamic thresholds, intraday-derisk tier
+table, aggregate-derisk close-budget logic. The derisk loops still
+identify the right symbols to trim — they just don't oversell, don't
+shout into closed venues, and can't paper-over a 28%-of-NAV
+concentration the engine should have refused upstream.
+
+**Tests.** `tests/test_d125_risk_caps.py` (15) +
+`tests/test_d125_derisk_dedup.py` (7) = 22 new tests, all passing.
+Three pre-existing tests updated to disable the new D125 caps in
+their fixtures (`tests/test_fx_cluster_exposure.py`,
+`tests/test_equity_index_cluster.py`, `tests/test_dynamic_scaling_stress.py`,
+`tests/test_risk_engine.py`) so they continue to exercise their
+focused subject (cluster logic, dynamic scaling, legacy-opt-in
+semantics) without tripping the new unconditional rails. Full repo
+regression: **1524 passed, 3 skipped** (one unrelated pre-existing
+failure: `test_instruments_sources_wikipedia.py` missing `lxml`
+optional dep).
+
+**Status:** Implemented. Restart `python run.py` to activate. After
+restart, expect:
+- `RISK single_name_notional REJECT | <SYMBOL> | ...` warnings if any
+  strategy tries to compound past 5% of NAV on one ticker — these are
+  the system saving you from the next BF-B.
+- `orchestrator | intraday-derisk deferred | ... | venue session closed`
+  INFO lines pre-NYSE-open instead of silent execute() bounces.
+- `EXECUTING / PAPER FILL / EXEC SKIP / MARKET CLOSED / SIZING GUARD
+  REJECT` lines from execution.engine landing in `logs/mytbot.log`
+  for the first time.
+
+---
+
 ## D124 — Auto-training embedded in orchestrator (2026-05-21)
 
 **Decision:** Move daily auto-training from a standalone Windows

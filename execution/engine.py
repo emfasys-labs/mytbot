@@ -37,6 +37,12 @@ from execution.arbitrage_executor import ArbitrageExecutor
 from execution.arbitrage_spot_executor import SpotArbitrageExecutor
 from execution.microstructure_shadow import build_microstructure_shadow_metadata
 
+# D125 — module uses stdlib logging (`logger.info("foo %s", bar)`). The
+# `LoguruInterceptHandler` installed by `run.py::_configure_logging`
+# forwards every stdlib record into the loguru file sink, so
+# `EXECUTING` / `MARKET CLOSED` / `PAPER FILL` / `EXEC SKIP` /
+# `SIZING GUARD REJECT` lines now land in `logs/mytbot.log` for
+# post-incident review.
 logger = logging.getLogger(__name__)
 
 

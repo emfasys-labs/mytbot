@@ -15,6 +15,8 @@ Press Ctrl+C to stop everything gracefully.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import signal
 import socket
@@ -26,9 +28,45 @@ from dotenv import load_dotenv
 from loguru import logger
 
 
+class _LoguruInterceptHandler(logging.Handler):
+    """D125 — bridge stdlib logging into the loguru file sink.
+
+    Modules like execution.engine, execution.router, execution.planner,
+    execution.wave9_runtime, ai.fusion, brokers.permissions, etc. use
+    `logging.getLogger(__name__)`. Without this handler their records
+    never reached the loguru file sink, so 24+ execution-path log
+    statements (EXECUTING / MARKET CLOSED / PAPER FILL / EXEC SKIP /
+    SIZING GUARD REJECT) were invisible to post-incident review. The
+    handler re-emits each stdlib record through loguru, preserving the
+    original level, module name, and stack frame depth so the existing
+    formatter renders the right `name:function:line` prefix.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        # Walk the call stack to find the caller outside the logging
+        # module — this gives loguru's `{name}:{function}:{line}` format
+        # the real source instead of `logging:callHandlers:1762`.
+        frame, depth = inspect.currentframe(), 0
+        while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+            frame = frame.f_back
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
+
+
 def _configure_logging() -> None:
     level = os.getenv("LOG_LEVEL", "INFO").upper()
     logger.remove()
+    # Install the stdlib→loguru bridge BEFORE adding sinks so the very
+    # first stdlib log line is captured. Replacing the root handlers
+    # (force=True) ensures uvicorn/asyncio/etc. don't keep a side
+    # console sink that double-emits.
+    logging.basicConfig(handlers=[_LoguruInterceptHandler()], level=0, force=True)
     logger.add(sys.stderr, level=level, format=(
         "<green>{time:HH:mm:ss}</green> | "
         "<level>{level: <8}</level> | "
