@@ -45,6 +45,13 @@ from execution.microstructure_shadow import build_microstructure_shadow_metadata
 # post-incident review.
 logger = logging.getLogger(__name__)
 
+# D129 — max lifetime of an in-process crypto-venue room reservation.
+# The reservation only bridges sub-cycle paper-wallet snapshot lag, so it
+# must never outlive a trading cycle. After this many seconds it is reset
+# regardless of whether the published `venue_deploy_room` changed — the
+# deadlock guard for a frozen snapshot.
+_CRYPTO_RESERVATION_TTL_SEC = 60.0
+
 
 class ExecutionEngine:
 
@@ -132,6 +139,12 @@ class ExecutionEngine:
         # changes and reflects the fills.
         self._crypto_paper_room_seen: dict[str, Decimal] = {}
         self._crypto_paper_room_reserved: dict[str, Decimal] = {}
+        # D129 — per-broker monotonic timestamp of the last reservation
+        # reset. The reservation only bridges sub-cycle snapshot lag; it
+        # must never outlive a cycle. Without a TTL, a frozen paper-wallet
+        # snapshot (room never changes) would leave the reservation stuck
+        # and permanently lock the venue out of new crypto opens.
+        self._crypto_paper_room_reserved_at: dict[str, float] = {}
         set_execution_engine(self)
 
     def reload_wave9_config(self) -> None:
@@ -187,9 +200,20 @@ class ExecutionEngine:
             return None, Decimal("0"), None
         room = Decimal(str(room))
         seen = self._crypto_paper_room_seen.get(broker_name_l)
-        if seen is None or seen != room:
+        # D129 — reset the in-process reservation on EITHER a room change
+        # (snapshot caught up — normal case) OR a TTL expiry. The TTL is
+        # the deadlock guard: if the paper-wallet snapshot freezes, `room`
+        # stops changing and, without this, the reservation would stick
+        # forever and lock the venue out of all new crypto opens.
+        import time as _time
+
+        now = _time.monotonic()
+        reserved_at = self._crypto_paper_room_reserved_at.get(broker_name_l, 0.0)
+        ttl_expired = (now - reserved_at) > _CRYPTO_RESERVATION_TTL_SEC
+        if seen is None or seen != room or ttl_expired:
             self._crypto_paper_room_seen[broker_name_l] = room
             self._crypto_paper_room_reserved[broker_name_l] = Decimal("0")
+            self._crypto_paper_room_reserved_at[broker_name_l] = now
         reserved = self._crypto_paper_room_reserved.get(broker_name_l, Decimal("0"))
         effective = room - reserved
         if effective < 0:

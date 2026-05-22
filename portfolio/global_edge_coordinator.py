@@ -68,6 +68,33 @@ def _decimal_or_none(v: Any) -> Decimal | None:
     return d
 
 
+def _crypto_venue_room_budget() -> Decimal | None:
+    """D129 — combined deploy room across the crypto paper-wallet venues.
+
+    Returns the shared notional budget a crypto opportunity can actually
+    be filled into (sum of each venue's ``venue_deploy_room``), or
+    ``None`` when the paper-wallet model is disabled / not applicable —
+    in which case the allocator applies no extra crypto bound (prior
+    behaviour). The allocator decrements this pool as it sizes each
+    crypto opp so it never proposes more crypto than the venues can hold.
+    """
+    try:
+        from system.paper_wallet import CRYPTO_PAPER_BROKERS, venue_deploy_room
+    except Exception:  # noqa: BLE001
+        return None
+    total = Decimal("0")
+    any_bound = False
+    for venue in CRYPTO_PAPER_BROKERS:
+        try:
+            room = venue_deploy_room(venue)
+        except Exception:  # noqa: BLE001
+            room = None
+        if room is not None:
+            any_bound = True
+            total += Decimal(str(room))
+    return total if any_bound else None
+
+
 def _canonical_position_side(raw: Any) -> str:
     """Normalise long/short labels for coordinator guards (buy/sell tolerant)."""
     s = str(raw or "long").strip().lower()
@@ -1285,6 +1312,15 @@ class GlobalEdgeCoordinator:
         # cash share is ``w_i * cash_budget``; we then convert to notional
         # via the asset-class cash factor (forex default 20% → ~5x on
         # notional, equity 1.0 → notional == cash).
+        #
+        # D129 — venue-aware crypto sizing. The crypto paper venues each
+        # have a small wallet (~$50k); their combined deploy room is a
+        # single shared pool. Without this, the allocator sizes a crypto
+        # opp at 5% of *total* NAV (~$61k) blind to the venue wallet, so
+        # the order is skipped/rerouted at execution — wasted cycles.
+        # Here the allocator clamps crypto opps to the real crypto-sleeve
+        # room and decrements the pool as it allocates.
+        crypto_room_budget = _crypto_venue_room_budget()
         out: list[CoordinatorAction] = []
         for (opp, trim_edge, topup_edge), w in zip(qualifying, weights, strict=True):
             opp_meta = opp.metadata or {}
@@ -1330,6 +1366,21 @@ class GlobalEdgeCoordinator:
                 if cap_i > room:
                     cap_i = room
                     cash_i = cap_i * cf
+            # D129 — venue-aware crypto clamp. A crypto opp can only
+            # execute against the crypto paper venues' shared deploy
+            # room. Clamp to the remaining pool and decrement it; when
+            # the pool is exhausted, skip the opp cleanly here rather
+            # than letting execution waste a cycle on a doomed order.
+            crypto_clamped = False
+            if crypto_room_budget is not None and opp_ac == "crypto":
+                if crypto_room_budget <= 0:
+                    continue
+                if cap_i > crypto_room_budget:
+                    cap_i = crypto_room_budget
+                    cash_i = cap_i * cf
+                    crypto_clamped = True
+                crypto_room_budget -= cap_i
+
             cap_i = cap_i.quantize(Decimal("0.01"))
             cash_i = cash_i.quantize(Decimal("0.01"))
             if cap_i <= 0:
@@ -1376,6 +1427,8 @@ class GlobalEdgeCoordinator:
             # Set it here so the adaptive path participates in the same audit
             # contract as the legacy directional path.
             action_meta["sizing_final_capital_required"] = str(cap_i)
+            if crypto_clamped:
+                action_meta["sizing_crypto_venue_clamped"] = True
             action_meta["sizing_gross_target_capital"] = str(gross_target_capital)
             action_meta["sizing_qualifying_count"] = str(len(qualifying))
             action_meta["sizing_pre_mode_capital"] = str(opp.capital_required)

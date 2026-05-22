@@ -1005,6 +1005,47 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D129 — Crypto venue-aware sizing + reservation TTL (2026-05-22)
+
+**Decision:** Two crypto-venue fixes — a TTL on the execution-side room
+reservation, and venue-aware crypto sizing in the allocator.
+
+**Context.** A health-check dig into the `EXEC SKIP (venue paper
+capital)` lines confirmed they are *not* a bug — the crypto paper
+wallets are genuinely small (~$50k each) and Kraken/Binance were full
+($184k / $142k gross on $50k wallets; crypto shorts count toward
+`gross_mv`). The bound + reroute work correctly. But the investigation
+surfaced two real issues.
+
+**P1 — reservation TTL (deadlock guard).** `execution/engine.py`
+tracks an in-process per-venue room reservation
+(`_crypto_paper_room_reserved`) to bridge sub-cycle paper-wallet
+snapshot lag. It reset *only* when the published `venue_deploy_room`
+changed. If that snapshot ever froze (heartbeat stall), `room` would
+stop changing, the reservation would never reset, and the venue would
+be **permanently locked out of all new crypto opens** even after
+positions closed. Fix: reset the reservation on a TTL too —
+`_CRYPTO_RESERVATION_TTL_SEC = 60s` — since the reservation only ever
+bridges a single cycle. A new `_crypto_paper_room_reserved_at`
+timestamp drives it.
+
+**P2 — venue-aware crypto sizing.** The D015 allocator
+(`global_edge_coordinator`) sized crypto opportunities at a fraction of
+*total* NAV (~$61k at the 5% single-name cap), blind to the destination
+crypto venue's ~$50k wallet — so the order was clamped/rerouted/skipped
+at execution, wasting allocator cycles. Fix: `_crypto_venue_room_budget()`
+sums the crypto venues' combined deploy room; the action-emit loop
+clamps each crypto opportunity's capital to the remaining pool and
+decrements it, skipping cleanly once exhausted. Stamps
+`sizing_crypto_venue_clamped` for observability. Returns `None` (no
+bound, prior behaviour) when the paper-wallet model is disabled.
+
+**Tests.** `tests/test_d129_crypto_venue_sizing.py` — 8 tests (TTL
+reset / persist / room-change reset; budget sum / none / partial;
+clamp-decrement semantics). Full suite: 1636 passed, 3 skipped.
+
+---
+
 ## D128 — ib_insync market-depth crash fix (2026-05-22)
 
 **Decision:** Monkey-patch `ib_insync.wrapper.Wrapper.updateMktDepthL2`
