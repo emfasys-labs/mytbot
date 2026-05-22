@@ -821,6 +821,24 @@ export type ConnectHubConnector = {
   notes?: string | null;
   status?: Record<string, unknown>;
   next_actions?: Array<{ kind: string; label: string }>;
+  /** D127 P2 — certification tier: 'certified' may execute, 'experimental' informs only. */
+  certification?: string;
+};
+
+/** D127 P1 — POST /connect/test result. */
+export type ConnectTestResponse = {
+  ok: boolean;
+  connector: { category: string; id: string };
+  status: string;
+  probe: {
+    ok: boolean;
+    partial: boolean;
+    reason: string;
+    detected_capabilities: Record<string, boolean>;
+    latency_ms?: number | null;
+  };
+  state_persisted: boolean;
+  connect_hub: ConnectHubResponse;
 };
 
 export type ConnectHubResponse = {
@@ -1016,6 +1034,8 @@ export const api = {
     postJsonBody<ConnectControlResponse>('/connect/enable', body),
   deleteConnector: (body: ConnectControlRequest) =>
     postJsonBody<ConnectControlResponse>('/connect/delete', body),
+  testConnector: (body: { category: string; connector_id: string }) =>
+    postJsonBody<ConnectTestResponse>('/connect/test', body),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND
