@@ -393,11 +393,15 @@ function AiStageCard({
 }: {
   stage: AiPipelineStage;
   connector?: ConnectHubConnector;
-  onConfigure: (row: ConnectHubConnector) => void;
+  onConfigure: (stage: AiPipelineStage, connector?: ConnectHubConnector) => void;
   onToggle: (stage: AiPipelineStage) => void;
   busy?: boolean;
 }) {
   const modelLine = aiModelLine(stage);
+  // Local LLM opens the model catalogue; other stages open the env wizard.
+  const isLocal = stage.id === 'local_reasoning';
+  const canConfigure = isLocal || !!connector;
+  const configureLabel = isLocal ? 'Models' : 'Configure';
   // Disable is blocked for the core (rules) and for FinBERT while it is
   // the only sentiment provider (P3). The backend also enforces this.
   const disableBlocked = stage.enabled && !stage.can_disable;
@@ -474,11 +478,11 @@ function AiStageCard({
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           <button
             type="button"
-            disabled={!connector}
-            onClick={() => connector && onConfigure(connector)}
-            style={{ ...cardButtonStyle(), flex: '1 1 70px', opacity: connector ? 1 : 0.5 }}
+            disabled={!canConfigure}
+            onClick={() => canConfigure && onConfigure(stage, connector)}
+            style={{ ...cardButtonStyle(), flex: '1 1 70px', opacity: canConfigure ? 1 : 0.5 }}
           >
-            Configure
+            {configureLabel}
           </button>
           <button
             type="button"
@@ -508,7 +512,7 @@ function AiPipelineGrid({
 }: {
   aiConnectors: ConnectHubConnector[];
   refreshKey: number;
-  onConfigure: (row: ConnectHubConnector) => void;
+  onConfigure: (stage: AiPipelineStage, connector?: ConnectHubConnector) => void;
   onToggle: (stage: AiPipelineStage) => void;
   busyKey: string | null;
 }) {
@@ -565,6 +569,200 @@ function AiPipelineGrid({
   );
 }
 
+// ── D127 P4 — Local LLM catalogue modal ──────────────────────────────────────
+
+function localFitnessTone(fitness: string): 'profit' | 'info' | 'caution' | 'neutral' {
+  if (fitness === 'recommended') return 'profit';
+  if (fitness === 'available') return 'info';
+  if (fitness === 'too_slow') return 'caution';
+  return 'neutral';
+}
+
+function LocalLlmCatalogueModal({
+  accentColor,
+  onClose,
+  onChanged,
+}: {
+  accentColor: string;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [cat, setCat] = useState<import('../lib/api').LocalLlmCatalogue | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [busyModel, setBusyModel] = useState<string | null>(null);
+
+  const refetch = () => {
+    setLoading(true);
+    api.getLocalLlmCatalogue()
+      .then((c) => { setCat(c); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { refetch(); }, []);
+
+  async function runMutation<T>(fn: () => Promise<T>): Promise<T | null> {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('(401)')) {
+        const token = window.prompt('Control token required');
+        if (token?.trim()) {
+          setApiControlToken(token.trim());
+          try { return await fn(); }
+          catch (retry) { setError(retry instanceof Error ? retry.message : String(retry)); return null; }
+        }
+      }
+      setError(msg);
+      return null;
+    }
+  }
+
+  const install = async (id: string) => {
+    setBusyModel(id);
+    setError(null);
+    setMessage(`Installing ${id} — the model download and certification can take several minutes…`);
+    const res = await runMutation(() => api.installLocalLlm({ model_id: id }));
+    setBusyModel(null);
+    if (res) {
+      setMessage(res.ok ? `${id} installed and certified.` : `${id}: install or certification failed.`);
+      refetch();
+    }
+  };
+  const activate = async (id: string) => {
+    setBusyModel(id);
+    setError(null);
+    setMessage(null);
+    const res = await runMutation(() => api.activateLocalLlm({ model_id: id }));
+    setBusyModel(null);
+    if (res) {
+      setMessage(res.next_step || `${id} is now the active Local LLM.`);
+      refetch();
+      onChanged();
+    }
+  };
+
+  const probe = cat?.machine_probe;
+  const probeCells: Array<[string, string]> = probe ? [
+    ['CPU', `${probe.cpu_count} cores`],
+    ['RAM', `${probe.ram_gb} GB`],
+    ['GPU', probe.gpu_present ? `${probe.gpu_name ?? 'present'} · ${probe.vram_gb} GB` : 'none'],
+    ['Disk free', `${probe.disk_free_gb} GB`],
+    ['Ollama', probe.ollama_available ? 'available' : 'not found'],
+  ] : [];
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 92, background: 'rgba(0,0,0,0.58)',
+        backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center',
+        justifyContent: 'center', padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 660, maxWidth: 'min(660px, 94vw)', maxHeight: '88vh', overflow: 'auto',
+          borderRadius: 10, border: `1px solid ${TOKENS.lineStrong}`, background: TOKENS.bg1,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.65)', padding: 18,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Label accent={accentColor}>Local LLM catalogue</Label>
+            <div style={{ marginTop: 6, fontFamily: TOKENS.sans, fontSize: 18, fontWeight: 560, color: TOKENS.ink0 }}>
+              Supported local models
+            </div>
+            <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+              Curated, tested models only — install via Ollama, then activate.
+            </div>
+          </div>
+          <button type="button" onClick={onClose} style={cardButtonStyle()}>Close</button>
+        </div>
+
+        {probe ? (
+          <div style={{
+            display: 'grid', gridTemplateColumns: `repeat(${probeCells.length}, 1fr)`,
+            gap: 8, marginBottom: 12,
+          }}>
+            {probeCells.map(([k, v]) => (
+              <div key={k} style={{
+                border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: '8px 10px', background: TOKENS.bg0,
+              }}>
+                <div style={{ fontFamily: TOKENS.mono, fontSize: 9, color: TOKENS.ink3, textTransform: 'uppercase' }}>{k}</div>
+                <div style={{ marginTop: 3, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink1 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {cat && !cat.local_llm_available ? (
+          <div style={{ marginBottom: 12 }}>
+            <Pill tone="caution">Local LLM unavailable — {cat.unavailable_reason}</Pill>
+          </div>
+        ) : null}
+        {message ? <div style={{ marginBottom: 10 }}><Pill tone="info">{message}</Pill></div> : null}
+        {error ? <div style={{ marginBottom: 10 }}><Pill tone="danger">{error}</Pill></div> : null}
+        {loading && !cat ? (
+          <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>loading catalogue…</div>
+        ) : null}
+
+        <div style={{ display: 'grid', gap: 8 }}>
+          {(cat?.models ?? []).map((m) => {
+            const busy = busyModel === m.id;
+            const unsupported = m.fitness === 'unsupported';
+            return (
+              <div key={m.id} style={{
+                border: `1px solid ${TOKENS.line}`, borderRadius: 8, background: TOKENS.bg0,
+                padding: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+              }}>
+                <div style={{ flex: '1 1 200px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 550, color: TOKENS.ink0 }}>
+                      {m.label}
+                    </span>
+                    <Pill size="sm" tone={localFitnessTone(m.fitness)}>{m.fitness}</Pill>
+                    {m.installed ? <Pill size="sm" tone="profit">installed</Pill> : null}
+                  </div>
+                  <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                    {m.id} · {m.params} · {m.disk_gb} GB · needs {m.min_ram_gb} GB RAM / {m.min_vram_gb} GB VRAM
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {m.installed ? (
+                    <button
+                      type="button" disabled={busy}
+                      onClick={() => activate(m.id)}
+                      style={{ ...cardButtonStyle(accentColor), minWidth: 78 }}
+                    >
+                      {busy ? '…' : 'Activate'}
+                    </button>
+                  ) : unsupported ? (
+                    <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>
+                      not supported here
+                    </span>
+                  ) : (
+                    <button
+                      type="button" disabled={busy || busyModel !== null}
+                      onClick={() => install(m.id)}
+                      style={{ ...cardButtonStyle(TOKENS.info), minWidth: 78 }}
+                    >
+                      {busy ? 'installing…' : 'Install'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ConnectScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const hub = live.connectHub;
@@ -578,6 +776,14 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   const [actionError, setActionError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, ConnectorTestState>>({});
   const [aiRefreshKey, setAiRefreshKey] = useState(0);
+  const [localCatalogueOpen, setLocalCatalogueOpen] = useState(false);
+  const handleAiConfigure = (stage: AiPipelineStage, connector?: ConnectHubConnector) => {
+    if (stage.id === 'local_reasoning') {
+      setLocalCatalogueOpen(true);
+      return;
+    }
+    if (connector) setSelected(connector);
+  };
   const runControl = async (
     row: ConnectHubConnector,
     fn: () => Promise<{ next_step?: string }>,
@@ -766,7 +972,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
               <AiPipelineGrid
                 aiConnectors={categories['ai_providers'] ?? []}
                 refreshKey={aiRefreshKey}
-                onConfigure={setSelected}
+                onConfigure={handleAiConfigure}
                 onToggle={toggleAiStage}
                 busyKey={actionBusy}
               />
@@ -822,6 +1028,16 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
           onClose={() => setAddOpen(false)}
           onSaved={() => {
             setAddOpen(false);
+            live.refresh();
+          }}
+        />
+      )}
+      {localCatalogueOpen && (
+        <LocalLlmCatalogueModal
+          accentColor={accentColor}
+          onClose={() => setLocalCatalogueOpen(false)}
+          onChanged={() => {
+            setAiRefreshKey((k) => k + 1);
             live.refresh();
           }}
         />

@@ -846,6 +846,40 @@ export type AiPipelineView = {
   enabled_count: number;
 };
 
+/** D127 P4 — machine probe + Local LLM catalogue. */
+export type MachineProbe = {
+  cpu_count: number;
+  ram_gb: number;
+  gpu_present: boolean;
+  gpu_name: string | null;
+  vram_gb: number;
+  disk_free_gb: number;
+  ollama_available: boolean;
+  ollama_url: string;
+  accelerated: boolean;
+};
+
+export type LocalLlmModel = {
+  id: string;
+  label: string;
+  params: string;
+  disk_gb: number;
+  min_ram_gb: number;
+  min_vram_gb: number;
+  quality_rank: number;
+  notes?: string | null;
+  fitness: string;       // recommended | available | too_slow | unsupported
+  installed: boolean;
+};
+
+export type LocalLlmCatalogue = {
+  machine_probe: MachineProbe;
+  models: LocalLlmModel[];
+  recommended_model: string | null;
+  local_llm_available: boolean;
+  unavailable_reason: string;
+};
+
 /** D127 P1 — POST /connect/test result. */
 export type ConnectTestResponse = {
   ok: boolean;
@@ -1058,6 +1092,11 @@ export const api = {
   testConnector: (body: { category: string; connector_id: string }) =>
     postJsonBody<ConnectTestResponse>('/connect/test', body),
   getAiPipeline: () => getJson<AiPipelineView>('/connect/ai/pipeline'),
+  getLocalLlmCatalogue: () => getJson<LocalLlmCatalogue>('/connect/ai/local/catalogue'),
+  installLocalLlm: (body: { model_id: string }) =>
+    postJsonBody<{ ok: boolean; result: Record<string, unknown> }>('/connect/ai/local/install', body),
+  activateLocalLlm: (body: { model_id: string }) =>
+    postJsonBody<{ ok: boolean; active_local_model: string; next_step?: string }>('/connect/ai/local/activate', body),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND
