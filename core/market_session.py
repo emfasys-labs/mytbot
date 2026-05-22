@@ -17,8 +17,9 @@ returns ``False`` only when we are confident the market is closed; unknown
 asset classes and 24/7 venues are never blocked.
 
 Toggle: ``MARKET_SESSION_GATE=0`` disables the gate entirely (default on).
-``MARKET_SESSION_EXTENDED=1`` widens US equity hours to 04:00–20:00 ET
-(pre/post-market) instead of the 09:30–16:00 regular session.
+``MARKET_SESSION_EXTENDED=1`` widens the default US equity hours to
+04:00–20:00 ET (pre/post-market) instead of the 09:30–16:00 regular
+session. Broker config can also opt a venue into extended equity hours.
 """
 
 from __future__ import annotations
@@ -40,8 +41,8 @@ _DEFAULT_BROKER_SESSION: dict[str, str] = {
     "kraken": "always",
     "binance": "always",
     "bybit": "always",
-    "ibkr": "by_asset_class",
-    "alpaca": "by_asset_class",
+    "ibkr": "by_asset_class_extended",
+    "alpaca": "by_asset_class_extended",
 }
 
 
@@ -129,6 +130,8 @@ def is_market_open(
     asset_class: object,
     symbol: str = "",
     now: datetime | None = None,
+    *,
+    extended_hours: bool | None = None,
 ) -> bool:
     """True if the instrument's venue can actually transact at ``now``.
 
@@ -169,7 +172,8 @@ def is_market_open(
             return False
         if et.strftime("%Y-%m-%d") in _US_EQUITY_HOLIDAYS:
             return False
-        if _extended_hours():
+        use_extended = _extended_hours() if extended_hours is None else bool(extended_hours)
+        if use_extended:
             open_t, close_t = time(4, 0), time(20, 0)
         else:
             open_t, close_t = time(9, 30), time(16, 0)
@@ -209,6 +213,8 @@ def is_tradeable(
       * ``always``         → 24/7 venue (crypto exchanges) → True.
       * ``by_asset_class`` → defer to the proven ``is_market_open``
         (US equity RTH+holidays / FX 24x5 / crypto 24/7).
+      * ``by_asset_class_extended`` → same, but US equities/ETFs/options
+        use the real 04:00–20:00 ET extended-hours session.
 
     Used upstream (candidate/opportunity selection, the harvest/stop/
     de-risk monitors) AND at the execution gate, so the whole pipeline
@@ -223,6 +229,8 @@ def is_tradeable(
     policy = smap.get(b) or smap.get("__default__", "by_asset_class")
     if policy == "always":
         return True
+    if policy in {"by_asset_class_extended", "us_equity_extended", "extended"}:
+        return is_market_open(asset_class, symbol, now, extended_hours=True)
     return is_market_open(asset_class, symbol, now)
 
 
@@ -236,7 +244,21 @@ def not_tradeable_reason(
     if is_tradeable(broker, asset_class, symbol, now):
         return None
     b = str(getattr(broker, "value", broker) or "").strip().lower()
-    base = market_closed_reason(asset_class, symbol, now) or "venue_closed"
+    smap = _broker_session_map()
+    policy = smap.get(b) or smap.get("__default__", "by_asset_class")
+    if policy in {"by_asset_class_extended", "us_equity_extended", "extended"}:
+        if is_market_open(asset_class, symbol, now, extended_hours=True):
+            base = None
+        else:
+            ac = _norm_ac(asset_class)
+            when = (now or datetime.now(timezone.utc)).astimezone(_ET)
+            base = (
+                f"market_closed:{ac or 'unknown'}:"
+                f"{when.strftime('%a %Y-%m-%d %H:%M')}_ET"
+            )
+    else:
+        base = market_closed_reason(asset_class, symbol, now)
+    base = base or "venue_closed"
     return f"{base}:broker={b or 'unknown'}"
 
 
@@ -281,6 +303,10 @@ def session_close_at(
         return close_dt
     if ac in _EQUITY_AC:
         et = now.astimezone(_ET)
+        # Session-exit policy remains anchored to the regular close unless
+        # the operator globally opts into extended-hours close handling. A
+        # broker may permit pre/post-market entry without changing the bell
+        # used for intraday de-risk / close-before-close logic.
         close_t = time(20, 0) if _extended_hours() else time(16, 0)
         close_et = datetime.combine(et.date(), close_t, tzinfo=_ET)
         close_utc = close_et.astimezone(timezone.utc)

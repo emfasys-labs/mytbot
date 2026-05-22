@@ -67,8 +67,11 @@ def _iso_now() -> str:
 
 
 def _bybit_symbol(symbol: str) -> str:
-    """BTC/USDT -> BTCUSDT."""
-    return symbol.strip().upper().replace(" ", "").replace("/", "").replace("-", "")
+    """BTC/USDT -> BTCUSDT; canonical BTC-USD uses the USDT venue book."""
+    s = symbol.strip().upper().replace(" ", "").replace("/", "-")
+    if s.endswith("-USD"):
+        s = f"{s[:-4]}-USDT"
+    return s.replace("-", "")
 
 
 def _map_order_status(s: str | None) -> OrderStatus:
@@ -955,4 +958,3 @@ class BybitAdapter(BrokerAdapter):
             return p.normalize()
         except Exception:
             return price
-

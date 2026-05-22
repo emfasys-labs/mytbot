@@ -158,6 +158,11 @@ class _FakeBroker:
         return price
 
 
+class _FakeCryptoBroker(_FakeBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.broker_name = "kraken"
+
 
 def _approved_decision() -> RiskDecision:
     return RiskDecision(
@@ -232,12 +237,157 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     broker = _FakeBroker()
     monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
 
-    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True, allowed_brokers=["kraken"])
     result = await engine.execute(_signal(), _approved_decision())
     assert result is not None
     assert result.status == OrderStatus.FILLED
     assert broker.place_calls == 0
     assert risk.killed is False
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_wallet_room_clamps_instead_of_skipping(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    broker = _FakeCryptoBroker()
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+    monkeypatch.setattr("system.paper_wallet.venue_deploy_room", lambda _broker: Decimal("50"))
+
+    sig = Signal(
+        signal_id="s-crypto",
+        symbol="BTC-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("2"),
+        suggested_price=Decimal("100"),
+        broker="kraken",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True, allowed_brokers=["kraken"])
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is not None
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_quantity == Decimal("0.5")
+    assert sig.suggested_quantity == Decimal("0.5")
+    assert sig.metadata["crypto_venue_room_clamped"] is True
+    assert sig.metadata["risk_notional_override"] == "50"
+    assert engine.last_skip_reason is None
+
+    sig2 = Signal(
+        signal_id="s-crypto-2",
+        symbol="ETH-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("2"),
+        suggested_price=Decimal("100"),
+        broker="kraken",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    result2 = await engine.execute(sig2, _approved_decision())
+
+    assert result2 is None
+    assert engine.last_skip_reason == "crypto_venue_capital_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_wallet_exhausted_reservation_reroutes_to_next_venue(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+
+    def _fake_get_broker(name, *args, **kwargs):
+        broker = _FakeCryptoBroker()
+        broker.broker_name = str(name).strip().lower()
+        return broker
+
+    monkeypatch.setattr("execution.engine.get_broker", _fake_get_broker)
+    monkeypatch.setattr(
+        "system.paper_wallet.venue_deploy_room",
+        lambda broker: {"binance": Decimal("50"), "bybit": Decimal("75"), "kraken": Decimal("0")}.get(broker),
+    )
+
+    engine = ExecutionEngine(
+        broker_configs={},
+        paper_mode=True,
+        allowed_brokers=["binance", "bybit", "kraken"],
+    )
+
+    sig1 = Signal(
+        signal_id="s-crypto-1",
+        symbol="BTC-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("2"),
+        suggested_price=Decimal("100"),
+        broker="binance",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    result1 = await engine.execute(sig1, _approved_decision())
+
+    assert result1 is not None
+    assert result1.status == OrderStatus.FILLED
+    assert result1.filled_quantity == Decimal("0.5")
+    assert engine._crypto_paper_room_reserved["binance"] == Decimal("50")
+
+    sig2 = Signal(
+        signal_id="s-crypto-2",
+        symbol="ETH-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("0.3"),
+        suggested_price=Decimal("100"),
+        broker="binance",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    result2 = await engine.execute(sig2, _approved_decision())
+
+    assert result2 is not None
+    assert result2.status == OrderStatus.FILLED
+    assert result2.filled_quantity == Decimal("0.3")
+    assert engine._crypto_paper_room_reserved["bybit"] == Decimal("30.0")
+    assert engine.last_skip_reason is None
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_wallet_zero_room_still_skips(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    broker = _FakeCryptoBroker()
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+    monkeypatch.setattr("system.paper_wallet.venue_deploy_room", lambda _broker: Decimal("0"))
+
+    sig = Signal(
+        signal_id="s-crypto",
+        symbol="BTC-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("2"),
+        suggested_price=Decimal("100"),
+        broker="kraken",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is None
+    assert engine.last_skip_reason == "crypto_venue_capital_exhausted"
 
 
 def test_build_order_preserves_signal_metadata_for_audit() -> None:

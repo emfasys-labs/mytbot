@@ -96,6 +96,28 @@ def test_resolve_one_ibkr_requires_qualification_when_unknown() -> None:
     assert res.broker_symbol == "HSBA"  # IBKR uses base ticker; exchange/currency handled at qualification
 
 
+def test_resolve_one_ibkr_crypto_support_is_whitelisted() -> None:
+    res = _resolve_one(
+        _row("BTC-USD", asset_class="crypto"),
+        broker="ibkr",
+        catalog=set(),
+        ibkr_qualified=set(),
+        config=AvailabilityResolverConfig(),
+    )
+    assert res.status == "requires_qualification"
+    assert res.broker_symbol == "BTC"
+
+    unsupported = _resolve_one(
+        _row("AAVE-USD", asset_class="crypto"),
+        broker="ibkr",
+        catalog=set(),
+        ibkr_qualified=set(),
+        config=AvailabilityResolverConfig(),
+    )
+    assert unsupported.status == "unavailable"
+    assert unsupported.broker_symbol is None
+
+
 def test_resolve_one_ibkr_available_when_in_catalog_or_qualified() -> None:
     res = _resolve_one(
         _row("SPY"),

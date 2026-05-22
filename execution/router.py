@@ -237,6 +237,25 @@ class SmartOrderRouter:
                 permitted.sort(key=_rank_key)
             fiat_usd_pair = sym_u.endswith("-USD") or sym_u.endswith("/USD")
             if fiat_usd_pair and "kraken" in permitted and not _truthy(md.get("allow_usd_stablecoin_conversion")):
+                try:
+                    from system.paper_wallet import venue_deploy_room
+
+                    room = venue_deploy_room("kraken")
+                except Exception:  # noqa: BLE001
+                    room = None
+                if room is None or room > 0:
+                    return "kraken"
+                # Canonical *-USD crypto can use USDT books when Kraken has no
+                # deployable room. Prefer Binance spot before Bybit because
+                # Bybit availability may represent derivatives/perp access.
+                converted = [b for b in ("binance", "bybit") if b in permitted]
+                for broker in converted:
+                    try:
+                        broker_room = venue_deploy_room(broker)
+                    except Exception:  # noqa: BLE001
+                        broker_room = None
+                    if broker_room is None or broker_room > 0:
+                        return broker
                 return "kraken"
             if not _truthy(md.get("allow_bybit_spot_usd")):
                 if fiat_usd_pair:

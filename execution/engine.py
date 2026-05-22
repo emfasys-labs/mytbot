@@ -126,6 +126,12 @@ class ExecutionEngine:
         self._run_session_id = uuid.uuid4().hex[:16]
         # D126 — oversell guard counter (ops visibility).
         self.oversell_guard_clamped = 0
+        # D125.2 — no-native-paper crypto venues expose deploy room through
+        # a heartbeat snapshot. Several orders in one trading cycle can see
+        # the same snapshot, so reserve room in-process until the snapshot
+        # changes and reflects the fills.
+        self._crypto_paper_room_seen: dict[str, Decimal] = {}
+        self._crypto_paper_room_reserved: dict[str, Decimal] = {}
         set_execution_engine(self)
 
     def reload_wave9_config(self) -> None:
@@ -162,6 +168,55 @@ class ExecutionEngine:
     def _clear_broker_balance_exhausted(self, broker_name: str) -> None:
         if broker_name in self._broker_balance_exhausted_until:
             self._broker_balance_exhausted_until.pop(broker_name, None)
+
+    def _crypto_paper_effective_room(self, broker_name: str) -> tuple[Decimal | None, Decimal, Decimal | None]:
+        """Return raw room, in-process reservation, and effective room.
+
+        The heartbeat snapshot can lag several orders inside one allocator
+        cycle, so execution tracks local reservations until the venue's
+        published room changes.
+        """
+        broker_name_l = (broker_name or "").strip().lower()
+        try:
+            from system.paper_wallet import venue_deploy_room
+
+            room = venue_deploy_room(broker_name_l)
+        except Exception:  # noqa: BLE001
+            return None, Decimal("0"), None
+        if room is None:
+            return None, Decimal("0"), None
+        room = Decimal(str(room))
+        seen = self._crypto_paper_room_seen.get(broker_name_l)
+        if seen is None or seen != room:
+            self._crypto_paper_room_seen[broker_name_l] = room
+            self._crypto_paper_room_reserved[broker_name_l] = Decimal("0")
+        reserved = self._crypto_paper_room_reserved.get(broker_name_l, Decimal("0"))
+        effective = room - reserved
+        if effective < 0:
+            effective = Decimal("0")
+        return room, reserved, effective
+
+    def _crypto_paper_fallback_broker(self, current_broker: str, attempted: set[str]) -> str | None:
+        """Find another synthetic crypto venue with deployable room."""
+        current = (current_broker or "").strip().lower()
+        allowed = set(self.allowed_brokers or [])
+        for candidate in ("binance", "bybit", "kraken"):
+            if candidate == current or candidate in attempted:
+                continue
+            if allowed and candidate not in allowed:
+                continue
+            bm = getattr(self, "_broker_manager", None)
+            is_avail = getattr(bm, "is_broker_available", None) if bm is not None else None
+            if callable(is_avail):
+                try:
+                    if not is_avail(candidate):
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+            _room, _reserved, effective = self._crypto_paper_effective_room(candidate)
+            if effective is None or effective > 0:
+                return candidate
+        return None
 
     def add_allowed_broker(self, name: str) -> None:
         """Register a venue that became available after engine construction (e.g. late IBKR connect)."""
@@ -391,6 +446,12 @@ class ExecutionEngine:
             # dynamic stop on the Kraken-style bleed the realised-only
             # governor was structurally blind to.
             _cap_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+            _attempted_crypto_venues = {
+                str(v).strip().lower()
+                for v in (_cap_md.get("crypto_venue_rerouted_from") or [])
+                if str(v).strip()
+            }
+            _attempted_crypto_venues.add(broker_name_l)
             _is_close = bool(
                 getattr(order, "reduce_only", False)
                 or getattr(signal, "reduce_only", False)
@@ -401,25 +462,68 @@ class ExecutionEngine:
             )
             if not _is_close:
                 try:
-                    from system.paper_wallet import venue_deploy_room
-
-                    room = venue_deploy_room(broker_name_l)
+                    room, reserved, effective_room = self._crypto_paper_effective_room(broker_name_l)
                     if room is not None:
                         _px = (
                             signal.suggested_price
                             or order.limit_price
                             or Decimal("0")
                         )
+                        _px = Decimal(str(_px or 0))
                         _notional = abs(Decimal(str(order.quantity or 0))) * Decimal(str(_px or 0))
-                        if _notional > room:
-                            self.last_skip_reason = "crypto_venue_capital_exhausted"
-                            logger.warning(
-                                "EXEC SKIP (venue paper capital) | %s %s broker=%s "
-                                "notional=%.2f > room=%.2f — venue wallet bound",
+                        if _notional > effective_room:
+                            if effective_room <= 0 or _px <= 0:
+                                fallback_broker = self._crypto_paper_fallback_broker(
+                                    broker_name_l,
+                                    _attempted_crypto_venues,
+                                )
+                                if fallback_broker:
+                                    new_md = dict(signal.metadata or {})
+                                    rerouted_from = list(new_md.get("crypto_venue_rerouted_from") or [])
+                                    if broker_name_l not in rerouted_from:
+                                        rerouted_from.append(broker_name_l)
+                                    new_md["crypto_venue_rerouted_from"] = rerouted_from
+                                    new_md["crypto_venue_rerouted_reason"] = "paper_room_exhausted"
+                                    logger.info(
+                                        "EXEC REROUTE (venue paper capital) | %s %s %s -> %s "
+                                        "room=%.2f reserved=%.2f",
+                                        signal.symbol, signal.side, broker_name_l, fallback_broker,
+                                        float(room), float(reserved),
+                                    )
+                                    return await self.execute(
+                                        replace(signal, broker=fallback_broker, metadata=new_md),
+                                        risk_decision,
+                                        session_factory=session_factory,
+                                    )
+                                self.last_skip_reason = "crypto_venue_capital_exhausted"
+                                logger.warning(
+                                    "EXEC SKIP (venue paper capital) | %s %s broker=%s "
+                                    "notional=%.2f > room=%.2f reserved=%.2f — venue wallet bound",
+                                    signal.symbol, signal.side, broker_name_l,
+                                    float(_notional), float(room), float(reserved),
+                                )
+                                return None
+                            clamped_qty = effective_room / _px
+                            order = replace(order, quantity=clamped_qty)
+                            signal.suggested_quantity = clamped_qty
+                            if isinstance(getattr(signal, "metadata", None), dict):
+                                signal.metadata["risk_notional_override"] = str(effective_room)
+                                signal.metadata["crypto_venue_room_clamped"] = True
+                                signal.metadata["crypto_venue_room"] = str(effective_room)
+                                signal.metadata["crypto_venue_room_reserved"] = str(reserved)
+                            if isinstance(getattr(order, "instrument_metadata", None), dict):
+                                order.instrument_metadata["risk_notional_override"] = str(effective_room)
+                                order.instrument_metadata["crypto_venue_room_clamped"] = True
+                                order.instrument_metadata["crypto_venue_room"] = str(effective_room)
+                                order.instrument_metadata["crypto_venue_room_reserved"] = str(reserved)
+                            logger.info(
+                                "EXEC CLAMP (venue paper capital) | %s %s broker=%s "
+                                "notional=%.2f -> %.2f room=%.2f reserved=%.2f",
                                 signal.symbol, signal.side, broker_name_l,
-                                float(_notional), float(room),
+                                float(_notional), float(effective_room), float(room), float(reserved),
                             )
-                            return None
+                            _notional = effective_room
+                        self._crypto_paper_room_reserved[broker_name_l] = reserved + _notional
                 except Exception as exc:  # noqa: BLE001 — bound must never crash exec
                     logger.debug("crypto venue cap check skipped (non-fatal): %s", exc)
             logger.info(

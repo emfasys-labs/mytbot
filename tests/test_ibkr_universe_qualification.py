@@ -54,15 +54,28 @@ def test_ibkr_symbol_to_contract_handles_dotted_forex() -> None:
     assert contract.currency == "USD"
 
 
+def test_ibkr_symbol_to_contract_handles_canonical_paxos_crypto() -> None:
+    adapter = IBKRAdapter(paper_mode=True)
+
+    contract = adapter._symbol_to_contract("BTC-USD")
+
+    assert contract.secType == "CRYPTO"
+    assert contract.symbol == "BTC"
+    assert contract.exchange == "PAXOS"
+    assert contract.currency == "USD"
+
+
 class _FakeIB:
     def __init__(self, qualified: bool) -> None:
         self.qualified = qualified
         self.orders = []
+        self.qualify_calls = []
 
     def isConnected(self) -> bool:
         return True
 
     async def qualifyContractsAsync(self, contract):
+        self.qualify_calls.append(contract)
         if not self.qualified:
             return []
         contract.conId = 12345
@@ -126,3 +139,28 @@ async def test_ibkr_qualify_symbol_persists_success(tmp_path) -> None:
     assert rec.is_qualified()
     assert rec.con_id == 12345
     assert adapter._qualification_cache.get("SPY", "etf").con_id == 12345
+
+
+@pytest.mark.asyncio
+async def test_ibkr_qualify_symbol_rejects_unsupported_crypto_locally(tmp_path) -> None:
+    adapter = IBKRAdapter(paper_mode=True)
+    adapter._ib = _FakeIB(qualified=True)
+    adapter._qualification_cache = IBKRQualificationCache(tmp_path / "cache.json")
+
+    rec = await adapter.qualify_symbol("AAVE-USD", "crypto")
+
+    assert rec.status == "failed"
+    assert rec.error == "unsupported IBKR PAXOS crypto symbol"
+    assert adapter._ib.qualify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ibkr_last_price_skips_unsupported_crypto_locally(tmp_path) -> None:
+    adapter = IBKRAdapter(paper_mode=True)
+    adapter._ib = _FakeIB(qualified=True)
+    adapter._qualification_cache = IBKRQualificationCache(tmp_path / "cache.json")
+
+    px = await adapter.get_last_price("AAVE-USD")
+
+    assert px == Decimal("0")
+    assert adapter._ib.qualify_calls == []

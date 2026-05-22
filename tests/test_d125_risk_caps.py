@@ -87,6 +87,23 @@ def test_single_name_existing_plus_new_clamped_to_remaining_room():
     ok, _ = e._check_single_name_notional(sig, portfolio)
     assert ok
     assert sig.suggested_quantity * Decimal("25.0") == Decimal("10000")  # clamped to room
+    assert sig.metadata["sizing_topup_existing"] is True
+    assert sig.metadata["risk_single_name_topup_clamped"] is True
+
+
+def test_single_name_clamped_topup_bypasses_theme_uniqueness():
+    """D125.4 — clamp metadata must survive into the later duplicate-theme gate."""
+    e = _engine(theme_uniqueness_check=True)
+    portfolio = _portfolio(
+        positions={"BF-B": {"symbol": "BF-B", "quantity": "1600", "current_price": "25.0"}}
+    )
+    sig = _sig(qty="800", price="25.0")
+
+    ok, _ = e._check_single_name_notional(sig, portfolio)
+    assert ok
+    ok, label = e._check_theme_uniqueness(sig, portfolio)
+
+    assert ok and label == "theme_uniqueness"
 
 
 def test_single_name_rejected_when_existing_already_over_cap():

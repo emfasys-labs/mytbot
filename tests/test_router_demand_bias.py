@@ -39,6 +39,30 @@ def test_router_crypto_usd_pairs_prefer_kraken() -> None:
     )
 
 
+def test_router_crypto_usd_pairs_fallback_when_kraken_paper_room_exhausted(monkeypatch) -> None:
+    r = SmartOrderRouter(["alpaca", "binance", "bybit", "kraken"])
+    r.permissions = _Permissive()
+
+    def _room(broker: str):
+        return {"kraken": 0, "binance": 50000, "bybit": 25000}.get(broker)
+
+    monkeypatch.setattr("system.paper_wallet.venue_deploy_room", _room)
+
+    assert r.route("crypto", "BTC-USD", metadata={"demand_score": 0.0}) == "binance"
+
+
+def test_router_crypto_usd_pairs_fallback_can_use_bybit_when_binance_exhausted(monkeypatch) -> None:
+    r = SmartOrderRouter(["alpaca", "binance", "bybit", "kraken"])
+    r.permissions = _Permissive()
+
+    def _room(broker: str):
+        return {"kraken": 0, "binance": 0, "bybit": 25000}.get(broker)
+
+    monkeypatch.setattr("system.paper_wallet.venue_deploy_room", _room)
+
+    assert r.route("crypto", "BTC-USD", metadata={"demand_score": 0.0}) == "bybit"
+
+
 def test_router_equity_hunter_risk_on_can_prefer_alpaca() -> None:
     r = SmartOrderRouter(["ibkr", "alpaca"])
     r.permissions = _Permissive()

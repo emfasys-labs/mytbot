@@ -64,8 +64,11 @@ def _iso_now() -> str:
 
 
 def _binance_symbol(symbol: str) -> str:
-    """BTC/USDT -> BTCUSDT."""
-    return symbol.strip().upper().replace(" ", "").replace("/", "")
+    """BTC/USDT -> BTCUSDT; canonical BTC-USD uses the USDT venue book."""
+    s = symbol.strip().upper().replace(" ", "").replace("/", "-")
+    if s.endswith("-USD"):
+        s = f"{s[:-4]}-USDT"
+    return s.replace("-", "")
 
 
 def _ms_to_iso(ms: int | None) -> str:
@@ -661,4 +664,3 @@ class BinanceAdapter(BrokerAdapter):
             return p.normalize()
         except Exception:
             return price
-

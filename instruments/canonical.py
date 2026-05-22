@@ -67,6 +67,19 @@ _EXCHANGE_SUFFIX: dict[str, tuple[str, str]] = {
 
 _BTC_ALIASES = {"BTC", "XBT", "XXBT"}
 _USD_ALIASES = {"USD", "USDT", "ZUSD"}
+_IBKR_PAXOS_CRYPTO_BASES = {
+    "BTC",
+    "ETH",
+    "LTC",
+    "BCH",
+    "PAXG",
+    "SOL",
+    "ADA",
+    "DOGE",
+    "LINK",
+    "MATIC",
+    "DOT",
+}
 
 _FX_MAJOR_CODES = {
     "EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD", "NOK", "SEK",
@@ -284,8 +297,10 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
         if b == "bybit":
             return f"{base}USDT"
         if b == "ibkr":
-            # IBKR PAXOS supports a small handful; surface canonical anyway
-            return base + "USD"
+            # IBKR PAXOS supports only a small whitelist and expects the bare
+            # base symbol for Crypto contracts. Unsupported crypto must not be
+            # surfaced as an equity/stock qualification candidate.
+            return base if base in _IBKR_PAXOS_CRYPTO_BASES else None
         if b == "alpaca":
             return f"{base}/USD"
         return None

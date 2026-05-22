@@ -1277,6 +1277,12 @@ class RiskEngine:
                 signal_sym, str(existing), str(cap_notional),
             )
             return (False, "single_name_notional")
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
+        if meta is not None:
+            meta["sizing_topup_existing"] = True
+            meta["risk_single_name_topup_clamped"] = True
+            meta["risk_single_name_existing_notional"] = str(existing)
+            meta["risk_single_name_cap_notional"] = str(cap_notional)
         logger.info(
             "RISK single_name_notional CLAMP | %s | proposed=%s -> %s (%.2f%% of NAV %s)",
             signal_sym, str(proposed), str(allowed),
@@ -1443,7 +1449,10 @@ class RiskEngine:
         if not positions:
             return (True, "theme_uniqueness")
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
-        if bool(meta.get("sizing_topup_existing")) and str(meta.get("coordinator_kind", "")).lower() == "open_strategy":
+        if bool(meta.get("sizing_topup_existing")) and (
+            str(meta.get("coordinator_kind", "")).lower() == "open_strategy"
+            or bool(meta.get("risk_single_name_topup_clamped"))
+        ):
             return (True, "theme_uniqueness")
         spec = parse_option_contract_from_metadata(meta)
         sym = spec.position_key() if spec is not None else (getattr(signal, "symbol", "") or "").strip().upper()

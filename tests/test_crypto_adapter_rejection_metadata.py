@@ -3,8 +3,8 @@ from decimal import Decimal
 import pytest
 
 from brokers.base import Order, OrderSide, OrderStatus, OrderType
-from brokers.binance.adapter import BinanceAdapter
-from brokers.bybit.adapter import BybitAdapter
+from brokers.binance.adapter import BinanceAdapter, _binance_symbol
+from brokers.bybit.adapter import BybitAdapter, _bybit_symbol
 from brokers.kraken.adapter import KrakenAdapter
 
 
@@ -17,6 +17,13 @@ def _order(symbol: str) -> Order:
         limit_price=Decimal("100"),
         client_order_id="test-paper-reject",
     )
+
+
+def test_usd_crypto_canonical_symbols_map_to_usdt_venue_books() -> None:
+    assert _binance_symbol("BTC-USD") == "BTCUSDT"
+    assert _binance_symbol("ETH/USD") == "ETHUSDT"
+    assert _bybit_symbol("BTC-USD") == "BTCUSDT"
+    assert _bybit_symbol("ETH/USD") == "ETHUSDT"
 
 
 @pytest.mark.asyncio

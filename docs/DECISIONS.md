@@ -1212,6 +1212,64 @@ repo 1609 passed, 3 skipped.
 
 ---
 
+## D125.4 — Live deployment constraints cleared through execution/session routing (2026-05-22)
+
+**Decision:** The low-deployment follow-up fixed the remaining live
+execution constraints after D125.1-D125.3: clamped top-ups no longer get
+vetoed by theme uniqueness, USD-quoted crypto can fall through from
+Kraken to USDT venues when Kraken paper room is exhausted, execution can
+reroute again when same-cycle venue reservations fill a crypto venue, and
+IBKR/Alpaca equities/ETFs are tradeable during their real extended-hours
+window.
+
+**Why.** After the first fixes, the UI still showed ~20% at work. Live
+logs showed the bottleneck had moved:
+- `single_name_notional` correctly clamped existing FX/crypto top-ups,
+  but `theme_uniqueness` then rejected the tiny same-theme residual
+  top-up.
+- Crypto `*-USD` signals hard-routed to Kraken even after Kraken's
+  synthetic paper deploy room was zero.
+- After Binance filled its first same-cycle crypto order, later crypto
+  orders still routed to Binance and skipped because execution saw
+  `room=50000 reserved=50000`.
+- U.S. equities/ETFs were rejected as `market_closed` at 08:20 ET even
+  though IBKR/Alpaca can transact the 04:00-20:00 ET extended-hours
+  session in paper mode.
+
+**Change.**
+- `risk/engine.py`: a successful single-name clamp now stamps
+  `sizing_topup_existing` / `risk_single_name_topup_clamped` metadata;
+  `_check_theme_uniqueness` exempts clamped same-side existing-position
+  top-ups so a size cap cannot be turned into a duplicate-theme veto.
+- `execution/router.py`: canonical `BTC-USD`-style crypto still prefers
+  Kraken while Kraken has deploy room, but when Kraken is exhausted it
+  falls back to Binance spot first, then Bybit.
+- `brokers/binance/adapter.py` and `brokers/bybit/adapter.py`: canonical
+  `*-USD` crypto maps to the venue's `*USDT` book for no-native-paper
+  execution.
+- `execution/engine.py`: crypto venue-room reservations are exposed to
+  execution-time fallback. If the chosen synthetic venue has zero
+  effective room after same-cycle reservations, the order is rerouted to
+  the next available crypto venue instead of skipped.
+- `core/market_session.py` and `config/market_hours.yaml`: IBKR and
+  Alpaca use broker-aware `by_asset_class_extended` tradeability for
+  U.S. equities/ETFs/options. Session-exit management remains anchored
+  to the regular close unless `MARKET_SESSION_EXTENDED=1` is globally
+  set.
+
+**Live verification.** After restart, the system moved from ~20% at work
+to 60.1% on the first extended-hours cycle and 69.3% on the next; gross
+exposure rose to ~$1.142M on ~$1.224M NAV (~93%). Remaining idle on the
+UI's cash/margin-deployed gauge is now a candidate-breadth / cash-factor
+issue: most current symbols are already at the 5%-NAV cap, while FX
+counts at a 0.20 cash factor.
+
+**Tests.** Focused verification:
+`python -m pytest tests/test_d125_risk_caps.py tests/test_risk_engine.py tests/test_execution_engine.py tests/test_router_demand_bias.py tests/test_asset_class_routing.py tests/test_crypto_adapter_rejection_metadata.py tests/test_paper_wallet.py tests/test_instruments_canonical.py tests/test_instruments_availability.py tests/test_ibkr_universe_qualification.py tests/test_market_session.py tests/test_session_exit_policy.py -q`
+-> 193 passed, 1 skipped.
+
+---
+
 ## D125.1 — Single-name / per-day caps clamp instead of veto (2026-05-22)
 
 **Decision:** The D125 `single_name_notional` and `intraday_symbol_adds`
@@ -1257,6 +1315,72 @@ trades.
 **Tests.** `tests/test_d125_risk_caps.py` updated — over-cap cases now
 assert clamp-to-cap; hard reject retained only for the no-room case.
 Full suite: 1611 passed, 3 skipped.
+
+---
+
+## D125.2 — Crypto paper-wallet room clamps instead of skips (2026-05-22)
+
+**Decision:** The crypto synthetic paper-wallet venue-room guard in
+`ExecutionEngine` now clamps an opening order down to the venue's
+remaining deploy room instead of skipping the order outright.
+
+**Why.** After D125.1, the primary risk veto was fixed and the live
+system began filling IBKR FX at the 5%-of-NAV cap. The remaining crypto
+execution gap was the same mechanism one layer later: post-risk crypto
+orders were clamped to ~5% of total NAV (~$61k), but each no-native-paper
+crypto venue has its own synthetic wallet (`$50k` default seed, less
+open gross exposure). A `$61k` BTC/XRP/ETH order routed to Kraken with
+only ~$30k room became `crypto_venue_capital_exhausted` and bought
+nothing.
+
+**Change.** In paper mode for Kraken/Binance/Bybit, when an opening
+crypto order's notional exceeds `system.paper_wallet.venue_deploy_room`,
+execution now resizes `order.quantity` and `signal.suggested_quantity`
+to exactly fit the room, stamps `crypto_venue_room_clamped` and
+`crypto_venue_room` metadata, and continues to the normal simulated fill.
+It still skips when room is zero or no usable price exists. Reduce-only
+and close intents remain exempt.
+
+Because `venue_deploy_room` is heartbeat/snapshot-backed, execution also
+keeps an in-process per-venue reservation for the current room snapshot.
+That prevents multiple orders in the same loop from each seeing the same
+stale `$30k` room and all filling against it before the wallet heartbeat
+has written the updated gross exposure.
+
+**Tests.** Added execution coverage for room-clamp and true zero-room
+skip. Focused verification:
+`python -m pytest tests/test_d125_risk_caps.py tests/test_paper_wallet.py tests/test_execution_engine.py -q`
+-> 67 passed.
+
+---
+
+## D125.3 — IBKR crypto registry guard (2026-05-22)
+
+**Decision:** IBKR instrument-registry translation now whitelists only
+known PAXOS crypto bases and emits the bare IBKR crypto base symbol
+(`BTC`, `SOL`, etc.) instead of letting canonical crypto pairs leak into
+stock qualification.
+
+**Why.** The live low-deployment audit showed repeated IBKR API errors
+for contracts such as `Stock(symbol='BTC-USD', exchange='SMART',
+currency='USD')`, plus account-summary request pressure. Those were not
+valid equity contracts; they were canonical crypto symbols being treated
+as IBKR stock candidates by downstream qualification paths.
+
+**Change.** `instruments.canonical.canonical_to_broker()` now returns an
+IBKR broker symbol only for the known PAXOS whitelist, and returns
+`None` for unsupported crypto such as `AAVE-USD`. `IBKRAdapter` now
+classifies canonical supported crypto (`BTC-USD`, `SOL-USD`, etc.) as
+`Crypto(..., "PAXOS", "USD")`; unsupported canonical crypto fails
+locally with `unsupported IBKR PAXOS crypto symbol` instead of sending a
+bad stock qualification request to TWS. Snapshot price reads and stream
+subscriptions also skip unsupported canonical crypto locally, so the
+market-data path cannot recreate the same `Stock(symbol='*-USD')` storm.
+
+**Tests.** Added canonical translation, availability, and IBKR adapter
+qualification coverage. Focused verification:
+`python -m pytest tests/test_d125_risk_caps.py tests/test_paper_wallet.py tests/test_execution_engine.py tests/test_instruments_canonical.py tests/test_instruments_availability.py tests/test_ibkr_universe_qualification.py -q`
+-> 96 passed.
 
 ---
 

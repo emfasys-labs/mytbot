@@ -153,8 +153,11 @@ def test_is_tradeable_crypto_venue_is_always_open() -> None:
 def test_is_tradeable_equity_venue_follows_asset_session() -> None:
     sun = _utc(2026, 5, 17, 15, 0)
     wed_rth = _utc(2026, 5, 13, 14, 30)  # 10:30 ET, open
+    wed_premarket = _utc(2026, 5, 13, 12, 0)  # 08:00 ET, extended-hours open
     assert is_tradeable("ibkr", "equity", "AAPL", sun) is False
     assert is_tradeable("ibkr", "equity", "AAPL", wed_rth) is True
+    assert is_tradeable("ibkr", "equity", "AAPL", wed_premarket) is True
+    assert is_tradeable("alpaca", "etf", "SPY", wed_premarket) is True
     assert is_tradeable("alpaca", "equity", "SPY", sun) is False
     # IBKR crypto leg still 24/7 (asset-class governs for by_asset_class).
     assert is_tradeable("ibkr", "crypto", "BTC-USD", sun) is True

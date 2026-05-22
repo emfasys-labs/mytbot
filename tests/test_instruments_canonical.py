@@ -56,6 +56,9 @@ def test_canonical_to_broker_crypto_routes() -> None:
     assert canonical_to_broker("ETH-USD", "kraken") == "ETH/USD"
     assert canonical_to_broker("ETH-USD", "binance") == "ETHUSDT"
     assert canonical_to_broker("SOL-USD", "bybit") == "SOLUSDT"
+    assert canonical_to_broker("BTC-USD", "ibkr") == "BTC"
+    assert canonical_to_broker("SOL-USD", "ibkr") == "SOL"
+    assert canonical_to_broker("AAVE-USD", "ibkr") is None
 
 
 def test_ibkr_dot_forex_round_trips() -> None:

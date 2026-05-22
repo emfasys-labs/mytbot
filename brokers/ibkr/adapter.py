@@ -87,6 +87,33 @@ _KNOWN_PAXOS_CRYPTO: frozenset[str] = frozenset(
 )
 
 
+def _canonical_paxos_crypto_base(symbol: str) -> str | None:
+    s = str(symbol or "").strip().upper()
+    if s in _KNOWN_PAXOS_CRYPTO:
+        return s
+    if "/" in s:
+        base, quote = [p.strip().upper() for p in s.split("/", 1)]
+        if quote == "USD" and base in _KNOWN_PAXOS_CRYPTO:
+            return base
+    if "-" in s:
+        base, quote = [p.strip().upper() for p in s.split("-", 1)]
+        if quote == "USD" and base in _KNOWN_PAXOS_CRYPTO:
+            return base
+    if s.endswith("USD"):
+        base = s[:-3]
+        if base in _KNOWN_PAXOS_CRYPTO:
+            return base
+    return None
+
+
+def _looks_like_canonical_crypto(symbol: str) -> bool:
+    s = str(symbol or "").strip().upper()
+    if "-" not in s:
+        return False
+    base, quote = [p.strip().upper() for p in s.split("-", 1)]
+    return bool(base.isalpha() and quote in {"USD", "USDT", "USDC"})
+
+
 def _total_from_account_summary_tags(tags: dict[str, Decimal]) -> Decimal:
     """Pick one equity figure per currency from IB account-summary tag bag.
 
@@ -243,6 +270,9 @@ class IBKRAdapter(BrokerAdapter):
     def _symbol_to_contract(self, symbol: str) -> Contract:
         """Map a canonical symbol string to an ib_insync Contract."""
         s = symbol.strip().upper()
+        crypto_base = _canonical_paxos_crypto_base(s)
+        if crypto_base is not None:
+            return Crypto(crypto_base, "PAXOS", "USD")
         if "." in s:
             parts = [p.strip().upper() for p in s.split(".") if p.strip()]
             if len(parts) == 2 and all(len(p) == 3 and p.isalpha() for p in parts):
@@ -251,8 +281,6 @@ class IBKRAdapter(BrokerAdapter):
             base, quote = s.split("/", 1)
             quote = quote.strip().upper()
             return Crypto(base.strip(), "PAXOS", quote)
-        if s in _KNOWN_PAXOS_CRYPTO:
-            return Crypto(s, "PAXOS", "USD")
         if len(s) == 6 and s.isalpha():
             return Forex(s[:3] + s[3:])
         return Stock(s, "SMART", "USD")
@@ -346,6 +374,18 @@ class IBKRAdapter(BrokerAdapter):
             self._qualification_cache.upsert(rec)
             return rec
 
+        if _looks_like_canonical_crypto(sym) and _canonical_paxos_crypto_base(sym) is None:
+            rec = IBKRQualificationRecord(
+                symbol=sym,
+                asset_class=ac or "crypto",
+                status="failed",
+                broker_symbol=sym,
+                qualified_at=utc_now_iso(),
+                error="unsupported IBKR PAXOS crypto symbol",
+            )
+            self._qualification_cache.upsert(rec)
+            return rec
+
         contract = self._symbol_to_contract(sym)
         try:
             qualified = await self._ib.qualifyContractsAsync(contract)
@@ -382,6 +422,23 @@ class IBKRAdapter(BrokerAdapter):
             return rec
 
     async def _qualified_order_contract(self, order: Order) -> Contract | None:
+        if _looks_like_canonical_crypto(order.symbol) and (
+            _canonical_paxos_crypto_base(order.symbol) is None
+        ):
+            rec = IBKRQualificationRecord(
+                symbol=order.symbol.strip().upper(),
+                asset_class="crypto",
+                status="failed",
+                broker_symbol=order.symbol.strip().upper(),
+                qualified_at=utc_now_iso(),
+                error="unsupported IBKR PAXOS crypto symbol",
+            )
+            self._qualification_cache.upsert(rec)
+            logger.warning(
+                "place_order | IBKR | unsupported PAXOS crypto symbol | symbol={}",
+                order.symbol,
+            )
+            return None
         contract = self._order_to_contract(order)
         if self._ib is None or not self._ib.isConnected():
             return None
@@ -1313,6 +1370,14 @@ class IBKRAdapter(BrokerAdapter):
         if self._ib is None or not self._ib.isConnected():
             logger.warning("get_last_price | IBKR | not connected | symbol={}", symbol)
             return Decimal(0)
+        if _looks_like_canonical_crypto(symbol) and (
+            _canonical_paxos_crypto_base(symbol) is None
+        ):
+            logger.debug(
+                "get_last_price | IBKR | unsupported PAXOS crypto symbol skipped | symbol={}",
+                symbol,
+            )
+            return Decimal(0)
         # Circuit breaker: if the socket recently dropped, skip probing the dead
         # connection entirely until the cooldown elapses (prevents the per-symbol
         # disconnect traceback storm seen during IBKR's nightly maintenance).
@@ -1393,6 +1458,14 @@ class IBKRAdapter(BrokerAdapter):
 
         try:
             for sym in symbols:
+                if _looks_like_canonical_crypto(sym) and (
+                    _canonical_paxos_crypto_base(sym) is None
+                ):
+                    logger.debug(
+                        "stream_prices | IBKR | unsupported PAXOS crypto symbol skipped | symbol={}",
+                        sym,
+                    )
+                    continue
                 c = self._symbol_to_contract(sym)
                 await self._ib.qualifyContractsAsync(c)
                 conid_to_sym[c.conId] = sym.strip().upper()
@@ -1785,12 +1858,8 @@ class IBKRAdapter(BrokerAdapter):
     async def get_asset_class(self, symbol: str) -> AssetClass:
         """Best-effort asset class from symbol string (contract not qualified)."""
         s = symbol.strip().upper()
-        if s in _KNOWN_PAXOS_CRYPTO:
+        if _canonical_paxos_crypto_base(s) is not None:
             return AssetClass.CRYPTO
-        if "/" in s:
-            base = s.split("/", 1)[0].strip()
-            if base in _KNOWN_PAXOS_CRYPTO:
-                return AssetClass.CRYPTO
         if len(s) == 6 and s.isalpha():
             return AssetClass.FOREX
         return AssetClass.EQUITY

@@ -12,17 +12,20 @@
 #
 # session policy values:
 #   always         — 24/7 venue (crypto exchanges). Always tradeable.
-#   by_asset_class — defer to core.market_session.is_market_open, which
-#                    resolves the session from the instrument's asset
-#                    class (US equity RTH + holidays / FX 24x5 / crypto
-#                    24/7). This is the safe default for mixed venues.
+#   by_asset_class          — defer to core.market_session.is_market_open,
+#                             which resolves the session from the instrument's
+#                             asset class (US equity RTH + holidays / FX 24x5 /
+#                             crypto 24/7). This is the safe default for
+#                             mixed venues.
+#   by_asset_class_extended — same, but US equity/ETF/option trading uses the
+#                             real extended-hours window (04:00–20:00 ET).
 
 brokers:
   kraken:  { session: always }          # crypto spot, 24/7
   binance: { session: always }          # crypto spot, 24/7
   bybit:   { session: always }          # crypto/derivatives, 24/7
-  ibkr:    { session: by_asset_class }  # equity=US RTH, forex=24x5, crypto=24/7
-  alpaca:  { session: by_asset_class }  # equity=US RTH, crypto=24/7
+  ibkr:    { session: by_asset_class_extended }  # equity=US extended, forex=24x5, crypto=24/7
+  alpaca:  { session: by_asset_class_extended }  # equity=US extended, crypto=24/7
 
 # Fallback for any broker not listed above.
 default: { session: by_asset_class }
