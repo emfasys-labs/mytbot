@@ -33,6 +33,14 @@ intraday_symbol_adds:
   enabled: true
   max_pct_nav: 0.10             # No more than 10% NAV of net adds to any symbol per UTC day
 
+# ── D127 P2 — Connect Hub connector certification gate ───────────────────────
+# Only Certified-tier brokers (config/connectors.yaml :: certification:
+# certified) may place trades. Experimental connectors may inform but never
+# execute; paper-only connectors may not execute in live mode. Reduce-only
+# exits are always exempt. Fail-open on catalogue-load glitches.
+connector_certification:
+  enforce: true
+
 # Phase 5: ``mode_overrides`` collapsed. Mode is now a derived indicator
 # (see ``system/adaptive_mode.py``) so per-mode ceilings serve no purpose.
 # All values are 1.00 (no clip) because the genuine risk caps come from

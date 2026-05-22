@@ -261,3 +261,119 @@ def test_probe_unsupported_category_phase1():
     r = probe_connector(category="treasury_accounts", manifest=m)
     assert r.ok is False
     assert "later" in r.reason.lower() or "phase" in r.reason.lower()
+
+
+# ── P2: certification tiers + risk-engine gate ────────────────────────────────
+
+from connectors import certification as cert  # noqa: E402
+
+
+class _CertManifest:
+    def __init__(self, *, id="x", category="brokers", certification="experimental",
+                 capabilities=None):
+        self.id = id
+        self.category = category
+        self.certification = certification
+        self.capabilities = capabilities or {}
+
+
+def test_resolve_tier():
+    assert cert.resolve_tier(_CertManifest(certification="certified")) == cert.CERTIFIED
+    assert cert.resolve_tier(_CertManifest(certification="experimental")) == cert.EXPERIMENTAL
+    assert cert.resolve_tier(_CertManifest(certification="")) == cert.EXPERIMENTAL
+    assert cert.resolve_tier(None) == cert.EXPERIMENTAL          # fail-closed
+
+
+def test_may_execute_certified_allowed():
+    m = _CertManifest(certification="certified",
+                      capabilities={"supports_paper": True, "supports_live": True})
+    allowed, reason = cert.may_execute(m, system_live_mode=False)
+    assert allowed is True and reason == "certified"
+
+
+def test_may_execute_experimental_blocked():
+    m = _CertManifest(certification="experimental")
+    allowed, reason = cert.may_execute(m)
+    assert allowed is False and reason == "broker_not_certified"
+
+
+def test_may_execute_paper_only_blocked_in_live():
+    m = _CertManifest(certification="certified",
+                      capabilities={"supports_paper": True, "supports_live": False})
+    allowed_paper, _ = cert.may_execute(m, system_live_mode=False)
+    allowed_live, reason = cert.may_execute(m, system_live_mode=True)
+    assert allowed_paper is True
+    assert allowed_live is False and reason == "broker_unsupported_in_live"
+
+
+def test_broker_execution_decision_real_catalogue_brokers():
+    # The 5 production brokers are marked certified in connectors.yaml.
+    for b in ("ibkr", "kraken", "binance", "bybit", "alpaca"):
+        allowed, reason = cert.broker_execution_decision(b)
+        assert allowed is True, f"{b}: {reason}"
+
+
+def test_broker_execution_decision_unknown_fails_open():
+    allowed, reason = cert.broker_execution_decision("totally_unknown_broker")
+    assert allowed is True                       # fail-open — no manifest, no adapter
+    assert reason == "broker_not_in_catalogue"
+
+
+# ── risk-engine certification gate ────────────────────────────────────────────
+
+def _cert_signal(*, broker="ibkr", side="buy", reduce_only=False):
+    from risk.engine import Signal
+    from decimal import Decimal
+    return Signal(
+        signal_id=f"c-{broker}-{side}",
+        symbol="AAPL",
+        side=side,
+        strategy="momentum_breakout",
+        confidence=0.9,
+        suggested_quantity=Decimal("10"),
+        suggested_price=Decimal("100"),
+        broker=broker,
+        asset_class="equity",
+        timestamp="2026-05-22T12:00:00+00:00",
+        metadata={"reduce_only": reduce_only} if reduce_only else {},
+    )
+
+
+def test_risk_gate_certified_broker_passes():
+    from risk.engine import RiskEngine
+    eng = RiskEngine({"connector_certification": {"enforce": True}})
+    ok, label = eng._check_broker_certification(_cert_signal(broker="ibkr"), {})
+    assert ok is True and label == "broker_certification"
+
+
+def test_risk_gate_enforcement_off_passes_anything():
+    from risk.engine import RiskEngine
+    eng = RiskEngine({"connector_certification": {"enforce": False}})
+    ok, _ = eng._check_broker_certification(_cert_signal(broker="anything"), {})
+    assert ok is True
+
+
+def test_risk_gate_blocks_uncertified(monkeypatch):
+    from risk.engine import RiskEngine
+    monkeypatch.setattr(
+        "connectors.certification.broker_execution_decision",
+        lambda broker_id, **kw: (False, "broker_not_certified"),
+    )
+    eng = RiskEngine({"connector_certification": {"enforce": True}})
+    ok, label = eng._check_broker_certification(_cert_signal(broker="some_experimental"), {})
+    assert ok is False
+    assert label.startswith("broker_certification:")
+
+
+def test_risk_gate_reduce_only_exempt(monkeypatch):
+    """Even an uncertified broker must allow a reduce-only exit."""
+    from risk.engine import RiskEngine
+    monkeypatch.setattr(
+        "connectors.certification.broker_execution_decision",
+        lambda broker_id, **kw: (False, "broker_not_certified"),
+    )
+    eng = RiskEngine({"connector_certification": {"enforce": True}})
+    ok, _ = eng._check_broker_certification(
+        _cert_signal(broker="some_experimental", side="sell", reduce_only=True), {}
+    )
+    assert ok is True                            # exits always allowed

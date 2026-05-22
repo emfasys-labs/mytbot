@@ -115,6 +115,7 @@ class RiskEngine:
         checks = [
             self._check_kill_switch,
             self._check_broker_disabled,
+            self._check_broker_certification,
             self._check_options_trading_policy,
             self._check_m8_symbol_whitelist,
             self._check_m8_strategy_whitelist,
@@ -365,6 +366,40 @@ class RiskEngine:
         if name and name in self._disabled_brokers:
             return False, "broker_disabled"
         return True, "broker_operational"
+
+    def _check_broker_certification(self, signal, portfolio) -> tuple[bool, str]:
+        """D127 P2 — only Certified-tier brokers may place trades.
+
+        Experimental connectors may inform but never execute; paper-only
+        connectors may not execute in live mode. Reduce-only signals are
+        exempt — exits must always be allowed regardless of tier (and the
+        reduce-only path already filters this gate out of the check set).
+        Fail-open on catalogue/infrastructure glitches — see
+        ``connectors.certification.broker_execution_decision``.
+        """
+        cfg = self.config.get("connector_certification")
+        cfg = cfg if isinstance(cfg, dict) else {}
+        if not bool(cfg.get("enforce", True)):
+            return (True, "broker_certification")
+        if self._is_reduce_only_signal(signal):
+            return (True, "broker_certification")
+        broker = (getattr(signal, "broker", None) or "").strip().lower()
+        if not broker:
+            return (True, "broker_certification")
+        try:
+            from connectors.certification import broker_execution_decision
+
+            live = (os.getenv("APP_ENV", "paper") or "paper").strip().lower() == "live"
+            allowed, reason = broker_execution_decision(broker, system_live_mode=live)
+        except Exception as exc:  # noqa: BLE001 — gate must never crash the engine
+            logger.warning("RISK broker_certification | check error (%s); allowing", exc)
+            return (True, "broker_certification")
+        if not allowed:
+            logger.warning(
+                "RISK broker_certification REJECT | broker=%s reason=%s", broker, reason
+            )
+            return (False, f"broker_certification:{reason}")
+        return (True, "broker_certification")
 
     @staticmethod
     def _is_reduce_only_signal(signal: Signal) -> bool:

@@ -80,6 +80,11 @@ class ConnectorManifest:
     safety: dict[str, Any] = field(default_factory=dict)
     docs_url: str | None = None
     notes: str | None = None
+    # D127 P2 — certification tier. Set by the myTbot team after testing;
+    # the operator never edits it. `certified` connectors may execute
+    # (place trades / move treasury cash); `experimental` may only inform.
+    # Anything not explicitly certified defaults to `experimental`.
+    certification: str = "experimental"
 
     @property
     def configured(self) -> bool:
@@ -130,6 +135,7 @@ class ConnectorManifest:
             "safety": dict(self.safety),
             "docs_url": self.docs_url,
             "notes": self.notes,
+            "certification": self.certification,
             "status": row_status,
             "next_actions": next_actions,
         }
@@ -172,6 +178,7 @@ def _parse_manifest(category: str, key: str, row: Any) -> ConnectorManifest | No
         safety=row.get("safety") if isinstance(row.get("safety"), dict) else {},
         docs_url=str(row.get("docs_url")).strip() if row.get("docs_url") else None,
         notes=str(row.get("notes")).strip() if row.get("notes") else None,
+        certification=str(row.get("certification") or "experimental").strip().lower(),
     )
 
 

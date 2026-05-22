@@ -1081,8 +1081,29 @@ Endpoint note: the design doc sketched `/connect/{category}/{id}/test`;
 the implementation uses `POST /connect/test` with a body to match the
 existing `/connect/{configure,enable,delete,add}` convention.
 
-Next: Phase 2 — certification tiers wired into execution gating +
-live-mode guard.
+**Phase 2 — landed (2026-05-22).** Certification tiers wired into
+execution gating + the live-mode guard:
+- `connectors.yaml` — `certification` field added to manifests; the 5
+  production brokers (ibkr/kraken/binance/bybit/alpaca) marked
+  `certified`. `ConnectorManifest` parses it; default `experimental`.
+- `connectors/certification.py` — `resolve_tier`, `may_execute`
+  (certification + paper-only-in-live guard), and the per-process
+  cached `broker_execution_decision` used by the risk gate.
+- `RiskEngine._check_broker_certification` — a new hard rail (runs
+  right after `_check_broker_disabled`): a trade signal to a broker
+  that is not `certified`, or to a paper-only broker while the system
+  is live, is REJECTED. Reduce-only exits are exempt (and the
+  reduce-only path already filters this gate out). Config:
+  `config/risk_limits.yaml::connector_certification.enforce` (default
+  true). Fail-open on catalogue-load glitches and on brokers absent
+  from the catalogue (no manifest → no adapter → cannot route anyway);
+  the genuine risk — an in-catalogue `experimental` broker — is caught.
+- `certification` surfaced per-connector in the `/connect/hub` snapshot.
+- `tests/test_d127_connect_hub_v2.py` extended to 31 tests. Full
+  suite: 1572 passed, 3 skipped.
+
+Next: Phase 3 — AI Pipeline screen (4 stage cards, enable/disable
+rules, FinBERT versioning via the model registry).
 
 ---
 
