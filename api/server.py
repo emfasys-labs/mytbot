@@ -2447,6 +2447,10 @@ class _ConnectTestBody(BaseModel):
     connector_id: str
 
 
+class _ConnectLocalModelBody(BaseModel):
+    model_id: str
+
+
 @app.post("/auth/dashboard/login")
 async def dashboard_login(body: _DashboardLoginBody):
     pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -2697,6 +2701,105 @@ async def configure_connector(
             else "Run the data pipeline to ingest fresh provider data."
         ),
         "connect_hub": hub,
+    }
+
+
+@app.get("/connect/machine-probe")
+async def get_machine_probe():
+    """D127 P4 — hardware capability snapshot (CPU/RAM/GPU/VRAM/disk/Ollama)."""
+    from connectors.machine_probe import probe_machine
+
+    return probe_machine()
+
+
+@app.get("/connect/ai/local/catalogue")
+async def get_local_llm_catalogue():
+    """D127 P4 — supported Local LLM catalogue with per-model machine fitness.
+
+    Read-only. Each model is tagged `recommended` / `available` /
+    `too_slow` / `unsupported` for the current machine; `installed`
+    reflects what Ollama already has. When `local_llm_available` is
+    false the AI pipeline runs on Rules + FinBERT (+ Premium) — a
+    graceful skip, not an error.
+    """
+    from connectors.local_llm import build_local_llm_view, list_installed_models
+    from connectors.machine_probe import probe_machine
+
+    probe = probe_machine()
+    installed: set[str] = set()
+    if probe.get("ollama_available"):
+        try:
+            installed = await list_installed_models(probe.get("ollama_url", "http://localhost:11434"))
+        except Exception:  # noqa: BLE001
+            installed = set()
+    return build_local_llm_view(probe=probe, installed_models=installed)
+
+
+@app.post("/connect/ai/local/install")
+async def install_local_llm(
+    body: _ConnectLocalModelBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P4 — download a catalogue model via Ollama and run its
+    compatibility certification (JSON-mode / schema / latency).
+
+    Catalogue-only — a model id not in the supported catalogue is
+    refused. This is a long operation (the model download can take
+    minutes); the call blocks until the pull and cert complete.
+    """
+    from connectors.local_llm import install_local_model
+    from connectors.machine_probe import probe_machine
+    from connectors.state_store import upsert_state
+
+    model_id = str(body.model_id or "").strip().lower()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    probe = probe_machine()
+    result = await install_local_model(
+        model_id, ollama_url=probe.get("ollama_url", "http://localhost:11434")
+    )
+    await upsert_state(
+        session_factory,
+        category="ai_providers",
+        connector_id="local_reasoning",
+        local_model_install_state=("installed" if result.ok else "install_failed"),
+        last_test_result=result.to_dict(),
+        machine_probe=probe,
+    )
+    return {"ok": result.ok, "result": result.to_dict()}
+
+
+@app.post("/connect/ai/local/activate")
+async def activate_local_llm(
+    body: _ConnectLocalModelBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P4 — point the Local LLM stage at a (catalogue) model in `ai.yaml`."""
+    from connectors.local_llm import set_local_llm_model
+    from connectors.state_store import upsert_state
+
+    model_id = str(body.model_id or "").strip().lower()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+    if not set_local_llm_model(model_id):
+        raise HTTPException(
+            status_code=400,
+            detail="model is not in the supported catalogue or ai.yaml is unwritable",
+        )
+    await upsert_state(
+        session_factory,
+        category="ai_providers",
+        connector_id="local_reasoning",
+        ai_model_version=model_id,
+    )
+    return {
+        "ok": True,
+        "active_local_model": model_id,
+        "requires_restart": True,
+        "next_step": "Restart or stop/start the system so the AI router reloads the model.",
     }
 
 

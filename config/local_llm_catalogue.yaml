@@ -1,0 +1,54 @@
+# config/local_llm_catalogue.yaml
+# ================================
+# Connect Hub v2 (D127 Phase 4) — supported Local LLM catalogue.
+#
+# Curated and tested. The operator picks from this list only; arbitrary
+# models are never attached into the trading path. New models (a new
+# Llama / Qwen / Mistral release) are added here by the myTbot team
+# after they pass the compatibility cert suite (JSON-mode, latency,
+# schema-conformance). That curated-addition flow IS the answer to
+# "how do we handle new versions".
+#
+# Per-model requirements:
+#   disk_gb      — approximate download size + working space
+#   min_ram_gb   — RAM floor for CPU-mode inference
+#   min_vram_gb  — VRAM floor for acceptable GPU-mode inference
+#   quality_rank — higher = better reasoning quality; the machine probe
+#                  recommends the highest-quality model that fits.
+
+local_llm_catalogue:
+  - id: mistral:7b
+    label: Mistral 7B
+    params: "7B"
+    disk_gb: 4.1
+    min_ram_gb: 8
+    min_vram_gb: 5
+    quality_rank: 1
+    notes: Compact and fast; the safest pick on modest hardware.
+
+  - id: qwen2.5:7b
+    label: Qwen2.5 7B
+    params: "7B"
+    disk_gb: 4.7
+    min_ram_gb: 8
+    min_vram_gb: 6
+    quality_rank: 2
+    notes: Strong structured-JSON output; the standard recommendation.
+
+  - id: llama3.1:8b
+    label: Llama 3.1 8B
+    params: "8B"
+    disk_gb: 4.9
+    min_ram_gb: 10
+    min_vram_gb: 6
+    quality_rank: 3
+    notes: Solid general reasoning; good ensemble partner for Qwen.
+
+  - id: qwen2.5:14b
+    label: Qwen2.5 14B
+    params: "14B"
+    disk_gb: 9.0
+    min_ram_gb: 16
+    min_vram_gb: 11
+    quality_rank: 4
+    notes: Higher reasoning quality; needs a capable GPU.

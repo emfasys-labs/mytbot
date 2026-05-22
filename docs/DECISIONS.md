@@ -1129,8 +1129,37 @@ stages:
 - `tests/test_d127_connect_hub_v2.py` extended to 45 tests. Full
   suite: 1579 passed, 3 skipped.
 
-Next: Phase 4 — Local LLM machine probe + supported-model catalogue +
-install/cert flow + graceful fallback.
+**Phase 4 — landed (2026-05-22).** Local LLM machine probe, catalogue,
+install/cert, graceful fallback:
+- `connectors/machine_probe.py` — best-effort CPU / RAM (psutil) /
+  GPU+VRAM (torch.cuda) / disk / Ollama detection. `psutil` added to
+  `requirements.txt`.
+- `config/local_llm_catalogue.yaml` — curated supported-model list
+  (mistral:7b, qwen2.5:7b, llama3.1:8b, qwen2.5:14b) with per-model
+  disk / RAM / VRAM requirements + quality rank.
+- `connectors/local_llm.py` — `compute_fitness`
+  (recommended/available/too_slow/unsupported per machine),
+  `recommend_model`, `resolve_local_llm_availability`,
+  `build_local_llm_view`, `cert_local_model` (JSON-mode + schema +
+  latency cert), `install_local_model` (`ollama pull` + cert,
+  catalogue-only), `set_local_llm_model`, `list_installed_models`.
+- Endpoints: `GET /connect/machine-probe`,
+  `GET /connect/ai/local/catalogue`,
+  `POST /connect/ai/local/install`, `POST /connect/ai/local/activate`.
+- `tests/test_d127_connect_hub_v2.py` extended to 52 tests. Full
+  suite: 1593 passed, 3 skipped.
+
+Open decisions resolved in P4:
+  * **#1 weak machine → silent skip.** A machine that fits no model
+    gets `local_llm_available: false`; the AI pipeline runs on
+    Rules + FinBERT (+ Premium). No launch-time prompt. (The AI
+    router already degrades gracefully when local reasoning is
+    absent.)
+  * **#2 → catalogue-only.** Both `install_local_model` and
+    `set_local_llm_model` refuse any model id not in the supported
+    catalogue. The custom-model Experimental escape hatch is deferred.
+
+Next: Phase 5 — Premium LLM provider picker + compatibility test.
 
 ---
 

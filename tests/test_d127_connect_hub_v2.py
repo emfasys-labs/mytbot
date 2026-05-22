@@ -434,3 +434,114 @@ def test_can_disable_unknown_stage():
     ok, reason = can_disable_ai_stage("not_a_stage")
     assert ok is False
     assert "unknown" in reason.lower()
+
+
+# ── P4: Local LLM machine probe + catalogue fitness ───────────────────────────
+
+from connectors.machine_probe import probe_machine  # noqa: E402
+from connectors import local_llm as lllm  # noqa: E402
+
+
+def _probe(*, cpu=8, ram=16.0, gpu=False, vram=0.0, disk=200.0, ollama=True):
+    return {
+        "cpu_count": cpu, "ram_gb": ram, "gpu_present": gpu, "gpu_name": "test" if gpu else None,
+        "vram_gb": vram, "disk_free_gb": disk, "ollama_available": ollama,
+        "ollama_url": "http://localhost:11434", "accelerated": gpu and vram > 0,
+    }
+
+
+def test_machine_probe_returns_all_fields():
+    p = probe_machine()
+    for key in ("cpu_count", "ram_gb", "gpu_present", "vram_gb", "disk_free_gb",
+                "ollama_available", "accelerated"):
+        assert key in p
+
+
+def test_catalogue_loads_and_is_nonempty():
+    cat = lllm.load_catalogue()
+    assert len(cat) >= 3
+    assert all("id" in e and "disk_gb" in e for e in cat)
+
+
+def test_fitness_unsupported_when_disk_too_small():
+    entry = {"id": "qwen2.5:7b", "disk_gb": 4.7, "min_ram_gb": 8, "min_vram_gb": 6, "params": "7B"}
+    f = lllm.compute_fitness(_probe(disk=2.0), entry)
+    assert f == lllm.UNSUPPORTED
+
+
+def test_fitness_available_on_capable_gpu():
+    entry = {"id": "qwen2.5:7b", "disk_gb": 4.7, "min_ram_gb": 8, "min_vram_gb": 6, "params": "7B"}
+    f = lllm.compute_fitness(_probe(gpu=True, vram=12.0, disk=200.0), entry)
+    assert f == lllm.AVAILABLE
+
+
+def test_fitness_unsupported_when_ram_too_small_cpu_only():
+    entry = {"id": "llama3.1:8b", "disk_gb": 4.9, "min_ram_gb": 10, "min_vram_gb": 6, "params": "8B"}
+    f = lllm.compute_fitness(_probe(ram=4.0, gpu=False, disk=200.0), entry)
+    assert f == lllm.UNSUPPORTED
+
+
+def test_fitness_large_model_cpu_only_is_too_slow():
+    entry = {"id": "qwen2.5:14b", "disk_gb": 9.0, "min_ram_gb": 16, "min_vram_gb": 11, "params": "14B"}
+    f = lllm.compute_fitness(_probe(ram=32.0, gpu=False, disk=200.0), entry)
+    assert f == lllm.TOO_SLOW
+
+
+def test_recommend_picks_highest_quality_available():
+    cat = lllm.load_catalogue()
+    # A strong GPU machine — the 14B model should be the recommendation.
+    rec = lllm.recommend_model(_probe(gpu=True, vram=16.0, ram=64.0, disk=500.0), cat)
+    assert rec == "qwen2.5:14b"
+
+
+def test_recommend_none_when_nothing_fits():
+    cat = lllm.load_catalogue()
+    rec = lllm.recommend_model(_probe(ram=2.0, gpu=False, disk=1.0), cat)
+    assert rec is None
+
+
+def test_availability_false_without_ollama():
+    cat = lllm.load_catalogue()
+    available, reason = lllm.resolve_local_llm_availability(_probe(ollama=False), cat)
+    assert available is False
+    assert "ollama" in reason.lower()
+
+
+def test_availability_false_on_weak_machine():
+    cat = lllm.load_catalogue()
+    available, reason = lllm.resolve_local_llm_availability(
+        _probe(ram=2.0, gpu=False, disk=1.0, ollama=True), cat
+    )
+    assert available is False
+    assert "machine" in reason.lower() or "hardware" in reason.lower()
+
+
+def test_availability_true_on_capable_machine():
+    cat = lllm.load_catalogue()
+    available, _ = lllm.resolve_local_llm_availability(
+        _probe(gpu=True, vram=12.0, ram=32.0, disk=300.0), cat
+    )
+    assert available is True
+
+
+def test_build_view_marks_recommendation_and_fitness():
+    view = lllm.build_local_llm_view(probe=_probe(gpu=True, vram=16.0, ram=64.0, disk=500.0))
+    assert view["local_llm_available"] is True
+    assert view["recommended_model"] == "qwen2.5:14b"
+    rec_rows = [m for m in view["models"] if m["fitness"] == lllm.RECOMMENDED]
+    assert len(rec_rows) == 1 and rec_rows[0]["id"] == "qwen2.5:14b"
+
+
+def test_set_local_llm_model_rejects_non_catalogue(tmp_path):
+    ai_yaml = tmp_path / "ai.yaml"
+    ai_yaml.write_text("providers:\n  local_reasoning:\n    model_name: qwen2.5:7b\n", encoding="utf-8")
+    assert lllm.set_local_llm_model("not-a-real-model", ai_config_path=ai_yaml) is False
+
+
+def test_set_local_llm_model_writes_catalogue_model(tmp_path):
+    ai_yaml = tmp_path / "ai.yaml"
+    ai_yaml.write_text("providers:\n  local_reasoning:\n    model_name: qwen2.5:7b\n", encoding="utf-8")
+    assert lllm.set_local_llm_model("llama3.1:8b", ai_config_path=ai_yaml) is True
+    import yaml
+    cfg = yaml.safe_load(ai_yaml.read_text(encoding="utf-8"))
+    assert cfg["providers"]["local_reasoning"]["model_name"] == "llama3.1:8b"
