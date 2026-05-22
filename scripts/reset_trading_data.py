@@ -33,7 +33,18 @@ WHAT IT KEEPS
 feature_snapshots, price_history, instrument_registry + sources,
 model_* tables, news_headlines, macro_observations, parameter_log,
 feature_contracts, training_datasets, ai_outputs, control_commands,
-config files, model artefacts. NAV resets to ``paper.nav_seed``.
+config files, model artefacts.
+
+NAV CAVEAT (D126.1)
+-------------------
+This wipe clears mytbot's DB ledger only. NAV is computed LIVE as the
+sum of the connected brokers' paper-account balances — IBKR's TWS
+paper account, Alpaca's paper account, and the crypto paper wallets.
+The wipe cannot reset those broker-side balances, so after restart NAV
+reflects the real broker totals, NOT ``paper.nav_seed``. ``nav_seed``
+is only a pre-broker-connect fallback. For a coherent return baseline,
+re-anchor ``paper.nav_seed`` to the real broker total after the
+brokers connect (or reset the broker paper accounts at their source).
 
 Usage:
     python scripts/reset_trading_data.py              # dry-run
@@ -148,13 +159,16 @@ async def _main() -> int:
             print(f"  KEEP ({len(keep)}): {', '.join(keep) or '(none)'}")
             print(f"  DROP ({len(drop)}): {', '.join(drop) or '(none)'}")
 
-            # NAV seed → the post-reset starting NAV.
+            # NAV seed → only a pre-broker-connect fallback. Real NAV is
+            # broker-derived (see the NAV CAVEAT in the module docstring).
             r = await session.execute(
                 text("SELECT value FROM control_state WHERE key='paper.nav_seed'")
             )
             seed = r.scalar()
             seed_val = (seed or {}).get("seed") if isinstance(seed, dict) else None
-            print(f"\nPost-reset NAV resets to paper.nav_seed = {seed_val}")
+            print(f"\npaper.nav_seed (pre-connect fallback only) = {seed_val}")
+            print("  NOTE: real post-restart NAV is the sum of broker paper")
+            print("  balances — re-anchor nav_seed to that total once brokers connect.")
 
             print("\nRuntime files to delete:")
             for f in RUNTIME_FILES:

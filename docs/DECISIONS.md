@@ -1212,6 +1212,45 @@ repo 1609 passed, 3 skipped.
 
 ---
 
+## D126.1 — NAV baseline re-anchored to real broker totals (2026-05-22)
+
+**Decision:** Re-anchor `control_state::paper.nav_seed` to the live sum
+of broker paper-account balances, and correct the misleading "NAV
+resets to paper.nav_seed" claim in `scripts/reset_trading_data.py`.
+
+**The gap.** D126's data reset wiped mytbot's DB and reset
+`paper.nav_seed` to $1,072,898, and the reset script reported "NAV
+resets to paper.nav_seed". That was wrong. NAV is computed **live** as
+the sum of the connected brokers' paper-account balances — IBKR's TWS
+paper account (`NetLiquidation`), Alpaca's paper account, and the
+crypto paper wallets (`system/paper_wallet.py`). The wipe cleared
+mytbot's *ledger* but cannot reach those broker-side balances. After
+the post-reset restart, once all five brokers connected, NAV settled
+at the real total **$1,224,361** — IBKR alone ≈ $1,016,548 (still
+carrying its pre-D126 paper history). `paper.nav_seed` is only a
+pre-broker-connect fallback; it never drove the displayed NAV. The
+apparent "+$151k jump" was simply the stale seed vs. the real
+broker total surfacing as IBKR (which connects late) came online.
+
+**Resolution.** Operator chose to re-anchor the baseline to reality
+rather than reset the broker paper accounts at source:
+- `paper.nav_seed` set to the live broker total ($1,224,361.13), with
+  a `reanchored_at` stamp.
+- the stale `nav.opening_snapshot` (recorded before IBKR connected, 4
+  brokers, $207,824) deleted so it re-records a complete all-broker
+  snapshot.
+- `scripts/reset_trading_data.py` docstring + output corrected with a
+  NAV CAVEAT: the wipe clears the DB ledger only; real NAV is
+  broker-derived and the seed must be re-anchored after brokers
+  connect (or the broker paper accounts reset at their source —
+  IBKR via TWS "Reset Paper Trading Account", Alpaca via its
+  dashboard, crypto via `PAPER_WALLET_*_USD`).
+
+The DB ledger from D126 remains genuinely clean; only the NAV baseline
+needed reconciling with the broker accounts the wipe could not touch.
+
+---
+
 ## D126 — Fills ledger + phantom-oversell root-cause fix + data reset (2026-05-21)
 
 **Decision:** Replace the corrupted, un-attributable trading history
