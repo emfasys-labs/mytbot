@@ -880,6 +880,43 @@ export type LocalLlmCatalogue = {
   unavailable_reason: string;
 };
 
+/** D127 P5 — Premium LLM provider catalogue. */
+export type PremiumLlmProvider = {
+  id: string;
+  label: string;
+  endpoint_type: string;
+  auth_env: string;
+  base_url_env?: string | null;
+  requires_base_url: boolean;
+  suggested_models: string[];
+  api_key_configured: boolean;
+  base_url_configured: boolean;
+  configured: boolean;
+  active: boolean;
+};
+
+export type PremiumLlmView = {
+  providers: PremiumLlmProvider[];
+  active_provider: string | null;
+  active_model: string | null;
+  premium_enabled: boolean;
+};
+
+export type PremiumTestResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  cert: {
+    passed: boolean;
+    auth_ok: boolean;
+    json_mode_ok: boolean;
+    schema_ok: boolean;
+    latency_ok: boolean;
+    latency_ms?: number | null;
+    reason: string;
+  };
+};
+
 /** D127 P1 — POST /connect/test result. */
 export type ConnectTestResponse = {
   ok: boolean;
@@ -1097,6 +1134,12 @@ export const api = {
     postJsonBody<{ ok: boolean; result: Record<string, unknown> }>('/connect/ai/local/install', body),
   activateLocalLlm: (body: { model_id: string }) =>
     postJsonBody<{ ok: boolean; active_local_model: string; next_step?: string }>('/connect/ai/local/activate', body),
+  getPremiumLlmCatalogue: () => getJson<PremiumLlmView>('/connect/ai/premium/catalogue'),
+  testPremiumLlm: (body: { provider_id: string; model: string }) =>
+    postJsonBody<PremiumTestResponse>('/connect/ai/premium/test', body),
+  activatePremiumLlm: (body: { provider_id: string; model: string }) =>
+    postJsonBody<{ ok: boolean; active_provider: string; active_model: string; next_step?: string }>(
+      '/connect/ai/premium/activate', body),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND

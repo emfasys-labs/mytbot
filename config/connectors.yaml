@@ -207,6 +207,22 @@ ai_providers:
       - env: GOOGLE_API_KEY
         label: Gemini API key
         required: false
+      # D127 P5 — Azure / custom OpenAI-compatible provider credentials,
+      # so the Connect Hub Premium provider picker can configure all five
+      # catalogue providers. All optional — only the chosen provider's
+      # vars need to be set.
+      - env: AZURE_OPENAI_API_KEY
+        label: Azure OpenAI API key
+        required: false
+      - env: AZURE_OPENAI_ENDPOINT
+        label: Azure OpenAI endpoint
+        required: false
+      - env: CUSTOM_LLM_API_KEY
+        label: Custom provider API key
+        required: false
+      - env: CUSTOM_LLM_BASE_URL
+        label: Custom provider base URL
+        required: false
     roles: [premium_arbiter, emergency_model]
     capabilities:
       advisory_only: true

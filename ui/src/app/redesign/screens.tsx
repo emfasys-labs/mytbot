@@ -398,10 +398,12 @@ function AiStageCard({
   busy?: boolean;
 }) {
   const modelLine = aiModelLine(stage);
-  // Local LLM opens the model catalogue; other stages open the env wizard.
+  // Local LLM opens the model catalogue; Premium opens the provider
+  // picker; other stages open the env wizard.
   const isLocal = stage.id === 'local_reasoning';
-  const canConfigure = isLocal || !!connector;
-  const configureLabel = isLocal ? 'Models' : 'Configure';
+  const isPremium = stage.id === 'premium_fallback';
+  const canConfigure = isLocal || isPremium || !!connector;
+  const configureLabel = isLocal ? 'Models' : isPremium ? 'Providers' : 'Configure';
   // Disable is blocked for the core (rules) and for FinBERT while it is
   // the only sentiment provider (P3). The backend also enforces this.
   const disableBlocked = stage.enabled && !stage.can_disable;
@@ -763,6 +765,279 @@ function LocalLlmCatalogueModal({
   );
 }
 
+// ── D127 P5 — Premium LLM provider picker modal ──────────────────────────────
+
+const premiumInputStyle: CSSProperties = {
+  width: '100%',
+  height: 30,
+  borderRadius: 6,
+  border: `1px solid ${TOKENS.line}`,
+  background: TOKENS.bg0,
+  color: TOKENS.ink0,
+  fontFamily: TOKENS.mono,
+  fontSize: 11,
+  padding: '0 9px',
+  boxSizing: 'border-box',
+};
+
+function PremiumLlmPickerModal({
+  accentColor,
+  onClose,
+  onChanged,
+}: {
+  accentColor: string;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [view, setView] = useState<import('../lib/api').PremiumLlmView | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [keyValues, setKeyValues] = useState<Record<string, string>>({});
+  const [modelInput, setModelInput] = useState('');
+  const [busy, setBusy] = useState<'save' | 'test' | 'activate' | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<import('../lib/api').PremiumTestResponse | null>(null);
+
+  const refetch = () => {
+    api.getPremiumLlmCatalogue()
+      .then((v) => { setView(v); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  };
+  useEffect(() => { refetch(); }, []);
+
+  const selected = view?.providers.find((p) => p.id === selectedId) ?? null;
+
+  const selectProvider = (id: string) => {
+    setSelectedId(id);
+    setKeyValues({});
+    setTestResult(null);
+    setMessage(null);
+    setError(null);
+    const p = view?.providers.find((x) => x.id === id);
+    setModelInput(
+      p?.active && view?.active_model ? view.active_model : (p?.suggested_models?.[0] ?? ''),
+    );
+  };
+
+  async function runMutation<T>(fn: () => Promise<T>): Promise<T | null> {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('(401)')) {
+        const token = window.prompt('Control token required');
+        if (token?.trim()) {
+          setApiControlToken(token.trim());
+          try { return await fn(); }
+          catch (retry) { setError(retry instanceof Error ? retry.message : String(retry)); return null; }
+        }
+      }
+      setError(msg);
+      return null;
+    }
+  }
+
+  const saveCredentials = async () => {
+    if (!selected) return;
+    const secrets: Record<string, string> = {};
+    for (const [env, val] of Object.entries(keyValues)) {
+      if (val.trim()) secrets[env] = val.trim();
+    }
+    if (!Object.keys(secrets).length) {
+      setError('Enter at least one credential value to save.');
+      return;
+    }
+    setBusy('save'); setError(null); setMessage(null);
+    const res = await runMutation(() => api.configureConnector({
+      category: 'ai_providers', connector_id: 'premium_fallback', secrets, enable: true,
+    }));
+    setBusy(null);
+    if (res) { setMessage('Credentials saved to .env.'); setKeyValues({}); refetch(); }
+  };
+
+  const runTest = async () => {
+    if (!selected || !modelInput.trim()) { setError('Pick a provider and enter a model id.'); return; }
+    setBusy('test'); setError(null); setMessage(null); setTestResult(null);
+    const res = await runMutation(() => api.testPremiumLlm({
+      provider_id: selected.id, model: modelInput.trim(),
+    }));
+    setBusy(null);
+    if (res) {
+      setTestResult(res);
+      setMessage(res.ok ? 'Compatibility test passed.' : `Test failed: ${res.cert.reason}`);
+    }
+  };
+
+  const activate = async () => {
+    if (!selected || !modelInput.trim()) { setError('Pick a provider and enter a model id.'); return; }
+    setBusy('activate'); setError(null); setMessage(null);
+    const res = await runMutation(() => api.activatePremiumLlm({
+      provider_id: selected.id, model: modelInput.trim(),
+    }));
+    setBusy(null);
+    if (res) { setMessage(res.next_step || `${selected.label} activated.`); refetch(); onChanged(); }
+  };
+
+  const credEnvs = selected
+    ? [selected.auth_env, ...(selected.requires_base_url && selected.base_url_env ? [selected.base_url_env] : [])]
+    : [];
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 92, background: 'rgba(0,0,0,0.58)',
+        backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center',
+        justifyContent: 'center', padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 640, maxWidth: 'min(640px, 94vw)', maxHeight: '88vh', overflow: 'auto',
+          borderRadius: 10, border: `1px solid ${TOKENS.lineStrong}`, background: TOKENS.bg1,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.65)', padding: 18,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Label accent={accentColor}>Premium LLM</Label>
+            <div style={{ marginTop: 6, fontFamily: TOKENS.sans, fontSize: 18, fontWeight: 560, color: TOKENS.ink0 }}>
+              Choose a provider
+            </div>
+            <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+              Paid escalation/arbiter model — advises only, never executes.
+            </div>
+          </div>
+          <button type="button" onClick={onClose} style={cardButtonStyle()}>Close</button>
+        </div>
+
+        {message ? <div style={{ marginBottom: 10 }}><Pill tone="info">{message}</Pill></div> : null}
+        {error ? <div style={{ marginBottom: 10 }}><Pill tone="danger">{error}</Pill></div> : null}
+        {!view ? (
+          <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>loading providers…</div>
+        ) : null}
+
+        <div style={{ display: 'grid', gap: 6, marginBottom: 12 }}>
+          {(view?.providers ?? []).map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => selectProvider(p.id)}
+              style={{
+                textAlign: 'left',
+                border: `1px solid ${p.id === selectedId ? accentColor : TOKENS.line}`,
+                borderRadius: 8,
+                background: p.id === selectedId ? `${accentColor}14` : TOKENS.bg0,
+                padding: '9px 11px',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 550, color: TOKENS.ink0, flex: 1 }}>
+                {p.label}
+              </span>
+              {p.active ? <Pill size="sm" tone="profit">active</Pill> : null}
+              <Pill size="sm" tone={p.configured ? 'info' : 'neutral'}>
+                {p.configured ? 'configured' : 'needs key'}
+              </Pill>
+              <span style={{ fontFamily: TOKENS.mono, fontSize: 9, color: TOKENS.ink3 }}>
+                {p.endpoint_type}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {selected ? (
+          <div style={{
+            border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12,
+            background: TOKENS.bg0, display: 'grid', gap: 10,
+          }}>
+            <div style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 550, color: TOKENS.ink0 }}>
+              {selected.label}
+            </div>
+            {credEnvs.map((env) => (
+              <div key={env} style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{env}</span>
+                <input
+                  type="password"
+                  placeholder={`set ${env}`}
+                  value={keyValues[env] ?? ''}
+                  onChange={(e) => setKeyValues((prev) => ({ ...prev, [env]: e.target.value }))}
+                  style={premiumInputStyle}
+                />
+              </div>
+            ))}
+            <button
+              type="button" disabled={busy !== null}
+              onClick={saveCredentials}
+              style={{ ...cardButtonStyle(), justifySelf: 'start', minWidth: 130 }}
+            >
+              {busy === 'save' ? 'saving…' : 'Save credentials'}
+            </button>
+
+            <div style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>model id</span>
+              <input
+                type="text"
+                placeholder="model id"
+                value={modelInput}
+                onChange={(e) => setModelInput(e.target.value)}
+                style={premiumInputStyle}
+              />
+              {selected.suggested_models.length ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 2 }}>
+                  {selected.suggested_models.map((sm) => (
+                    <button
+                      key={sm}
+                      type="button"
+                      onClick={() => setModelInput(sm)}
+                      style={{ ...cardButtonStyle(), height: 22, fontSize: 10, padding: '0 8px' }}
+                    >
+                      {sm}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            {testResult ? (
+              <div style={{
+                fontFamily: TOKENS.mono, fontSize: 10, lineHeight: 1.5,
+                color: testResult.ok ? TOKENS.profit : TOKENS.danger,
+              }}>
+                cert: {testResult.cert.reason}
+                {testResult.cert.latency_ms != null ? ` · ${testResult.cert.latency_ms}ms` : ''}
+              </div>
+            ) : null}
+
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                type="button" disabled={busy !== null}
+                onClick={runTest}
+                style={{ ...cardButtonStyle(TOKENS.info), minWidth: 90 }}
+              >
+                {busy === 'test' ? 'testing…' : 'Test'}
+              </button>
+              <button
+                type="button" disabled={busy !== null}
+                onClick={activate}
+                style={{ ...cardButtonStyle(accentColor), minWidth: 90 }}
+              >
+                {busy === 'activate' ? 'activating…' : 'Activate'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+            Select a provider above to configure, test, and activate it.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ConnectScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const hub = live.connectHub;
@@ -777,9 +1052,14 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   const [testStates, setTestStates] = useState<Record<string, ConnectorTestState>>({});
   const [aiRefreshKey, setAiRefreshKey] = useState(0);
   const [localCatalogueOpen, setLocalCatalogueOpen] = useState(false);
+  const [premiumPickerOpen, setPremiumPickerOpen] = useState(false);
   const handleAiConfigure = (stage: AiPipelineStage, connector?: ConnectHubConnector) => {
     if (stage.id === 'local_reasoning') {
       setLocalCatalogueOpen(true);
+      return;
+    }
+    if (stage.id === 'premium_fallback') {
+      setPremiumPickerOpen(true);
       return;
     }
     if (connector) setSelected(connector);
@@ -1036,6 +1316,16 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
         <LocalLlmCatalogueModal
           accentColor={accentColor}
           onClose={() => setLocalCatalogueOpen(false)}
+          onChanged={() => {
+            setAiRefreshKey((k) => k + 1);
+            live.refresh();
+          }}
+        />
+      )}
+      {premiumPickerOpen && (
+        <PremiumLlmPickerModal
+          accentColor={accentColor}
+          onClose={() => setPremiumPickerOpen(false)}
           onChanged={() => {
             setAiRefreshKey((k) => k + 1);
             live.refresh();
