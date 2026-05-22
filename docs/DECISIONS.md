@@ -1179,7 +1179,26 @@ A custom OpenAI-compatible endpoint is accepted because the premium
 LLM only advises — it never executes — but it must still pass the
 compatibility test before activation.
 
-Next: Phase 6 — first-run onboarding wizard.
+**Phase 6 — landed (2026-05-22).** First-run onboarding wizard:
+- `connectors/onboarding.py` — `build_onboarding_view` derives the
+  four-step wizard (broker / feeds / AI / treasury) from the live
+  Connect Hub snapshot, AI pipeline view, and machine probe. The
+  broker + AI-core steps are required; feeds + treasury are optional.
+  `can_launch` is true as soon as one broker is configured (a single
+  paper broker runs the system); `ready_to_finish` is true when no
+  required step is outstanding. Degrades safely on missing inputs.
+- Persistence: only the "operator finished the wizard" flag is stored
+  (`control_state` key `connect_hub.onboarding`), so the wizard does
+  not reappear every launch.
+- Endpoints: `GET /connect/onboarding`,
+  `POST /connect/onboarding/complete`.
+- `tests/test_d127_connect_hub_v2.py` extended to 68 tests. Full
+  suite: 1609 passed, 3 skipped.
+
+Next: Phase 7 — Treasury v2 approval workflow. Per open decision #4,
+this is the largest and most sensitive phase (real cash-movement
+contract) and should be confirmed as in-scope vs. its own project
+before starting.
 
 ---
 

@@ -630,3 +630,91 @@ def test_premium_cert_text_evaluation():
     # Missing schema keys → fails.
     partial = pllm._evaluate_text('{"foo": "bar"}', 500)
     assert partial.passed is False and partial.schema_ok is False
+
+
+# ── P6: first-run onboarding wizard ───────────────────────────────────────────
+
+from connectors import onboarding as ob  # noqa: E402
+
+
+def _hub(*, brokers=0, brokers_connected=0, feeds=0, treasury=0):
+    def rows(n, connected=0):
+        out = []
+        for i in range(n):
+            out.append({"enabled": True, "configured": True,
+                        "connected": i < connected})
+        return out
+    return {
+        "categories": {
+            "brokers": rows(brokers, brokers_connected),
+            "information_feeds": rows(feeds),
+            "treasury_accounts": rows(treasury),
+        }
+    }
+
+
+_AI_OK = {"stages": [{"id": "rules", "enabled": True},
+                     {"id": "fin_sentiment", "enabled": True}]}
+
+
+def test_onboarding_fresh_install_needs_a_broker():
+    v = ob.build_onboarding_view(connect_hub=_hub(brokers=0), ai_pipeline=_AI_OK)
+    broker_step = next(s for s in v["steps"] if s["id"] == "broker")
+    assert broker_step["status"] == ob.ATTENTION
+    assert v["can_launch"] is False
+    assert v["ready_to_finish"] is False
+    assert v["current_step"] == "broker"
+
+
+def test_onboarding_one_broker_makes_it_launchable():
+    v = ob.build_onboarding_view(
+        connect_hub=_hub(brokers=1, brokers_connected=1), ai_pipeline=_AI_OK
+    )
+    assert v["can_launch"] is True                  # single broker is enough
+    assert v["ready_to_finish"] is True             # no required step outstanding
+
+
+def test_onboarding_feeds_and_treasury_are_optional():
+    v = ob.build_onboarding_view(connect_hub=_hub(brokers=1), ai_pipeline=_AI_OK)
+    feeds = next(s for s in v["steps"] if s["id"] == "feeds")
+    treasury = next(s for s in v["steps"] if s["id"] == "treasury")
+    assert feeds["status"] == ob.OPTIONAL          # unconfigured but skippable
+    assert treasury["status"] == ob.OPTIONAL
+    assert v["ready_to_finish"] is True             # optional steps don't block
+
+
+def test_onboarding_ai_step_needs_rules_and_finbert():
+    ai_off = {"stages": [{"id": "rules", "enabled": True},
+                         {"id": "fin_sentiment", "enabled": False}]}
+    v = ob.build_onboarding_view(connect_hub=_hub(brokers=1), ai_pipeline=ai_off)
+    ai_step = next(s for s in v["steps"] if s["id"] == "ai")
+    assert ai_step["status"] == ob.ATTENTION
+    assert v["ready_to_finish"] is False
+
+
+def test_onboarding_fully_configured_install():
+    v = ob.build_onboarding_view(
+        connect_hub=_hub(brokers=2, brokers_connected=2, feeds=3, treasury=1),
+        ai_pipeline=_AI_OK,
+    )
+    assert all(s["satisfied"] for s in v["steps"])
+    assert v["current_step"] is None               # nothing left to do
+    assert v["ready_to_finish"] is True
+
+
+def test_onboarding_completion_hides_wizard():
+    not_done = ob.build_onboarding_view(connect_hub=_hub(brokers=1), ai_pipeline=_AI_OK)
+    assert not_done["show_wizard"] is True
+    done = ob.build_onboarding_view(
+        connect_hub=_hub(brokers=1), ai_pipeline=_AI_OK,
+        persisted={"completed": True, "completed_at": "2026-05-22T00:00:00+00:00"},
+    )
+    assert done["completed"] is True
+    assert done["show_wizard"] is False
+
+
+def test_onboarding_degrades_safely_on_missing_inputs():
+    v = ob.build_onboarding_view()                 # no inputs at all
+    assert v["can_launch"] is False
+    assert v["current_step"] == "broker"
+    assert len(v["steps"]) == 4

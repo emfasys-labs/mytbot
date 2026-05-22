@@ -2884,6 +2884,76 @@ async def activate_premium_llm(
     }
 
 
+@app.get("/connect/onboarding")
+async def get_onboarding(
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P6 — first-run onboarding wizard state.
+
+    Read-only. Derives the wizard steps from the live Connect Hub
+    snapshot, the AI pipeline view, and the machine probe. `can_launch`
+    is true as soon as one broker is configured (a single paper broker
+    is enough to run the system).
+    """
+    from data.ingest_telemetry import (
+        build_news_data_provider_status,
+        build_news_data_provider_status_env_only,
+    )
+    from system.connect_hub import build_connect_hub_snapshot
+    from connectors.ai_pipeline import build_ai_pipeline_view
+    from connectors.machine_probe import probe_machine
+    from connectors.onboarding import ONBOARDING_STATE_KEY, build_onboarding_view
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+
+    persisted: dict = {}
+    if session_factory is not None:
+        try:
+            from control.command_bus import CommandBus
+
+            raw = await CommandBus(session_factory).get_state(ONBOARDING_STATE_KEY, None)
+            if isinstance(raw, dict):
+                persisted = raw
+        except Exception:  # noqa: BLE001
+            persisted = {}
+
+    return build_onboarding_view(
+        connect_hub=build_connect_hub_snapshot(
+            orchestrator=_get_orchestrator(), news_data_providers=npp
+        ),
+        ai_pipeline=build_ai_pipeline_view(),
+        machine_probe=probe_machine(),
+        persisted=persisted,
+    )
+
+
+@app.post("/connect/onboarding/complete")
+async def complete_onboarding(
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P6 — mark the onboarding wizard finished so it stops showing."""
+    from datetime import datetime, timezone
+
+    from connectors.onboarding import ONBOARDING_STATE_KEY
+
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    from control.command_bus import CommandBus
+
+    payload = {
+        "completed": True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await CommandBus(session_factory).set_state(ONBOARDING_STATE_KEY, payload)
+    return {"ok": True, "onboarding": payload}
+
+
 @app.get("/connect/ai/pipeline")
 async def get_ai_pipeline():
     """D127 Connect Hub v2 — the four-stage AI pipeline descriptor.
