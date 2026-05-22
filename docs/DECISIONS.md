@@ -1195,10 +1195,20 @@ compatibility test before activation.
 - `tests/test_d127_connect_hub_v2.py` extended to 68 tests. Full
   suite: 1609 passed, 3 skipped.
 
-Next: Phase 7 — Treasury v2 approval workflow. Per open decision #4,
-this is the largest and most sensitive phase (real cash-movement
-contract) and should be confirmed as in-scope vs. its own project
-before starting.
+**Phase 7 — deferred to its own project (open decision #4, 2026-05-22).**
+Connect Hub v2 ships at P6. Treasury stays **read-only** — fully usable
+as a capital reference, no cash movement. P1–P6 are all read-only
+inventory / config / advisory-gating; P7 is categorically different —
+it designs and implements the contract for moving *real cash* between a
+treasury account and brokers (approval workflow, daily caps, reserve
+floor, beneficiary whitelist, audit). The design doc itself flagged it
+as "separate, gated, after everything else is soak-tested". The
+operator chose to defer P7 to a dedicated, carefully-scoped project
+after the P1–P6 work has had a paper soak.
+
+**Connect Hub v2 — final status: P1–P6 implemented (2026-05-22),
+P7 deferred.** 68 tests in `tests/test_d127_connect_hub_v2.py`; full
+repo 1609 passed, 3 skipped.
 
 ---
 

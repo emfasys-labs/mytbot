@@ -447,15 +447,27 @@ with a single paper broker.
 
 ## Build phases
 
-| Phase | Scope |
-|---|---|
-| P1 | `connector_state` table + lifecycle state machine + Test endpoints for brokers & feeds + capability detection |
-| P2 | Certification tiers wired into execution gating; live-mode guard |
-| P3 | AI Pipeline screen: 4 stage cards, enable/disable rules, FinBERT versioning |
-| P4 | Local LLM: machine probe + catalogue + install/cert + graceful fallback |
-| P5 | Premium LLM provider picker + compatibility test |
-| P6 | First-run onboarding wizard |
-| P7 | Treasury v2 approval workflow (separate, gated, after the rest is soak-tested) |
+| Phase | Scope | Status |
+|---|---|---|
+| P1 | `connector_state` table + lifecycle state machine + Test endpoints + capability detection | ✅ implemented |
+| P2 | Certification tiers wired into execution gating; live-mode guard | ✅ implemented |
+| P3 | AI Pipeline: 4 stage cards, enable/disable rules, FinBERT versioning | ✅ implemented |
+| P4 | Local LLM: machine probe + catalogue + install/cert + graceful fallback | ✅ implemented |
+| P5 | Premium LLM provider picker + compatibility test | ✅ implemented |
+| P6 | First-run onboarding wizard | ✅ implemented |
+| P7 | Treasury v2 approval workflow | ⏸ deferred to its own project |
+
+P1–P6 are all read-only inventory / config / advisory-gating. P7 is
+categorically different — it moves real cash — and is deferred to a
+dedicated, carefully-scoped project after a paper soak (see DECISIONS
+D127, open decision #4). Until then the treasury connector stays
+read-only: a usable capital reference with no movement.
+
+The remaining work for P1–P6 is the **redesign UI screens** that render
+these backend contracts (the Connect screen extensions, the AI Pipeline
+stage cards, the Local LLM catalogue sub-screen, the Premium provider
+picker, and the onboarding wizard). The backend endpoints and
+descriptors they consume are all in place.
 
 ## Open decisions
 
