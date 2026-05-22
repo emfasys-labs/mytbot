@@ -201,17 +201,12 @@ class RiskEngine:
             return decision
         checks_passed.append(arb_label)
 
-        # D125 fix #5 — record the approved open notional against the
-        # per-UTC-day cumulative-add tracker so the next signal on the
-        # same symbol can see this one even before it's filled.
-        # Reduce-only is skipped (it lowers exposure, not adds it).
-        if not self._is_reduce_only_signal(signal):
-            try:
-                proposed = self._requested_notional(signal)
-                if proposed > 0:
-                    self.record_open_signal_notional(str(signal.symbol or ""), proposed)
-            except Exception:  # noqa: BLE001 — recording is non-fatal
-                pass
+        # D125.1 — the per-UTC-day cumulative-add tracker is now updated
+        # from *actual fills* (execution engine calls
+        # ``record_open_signal_notional`` on confirmed fills), not at
+        # risk approval. Recording at approval over-counted: approved
+        # signals that never fill inflated the daily total and wrongly
+        # blocked later trades.
 
         logger.info(f"RISK APPROVED {signal.signal_id} | {signal.symbol} {signal.side}")
         return RiskDecision(
@@ -1151,6 +1146,33 @@ class RiskEngine:
                     out.add(s)
         return out
 
+    def _clamp_signal_to_notional(self, signal, allowed_notional: Decimal) -> bool:
+        """D125.1 — resize a signal so its notional fits ``allowed_notional``.
+
+        Used by the single-name and per-day caps to **clamp** an oversized
+        order down to the cap rather than vetoing it outright — a position
+        limit must bound exposure, not block deployment. Returns True when
+        the signal was clamped (or already within), False when it cannot
+        be sized (no usable price). Never enlarges a signal.
+        """
+        if allowed_notional <= 0:
+            return False
+        price = self._resolve_signal_price(signal)
+        if price <= 0:
+            return False
+        try:
+            current_qty = abs(Decimal(str(getattr(signal, "suggested_quantity", 0) or 0)))
+        except (InvalidOperation, TypeError, ValueError):
+            current_qty = Decimal("0")
+        new_qty = allowed_notional / price
+        if current_qty > 0 and new_qty >= current_qty:
+            return True  # already within the cap — nothing to clamp
+        signal.suggested_quantity = new_qty
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
+        if meta is not None and "risk_notional_override" in meta:
+            meta["risk_notional_override"] = str(allowed_notional)
+        return True
+
     # ------------------------------------------------------------------
     # D125 fix #1 — Single-name notional cap.
     #
@@ -1243,17 +1265,24 @@ class RiskEngine:
         if projected <= cap_notional:
             return (True, "single_name_notional")
 
-        logger.warning(
-            "RISK single_name_notional REJECT | %s | existing=%s + proposed=%s = %s > cap=%s (%.2f%% of NAV %s)",
-            signal_sym,
-            str(existing),
-            str(proposed),
-            str(projected),
-            str(cap_notional),
-            float(max_pct * Decimal("100")),
-            str(sizing_base),
+        # D125.1 — clamp, don't veto. The allocator routinely sizes a
+        # single action well above the per-name cap; rejecting it
+        # outright suppresses deployment. Resize the order down to the
+        # remaining room instead. Only reject when the existing position
+        # already meets/exceeds the cap (no room at all).
+        allowed = cap_notional - existing
+        if allowed <= 0 or not self._clamp_signal_to_notional(signal, allowed):
+            logger.warning(
+                "RISK single_name_notional REJECT | %s | existing=%s already at/over cap=%s",
+                signal_sym, str(existing), str(cap_notional),
+            )
+            return (False, "single_name_notional")
+        logger.info(
+            "RISK single_name_notional CLAMP | %s | proposed=%s -> %s (%.2f%% of NAV %s)",
+            signal_sym, str(proposed), str(allowed),
+            float(max_pct * Decimal("100")), str(sizing_base),
         )
-        return (False, "single_name_notional")
+        return (True, "single_name_notional")
 
     # ------------------------------------------------------------------
     # D125 fix #5 — Per-UTC-day cumulative-add cap per symbol.
@@ -1308,17 +1337,20 @@ class RiskEngine:
         if projected <= cap_notional:
             return (True, "intraday_symbol_adds")
 
-        logger.warning(
-            "RISK intraday_symbol_adds REJECT | %s | added_today=%s + proposed=%s = %s > cap=%s (%.2f%% of NAV %s)",
-            signal_sym,
-            str(already),
-            str(proposed),
-            str(projected),
-            str(cap_notional),
-            float(max_pct * Decimal("100")),
-            str(sizing_base),
+        # D125.1 — clamp to the remaining daily room rather than veto.
+        allowed = cap_notional - already
+        if allowed <= 0 or not self._clamp_signal_to_notional(signal, allowed):
+            logger.warning(
+                "RISK intraday_symbol_adds REJECT | %s | added_today=%s already at/over cap=%s",
+                signal_sym, str(already), str(cap_notional),
+            )
+            return (False, "intraday_symbol_adds")
+        logger.info(
+            "RISK intraday_symbol_adds CLAMP | %s | proposed=%s -> %s (%.2f%% of NAV %s)",
+            signal_sym, str(proposed), str(allowed),
+            float(max_pct * Decimal("100")), str(sizing_base),
         )
-        return (False, "intraday_symbol_adds")
+        return (True, "intraday_symbol_adds")
 
     def _roll_intraday_adds_day_if_needed(self) -> None:
         """Reset the per-day cumulative-add tracker on UTC date change."""

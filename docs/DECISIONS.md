@@ -1212,6 +1212,54 @@ repo 1609 passed, 3 skipped.
 
 ---
 
+## D125.1 — Single-name / per-day caps clamp instead of veto (2026-05-22)
+
+**Decision:** The D125 `single_name_notional` and `intraday_symbol_adds`
+risk gates now **clamp** an oversized order down to the cap rather than
+**vetoing** it, and the per-day tracker is fed from actual fills.
+
+**Why.** After the D126 clean-slate restart, deployment stalled at
+~1.6% — 2 positions in hours. Investigation of the live log: 35 of the
+last 40 risk rejections were `single_name_notional`. The allocator
+(hunter mode, $1.22M NAV, mostly-cash book) sizes individual actions at
+$63k–$321k; the 5%-of-NAV cap is $61k, so the gate rejected almost the
+entire allocator output. A position-size *limit* was acting as a
+deployment *blocker*.
+
+**The flaw.** A per-name exposure cap should bound the position —
+"buy at most 5%" — not refuse the trade. When the allocator wants $98k
+of AAVE and the cap is $61k, the correct outcome is *buy $61k of AAVE*,
+not buy nothing.
+
+Second, smaller bug: `intraday_symbol_adds` recorded against its
+per-UTC-day tracker at *risk approval*, not at *fill*. Approved signals
+that never filled inflated the daily total (BCH-USD showed
+`added_today=$110k` with zero BCH-USD fills) and wrongly blocked later
+trades.
+
+**Changes.**
+- `RiskEngine._clamp_signal_to_notional` — resizes
+  `signal.suggested_quantity` so its notional fits a target; never
+  enlarges; updates `risk_notional_override` metadata if present.
+- `_check_single_name_notional` and `_check_intraday_symbol_adds` —
+  on an over-cap signal, clamp to the remaining room and APPROVE.
+  Only REJECT when there is genuinely no room (existing position /
+  day-total already at or over the cap) or no usable price to resize.
+- Recording moved off the risk-approval path: `evaluate()` no longer
+  touches the tracker; `ExecutionEngine._persist_fill_to_ledger` calls
+  `record_open_signal_notional` on every confirmed non-reduce-only
+  fill, so the per-day cap counts real fills.
+- Reduce-only / arbitrage / options exemptions unchanged. The 5% and
+  10% caps are unchanged — with clamping, 5% simply means the book
+  naturally diversifies into ≥20 names to reach full deployment, which
+  is the intended risk posture.
+
+**Tests.** `tests/test_d125_risk_caps.py` updated — over-cap cases now
+assert clamp-to-cap; hard reject retained only for the no-room case.
+Full suite: 1611 passed, 3 skipped.
+
+---
+
 ## D126.1 — NAV baseline re-anchored to real broker totals (2026-05-22)
 
 **Decision:** Re-anchor `control_state::paper.nav_seed` to the live sum

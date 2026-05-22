@@ -1104,6 +1104,20 @@ class ExecutionEngine:
                     else None
                 ),
             )
+            # D125.1 — update the risk engine's per-UTC-day cumulative-add
+            # tracker from the *actual fill* (not at risk approval, which
+            # over-counted approved-but-unfilled signals).
+            if not reduce_only:
+                try:
+                    from control.runtime import get_risk_engine
+
+                    re = get_risk_engine()
+                    if re is not None:
+                        re.record_open_signal_notional(
+                            str(signal.symbol or ""), filled_qty * px
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "fills ledger persistence failed | signal_id=%s | %s",
