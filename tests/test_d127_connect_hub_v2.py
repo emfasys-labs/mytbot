@@ -545,3 +545,88 @@ def test_set_local_llm_model_writes_catalogue_model(tmp_path):
     import yaml
     cfg = yaml.safe_load(ai_yaml.read_text(encoding="utf-8"))
     assert cfg["providers"]["local_reasoning"]["model_name"] == "llama3.1:8b"
+
+
+# ── P5: Premium LLM provider picker + cert ────────────────────────────────────
+
+from connectors import premium_llm as pllm  # noqa: E402
+
+
+def test_premium_catalogue_has_five_providers():
+    cat = pllm.load_provider_catalogue()
+    ids = {e["id"] for e in cat}
+    assert ids == {"anthropic", "openai", "gemini", "azure_openai", "custom_openai"}
+
+
+def test_premium_endpoint_types_cover_two_shapes():
+    cat = pllm.load_provider_catalogue()
+    types = {e["endpoint_type"] for e in cat}
+    assert types == {"anthropic_native", "openai_compatible"}
+
+
+def test_find_provider():
+    assert pllm.find_provider("anthropic")["label"] == "Anthropic Claude"
+    assert pllm.find_provider("nonexistent") is None
+
+
+def test_premium_view_reports_configuration(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    view = pllm.build_premium_llm_view()
+    by_id = {p["id"]: p for p in view["providers"]}
+    assert by_id["openai"]["api_key_configured"] is True
+    assert by_id["openai"]["configured"] is True            # openai needs no base_url
+    assert by_id["anthropic"]["api_key_configured"] is False
+    # Azure/custom need a base_url too — key alone is not "configured".
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "key")
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    view2 = pllm.build_premium_llm_view()
+    azure = {p["id"]: p for p in view2["providers"]}["azure_openai"]
+    assert azure["api_key_configured"] is True
+    assert azure["configured"] is False                      # missing endpoint
+
+
+def test_set_premium_provider_rejects_non_catalogue(tmp_path):
+    ai_yaml = tmp_path / "ai.yaml"
+    ai_yaml.write_text("providers:\n  premium_fallback:\n    provider: anthropic\n", encoding="utf-8")
+    assert pllm.set_premium_provider("not-a-provider", "x", ai_config_path=ai_yaml) is False
+
+
+def test_set_premium_provider_writes_catalogue_provider(tmp_path):
+    ai_yaml = tmp_path / "ai.yaml"
+    ai_yaml.write_text(
+        "providers:\n  premium_fallback:\n    provider: anthropic\n    model_name: old\n",
+        encoding="utf-8",
+    )
+    assert pllm.set_premium_provider("openai", "gpt-4o", ai_config_path=ai_yaml) is True
+    import yaml
+    cfg = yaml.safe_load(ai_yaml.read_text(encoding="utf-8"))
+    assert cfg["providers"]["premium_fallback"]["provider"] == "openai"
+    assert cfg["providers"]["premium_fallback"]["model_name"] == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_cert_premium_unknown_provider():
+    r = await pllm.cert_premium_provider("nonexistent", model="x")
+    assert r.passed is False
+    assert "catalogue" in r.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_cert_premium_missing_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    r = await pllm.cert_premium_provider("anthropic", model="claude-sonnet-4-5")
+    assert r.passed is False
+    assert "api key" in r.reason.lower()
+
+
+def test_premium_cert_text_evaluation():
+    # Valid structured reply within budget → passes.
+    good = pllm._evaluate_text('{"sentiment": "positive", "confidence": 0.8}', 500)
+    assert good.passed is True and good.schema_ok is True
+    # Non-JSON reply → fails.
+    bad = pllm._evaluate_text("not json at all", 500)
+    assert bad.passed is False and bad.json_mode_ok is False
+    # Missing schema keys → fails.
+    partial = pllm._evaluate_text('{"foo": "bar"}', 500)
+    assert partial.passed is False and partial.schema_ok is False

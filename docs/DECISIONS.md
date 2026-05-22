@@ -1159,7 +1159,27 @@ Open decisions resolved in P4:
     `set_local_llm_model` refuse any model id not in the supported
     catalogue. The custom-model Experimental escape hatch is deferred.
 
-Next: Phase 5 — Premium LLM provider picker + compatibility test.
+**Phase 5 — landed (2026-05-22).** Premium LLM provider picker +
+compatibility test:
+- `config/premium_llm_catalogue.yaml` — 5 supported providers
+  (Anthropic, OpenAI, Gemini, Azure OpenAI, custom OpenAI-compatible).
+  Two endpoint shapes cover all five: `anthropic_native` and
+  `openai_compatible` (Gemini uses its OpenAI-compatible endpoint).
+- `connectors/premium_llm.py` — `build_premium_llm_view` (per-provider
+  configured state + active provider), `cert_premium_provider`
+  (auth + structured-JSON + latency test against the live provider
+  API; credentials read from env, never echoed), `set_premium_provider`
+  (catalogue-only write to `ai.yaml`).
+- Endpoints: `GET /connect/ai/premium/catalogue`,
+  `POST /connect/ai/premium/test`, `POST /connect/ai/premium/activate`.
+- `tests/test_d127_connect_hub_v2.py` extended to 61 tests. Full
+  suite: 1602 passed, 3 skipped.
+
+A custom OpenAI-compatible endpoint is accepted because the premium
+LLM only advises — it never executes — but it must still pass the
+compatibility test before activation.
+
+Next: Phase 6 — first-run onboarding wizard.
 
 ---
 

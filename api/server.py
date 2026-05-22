@@ -2451,6 +2451,11 @@ class _ConnectLocalModelBody(BaseModel):
     model_id: str
 
 
+class _ConnectPremiumBody(BaseModel):
+    provider_id: str
+    model: str
+
+
 @app.post("/auth/dashboard/login")
 async def dashboard_login(body: _DashboardLoginBody):
     pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -2800,6 +2805,82 @@ async def activate_local_llm(
         "active_local_model": model_id,
         "requires_restart": True,
         "next_step": "Restart or stop/start the system so the AI router reloads the model.",
+    }
+
+
+@app.get("/connect/ai/premium/catalogue")
+async def get_premium_llm_catalogue():
+    """D127 P5 — supported Premium LLM providers + configuration state.
+
+    Read-only. Per provider: whether its API key (and endpoint, for
+    Azure / custom) is configured, the suggested models, and which
+    provider is currently active in `ai.yaml`. Secrets are never echoed.
+    """
+    from connectors.premium_llm import build_premium_llm_view
+
+    return build_premium_llm_view()
+
+
+@app.post("/connect/ai/premium/test")
+async def test_premium_llm(
+    body: _ConnectPremiumBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P5 — run the premium-provider compatibility test.
+
+    Verifies auth, structured-JSON output, and latency against the live
+    provider API. Credentials are read from the environment.
+    """
+    from connectors.premium_llm import cert_premium_provider
+    from connectors.state_store import upsert_state
+
+    provider_id = str(body.provider_id or "").strip().lower()
+    model = str(body.model or "").strip()
+    if not provider_id or not model:
+        raise HTTPException(status_code=400, detail="provider_id and model are required")
+
+    cert = await cert_premium_provider(provider_id, model=model)
+    await upsert_state(
+        session_factory,
+        category="ai_providers",
+        connector_id="premium_fallback",
+        last_test_result={"provider": provider_id, "model": model, **cert.to_dict()},
+    )
+    return {"ok": cert.passed, "provider": provider_id, "model": model, "cert": cert.to_dict()}
+
+
+@app.post("/connect/ai/premium/activate")
+async def activate_premium_llm(
+    body: _ConnectPremiumBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 P5 — point the Premium LLM stage at a catalogue provider/model."""
+    from connectors.premium_llm import set_premium_provider
+    from connectors.state_store import upsert_state
+
+    provider_id = str(body.provider_id or "").strip().lower()
+    model = str(body.model or "").strip()
+    if not provider_id or not model:
+        raise HTTPException(status_code=400, detail="provider_id and model are required")
+    if not set_premium_provider(provider_id, model):
+        raise HTTPException(
+            status_code=400,
+            detail="provider is not in the supported catalogue or ai.yaml is unwritable",
+        )
+    await upsert_state(
+        session_factory,
+        category="ai_providers",
+        connector_id="premium_fallback",
+        ai_model_version=f"{provider_id}:{model}",
+    )
+    return {
+        "ok": True,
+        "active_provider": provider_id,
+        "active_model": model,
+        "requires_restart": True,
+        "next_step": "Restart or stop/start the system so the AI router reloads the premium provider.",
     }
 
 

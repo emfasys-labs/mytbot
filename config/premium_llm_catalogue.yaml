@@ -1,0 +1,68 @@
+# config/premium_llm_catalogue.yaml
+# ==================================
+# Connect Hub v2 (D127 Phase 5) — supported Premium LLM providers.
+#
+# The Premium LLM is the optional paid escalation/arbiter stage. It only
+# ADVISES — it never places orders — so a custom OpenAI-compatible
+# endpoint is acceptable here. Every provider must still pass the
+# compatibility test (structured-output + latency) before activation.
+#
+# Two endpoint shapes cover all five providers:
+#   anthropic_native   — POST /v1/messages
+#   openai_compatible  — POST /v1/chat/completions  (OpenAI, Azure,
+#                        Gemini's OpenAI-compatible endpoint, and any
+#                        custom OpenAI-compatible server)
+#
+# `suggested_models` are starting points; the operator may enter any
+# model id their account exposes. `requires_base_url` providers need
+# the operator to supply the endpoint (Azure deployment / custom host).
+
+premium_llm_providers:
+  - id: anthropic
+    label: Anthropic Claude
+    endpoint_type: anthropic_native
+    base_url: https://api.anthropic.com
+    auth_env: ANTHROPIC_API_KEY
+    requires_base_url: false
+    suggested_models:
+      - claude-sonnet-4-5
+      - claude-opus-4-1
+      - claude-haiku-4-5
+
+  - id: openai
+    label: OpenAI
+    endpoint_type: openai_compatible
+    base_url: https://api.openai.com/v1
+    auth_env: OPENAI_API_KEY
+    requires_base_url: false
+    suggested_models:
+      - gpt-4o
+      - gpt-4o-mini
+
+  - id: gemini
+    label: Google Gemini
+    endpoint_type: openai_compatible
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    auth_env: GOOGLE_API_KEY
+    requires_base_url: false
+    suggested_models:
+      - gemini-2.0-flash
+      - gemini-1.5-pro
+
+  - id: azure_openai
+    label: Azure OpenAI
+    endpoint_type: openai_compatible
+    base_url: ""                       # operator-supplied resource endpoint
+    auth_env: AZURE_OPENAI_API_KEY
+    base_url_env: AZURE_OPENAI_ENDPOINT
+    requires_base_url: true
+    suggested_models: []               # operator-supplied deployment name
+
+  - id: custom_openai
+    label: Custom OpenAI-compatible
+    endpoint_type: openai_compatible
+    base_url: ""                       # operator-supplied host
+    auth_env: CUSTOM_LLM_API_KEY
+    base_url_env: CUSTOM_LLM_BASE_URL
+    requires_base_url: true
+    suggested_models: []
