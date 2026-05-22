@@ -1102,8 +1102,35 @@ execution gating + the live-mode guard:
 - `tests/test_d127_connect_hub_v2.py` extended to 31 tests. Full
   suite: 1572 passed, 3 skipped.
 
-Next: Phase 3 — AI Pipeline screen (4 stage cards, enable/disable
-rules, FinBERT versioning via the model registry).
+**Phase 3 — landed (2026-05-22).** The AI pipeline as four managed
+stages:
+- `connectors/ai_pipeline.py` — `build_ai_pipeline_view` builds the
+  fixed Rules → FinBERT → Local LLM → Premium descriptor (escalation
+  order, enable state, model/version detail); `can_disable_ai_stage`
+  is the single authority for the per-stage disable rules.
+- Disable rules enforced in `POST /connect/enable`: Rules is the
+  non-disableable core (already via the manifest); FinBERT may be
+  disabled only when another *enabled* provider carries the
+  `sentiment_classifier` role — today it is the sole sentiment
+  provider, so it is locked. Local LLM / Premium are freely
+  disableable. No AI stage is ever deletable (they are stages, not
+  connectors).
+- FinBERT versioning: `config/ai.yaml::providers.fin_sentiment` gains
+  `version` (logical label) + `model_revision` (pins the exact
+  HuggingFace checkpoint). Surfaced on the stage card. NOTE — the
+  design sketched registering FinBERT in `model_registry.yaml`; that
+  registry's schema (task/target/validation_method/training_dataset)
+  fits trained classifiers, not a pinned pretrained HF model, so the
+  version lives in `ai.yaml` instead. The *update mechanism*
+  (download new checkpoint → checksum → smoke test → atomic swap) is
+  deliberately deferred — it is a HuggingFace-environment-specific
+  subsystem; P3 surfaces the version and structures the contract.
+- `GET /connect/ai/pipeline` — read-only four-stage descriptor.
+- `tests/test_d127_connect_hub_v2.py` extended to 45 tests. Full
+  suite: 1579 passed, 3 skipped.
+
+Next: Phase 4 — Local LLM machine probe + supported-model catalogue +
+install/cert flow + graceful fallback.
 
 ---
 

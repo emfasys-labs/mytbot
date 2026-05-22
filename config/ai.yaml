@@ -77,6 +77,13 @@ providers:
   fin_sentiment:
     enabled: true
     model_name: ProsusAI/finbert
+    # D127 P3 — FinBERT is a pinned pretrained checkpoint, not a model the
+    # system trains. `version` is a logical label surfaced on the Connect
+    # Hub AI-pipeline card; `model_revision` pins the exact HuggingFace
+    # checkpoint (a git tag/commit) so an update is a deliberate, auditable
+    # bump rather than silent drift. `null` revision = HF default branch.
+    version: 1.0.0
+    model_revision: null
     device: auto                  # auto|cuda|cpu (auto prefers CUDA when torch has GPU support)
     local_only: true
     batch_size: 16

@@ -2700,6 +2700,21 @@ async def configure_connector(
     }
 
 
+@app.get("/connect/ai/pipeline")
+async def get_ai_pipeline():
+    """D127 Connect Hub v2 — the four-stage AI pipeline descriptor.
+
+    Read-only. Returns the fixed Rules → FinBERT → Local LLM → Premium
+    pipeline with per-stage enable state, the dynamic disable rules
+    (e.g. FinBERT is locked while it is the only sentiment provider),
+    and model/version detail. The AI pipeline is four managed *stages*,
+    never an add/remove connector list.
+    """
+    from connectors.ai_pipeline import build_ai_pipeline_view
+
+    return build_ai_pipeline_view()
+
+
 @app.post("/connect/test")
 async def test_connector_endpoint(
     body: _ConnectTestBody,
@@ -2892,6 +2907,14 @@ async def set_connector_enabled_endpoint(
         raise HTTPException(status_code=404, detail="Unknown connector")
     if not enabled and _connector_is_non_disableable(manifest):
         raise HTTPException(status_code=409, detail="This connector is a core pipeline component and cannot be disabled")
+    # D127 P3 — AI pipeline stages have dynamic disable rules (e.g. FinBERT
+    # may be disabled only when another sentiment provider is active).
+    if not enabled and category == "ai_providers":
+        from connectors.ai_pipeline import can_disable_ai_stage
+
+        can_disable, blocked_reason = can_disable_ai_stage(connector_id)
+        if not can_disable:
+            raise HTTPException(status_code=409, detail=blocked_reason)
     exposure = {"positions": 0, "open_orders": 0, "has_exposure": False}
     if category == "brokers" and not enabled:
         exposure = await _broker_exposure_summary(connector_id)

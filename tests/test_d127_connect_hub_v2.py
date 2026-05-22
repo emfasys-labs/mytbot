@@ -377,3 +377,60 @@ def test_risk_gate_reduce_only_exempt(monkeypatch):
         _cert_signal(broker="some_experimental", side="sell", reduce_only=True), {}
     )
     assert ok is True                            # exits always allowed
+
+
+# ── P3: AI pipeline as managed stages ─────────────────────────────────────────
+
+from connectors.ai_pipeline import build_ai_pipeline_view, can_disable_ai_stage, STAGE_ORDER  # noqa: E402
+
+
+def test_ai_pipeline_has_four_fixed_stages_in_order():
+    view = build_ai_pipeline_view()
+    ids = [s["id"] for s in view["stages"]]
+    assert ids == list(STAGE_ORDER)
+    assert ids == ["rules", "fin_sentiment", "local_reasoning", "premium_fallback"]
+    assert view["stage_count"] == 4
+    # Every stage carries its escalation order and is never deletable.
+    for i, s in enumerate(view["stages"], start=1):
+        assert s["order"] == i
+        assert s["can_delete"] is False
+
+
+def test_ai_pipeline_rules_is_core_and_locked():
+    view = build_ai_pipeline_view()
+    rules = view["stages"][0]
+    assert rules["id"] == "rules"
+    assert rules["core"] is True
+    assert rules["can_disable"] is False
+
+
+def test_can_disable_rules_always_false():
+    ok, reason = can_disable_ai_stage("rules")
+    assert ok is False
+    assert "core" in reason.lower()
+
+
+def test_can_disable_finbert_blocked_when_sole_sentiment_provider():
+    # In the shipped config FinBERT is the only sentiment_classifier.
+    ok, reason = can_disable_ai_stage("fin_sentiment")
+    assert ok is False
+    assert "sentiment" in reason.lower()
+
+
+def test_can_disable_local_and_premium_allowed():
+    assert can_disable_ai_stage("local_reasoning")[0] is True
+    assert can_disable_ai_stage("premium_fallback")[0] is True
+
+
+def test_ai_pipeline_finbert_carries_version():
+    view = build_ai_pipeline_view()
+    finbert = view["stages"][1]
+    assert finbert["id"] == "fin_sentiment"
+    assert finbert["model"]["model_name"] == "ProsusAI/finbert"
+    assert finbert["model"]["version"]            # a logical version label is present
+
+
+def test_can_disable_unknown_stage():
+    ok, reason = can_disable_ai_stage("not_a_stage")
+    assert ok is False
+    assert "unknown" in reason.lower()
