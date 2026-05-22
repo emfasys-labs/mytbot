@@ -3,11 +3,11 @@
  * All screens are wired to live system data via `LiveData`.
  */
 
-import { Fragment, useMemo, useState, type CSSProperties } from 'react';
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
-import { api, setApiControlToken, type ConnectHubConnector, type RoutingBrokerRow } from '../lib/api';
+import { api, setApiControlToken, type AiPipelineStage, type AiPipelineView, type ConnectHubConnector, type RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 import { formatStrategyDisplayName } from './strategyLabels';
 
@@ -372,6 +372,199 @@ function ConnectorCard({
   );
 }
 
+// ── D127 P3 — AI pipeline rendered as four fixed, ordered stages ─────────────
+
+function aiModelLine(stage: AiPipelineStage): string {
+  const m = (stage.model ?? {}) as Record<string, unknown>;
+  const parts: string[] = [];
+  if (m.model_name) parts.push(String(m.model_name));
+  else if (m.provider) parts.push(String(m.provider));
+  if (m.version) parts.push(`v${m.version}`);
+  if (m.fallback_model) parts.push(`fallback ${m.fallback_model}`);
+  return parts.join(' · ');
+}
+
+function AiStageCard({
+  stage,
+  connector,
+  onConfigure,
+  onToggle,
+  busy,
+}: {
+  stage: AiPipelineStage;
+  connector?: ConnectHubConnector;
+  onConfigure: (row: ConnectHubConnector) => void;
+  onToggle: (stage: AiPipelineStage) => void;
+  busy?: boolean;
+}) {
+  const modelLine = aiModelLine(stage);
+  // Disable is blocked for the core (rules) and for FinBERT while it is
+  // the only sentiment provider (P3). The backend also enforces this.
+  const disableBlocked = stage.enabled && !stage.can_disable;
+  return (
+    <div style={{
+      border: `1px solid ${TOKENS.line}`,
+      borderRadius: 8,
+      background: TOKENS.bg1,
+      padding: 14,
+      display: 'grid',
+      gap: 10,
+      minHeight: 158,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{
+          flex: '0 0 22px',
+          height: 22,
+          borderRadius: 6,
+          background: `${TOKENS.info}1f`,
+          color: TOKENS.info,
+          fontFamily: TOKENS.mono,
+          fontSize: 11,
+          fontWeight: 600,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          {stage.order}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{
+            fontFamily: TOKENS.sans,
+            fontSize: 14,
+            fontWeight: 550,
+            color: TOKENS.ink0,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {stage.label}
+          </div>
+          <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            {stage.role}
+          </div>
+        </div>
+        <Pill size="sm" tone={stage.enabled ? 'profit' : 'neutral'}>
+          {stage.enabled ? 'enabled' : 'disabled'}
+        </Pill>
+      </div>
+      <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.5 }}>
+        {stage.summary}
+      </div>
+      {modelLine ? (
+        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink2 }}>
+          {modelLine}
+        </div>
+      ) : null}
+      <div style={{
+        marginTop: 'auto',
+        borderTop: `1px solid ${TOKENS.line}`,
+        paddingTop: 9,
+        fontFamily: TOKENS.mono,
+        fontSize: 10,
+        color: disableBlocked ? TOKENS.caution : TOKENS.ink3,
+        lineHeight: 1.45,
+      }}>
+        {stage.core
+          ? 'core pipeline component · always on'
+          : disableBlocked
+            ? stage.disable_blocked_reason
+            : 'stage · cannot be deleted'}
+      </div>
+      {stage.core ? null : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <button
+            type="button"
+            disabled={!connector}
+            onClick={() => connector && onConfigure(connector)}
+            style={{ ...cardButtonStyle(), flex: '1 1 70px', opacity: connector ? 1 : 0.5 }}
+          >
+            Configure
+          </button>
+          <button
+            type="button"
+            disabled={busy || disableBlocked}
+            onClick={() => onToggle(stage)}
+            title={disableBlocked ? stage.disable_blocked_reason : undefined}
+            style={{
+              ...cardButtonStyle(stage.enabled ? TOKENS.caution : TOKENS.profit),
+              flex: '1 1 70px',
+              opacity: disableBlocked ? 0.5 : 1,
+            }}
+          >
+            {stage.enabled ? 'Disable' : 'Enable'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiPipelineGrid({
+  aiConnectors,
+  refreshKey,
+  onConfigure,
+  onToggle,
+  busyKey,
+}: {
+  aiConnectors: ConnectHubConnector[];
+  refreshKey: number;
+  onConfigure: (row: ConnectHubConnector) => void;
+  onToggle: (stage: AiPipelineStage) => void;
+  busyKey: string | null;
+}) {
+  const [view, setView] = useState<AiPipelineView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.getAiPipeline()
+      .then((v) => { if (!cancelled) { setView(v); setError(null); } })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  if (error) {
+    return (
+      <div style={{
+        border: `1px dashed ${TOKENS.lineStrong}`,
+        borderRadius: 8,
+        padding: 18,
+        color: TOKENS.caution,
+        fontFamily: TOKENS.mono,
+        fontSize: 11,
+      }}>
+        AI pipeline unavailable: {error}
+      </div>
+    );
+  }
+  if (!view) {
+    return (
+      <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>
+        loading AI pipeline…
+      </div>
+    );
+  }
+  const byId = new Map(aiConnectors.map((c) => [c.id, c]));
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 260px))',
+      gap: 12,
+      alignItems: 'stretch',
+    }}>
+      {view.stages.map((stage) => (
+        <AiStageCard
+          key={stage.id}
+          stage={stage}
+          connector={byId.get(stage.id)}
+          onConfigure={onConfigure}
+          onToggle={onToggle}
+          busy={busyKey === `ai_providers:${stage.id}`}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function ConnectScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const hub = live.connectHub;
@@ -384,6 +577,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, ConnectorTestState>>({});
+  const [aiRefreshKey, setAiRefreshKey] = useState(0);
   const runControl = async (
     row: ConnectHubConnector,
     fn: () => Promise<{ next_step?: string }>,
@@ -452,6 +646,15 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
     } finally {
       setActionBusy(null);
     }
+  };
+  const toggleAiStage = (stage: AiPipelineStage) => {
+    const row = (categories['ai_providers'] ?? []).find((c) => c.id === stage.id);
+    if (!row) return;
+    void runControl(row, () => api.setConnectorEnabled({
+      category: 'ai_providers',
+      connector_id: stage.id,
+      enabled: !stage.enabled,
+    })).then(() => setAiRefreshKey((k) => k + 1));
   };
   const toggleConnector = (row: ConnectHubConnector) => {
     const exposureAction =
@@ -559,6 +762,15 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
                 {summary ? `${summary.connected}/${summary.enabled} connected · ${summary.configured} configured` : 'awaiting status'}
               </div>
             </div>
+            {category === 'ai_providers' ? (
+              <AiPipelineGrid
+                aiConnectors={categories['ai_providers'] ?? []}
+                refreshKey={aiRefreshKey}
+                onConfigure={setSelected}
+                onToggle={toggleAiStage}
+                busyKey={actionBusy}
+              />
+            ) : (
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 260px))',
@@ -589,6 +801,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
                 </div>
               )}
             </div>
+            )}
           </section>
         );
       })}

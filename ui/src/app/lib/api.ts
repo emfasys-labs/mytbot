@@ -825,6 +825,27 @@ export type ConnectHubConnector = {
   certification?: string;
 };
 
+/** D127 P3 — GET /connect/ai/pipeline — the four fixed AI stages. */
+export type AiPipelineStage = {
+  id: string;
+  label: string;
+  role: string;
+  order: number;
+  core: boolean;
+  summary: string;
+  enabled: boolean;
+  can_disable: boolean;
+  disable_blocked_reason: string;
+  can_delete: boolean;
+  model: Record<string, unknown>;
+};
+
+export type AiPipelineView = {
+  stages: AiPipelineStage[];
+  stage_count: number;
+  enabled_count: number;
+};
+
 /** D127 P1 — POST /connect/test result. */
 export type ConnectTestResponse = {
   ok: boolean;
@@ -1036,6 +1057,7 @@ export const api = {
     postJsonBody<ConnectControlResponse>('/connect/delete', body),
   testConnector: (body: { category: string; connector_id: string }) =>
     postJsonBody<ConnectTestResponse>('/connect/test', body),
+  getAiPipeline: () => getJson<AiPipelineView>('/connect/ai/pipeline'),
   systemStart: () => postJson<SystemStatusResponse>('/system/start'),
   systemStop: () => postJson<SystemStatusResponse>('/system/stop'),
   // Risk-engine kill switch. Activating it blocks both new opens AND
