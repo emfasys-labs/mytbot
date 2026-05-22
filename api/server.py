@@ -2442,6 +2442,11 @@ class _ConnectControlBody(BaseModel):
     exposure_action: str | None = None
 
 
+class _ConnectTestBody(BaseModel):
+    category: str
+    connector_id: str
+
+
 @app.post("/auth/dashboard/login")
 async def dashboard_login(body: _DashboardLoginBody):
     pwd = os.getenv("DASHBOARD_PASSWORD", "").strip()
@@ -2691,6 +2696,87 @@ async def configure_connector(
             if category in {"brokers", "ai_providers", "treasury_accounts"}
             else "Run the data pipeline to ingest fresh provider data."
         ),
+        "connect_hub": hub,
+    }
+
+
+@app.post("/connect/test")
+async def test_connector_endpoint(
+    body: _ConnectTestBody,
+    _: None = Depends(_require_mutation_token),
+    session_factory=Depends(_optional_session_factory),
+):
+    """D127 Connect Hub v2 — run a live capability probe for one connector.
+
+    Detects what the connector can actually do right now (vs what the
+    manifest declares), derives the lifecycle status, persists it to the
+    `connector_state` table, and returns the refreshed hub snapshot.
+    Phase 1 supports brokers and information feeds.
+    """
+    from data.ingest_telemetry import (
+        build_news_data_provider_status,
+        build_news_data_provider_status_env_only,
+    )
+    from system.connect_hub import build_connect_hub_snapshot, find_connector_manifest
+    from connectors.capability_probe import probe_connector
+    from connectors.lifecycle import StatusInputs, resolve_status
+    from connectors.state_store import upsert_state
+
+    category = str(body.category or "").strip()
+    connector_id = str(body.connector_id or "").strip().lower()
+    manifest = find_connector_manifest(category=category, connector_id=connector_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="Unknown connector")
+
+    npp = build_news_data_provider_status_env_only()
+    if session_factory is not None:
+        try:
+            npp = await build_news_data_provider_status(session_factory)
+        except Exception:  # noqa: BLE001
+            npp = build_news_data_provider_status_env_only()
+
+    probe = probe_connector(
+        category=category,
+        manifest=manifest,
+        orchestrator=_get_orchestrator(),
+        news_provider_statuses=npp,
+    )
+
+    caps = dict(manifest.capabilities or {})
+    paper_only = bool(caps.get("supports_paper")) and not bool(caps.get("supports_live", True))
+    auth_type = str(getattr(manifest, "auth_type", "api_key") or "").strip().lower()
+    auth_required = auth_type not in {"none", "gateway", "local_model", "local_endpoint"}
+    status = resolve_status(
+        StatusInputs(
+            enabled=bool(manifest.enabled),
+            credentials_complete=probe.credentials_complete,
+            has_any_credential=probe.has_any_credential,
+            test_ok=probe.ok,
+            test_partial=probe.partial,
+            paper_only=paper_only,
+            system_live_mode=(os.getenv("APP_ENV", "paper").strip().lower() == "live"),
+            auth_required=auth_required,
+        )
+    )
+
+    saved = await upsert_state(
+        session_factory,
+        category=category,
+        connector_id=connector_id,
+        status=status,
+        enabled=bool(manifest.enabled),
+        last_test_at=probe.checked_at,
+        last_test_result=probe.to_dict(),
+        detected_capabilities=probe.detected_capabilities,
+    )
+
+    hub = build_connect_hub_snapshot(orchestrator=_get_orchestrator(), news_data_providers=npp)
+    return {
+        "ok": probe.ok,
+        "connector": {"category": category, "id": connector_id},
+        "status": status,
+        "probe": probe.to_dict(),
+        "state_persisted": saved is not None,
         "connect_hub": hub,
     }
 

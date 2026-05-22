@@ -1005,6 +1005,87 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D127 — Connect Hub v2 design accepted (2026-05-22)
+
+**Decision:** Accept the Connect Hub v2 design — taking D107's read-only
+connector inventory to a full lifecycle feature. Design captured in
+`docs/CONNECT_HUB.md` ("Connect Hub v2 — Design (D127)"); implementation
+is phased (P1–P7) and not yet started.
+
+**Why.** D107 delivered the onboarding *inventory* slice and explicitly
+deferred OAuth flows, capability detection, and treasury execution. The
+product needs the full lifecycle: any operator can install the app and
+connect only the brokers / feeds / AI models / treasury account they
+actually have, from a **curated, tested catalogue** — never arbitrary
+connectors that could move money through an unverified adapter.
+
+**Key design commitments.**
+
+- **Curated catalogue only.** Users pick from `config/connectors.yaml`;
+  new connectors are added by the myTbot team over time, after testing.
+- **Three certification tiers** — Certified (may execute), Experimental
+  (may inform only — never trades or moves money), Unsupported (cannot
+  be added). Effective capability = manifest-declared ∩ test-detected ∩
+  tier-permitted.
+- **Four category shapes are distinct:** trading platforms and news
+  feeds are collections (add/remove N); the AI pipeline is 4 fixed
+  stages (Rules / FinBERT / Local LLM / Premium — configured, never
+  added/removed; "disable yes, delete no"); treasury is a singleton
+  (0 or 1 — it is the capital source-of-truth).
+- **Connector lifecycle state machine** — `not_configured →
+  needs_credentials → testing → connected | connected_limited |
+  error | disabled | unsupported_in_live`.
+- **AI pipeline specifics:** Rules is non-disableable core; FinBERT is
+  a version-pinned curated checkpoint updated via the model registry +
+  smoke test; Local LLM uses a supported-model catalogue with a
+  first-run machine probe, an install/activation compatibility cert
+  (JSON-mode + latency + schema tests), and graceful skip on weak
+  hardware; Premium LLM is provider-based with a compatibility test
+  and only ever advises.
+- **Treasury** stays read-only in v1; v2 adds approval-gated transfers
+  (manual approval, daily cap, reserve floor, beneficiary whitelist) —
+  no tier ever gets silent cash movement.
+- **Data model:** `config/connectors.yaml` is the catalogue, `.env`
+  holds secrets (never DB, never echoed), a new `connector_state`
+  table holds per-install state (enabled, test history, detected
+  capabilities, certification tier, model versions, machine probe).
+  Single-user-per-install — no multi-tenancy.
+
+**Open decisions** (recorded in the design doc, to resolve before the
+relevant phase): local-LLM behaviour on weak machines; whether to ship
+the custom-model Experimental escape hatch in v1; FinBERT auto-update
+toggle; whether Treasury v2 is in-scope or its own project.
+
+**Status:** Design accepted and documented.
+
+**Phase 1 — landed (2026-05-22).** Per-install connector state + the
+lifecycle foundation:
+- `storage/models.py::ConnectorState` + migration `d127a1b2c3d4`
+  (`connector_state` table — unique on `(category, connector_id)`).
+- `connectors/lifecycle.py` — the 8-state machine, legal-transition
+  guard, and the pure `resolve_status(StatusInputs)` derivation used by
+  the API and snapshot builder.
+- `connectors/state_store.py` — upsert / load helpers for the
+  per-install state.
+- `connectors/capability_probe.py` — `probe_connector` turning a
+  connector's *declared* capabilities into *detected* ones; Phase 1
+  covers brokers (against live `BrokerManager` status) and information
+  feeds (against ingest telemetry). AI/treasury return an explicit
+  not-yet-probed result.
+- `POST /connect/test` — runs the probe, derives the lifecycle status,
+  persists `connector_state`, returns the refreshed hub snapshot.
+- `tests/test_d127_connect_hub_v2.py` — 21 tests (state machine, store,
+  probe). Full suite: 1562 passed, 3 skipped.
+
+Endpoint note: the design doc sketched `/connect/{category}/{id}/test`;
+the implementation uses `POST /connect/test` with a body to match the
+existing `/connect/{configure,enable,delete,add}` convention.
+
+Next: Phase 2 — certification tiers wired into execution gating +
+live-mode guard.
+
+---
+
 ## D126 — Fills ledger + phantom-oversell root-cause fix + data reset (2026-05-21)
 
 **Decision:** Replace the corrupted, un-attributable trading history

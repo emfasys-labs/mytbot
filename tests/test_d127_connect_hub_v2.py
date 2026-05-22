@@ -1,0 +1,263 @@
+"""D127 Connect Hub v2 — Phase 1 tests.
+
+Covers the connector lifecycle state machine, the connector_state store,
+and the broker/feed capability probe.
+"""
+from __future__ import annotations
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from storage.models import Base
+from connectors import lifecycle as lc
+from connectors.lifecycle import StatusInputs, resolve_status, can_transition, is_usable
+from connectors.capability_probe import probe_connector
+from connectors.state_store import upsert_state, load_state, load_all_states
+
+
+# ── lifecycle state machine ───────────────────────────────────────────────────
+
+
+def test_resolve_disabled_when_not_enabled():
+    s = resolve_status(StatusInputs(
+        enabled=False, credentials_complete=True, has_any_credential=True,
+        test_ok=True,
+    ))
+    assert s == lc.DISABLED
+
+
+def test_resolve_not_configured_when_no_credentials():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=False, has_any_credential=False,
+        test_ok=None,
+    ))
+    assert s == lc.NOT_CONFIGURED
+
+
+def test_resolve_needs_credentials_when_partial_credentials():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=False, has_any_credential=True,
+        test_ok=None,
+    ))
+    assert s == lc.NEEDS_CREDENTIALS
+
+
+def test_resolve_testing_when_configured_but_untested():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=True, has_any_credential=True,
+        test_ok=None,
+    ))
+    assert s == lc.TESTING
+
+
+def test_resolve_connected_on_passing_test():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=True, has_any_credential=True,
+        test_ok=True, test_partial=False,
+    ))
+    assert s == lc.CONNECTED
+
+
+def test_resolve_connected_limited_on_partial_test():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=True, has_any_credential=True,
+        test_ok=True, test_partial=True,
+    ))
+    assert s == lc.CONNECTED_LIMITED
+
+
+def test_resolve_error_on_failing_test():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=True, has_any_credential=True,
+        test_ok=False,
+    ))
+    assert s == lc.ERROR
+
+
+def test_resolve_unsupported_in_live_for_paper_only():
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=True, has_any_credential=True,
+        test_ok=True, paper_only=True, system_live_mode=True,
+    ))
+    assert s == lc.UNSUPPORTED_IN_LIVE
+
+
+def test_resolve_no_auth_connector_skips_credential_gate():
+    # Rules engine: auth_required=False — never blocked on credentials.
+    s = resolve_status(StatusInputs(
+        enabled=True, credentials_complete=False, has_any_credential=False,
+        test_ok=True, auth_required=False,
+    ))
+    assert s == lc.CONNECTED
+
+
+def test_transition_legal_and_illegal():
+    assert can_transition(lc.TESTING, lc.CONNECTED) is True
+    assert can_transition(lc.CONNECTED, lc.DISABLED) is True
+    assert can_transition(lc.DISABLED, lc.TESTING) is True
+    assert can_transition(lc.CONNECTED, lc.CONNECTED) is True       # no-op legal
+    assert can_transition(lc.NOT_CONFIGURED, lc.CONNECTED) is False  # must test first
+    assert can_transition(lc.ERROR, lc.CONNECTED) is False           # must re-test
+
+
+def test_is_usable():
+    assert is_usable(lc.CONNECTED) is True
+    assert is_usable(lc.CONNECTED_LIMITED) is True
+    assert is_usable(lc.ERROR) is False
+    assert is_usable(lc.DISABLED) is False
+    assert is_usable(lc.TESTING) is False
+
+
+# ── connector_state store ─────────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def sf():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    yield maker
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_state_store_insert_and_load(sf):
+    saved = await upsert_state(
+        sf, category="brokers", connector_id="kraken",
+        status=lc.CONNECTED, enabled=True,
+        detected_capabilities={"can_trade": True, "can_withdraw": False},
+    )
+    assert saved is not None
+    assert saved["status"] == lc.CONNECTED
+    loaded = await load_state(sf, "brokers", "kraken")
+    assert loaded["detected_capabilities"]["can_trade"] is True
+    assert loaded["detected_capabilities"]["can_withdraw"] is False
+
+
+@pytest.mark.asyncio
+async def test_state_store_upsert_updates_in_place(sf):
+    await upsert_state(sf, category="brokers", connector_id="ibkr",
+                       status=lc.TESTING, enabled=True)
+    await upsert_state(sf, category="brokers", connector_id="ibkr",
+                       status=lc.CONNECTED)
+    loaded = await load_state(sf, "brokers", "ibkr")
+    assert loaded["status"] == lc.CONNECTED
+    assert loaded["enabled"] is True                 # preserved — not overwritten
+    alls = await load_all_states(sf)
+    assert len(alls) == 1                            # upsert, not insert
+
+
+@pytest.mark.asyncio
+async def test_state_store_load_missing_returns_none(sf):
+    assert await load_state(sf, "brokers", "nonexistent") is None
+
+
+# ── capability probe ──────────────────────────────────────────────────────────
+
+
+class _FakeSecret:
+    def __init__(self, env, required=True, configured=True):
+        self.env = env
+        self.required = required
+        self.configured = configured
+
+
+class _FakeManifest:
+    def __init__(self, *, id, category, auth_type="api_key",
+                 required_secrets=(), capabilities=None):
+        self.id = id
+        self.category = category
+        self.auth_type = auth_type
+        self.required_secrets = required_secrets
+        self.capabilities = capabilities or {}
+
+
+class _FakeOrchestrator:
+    def __init__(self, brokers):
+        self._brokers = brokers
+
+    def status(self):
+        return {"brokers": self._brokers}
+
+
+def test_probe_broker_missing_credentials():
+    m = _FakeManifest(
+        id="kraken", category="brokers",
+        required_secrets=(_FakeSecret("KRAKEN_API_KEY", configured=False),),
+        capabilities={"can_trade": True},
+    )
+    r = probe_connector(category="brokers", manifest=m, orchestrator=None)
+    assert r.ok is False
+    assert "credential" in r.reason.lower()
+
+
+def test_probe_broker_connected_detects_capabilities():
+    m = _FakeManifest(
+        id="kraken", category="brokers",
+        required_secrets=(_FakeSecret("KRAKEN_API_KEY"),),
+        capabilities={"can_trade": True, "can_read_balance": True, "supports_paper": True},
+    )
+    orc = _FakeOrchestrator({"kraken": {"connected": True, "balance_ready": True}})
+    r = probe_connector(category="brokers", manifest=m, orchestrator=orc)
+    assert r.ok is True and r.partial is False
+    assert r.detected_capabilities["can_trade"] is True
+    assert r.detected_capabilities["can_read_balance"] is True
+    assert r.detected_capabilities["can_withdraw"] is False     # always off
+
+
+def test_probe_broker_connected_but_balance_not_ready_is_partial():
+    m = _FakeManifest(
+        id="ibkr", category="brokers", auth_type="gateway",
+        capabilities={"can_trade": True, "can_read_balance": True},
+    )
+    orc = _FakeOrchestrator({"ibkr": {"connected": True, "balance_ready": False}})
+    r = probe_connector(category="brokers", manifest=m, orchestrator=orc)
+    assert r.ok is True and r.partial is True
+    assert r.detected_capabilities["can_read_balance"] is False
+
+
+def test_probe_broker_not_connected():
+    m = _FakeManifest(
+        id="ibkr", category="brokers", auth_type="gateway",
+        capabilities={"can_trade": True},
+    )
+    orc = _FakeOrchestrator({"ibkr": {"connected": False, "error": "gateway down"}})
+    r = probe_connector(category="brokers", manifest=m, orchestrator=orc)
+    assert r.ok is False
+    assert "gateway down" in r.reason
+
+
+def test_probe_feed_live():
+    m = _FakeManifest(
+        id="newsapi", category="information_feeds",
+        required_secrets=(_FakeSecret("NEWS_API_KEY"),),
+        capabilities={"can_ingest_news": True},
+    )
+    r = probe_connector(
+        category="information_feeds", manifest=m,
+        news_provider_statuses=[{"id": "newsapi", "state": "live"}],
+    )
+    assert r.ok is True and r.partial is False
+    assert r.detected_capabilities["can_ingest_news"] is True
+
+
+def test_probe_feed_stale_is_partial():
+    m = _FakeManifest(
+        id="finnhub", category="information_feeds",
+        required_secrets=(_FakeSecret("FINNHUB_API_KEY"),),
+        capabilities={"can_ingest_news": True},
+    )
+    r = probe_connector(
+        category="information_feeds", manifest=m,
+        news_provider_statuses=[{"id": "finnhub", "state": "stale"}],
+    )
+    assert r.ok is True and r.partial is True
+
+
+def test_probe_unsupported_category_phase1():
+    m = _FakeManifest(id="external_treasury", category="treasury_accounts")
+    r = probe_connector(category="treasury_accounts", manifest=m)
+    assert r.ok is False
+    assert "later" in r.reason.lower() or "phase" in r.reason.lower()

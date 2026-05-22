@@ -148,6 +148,38 @@ class PositionLog(Base):
     instrument_metadata = Column(JSON, nullable=True)
 
 
+class ConnectorState(Base):
+    """D127 Connect Hub v2 — per-install connector lifecycle state.
+
+    `config/connectors.yaml` is the static, version-controlled *catalogue*
+    of supported connectors. This table is the per-install *state* layer:
+    which catalogue connectors this operator has set up, their lifecycle
+    status, the result of the last live capability test, the capabilities
+    actually detected (vs merely declared in the manifest), and AI-stage
+    version / install metadata. Secrets never live here — they stay in
+    `.env`. One install = one operator, so no user dimension.
+    """
+    __tablename__ = "connector_state"
+    __table_args__ = (
+        UniqueConstraint("category", "connector_id", name="uq_connector_state_cat_id"),
+    )
+
+    id                        = Column(Integer, primary_key=True, autoincrement=True)
+    category                  = Column(String(32), nullable=False)   # brokers / information_feeds / ai_providers / treasury_accounts
+    connector_id              = Column(String(64), nullable=False)
+    status                    = Column(String(32), nullable=False, default="not_configured")
+    enabled                   = Column(Boolean, nullable=False, default=False)
+    certification_tier        = Column(String(16), nullable=True)    # certified / experimental
+    last_test_at              = Column(DateTime(timezone=True), nullable=True)
+    last_test_result          = Column(JSON, nullable=True)          # {ok, reason, latency_ms, ...}
+    detected_capabilities     = Column(JSON, nullable=True)          # {can_trade: true, can_read_balance: true, ...}
+    # AI-stage fields (populated in P3/P4 — nullable so no later migration).
+    ai_model_version          = Column(String(64), nullable=True)
+    local_model_install_state = Column(String(32), nullable=True)    # installed / available / unsupported / too_slow
+    machine_probe             = Column(JSON, nullable=True)          # {cpu, ram_gb, gpu, vram_gb, ...}
+    updated_at                = Column(DateTime(timezone=True), nullable=False)
+
+
 class PriceHistory(Base):
     """OHLCV candle data — TimescaleDB hypertable."""
     __tablename__ = "price_history"
