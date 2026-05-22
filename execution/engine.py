@@ -1213,6 +1213,9 @@ class ExecutionEngine:
                 side=str(signal.side or ""),
                 quantity=filled_qty,
                 fill_price=px,
+                # D130 — the signal's target price at order time; the
+                # ledger derives signed slippage_bps from this vs ``px``.
+                intended_price=getattr(signal, "suggested_price", None),
                 fee=getattr(result, "fee", 0),
                 asset_class=str(getattr(signal, "asset_class", "") or ""),
                 order_type=str(order_type_s or ""),

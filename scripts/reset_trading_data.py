@@ -26,7 +26,10 @@ Tables (TRUNCATE):
 control_state: every key EXCEPT the operator/config whitelist
   (paper.nav_seed, system.capital_allocation, strategy.enabled.*,
    auto_training.last_run_at).
-Runtime files: data/runtime/risk_state.json (loss/cooldown counters).
+Runtime files: data/runtime/risk_state.json (loss/cooldown counters),
+  data/runtime/paper_wallet.json (crypto paper-wallet venue equity —
+  deleting it lets each crypto venue restart from its seed balance, so a
+  wiped position book and the crypto wallets stay consistent).
 
 WHAT IT KEEPS
 -------------
@@ -96,9 +99,12 @@ KEEP_STATE_EXACT = {
 }
 KEEP_STATE_PREFIXES = ("strategy.enabled.",)
 
-# Runtime files reset (loss / cooldown counters).
+# Runtime files reset (loss / cooldown counters; crypto paper-wallet
+# venue equity so the crypto wallets restart from seed alongside the
+# wiped position book).
 RUNTIME_FILES = [
     ROOT / "data" / "runtime" / "risk_state.json",
+    ROOT / "data" / "runtime" / "paper_wallet.json",
 ]
 
 

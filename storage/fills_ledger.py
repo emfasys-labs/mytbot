@@ -152,6 +152,27 @@ async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Deci
     return (prior_qty, prior_avg, opened_at)
 
 
+def _slippage_bps(
+    intended: Optional[Decimal],
+    fill_price: Decimal,
+    signed_delta: Decimal,
+) -> Optional[Decimal]:
+    """Signed adverse slippage in basis points, or ``None`` when unknown.
+
+    Convention: **positive = the fill was WORSE than intended** (an
+    execution cost), **negative = price improvement**. For a buy, paying
+    more than intended is adverse; for a sell, receiving less is adverse.
+    Returns ``None`` when no usable intended price was supplied.
+    """
+    if intended is None or intended <= 0 or fill_price <= 0:
+        return None
+    if signed_delta > 0:        # buy — adverse when fill > intended
+        raw = (fill_price - intended) / intended
+    else:                       # sell — adverse when fill < intended
+        raw = (intended - fill_price) / intended
+    return (raw * Decimal("10000")).quantize(Decimal("0.0001"))
+
+
 def _compute_wac(
     prior_qty: Decimal,
     prior_avg: Decimal,
@@ -206,6 +227,7 @@ async def record_fill(
     side: str,
     quantity: Any,
     fill_price: Any,
+    intended_price: Any = None,
     fee: Any = 0,
     asset_class: str = "",
     order_type: str = "",
@@ -248,6 +270,13 @@ async def record_fill(
     signed_delta = qty_abs if side_l in ("buy", "long") else -qty_abs
     ts = timestamp or datetime.now(timezone.utc)
     fee_d = abs(_dec(fee))
+    # D130 — execution-quality capture. ``intended_price`` is the signal's
+    # target price at order time; slippage is computed against the actual
+    # fill. Both stay NULL when no usable intended price was supplied.
+    intended_d = _dec(intended_price, default=None) if intended_price is not None else None
+    if intended_d is not None and intended_d <= 0:
+        intended_d = None
+    slippage = _slippage_bps(intended_d, px, signed_delta)
 
     async with _FILLS_LOCK:
         async with session_factory() as session:
@@ -273,6 +302,8 @@ async def record_fill(
                 signed_quantity=signed_delta,
                 fill_price=px,
                 notional=qty_abs * px,
+                intended_price=intended_d,
+                slippage_bps=slippage,
                 fee=fee_d,
                 reduce_only=bool(reduce_only),
                 realised_pnl=realised,

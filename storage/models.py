@@ -111,6 +111,14 @@ class FillLog(Base):
     fill_price          = Column(Numeric(20, 8), nullable=False)
     notional            = Column(Numeric(20, 8), nullable=False, default=0)
     fee                 = Column(Numeric(20, 8), nullable=False, default=0)
+    # D130 — execution-quality capture. ``intended_price`` is the signal's
+    # target price (``signal.suggested_price``) known at order time;
+    # ``slippage_bps`` is signed adverse slippage = positive when the fill
+    # was WORSE than intended (a cost), negative on price improvement.
+    # Both NULL when no intended price was available (cannot be backfilled
+    # onto pre-D130 fills — only forward-captured fills carry it).
+    intended_price      = Column(Numeric(20, 8), nullable=True)
+    slippage_bps        = Column(Numeric(12, 4), nullable=True)
     reduce_only         = Column(Boolean, nullable=False, default=False)
     # Realised P&L (weighted-average cost). Non-zero only on closing
     # (position-decreasing) fills.

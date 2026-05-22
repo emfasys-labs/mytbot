@@ -2375,6 +2375,29 @@ async def get_pnl_realised_curve(
     }
 
 
+@app.get("/performance")
+async def get_performance_scorecard(
+    response: Response,
+    days: int = Query(0, ge=0, le=1100),
+    session_factory=Depends(_session_factory),
+):
+    """D130 — fills-based performance scorecard.
+
+    ``days=0`` (default) covers all history; a positive value limits the
+    fills window to the trailing N days. Trade-quality metrics (profit
+    factor, win rate, attribution, turnover, fees, holding-period and
+    slippage distributions) come straight from the ``fills`` ledger and
+    are always present. Time-series risk metrics (Sharpe, Sortino, max
+    drawdown, Calmar, CAGR, volatility) are returned only once the
+    ``daily_pnl`` ledger holds enough rows; until then the ``time_series``
+    block reports ``status="insufficient_history"``.
+    """
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    from api.performance import build_performance_scorecard
+
+    return await build_performance_scorecard(session_factory, window_days=days)
+
+
 def _command_row_dict(r) -> dict[str, Any]:
     return {
         "id": r.id,

@@ -1005,6 +1005,99 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D130.1 — Second full trading-data reset to a clean slate (2026-05-22)
+
+**Decision:** Operator-requested full wipe of the trading ledger and a
+restart, so all data is clean and consistent from a single T0 — this
+time with slippage capture (D130) live from the first fill.
+
+**Why now.** D130 added per-fill slippage capture but, by design, it
+cannot be backfilled — the 615 fills already booked carry no intended
+price. Rather than run a soak on a ledger that is part slippage-aware
+and part not, the operator chose to reset and start the soak fresh so
+*every* fill from T0 carries `intended_price` + `slippage_bps`.
+
+**Sequence.** `POST /system/stop` → kill `run.py` (releases all broker
+connections) → `scripts/reset_trading_data.py --execute` → relaunch
+`python run.py` → re-anchor `paper.nav_seed`.
+
+**Flatten semantics.** The operator asked for positions to be flattened
+before the wipe. Investigation confirmed `EXECUTION_PAPER_USE_BROKER_ORDERS`
+is unset, so the execution engine simulates every paper fill locally and
+never places orders at IBKR/Alpaca; reconciliation in paper mode treats
+`PositionLog` as authoritative and skips broker `get_positions()`
+entirely (`execution/engine.py` ~L2466). All 55 open positions therefore
+existed only in mytbot's DB (`positions`/`fills`) + the crypto
+`paper_wallet.json` — there were no broker-side orders to close. The
+wipe itself flattens the book; the result is the perfectly consistent
+state the operator wanted (empty ledger ⇄ flat book) with **no realised
+loss incurred** (nothing was sold at a broker).
+
+**Reset-script fix.** `scripts/reset_trading_data.py` now also deletes
+`data/runtime/paper_wallet.json` so the three crypto venues restart from
+their seed balance instead of carrying stale venue equity computed
+against wiped positions — closing the gap that left crypto wallets
+inconsistent after the D126 reset.
+
+**Outcome.** All trading tables truncated (orders 638, positions 34,020,
+fills 615, signals 3,700, risk_decisions 4,298, strategy_candidate_log
+52,983 → 0). `control_state` reduced to the 4-key operator/config
+whitelist. Fresh `nav.opening_snapshot` auto-recorded: total
+**$1,224,392.84** (ibkr 977,793.85 / alpaca 96,598.99 / kraken·binance·
+bybit 50,000 each). `paper.nav_seed` re-anchored to that total. Restart
+loaded the D130 code; first 9 post-restart fills show **100 % slippage
+coverage** — forward capture confirmed working.
+
+---
+
+## D130 — Per-fill slippage capture + /performance scorecard (2026-05-22)
+
+**Decision:** Capture execution slippage on every fill from now on, and
+expose a fills-based performance scorecard endpoint.
+
+**Context.** The operator asked whether myTbot can fully measure its own
+performance from the data it holds. Audit of the post-D126 ledger: 599
+fills in a single 7.23h window, one `daily_pnl` row. Two findings — (1)
+trade-quality metrics (profit factor, win rate, attribution, turnover,
+fees, holding period) *are* computable now but not yet statistically
+meaningful; (2) time-series risk metrics (Sharpe, Sortino, max drawdown,
+Calmar, CAGR, volatility) need a multi-day daily-return series that does
+not exist yet; (3) one genuine, time-sensitive gap — **slippage was
+never recorded**, and it cannot be retrofitted onto the 599 fills
+already booked. It must start capturing before the soak adds more rows.
+
+**P1 — slippage capture.** Added `intended_price` + `slippage_bps`
+(both nullable) to the `FillLog` model / `fills` table; migration
+`d130a1b2c3d4` chains from `d127a1b2c3d4` and is column-add idempotent.
+`storage/fills_ledger.py::record_fill` takes an `intended_price` arg and
+derives signed `slippage_bps` via `_slippage_bps()` — **positive = the
+fill was worse than intended (an execution cost), negative = price
+improvement**; buy-adverse when fill > intended, sell-adverse when fill
+< intended. `ExecutionEngine._persist_fill_to_ledger` passes
+`signal.suggested_price` as the intended price. Forward-only by design:
+pre-D130 fills carry NULL and are excluded from slippage stats.
+
+**P2 — `/performance` scorecard.** New `api/performance.py` +
+`GET /performance?days=N` (`days=0` = all history). Trade-quality block
+(profit factor, win rate, avg win/loss, payoff ratio, expectancy,
+turnover, fees, net P&L), holding-period and slippage distributions
+(mean/p50/p90/worst/best + estimated dollar cost), and attribution by
+strategy / broker / asset class / symbol come straight from the fills
+ledger and are always present. The `time_series` block computes
+Sharpe/Sortino/max-drawdown/Calmar/CAGR/volatility from `daily_pnl` but
+returns `status="insufficient_history"` until ≥20 daily rows exist. A
+`data_quality` block flags trade metrics as descriptive-only below 200
+closing trades. Pure read path — mutates nothing.
+
+**Tests.** `tests/test_d130_slippage_scorecard.py` — 14 tests (slippage
+sign math, percentile interpolation, ledger column capture, scorecard
+trade-quality / slippage / attribution / holding-period, time-series
+insufficient + available paths). Live DB check: 599 fills, 144 closing,
+profit factor 4.39, win rate 73.6%, net realised $4,246, slippage
+coverage 0% (all fills pre-D130 — forward capture starts now).
+
+---
+
 ## D129 — Crypto venue-aware sizing + reservation TTL (2026-05-22)
 
 **Decision:** Two crypto-venue fixes — a TTL on the execution-side room
