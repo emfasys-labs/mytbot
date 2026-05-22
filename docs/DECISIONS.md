@@ -1005,6 +1005,54 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D128 — ib_insync market-depth crash fix (2026-05-22)
+
+**Decision:** Monkey-patch `ib_insync.wrapper.Wrapper.updateMktDepthL2`
+with a bounds-safe version so a malformed IBKR Level-2 depth update can
+never crash the event loop.
+
+**Why.** A health check found `run.py` had crashed four times in 17
+minutes (13:07–13:24, `exit=0xFFFFFFFF`). Root cause in the log:
+
+    ib_insync/wrapper.py:921 updateMktDepthL2
+      dom[position] = DOMLevel(price, size, marketMaker)
+    IndexError: list assignment index out of range
+
+ib_insync's depth handler indexes the DOM list on the `update`
+operation (`operation == 1`) with **no bounds check** — the `delete`
+branch is guarded (`if position < len(dom)`), `update` is not. IBKR
+streams depth updates with `position` indices past the current list
+length (partial/unentitled depth feeds, out-of-order messages). The
+`IndexError` is raised inside the asyncio socket-read callback;
+ib_insync's decoder catches most occurrences (177 logged), but under a
+burst it escapes and kills `asyncio.run()` → the whole process.
+
+`get_order_book` in `brokers/ibkr/adapter.py` triggers this — it calls
+`reqMktDepth` to snapshot the book (used by the execution slippage
+estimate and the microstructure shadow).
+
+**Fix.** `brokers/ibkr/ibinsync_patches.py` — `apply_ibinsync_patches()`
+replaces `Wrapper.updateMktDepthL2` with a bounds-safe version:
+out-of-range `update` grows the list instead of raising; `insert`
+clamps the index; `delete` and unknown-`reqId` are guarded; the whole
+handler is wrapped so it can never raise out of the event loop.
+In-range semantics are unchanged. Idempotent. Applied at
+`brokers/ibkr/adapter.py` import time (right after `util.patchAsyncio()`).
+This also removes the 177-line log spam (the spam *was* the caught
+errors).
+
+**Tests.** `tests/test_d128_ibinsync_patch.py` — 6 tests (the exact
+out-of-range-update crash scenario, in-range insert/update/delete
+preserved, out-of-range delete, unknown reqId, negative-index insert).
+Full suite: 1628 passed, 3 skipped.
+
+**Note.** This is a vendored-library patch — re-verify if `ib_insync`
+is ever upgraded from 0.9.86. The upstream bug may also be fixable by
+not subscribing to L2 depth at all (top-of-book L1 would suffice for
+the slippage estimate); deferred as a larger change.
+
+---
+
 ## D127 — Connect Hub v2 design accepted (2026-05-22)
 
 **Decision:** Accept the Connect Hub v2 design — taking D107's read-only

@@ -63,6 +63,12 @@ from system.live_arming import validate_ibkr_port_arming
 # ib_insync expects asyncio integration when using connectAsync outside its own loop.
 util.patchAsyncio()
 
+# D128 — install the bounds-safe market-depth patch so a malformed IBKR
+# Level-2 update can never crash the event loop (see ibinsync_patches).
+from brokers.ibkr.ibinsync_patches import apply_ibinsync_patches  # noqa: E402
+
+apply_ibinsync_patches()
+
 # Paxos crypto on IBKR: bare symbol like "BTC" implies USD quote.
 #
 # Paper trading caveat: PAXOS-routed crypto orders often stay Inactive or do not
