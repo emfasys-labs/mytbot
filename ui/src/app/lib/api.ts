@@ -917,6 +917,27 @@ export type PremiumTestResponse = {
   };
 };
 
+/** D127 P6 — first-run onboarding wizard. */
+export type OnboardingStep = {
+  id: string;
+  label: string;
+  required: boolean;
+  summary: string;
+  status: string;        // done | attention | optional
+  satisfied: boolean;
+  detail: Record<string, unknown>;
+};
+
+export type OnboardingView = {
+  steps: OnboardingStep[];
+  current_step: string | null;
+  can_launch: boolean;
+  ready_to_finish: boolean;
+  completed: boolean;
+  completed_at: string | null;
+  show_wizard: boolean;
+};
+
 /** D127 P1 — POST /connect/test result. */
 export type ConnectTestResponse = {
   ok: boolean;
@@ -1129,6 +1150,9 @@ export const api = {
   testConnector: (body: { category: string; connector_id: string }) =>
     postJsonBody<ConnectTestResponse>('/connect/test', body),
   getAiPipeline: () => getJson<AiPipelineView>('/connect/ai/pipeline'),
+  getOnboarding: () => getJson<OnboardingView>('/connect/onboarding'),
+  completeOnboarding: () =>
+    postJson<{ ok: boolean; onboarding: Record<string, unknown> }>('/connect/onboarding/complete'),
   getLocalLlmCatalogue: () => getJson<LocalLlmCatalogue>('/connect/ai/local/catalogue'),
   installLocalLlm: (body: { model_id: string }) =>
     postJsonBody<{ ok: boolean; result: Record<string, unknown> }>('/connect/ai/local/install', body),

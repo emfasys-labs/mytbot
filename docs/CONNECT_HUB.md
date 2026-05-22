@@ -463,11 +463,19 @@ dedicated, carefully-scoped project after a paper soak (see DECISIONS
 D127, open decision #4). Until then the treasury connector stays
 read-only: a usable capital reference with no movement.
 
-The remaining work for P1–P6 is the **redesign UI screens** that render
-these backend contracts (the Connect screen extensions, the AI Pipeline
-stage cards, the Local LLM catalogue sub-screen, the Premium provider
-picker, and the onboarding wizard). The backend endpoints and
-descriptors they consume are all in place.
+The P1–P6 **redesign UI** is implemented in `ui/src/app/redesign/
+screens.tsx` (`ConnectScreen`):
+- broker/feed cards carry a **Test** button + certification badge;
+- the AI Pipeline renders as four ordered **stage cards** with the
+  per-stage disable rules and no delete control;
+- the **Local LLM catalogue** modal (machine probe + per-model fitness
+  + install/activate) and the **Premium provider picker** modal
+  (select provider, save credentials, test, activate);
+- a first-run **onboarding panel** banner driven by
+  `GET /connect/onboarding`.
+
+Connect Hub v2 (P1–P6) is therefore complete end to end — backend and
+UI. P7 (treasury cash movement) remains a separate future project.
 
 ## Open decisions
 

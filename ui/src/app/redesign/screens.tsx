@@ -1038,6 +1038,136 @@ function PremiumLlmPickerModal({
   );
 }
 
+// ── D127 P6 — first-run onboarding wizard banner ─────────────────────────────
+
+function onboardingStepTone(status: string): 'profit' | 'caution' | 'neutral' {
+  if (status === 'done') return 'profit';
+  if (status === 'attention') return 'caution';
+  return 'neutral';
+}
+
+function OnboardingPanel({
+  accentColor,
+  refreshKey,
+}: {
+  accentColor: string;
+  refreshKey: number;
+}) {
+  const [view, setView] = useState<import('../lib/api').OnboardingView | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getOnboarding()
+      .then((v) => { if (!cancelled) setView(v); })
+      .catch(() => { /* onboarding is best-effort — silent on failure */ });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  if (dismissed || !view || !view.show_wizard) return null;
+
+  const finish = async () => {
+    setBusy(true);
+    setError(null);
+    const run = () => api.completeOnboarding();
+    try {
+      await run();
+      setDismissed(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('(401)')) {
+        const token = window.prompt('Control token required');
+        if (token?.trim()) {
+          setApiControlToken(token.trim());
+          try { await run(); setDismissed(true); return; }
+          catch (retry) { setError(retry instanceof Error ? retry.message : String(retry)); return; }
+          finally { setBusy(false); }
+        }
+      }
+      setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      border: `1px solid ${accentColor}55`,
+      borderRadius: 10,
+      background: `${accentColor}0e`,
+      padding: 14,
+      marginBottom: 16,
+      display: 'grid',
+      gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Label accent={accentColor}>First-run setup</Label>
+          <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            {view.can_launch
+              ? 'Minimum setup complete — the system can run. Finish or keep configuring.'
+              : 'Connect at least one trading platform to launch the system.'}
+          </div>
+        </div>
+        <Pill tone={view.can_launch ? 'profit' : 'caution'}>
+          {view.can_launch ? 'launchable' : 'needs a broker'}
+        </Pill>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {view.steps.map((s) => (
+          <div
+            key={s.id}
+            title={s.summary}
+            style={{
+              border: `1px solid ${TOKENS.line}`,
+              borderRadius: 7,
+              background: TOKENS.bg1,
+              padding: '7px 10px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            <span style={{
+              fontFamily: TOKENS.mono,
+              fontSize: 12,
+              color: s.status === 'done' ? TOKENS.profit
+                : s.status === 'attention' ? TOKENS.caution : TOKENS.ink4,
+            }}>
+              {s.status === 'done' ? '✓' : s.status === 'attention' ? '!' : '○'}
+            </span>
+            <span style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink1 }}>{s.label}</span>
+            <Pill size="sm" tone={onboardingStepTone(s.status)}>
+              {s.required ? s.status : `${s.status} · optional`}
+            </Pill>
+          </div>
+        ))}
+      </div>
+      {error ? <Pill tone="danger">{error}</Pill> : null}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          disabled={busy || !view.ready_to_finish}
+          onClick={finish}
+          title={view.ready_to_finish ? undefined : 'Complete the required steps first'}
+          style={{
+            ...cardButtonStyle(accentColor),
+            minWidth: 120,
+            opacity: view.ready_to_finish ? 1 : 0.5,
+          }}
+        >
+          {busy ? 'finishing…' : 'Finish setup'}
+        </button>
+        <button type="button" onClick={() => setDismissed(true)} style={cardButtonStyle()}>
+          Hide for now
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ConnectScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
   const hub = live.connectHub;
@@ -1075,6 +1205,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
       const res = await fn();
       setActionMessage(res.next_step || 'Saved.');
       live.refresh();
+      setAiRefreshKey((k) => k + 1);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('(401)')) {
@@ -1085,6 +1216,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
             const res = await fn();
             setActionMessage(res.next_step || 'Saved.');
             live.refresh();
+            setAiRefreshKey((k) => k + 1);
             return;
           } catch (retryErr) {
             setActionError(retryErr instanceof Error ? retryErr.message : String(retryErr));
@@ -1110,6 +1242,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
       }));
       setActionMessage(res.probe.ok ? `${row.label}: ${res.status}` : `${row.label}: ${res.probe.reason}`);
       live.refresh();
+      setAiRefreshKey((k) => k + 1);
     };
     try {
       apply(await call());
@@ -1174,6 +1307,7 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   };
   return (
     <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
+      <OnboardingPanel accentColor={accentColor} refreshKey={aiRefreshKey} />
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
         <button
           type="button"
