@@ -232,34 +232,25 @@ function isCoreConnector(row: ConnectHubConnector): boolean {
   return !!(row.capabilities?.core_required || row.capabilities?.non_disableable);
 }
 
-type ConnectorTestState = { ok: boolean; status: string; reason: string };
-
 function ConnectorCard({
   row,
   onConfigure,
   onToggle,
   onDelete,
-  onTest,
-  testState,
   busy,
 }: {
   row: ConnectHubConnector;
   onConfigure: (row: ConnectHubConnector) => void;
   onToggle: (row: ConnectHubConnector) => void;
   onDelete: (row: ConnectHubConnector) => void;
-  onTest: (row: ConnectHubConnector) => void;
-  testState?: ConnectorTestState;
   busy?: boolean;
 }) {
   const caps = capabilityList(row);
   const missing = (row.required_secrets ?? []).filter((s) => s.required && !s.configured);
   const core = isCoreConnector(row);
-  // D127 P1/P2/P3 — Test is supported for brokers & feeds; AI pipeline
-  // stages are never deletable; certification tier is shown for brokers.
-  const showTest = row.category === 'brokers' || row.category === 'information_feeds';
+  // D127 P1/P2/P3 — AI pipeline stages are never deletable. Broker
+  // certification remains a backend execution gate, not a per-card UI badge.
   const showDelete = row.category !== 'ai_providers';
-  const cert = (row.certification || '').toLowerCase();
-  const showCert = row.category === 'brokers' && (cert === 'certified' || cert === 'experimental');
   return (
     <div style={{
       border: `1px solid ${TOKENS.line}`,
@@ -289,11 +280,6 @@ function ConnectorCard({
         </div>
         <div style={{ display: 'grid', gap: 4, justifyItems: 'end' }}>
           <Pill size="sm" tone={connectorTone(row)}>{connectorStatusLabel(row)}</Pill>
-          {showCert ? (
-            <Pill size="sm" tone={cert === 'certified' ? 'info' : 'caution'}>
-              {cert}
-            </Pill>
-          ) : null}
         </div>
       </div>
       <div style={{
@@ -334,16 +320,6 @@ function ConnectorCard({
           next: {row.next_actions[0].label}
         </div>
       ) : null}
-      {testState ? (
-        <div style={{
-          fontFamily: TOKENS.mono,
-          fontSize: 10,
-          color: testState.ok ? TOKENS.profit : TOKENS.danger,
-          lineHeight: 1.45,
-        }}>
-          test: {testState.status} — {testState.reason}
-        </div>
-      ) : null}
       {core ? (
         <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
           core pipeline component · always on
@@ -353,11 +329,6 @@ function ConnectorCard({
         <button type="button" onClick={() => onConfigure(row)} style={{ ...cardButtonStyle(), flex: '1 1 70px' }}>
           Configure
         </button>
-        {showTest ? (
-          <button type="button" disabled={busy} onClick={() => onTest(row)} style={{ ...cardButtonStyle(TOKENS.info), flex: '1 1 70px' }}>
-            Test
-          </button>
-        ) : null}
         <button type="button" disabled={busy} onClick={() => onToggle(row)} style={{ ...cardButtonStyle(row.enabled ? TOKENS.caution : TOKENS.profit), flex: '1 1 70px' }}>
           {row.enabled ? 'Disable' : 'Enable'}
         </button>
@@ -1179,7 +1150,6 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [testStates, setTestStates] = useState<Record<string, ConnectorTestState>>({});
   const [aiRefreshKey, setAiRefreshKey] = useState(0);
   const [localCatalogueOpen, setLocalCatalogueOpen] = useState(false);
   const [premiumPickerOpen, setPremiumPickerOpen] = useState(false);
@@ -1217,43 +1187,6 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
             setActionMessage(res.next_step || 'Saved.');
             live.refresh();
             setAiRefreshKey((k) => k + 1);
-            return;
-          } catch (retryErr) {
-            setActionError(retryErr instanceof Error ? retryErr.message : String(retryErr));
-            return;
-          }
-        }
-      }
-      setActionError(msg);
-    } finally {
-      setActionBusy(null);
-    }
-  };
-  const testConnector = async (row: ConnectHubConnector) => {
-    const key = `${row.category}:${row.id}`;
-    setActionBusy(key);
-    setActionError(null);
-    setActionMessage(null);
-    const call = () => api.testConnector({ category: row.category, connector_id: row.id });
-    const apply = (res: Awaited<ReturnType<typeof call>>) => {
-      setTestStates((prev) => ({
-        ...prev,
-        [key]: { ok: res.probe.ok, status: res.status, reason: res.probe.reason },
-      }));
-      setActionMessage(res.probe.ok ? `${row.label}: ${res.status}` : `${row.label}: ${res.probe.reason}`);
-      live.refresh();
-      setAiRefreshKey((k) => k + 1);
-    };
-    try {
-      apply(await call());
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes('(401)')) {
-        const token = window.prompt('Control token required');
-        if (token?.trim()) {
-          setApiControlToken(token.trim());
-          try {
-            apply(await call());
             return;
           } catch (retryErr) {
             setActionError(retryErr instanceof Error ? retryErr.message : String(retryErr));
@@ -1404,8 +1337,6 @@ export function ConnectScreen({ accent, live }: { accent: AccentName; live: Live
                   onConfigure={setSelected}
                   onToggle={toggleConnector}
                   onDelete={deleteConnector}
-                  onTest={testConnector}
-                  testState={testStates[`${row.category}:${row.id}`]}
                   busy={actionBusy === `${row.category}:${row.id}`}
                 />
               )) : (
