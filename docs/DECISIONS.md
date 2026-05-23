@@ -1005,6 +1005,56 @@ only allocated to currently-tradeable instruments; no pre-market spam),
 NOT a profitability change. `MARKET_SESSION_GATE=0` disables; absent/
 invalid YAML → built-in defaults (backward-safe).
 
+## D131 — Crypto cluster cap + disable bleeding alphas (2026-05-23)
+
+**Decision:** Add a venue-spanning crypto cluster cap (analogous to the
+D115 fx + equity-index cluster caps) and disable the two consistently-
+losing alpha strategies (`volatility_regime`, `volume_flow`).
+
+**Why.** The dashboard showed `-$9,805` unrealised, `-$528` realised
+overnight, 18.9 % win rate, 0.50 profit factor after only 15 hours of
+post-reset soak. Deep-dive via `/performance`:
+
+* 96 % of the unrealised loss was **stacked long crypto** across all
+  three venues: kraken BTC $60k / kraken XRP $61k / binance AVAX $60k /
+  binance AAVE $42k / binance ETH $28k = **$251k one-direction long
+  crypto on $1.21M NAV (≈ 21 %)**. Each leg sat under the 5 %
+  single-name cap but together formed one correlated crypto-beta bet.
+  Crypto dropped 3 – 5 % overnight and they all lost together. There
+  was no crypto cluster cap.
+* **`volatility_regime`** booked 60 closes / **1 win** / **−$1,740**
+  (stacking shorts on the same crypto names that mean_reversion was
+  stacking longs — the system fighting itself).
+* **`volume_flow`** booked 4 closes / 0 wins / −$116.
+
+**Crypto cluster cap.** New `_check_crypto_cluster_exposure` in
+`risk/engine.py`, wired into the standard check list right after the
+fx + equity-index cluster checks. Bounds `|sum(signed_qty *
+current_price) for positions where asset_class=='crypto' or symbol
+endswith '-USD'|` to `max_net_exposure_pct` of NAV (default `0.10` =
+10 %). Reduce-only never blocked; neutralising legs that REDUCE the
+absolute cluster magnitude always pass. Config:
+`config/risk_limits.yaml::crypto_cluster`.
+
+**Strategy disables.** Posted `POST /strategy/volatility_regime/toggle
+{enabled:false}` and same for `volume_flow`; persisted under
+`control_state.strategy.enabled.*`, survives restart.
+
+**No forced flatten.** Manual flatten would lock the −$9.3k crypto
+unrealised into realised loss. The new cap prevents *new* accumulation;
+`intraday_derisk_monitor` can grind the existing concentration down
+under reduce-only flow when it triggers, and a crypto rebound is still
+possible. The right tradeoff is "stop digging", not "panic-sell the
+bottom".
+
+**Tests.** `tests/test_d131_crypto_cluster.py` — 7 tests (non-crypto
+skip, within-cap pass, cross-venue aggregation rejected,
+neutralising-leg allowed, reduce-only never blocked, disabled-config
+pass-through, `-USD` symbol detection without `asset_class`). Cluster
++ D125 regression: 43 passed.
+
+---
+
 ## D130.1 — Second full trading-data reset to a clean slate (2026-05-22)
 
 **Decision:** Operator-requested full wipe of the trading ledger and a

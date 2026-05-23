@@ -135,6 +135,7 @@ class RiskEngine:
             self._check_asset_class_limits,
             self._check_fx_cluster_exposure,
             self._check_equity_index_cluster_exposure,
+            self._check_crypto_cluster_exposure,
             # D125 fix #1 / #5 — single-name notional cap + per-day
             # cumulative-add cap. Hard rails that bind regardless of
             # ``enforce_static_exposure_caps`` (which is False by
@@ -1135,6 +1136,98 @@ class RiskEngine:
         if abs(projected) <= abs(current):
             return (True, "equity_index_cluster")
         return (abs(projected) <= cap_notional, "equity_index_cluster")
+
+    # ------------------------------------------------------------------
+    # D131 — Crypto cluster cap.
+    # Symmetric to ``_check_equity_index_cluster_exposure`` but for the
+    # crypto family across ALL venues (kraken/binance/bybit). BTC long
+    # on kraken + ETH long on binance + SOL long on bybit look like
+    # three independent single-name bets each below the 5 % per-name
+    # cap, but they share the same systematic crypto-beta risk and lose
+    # together when the asset class drops. This cap bounds the aggregate
+    # signed crypto notional across every venue. Reduce-only never
+    # blocked; neutralising legs (those that REDUCE the absolute cluster
+    # exposure) always pass.
+    # ------------------------------------------------------------------
+    def _check_crypto_cluster_exposure(self, signal, portfolio) -> tuple[bool, str]:
+        cfg = self.config.get("crypto_cluster") or {}
+        if not bool(cfg.get("enabled", False)):
+            return (True, "crypto_cluster")
+
+        if self._is_reduce_only_signal(signal):
+            return (True, "crypto_cluster")
+
+        # Identify the signal as crypto. Prefer the explicit asset_class;
+        # fall back to the canonical "-USD" suffix used for spot pairs
+        # (BTC-USD, ETH-USD, ...).
+        sig_asset = str(getattr(signal, "asset_class", "") or "").strip().lower()
+        sig_sym = (getattr(signal, "symbol", "") or "").strip().upper()
+        is_crypto_signal = sig_asset == "crypto" or sig_sym.endswith("-USD")
+        if not is_crypto_signal:
+            return (True, "crypto_cluster")
+
+        sizing_base = self._sizing_nav(portfolio)
+        if sizing_base <= 0:
+            return (True, "crypto_cluster")
+
+        try:
+            max_pct = Decimal(str(cfg.get("max_net_exposure_pct", "0.10")))
+        except (InvalidOperation, TypeError, ValueError):
+            max_pct = Decimal("0.10")
+        if max_pct <= 0:
+            return (True, "crypto_cluster")
+        cap_notional = sizing_base * max_pct
+
+        # Signed proposed delta from the new signal.
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        if side in ("buy", "long"):
+            sign = 1
+        elif side in ("sell", "short"):
+            sign = -1
+        else:
+            return (True, "crypto_cluster")
+        try:
+            qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+            price = Decimal(str(getattr(signal, "suggested_price", None) or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return (True, "crypto_cluster")
+        if qty <= 0 or price <= 0:
+            return (True, "crypto_cluster")
+        proposed = Decimal(sign) * abs(qty) * price
+
+        # Current signed crypto exposure across every venue.
+        current = Decimal("0")
+        positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        if isinstance(positions, dict):
+            for pos_key, pos in positions.items():
+                if not isinstance(pos, dict):
+                    continue
+                p_asset = str(pos.get("asset_class", "") or "").strip().lower()
+                p_sym = str(pos.get("symbol") or str(pos_key).split(":", 1)[-1]).strip().upper()
+                if not (p_asset == "crypto" or p_sym.endswith("-USD")):
+                    continue
+                try:
+                    p_qty = Decimal(str(pos.get("quantity", "0") or "0"))
+                    p_px = Decimal(str(pos.get("current_price") or pos.get("avg_entry_price") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if p_qty == 0 or p_px <= 0:
+                    continue
+                current += p_qty * p_px  # qty carries sign
+
+        projected = current + proposed
+        # A neutralising leg (one that REDUCES the absolute cluster
+        # exposure) must always be allowed through — it is risk-reducing.
+        if abs(projected) <= abs(current):
+            return (True, "crypto_cluster")
+        if abs(projected) <= cap_notional:
+            return (True, "crypto_cluster")
+        logger.warning(
+            "RISK crypto_cluster REJECT | %s %s | proposed=%s current_cluster=%s "
+            "projected=%s cap=%s",
+            sig_sym, side, str(proposed), str(current), str(projected), str(cap_notional),
+        )
+        return (False, "crypto_cluster")
 
     @staticmethod
     def _normalize_symbol_list(raw) -> set[str]:

@@ -272,6 +272,19 @@ equity_index_cluster:
   enabled: true
   max_net_exposure_pct: 0.20    # |signed cluster notional| <= 20% of NAV
 
+# ── D131 — Crypto cluster cap ────────────────────────────────────────────
+# BTC long on kraken + ETH long on binance + SOL long on bybit look like
+# three independent single-name bets each below the 5% per-name cap, but
+# they share systematic crypto-beta risk and lose together when the
+# asset class drops. This bounds the aggregate signed crypto notional
+# across every venue, summed as positions[*].quantity * current_price
+# where asset_class=='crypto' OR symbol endswith '-USD'. Reduce-only
+# never blocked; neutralising legs that REDUCE the absolute cluster
+# exposure always pass.
+crypto_cluster:
+  enabled: true
+  max_net_exposure_pct: 0.10    # |signed crypto notional| <= 10% of NAV
+
 # ── D115 — Paper-mode stale-price gate ───────────────────────────────────
 # An opening signal whose ``suggested_price`` was generated several minutes
 # ago and the broker quote has since moved against the trade direction has
