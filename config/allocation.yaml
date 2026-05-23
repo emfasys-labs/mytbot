@@ -94,6 +94,14 @@ gross_exposure:
     use_breadth_score: true
     use_drawdown_throttle: true
     use_execution_quality: true
+  unleash:
+    enabled: true
+    # Deployment pressure may relax only the opportunity-shape term, never
+    # drawdown / execution / volatility safety. The band is config-governed
+    # so it is no longer a hidden 0.9 -> 1.0 magic number in code.
+    start_capital_pct: 0.90
+    full_capital_pct: 1.00
+    max_shape_relaxation: 0.50
   shaping:
     market_state_weight: 0.35
     breadth_weight: 0.35

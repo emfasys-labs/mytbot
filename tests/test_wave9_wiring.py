@@ -136,6 +136,30 @@ async def test_gate_blocks_when_cost_exceeds_edge(monkeypatch) -> None:
     assert eng.wave9_gate_passed == 0
 
 
+@pytest.mark.asyncio
+async def test_topup_existing_still_uses_wave9_gate(monkeypatch) -> None:
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    eng._wave9_cfg = Wave9RuntimeConfig(
+        enabled=True,
+        urgency_policy=UrgencyPolicy(
+            do_not_trade_ceiling=10_000.0,
+            edge_to_cost_safety=1.0,
+        ),
+    )
+    monkeypatch.setattr("execution.engine.get_broker", lambda *a, **kw: None)
+
+    md = {
+        "sizing_topup_existing": True,
+        "daily_volume": 1.0,
+        "daily_volatility": 5.0,
+        "urgency_score": 0.5,
+        "forecast_expected_return": 0.0001,
+    }
+    result = await eng.execute(_signal(metadata=md), _approved())
+    assert result is None
+    assert eng.wave9_gate_blocked == 1
+
+
 def test_gate_uses_bounded_allocator_edge_proxy_when_forecast_missing() -> None:
     cfg = Wave9RuntimeConfig(
         enabled=True,

@@ -154,3 +154,23 @@ def test_dash_usd_symbol_with_missing_asset_class_still_detected():
     decision = eng.evaluate(sig, _port(nav="1000000", positions=positions))
     assert decision.verdict.value == "rejected"
     assert "crypto_cluster" in (decision.reason or "")
+
+
+def test_crypto_cluster_cap_scales_down_with_market_state():
+    eng = _engine()
+    positions = {
+        "binance:BTC-USD": {
+            "symbol": "BTC-USD",
+            "asset_class": "crypto",
+            "quantity": "0.5",
+            "current_price": "50000",
+        },
+    }
+    sig = _sig(symbol="ETH-USD", side="buy", qty="1", price="5000", asset_class="crypto")
+    port = _port(nav="1000000", positions=positions)
+    port["metadata"] = {"market_state_score": 0.20}
+
+    decision = eng.evaluate(sig, port)
+
+    assert decision.verdict.value == "rejected"
+    assert "crypto_cluster" in (decision.reason or "")

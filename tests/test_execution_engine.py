@@ -455,6 +455,28 @@ async def test_ibkr_equity_quantity_is_normalized_to_whole_units(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_paper_mode_enforces_execution_prechecks(monkeypatch) -> None:
+    risk = _FakeRiskEngine(
+        {
+            "max_spread_pct": Decimal("0.001"),
+            "min_liquidity_usd": Decimal("1000"),
+            "max_slippage_pct": Decimal("0.05"),
+            "auto_kill_on_api_failure": False,
+        }
+    )
+    set_risk_engine(risk)
+    broker = _FakeBroker(wide_spread=True)
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True)
+    result = await engine.execute(_signal(), _approved_decision())
+
+    assert result is None
+    assert engine.last_skip_reason == "execution_precheck_rejected"
+    assert broker.place_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_ibkr_equity_fractional_under_one_is_skipped(monkeypatch) -> None:
     risk = _FakeRiskEngine(
         {

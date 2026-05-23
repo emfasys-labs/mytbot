@@ -14,6 +14,14 @@
 
 ---
 
+## D132 — Bleed-stopper safety rebuild for fully deployed trading
+**Date:** 2026-05-23
+**Decision:** The capital slider is a deployment target only; it may not erase safety dampers. `gross_exposure.unleash` is now config-governed and only relaxes opportunity-shape pressure, while drawdown throttle, execution quality, volatility overlays, and Wave 8 overlays remain live at `capital_pct=1.0`. Intraday derisk can activate a persisted risk-engine open lock that blocks fresh opens while allowing reduce-only exits and hedges. Wave 9 no longer exempts top-ups; genuine top-ups receive a scaled-down cost cushion, and D125 single-name clamps no longer stamp `sizing_topup_existing`. Paper mode now enforces execution pre-checks instead of filling orders that would fail live spread/liquidity/slippage gates. Confidence and trade-quality thresholds now adapt to market state and rolling win-rate inside hard circuit-breaker bands. FX, equity-index, and crypto cluster caps use configured base caps scaled by market-state quality.
+**Reason:** A fully deployed paper/live system was able to keep seeking new risk while intraday derisk was firing, and `capital_pct=1.0` previously interpolated multiple safety dampers to `1.0`. That made “max deployment” behave like “ignore dampers,” creating churn and loss leakage.
+**Status:** Implemented in `portfolio/allocation_engine.py`, `risk/engine.py`, `risk/drawdown_governor.py`, `system/orchestrator.py`, `execution/engine.py`, `config/allocation.yaml`, and `config/risk_limits.yaml`.
+
+---
+
 ## D067 — Fee-first execution gating and accounting
 **Date:** 2026-05-01
 **Decision:** Transaction costs are treated as mandatory execution constraints across all strategy flows. The Wave 9 pre-flight cost gate is enabled by default, and per-fill fees are always persisted into daily P&L accumulation (including opening/add flows, not only realised closes).

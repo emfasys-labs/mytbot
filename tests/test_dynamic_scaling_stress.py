@@ -91,6 +91,36 @@ def test_dynamic_confidence_threshold_rises_in_poor_market() -> None:
     assert decision.verdict.value == "approved"
 
 
+def test_dynamic_confidence_threshold_tightens_after_low_win_rate() -> None:
+    cfg = _default_cfg()
+    eng = RiskEngine(cfg)
+    portfolio = {
+        "portfolio_value": "10000",
+        "metadata": {"market_state_score": 1.0, "recent_win_rate": 0.20},
+    }
+
+    sig = _signal(confidence=0.54)
+    decision = eng.evaluate(sig, portfolio)
+
+    assert decision.verdict.value == "rejected"
+    assert "confidence_threshold" in (decision.reason or "")
+
+
+def test_drawdown_open_lock_blocks_opens_but_allows_reduce_only() -> None:
+    cfg = _default_cfg()
+    eng = RiskEngine(cfg)
+    eng.activate_open_lock(seconds=60, reason="intraday_derisk_tier_1")
+    portfolio = {"portfolio_value": "10000", "metadata": {"market_state_score": 1.0}}
+
+    decision = eng.evaluate(_signal(confidence=1.0), portfolio)
+    assert decision.verdict.value == "rejected"
+    assert "drawdown_open_lock" in (decision.reason or "")
+
+    reduce_sig = _signal(confidence=1.0, side="sell", metadata={"reduce_only": True})
+    decision = eng.evaluate(reduce_sig, portfolio)
+    assert decision.verdict.value == "approved"
+
+
 def test_dynamic_consecutive_losses() -> None:
     cfg = _default_cfg()
     cfg["max_consecutive_losses"] = 5
@@ -140,7 +170,6 @@ def test_dynamic_consecutive_losses() -> None:
     decision = eng2.evaluate(sig, portfolio2)
     assert decision.verdict.value == "rejected"
     assert "consecutive_losses" in (decision.reason or "")
-
 
 
 

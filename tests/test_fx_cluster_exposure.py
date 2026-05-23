@@ -199,9 +199,9 @@ def test_eurgbp_does_not_count_against_usd_cluster():
 def test_dynamic_fx_cluster_cap_scales_with_market_state_score_high():
     eng = _engine()
     positions = {
-        "EURUSD": {"quantity": "200000", "current_price": "1.16"},
+        "EURUSD": {"quantity": "20000", "current_price": "1.16"},
     }
-    sig = _signal(symbol="GBPUSD", side="buy", qty="50000", price="1.34")
+    sig = _signal(symbol="GBPUSD", side="buy", qty="5000", price="1.34")
     port = _portfolio(nav="1000000", positions=positions)
     port["metadata"] = {"market_state_score": 0.50}
     decision = eng.evaluate(sig, port)

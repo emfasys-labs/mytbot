@@ -87,7 +87,7 @@ def test_single_name_existing_plus_new_clamped_to_remaining_room():
     ok, _ = e._check_single_name_notional(sig, portfolio)
     assert ok
     assert sig.suggested_quantity * Decimal("25.0") == Decimal("10000")  # clamped to room
-    assert sig.metadata["sizing_topup_existing"] is True
+    assert "sizing_topup_existing" not in sig.metadata
     assert sig.metadata["risk_single_name_topup_clamped"] is True
 
 

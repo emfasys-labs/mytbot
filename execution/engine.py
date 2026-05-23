@@ -361,10 +361,11 @@ class ExecutionEngine:
             or _w9_sig_md.get("coordinator_kind") == "trim_symbol"
         )
         _w9_topup_existing = bool(_w9_sig_md.get("sizing_topup_existing"))
-        _w9_exempt = _w9_reduce_only or _w9_topup_existing
+        _w9_exempt = _w9_reduce_only
         if self._wave9_cfg is not None and getattr(self._wave9_cfg, "enabled", False) and not _w9_exempt:
             from execution.wave9_runtime import pre_flight_cost_gate
             from brokers.base import AssetClass as _AssetClass
+            from dataclasses import replace as _dc_replace
 
             try:
                 ac_str = (
@@ -378,8 +379,19 @@ class ExecutionEngine:
                 qty_f = float(signal.suggested_quantity or 0)
             except (TypeError, ValueError):
                 qty_f = 0.0
+            wave9_cfg = self._wave9_cfg
+            if _w9_topup_existing:
+                try:
+                    ds = _dc_replace(
+                        wave9_cfg.dynamic_safety,
+                        base_anchor=max(0.1, float(wave9_cfg.dynamic_safety.base_anchor) * 0.5),
+                        safety_min=max(0.1, float(wave9_cfg.dynamic_safety.safety_min) * 0.5),
+                    )
+                    wave9_cfg = _dc_replace(wave9_cfg, dynamic_safety=ds)
+                except Exception:  # noqa: BLE001
+                    wave9_cfg = self._wave9_cfg
             gate = pre_flight_cost_gate(
-                config=self._wave9_cfg,
+                config=wave9_cfg,
                 broker=str(signal.broker or ""),
                 symbol=str(signal.symbol or ""),
                 asset_class=ac_str,
@@ -388,6 +400,8 @@ class ExecutionEngine:
             )
             if gate.used:
                 wave9_metadata = dict(gate.metadata or {})
+                if _w9_topup_existing:
+                    wave9_metadata["wave9_topup_scaled_threshold"] = True
             if gate.used and not gate.allow:
                 self.wave9_gate_blocked += 1
                 logger.info(
@@ -653,14 +667,6 @@ class ExecutionEngine:
         )
 
         if not await self._passes_execution_limits(broker, order, broker_name=str(signal.broker or "").strip().lower()):
-            if self.paper_mode:
-                logger.info(
-                    "PAPER FILL (limits bypassed) | %s %s qty=%s",
-                    signal.symbol, signal.side, signal.suggested_quantity,
-                )
-                result = await self._simulate_fill(order, signal, broker=broker)
-                await self._persist_result(session_factory, order, result, signal)
-                return result
             logger.warning(
                 "Execution pre-check rejected | signal_id=%s symbol=%s broker=%s",
                 signal.signal_id, signal.symbol, signal.broker,
@@ -2120,9 +2126,6 @@ class ExecutionEngine:
         return True
 
     async def _passes_execution_limits(self, broker, order: Order, *, broker_name: str) -> bool:
-        if self.paper_mode:
-            return True
-
         limits = self._execution_limits()
         try:
             ob: OrderBook = await broker.get_order_book(order.symbol, depth=10)

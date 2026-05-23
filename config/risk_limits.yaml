@@ -168,6 +168,21 @@ min_signal_confidence: 0.50     # Minimum confidence score to proceed (0.0-1.0)
 # rejected here regardless of how many trades ran today.
 min_trade_quality_score: 0.30   # Minimum composite quality score (0 = disabled)
 
+dynamic_quality_thresholds:
+  enabled: true
+  confidence:
+    min: 0.40
+    max: 0.85
+    win_rate_pivot: 0.55
+    win_rate_weight: 0.35
+    market_state_weight: 0.25
+  trade_quality:
+    min: 0.25
+    max: 0.85
+    win_rate_pivot: 0.55
+    win_rate_weight: 0.35
+    market_state_weight: 0.25
+
 # ── Catalyst requirement ───────────────────────────────────────────────────────
 # Set to true to require at least one of: volume spike OR news sentiment.
 # Leave false while data pipelines (NewsAPI / feature data) are being validated.
@@ -311,6 +326,11 @@ intraday_derisk:
   enabled: true
   monitor_interval_sec: 30
   close_cooldown_sec: 120
+  open_lock:
+    enabled: true
+    trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -0.50% tier
+    cooldown_sec: 900            # no fresh opens for 15 minutes after tier-2 derisk
+    recover_hysteresis_pct: 0.0015
   tiers:
     - threshold_pct: -0.0050    # -0.50% intraday day P&L
       trim_pct: 0.20            # close 20% of the worst losers

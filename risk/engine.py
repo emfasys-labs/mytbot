@@ -84,6 +84,8 @@ class RiskEngine:
         self._daily_loss = Decimal("0")
         self._consecutive_losses = 0
         self._cooldown_until: Optional[datetime] = None
+        self._open_lock_until: Optional[datetime] = None
+        self._open_lock_reason: str = ""
         self._is_killed = False
         self._disabled_brokers: set[str] = set()
         self._high_watermark = Decimal("0")
@@ -124,6 +126,7 @@ class RiskEngine:
             self._check_max_order_notional,
             self._check_allocator_amplification,
             self._check_cooldown,
+            self._check_open_lock,
             self._check_asset_proportionality,
             self._check_minimum_order_size,
             self._check_daily_loss_limit,
@@ -279,6 +282,8 @@ class RiskEngine:
         """Called at start of each trading day."""
         self._daily_loss = Decimal("0")
         self._cooldown_until = None
+        self._open_lock_until = None
+        self._open_lock_reason = ""
         self._persist_runtime_state()
 
     def update_high_watermark(self, portfolio_value: Decimal) -> None:
@@ -305,6 +310,18 @@ class RiskEngine:
                 self._cooldown_until = dt
             except Exception:  # noqa: BLE001
                 pass
+        raw_open_lock = portfolio_state.get("open_lock_until")
+        if isinstance(raw_open_lock, str) and raw_open_lock.strip():
+            try:
+                dt = datetime.fromisoformat(raw_open_lock.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                self._open_lock_until = dt
+            except Exception:  # noqa: BLE001
+                pass
+        reason = portfolio_state.get("open_lock_reason")
+        if isinstance(reason, str):
+            self._open_lock_reason = reason
         if bool(portfolio_state.get("is_killed")):
             self._is_killed = True
         raw_disabled = portfolio_state.get("disabled_brokers")
@@ -321,9 +338,34 @@ class RiskEngine:
             "consecutive_losses": int(self._consecutive_losses),
             "daily_loss_accumulated": str(self._daily_loss),
             "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
+            "open_lock_until": self._open_lock_until.isoformat() if self._open_lock_until else None,
+            "open_lock_reason": self._open_lock_reason,
             "is_killed": bool(self._is_killed),
             "disabled_brokers": sorted(self._disabled_brokers),
         }
+
+    def activate_open_lock(self, *, seconds: float, reason: str) -> None:
+        """Temporarily block fresh opens while allowing risk-reducing exits."""
+        if seconds <= 0:
+            return
+        until = datetime.now(timezone.utc) + timedelta(seconds=float(seconds))
+        if self._open_lock_until is None or until > self._open_lock_until:
+            self._open_lock_until = until
+            self._open_lock_reason = str(reason or "drawdown_open_lock")
+            self._persist_runtime_state()
+            logger.warning(
+                "RISK open_lock activated | until=%s | reason=%s",
+                until.isoformat(),
+                self._open_lock_reason,
+            )
+
+    def clear_open_lock(self, reason: str = "recovered") -> None:
+        if self._open_lock_until is None:
+            return
+        logger.warning("RISK open_lock cleared | reason=%s", reason)
+        self._open_lock_until = None
+        self._open_lock_reason = ""
+        self._persist_runtime_state()
 
     def _restore_persisted_runtime_state(self) -> None:
         if not self._runtime_state_enabled:
@@ -362,6 +404,28 @@ class RiskEngine:
         if name and name in self._disabled_brokers:
             return False, "broker_disabled"
         return True, "broker_operational"
+
+    def _check_open_lock(self, signal, portfolio) -> tuple[bool, str]:
+        if self._is_reduce_only_signal(signal):
+            return (True, "drawdown_open_lock")
+        if self._open_lock_until is None:
+            return (True, "drawdown_open_lock")
+        now = datetime.now(timezone.utc)
+        if now >= self._open_lock_until:
+            self._open_lock_until = None
+            self._open_lock_reason = ""
+            self._persist_runtime_state()
+            return (True, "drawdown_open_lock")
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        if bool(meta.get("hedge") or meta.get("protective_hedge")):
+            return (True, "drawdown_open_lock")
+        logger.warning(
+            "RISK drawdown_open_lock REJECT | %s | until=%s reason=%s",
+            getattr(signal, "symbol", ""),
+            self._open_lock_until.isoformat(),
+            self._open_lock_reason,
+        )
+        return (False, "drawdown_open_lock")
 
     def _check_broker_certification(self, signal, portfolio) -> tuple[bool, str]:
         """D127 P2 — only Certified-tier brokers may place trades.
@@ -916,29 +980,13 @@ class RiskEngine:
         if sizing_base <= 0:
             return (True, "fx_cluster")
 
-        # D120 Dynamic FX Cap (0 to 100%)
-        # No fixed numbers. Cap is 1:1 with market_state_score.
-        market_state_score = Decimal("0.15") # Fallback
-        if isinstance(portfolio, dict):
-            metadata = portfolio.get("metadata", {})
-            if isinstance(metadata, dict):
-                mss = metadata.get("market_state_score")
-                if mss is not None:
-                    try:
-                        market_state_score = Decimal(str(mss))
-                    except (TypeError, ValueError, InvalidOperation):
-                        pass
-
-        if getattr(signal, "metadata", None):
-            mss = signal.metadata.get("market_state_score")
-            if mss is not None:
-                try:
-                    market_state_score = Decimal(str(mss))
-                except (TypeError, ValueError, InvalidOperation):
-                    pass
-
-        # Fully dynamic: 0.0 (0%) to 1.0 (100%)
-        max_pct = max(Decimal("0.0"), min(Decimal("1.0"), market_state_score))
+        max_pct = self._regime_scaled_cap_pct(
+            cfg=cfg,
+            key="max_usd_directional_exposure_pct",
+            default="0.15",
+            portfolio=portfolio,
+            signal=signal,
+        )
 
         if max_pct <= 0:
             return (True, "fx_cluster")
@@ -1071,29 +1119,13 @@ class RiskEngine:
         if sizing_base <= 0:
             return (True, "equity_index_cluster")
 
-        # D120 Dynamic Equity Cluster Cap (0 to 100%)
-        # Cap is 1:1 with market_state_score.
-        market_state_score = Decimal("0.20") # Fallback
-        if isinstance(portfolio, dict):
-            metadata = portfolio.get("metadata", {})
-            if isinstance(metadata, dict):
-                mss = metadata.get("market_state_score")
-                if mss is not None:
-                    try:
-                        market_state_score = Decimal(str(mss))
-                    except (TypeError, ValueError, InvalidOperation):
-                        pass
-
-        if getattr(signal, "metadata", None):
-            mss = signal.metadata.get("market_state_score")
-            if mss is not None:
-                try:
-                    market_state_score = Decimal(str(mss))
-                except (TypeError, ValueError, InvalidOperation):
-                    pass
-
-        # Fully dynamic: 0.0 (0%) to 1.0 (100%)
-        max_pct = max(Decimal("0.0"), min(Decimal("1.0"), market_state_score))
+        max_pct = self._regime_scaled_cap_pct(
+            cfg=cfg,
+            key="max_net_exposure_pct",
+            default="0.20",
+            portfolio=portfolio,
+            signal=signal,
+        )
         if max_pct <= 0:
             return (True, "equity_index_cluster")
         cap_notional = sizing_base * max_pct
@@ -1171,7 +1203,13 @@ class RiskEngine:
             return (True, "crypto_cluster")
 
         try:
-            max_pct = Decimal(str(cfg.get("max_net_exposure_pct", "0.10")))
+            max_pct = self._regime_scaled_cap_pct(
+                cfg=cfg,
+                key="max_net_exposure_pct",
+                default="0.10",
+                portfolio=portfolio,
+                signal=signal,
+            )
         except (InvalidOperation, TypeError, ValueError):
             max_pct = Decimal("0.10")
         if max_pct <= 0:
@@ -1238,6 +1276,23 @@ class RiskEngine:
                 if s:
                     out.add(s)
         return out
+
+    def _regime_scaled_cap_pct(
+        self,
+        *,
+        cfg: dict,
+        key: str,
+        default: str,
+        portfolio: dict,
+        signal: Signal,
+    ) -> Decimal:
+        try:
+            base = Decimal(str(cfg.get(key, default)))
+        except (InvalidOperation, TypeError, ValueError):
+            base = Decimal(default)
+        base = max(Decimal("0"), min(Decimal("1"), base))
+        scalar = Decimal(str(self._market_state_score(portfolio, signal, default=1.0)))
+        return max(Decimal("0"), min(base, base * scalar))
 
     def _clamp_signal_to_notional(self, signal, allowed_notional: Decimal) -> bool:
         """D125.1 — resize a signal so its notional fits ``allowed_notional``.
@@ -1372,7 +1427,6 @@ class RiskEngine:
             return (False, "single_name_notional")
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
         if meta is not None:
-            meta["sizing_topup_existing"] = True
             meta["risk_single_name_topup_clamped"] = True
             meta["risk_single_name_existing_notional"] = str(existing)
             meta["risk_single_name_cap_notional"] = str(cap_notional)
@@ -1515,20 +1569,15 @@ class RiskEngine:
 
 
     def _check_confidence_threshold(self, signal, portfolio) -> tuple[bool, str]:
-        base_min_confidence = float(self.config.get("min_signal_confidence", 1.0))
-        
-        market_state_score = 1.0
-        if isinstance(portfolio, dict):
-            pmeta = portfolio.get("metadata", {})
-            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
-                try:
-                    market_state_score = float(pmeta["market_state_score"])
-                except (TypeError, ValueError):
-                    pass
-        
-        # Scale inversely: in terrible market (0.0), threshold raises up to 2x base.
-        min_confidence = base_min_confidence * (2.0 - max(0.1, min(1.0, market_state_score)))
-        
+        min_confidence = self._dynamic_quality_threshold(
+            base_key="min_signal_confidence",
+            block_key="confidence",
+            portfolio=portfolio,
+            signal=signal,
+            default=1.0,
+        )
+        if isinstance(getattr(signal, "metadata", None), dict):
+            signal.metadata["risk_min_confidence_dynamic"] = round(float(min_confidence), 4)
         return (signal.confidence >= min_confidence, "confidence_threshold")
 
     def _check_theme_uniqueness(self, signal, portfolio) -> tuple[bool, str]:
@@ -1542,9 +1591,9 @@ class RiskEngine:
         if not positions:
             return (True, "theme_uniqueness")
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
-        if bool(meta.get("sizing_topup_existing")) and (
-            str(meta.get("coordinator_kind", "")).lower() == "open_strategy"
-            or bool(meta.get("risk_single_name_topup_clamped"))
+        if bool(meta.get("risk_single_name_topup_clamped")) or (
+            bool(meta.get("sizing_topup_existing"))
+            and str(meta.get("coordinator_kind", "")).lower() == "open_strategy"
         ):
             return (True, "theme_uniqueness")
         spec = parse_option_contract_from_metadata(meta)
@@ -1600,17 +1649,13 @@ class RiskEngine:
         base_threshold = float(self.config.get("min_trade_quality_score", 0.0))
         if base_threshold <= 0.0:
             return (True, "trade_quality")
-
-        market_state_score = 1.0
-        if isinstance(portfolio, dict):
-            pmeta = portfolio.get("metadata", {})
-            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
-                try:
-                    market_state_score = float(pmeta["market_state_score"])
-                except (TypeError, ValueError):
-                    pass
-        
-        threshold = base_threshold * (2.0 - max(0.1, min(1.0, market_state_score)))
+        threshold = self._dynamic_quality_threshold(
+            base_key="min_trade_quality_score",
+            block_key="trade_quality",
+            portfolio=portfolio,
+            signal=signal,
+            default=0.0,
+        )
 
         confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
         news_raw = float(getattr(signal, "news_score", None) or 0.0)
@@ -1643,6 +1688,7 @@ class RiskEngine:
         # Write quality score back into the signal's live metadata dict (persisted after risk check)
         try:
             meta["trade_quality_score"] = round(quality, 4)
+            meta["risk_min_trade_quality_dynamic"] = round(float(threshold), 4)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1653,6 +1699,98 @@ class RiskEngine:
                 signal.symbol, confidence, abs(news_raw), volume_z, quality, threshold,
             )
         return (passed, "trade_quality")
+
+    def _dynamic_quality_threshold(
+        self,
+        *,
+        base_key: str,
+        block_key: str,
+        portfolio: dict,
+        signal: Signal,
+        default: float,
+    ) -> float:
+        try:
+            base = float(self.config.get(base_key, default))
+        except (TypeError, ValueError):
+            base = float(default)
+        cfg = self.config.get("dynamic_quality_thresholds") or {}
+        if not isinstance(cfg, dict) or not bool(cfg.get("enabled", True)):
+            return base
+        block = cfg.get(block_key) or {}
+        if not isinstance(block, dict):
+            block = {}
+        lo = self._float_cfg(block, "min", 0.0)
+        hi = self._float_cfg(block, "max", 1.0)
+        if hi < lo:
+            lo, hi = hi, lo
+        pivot = self._float_cfg(block, "win_rate_pivot", 0.55)
+        wr_weight = self._float_cfg(block, "win_rate_weight", 0.35)
+        ms_weight = self._float_cfg(block, "market_state_weight", 0.25)
+
+        mss = self._market_state_score(portfolio, signal, default=1.0)
+        win_rate = self._recent_win_rate(portfolio, signal)
+        threshold = base
+        threshold += base * ms_weight * max(0.0, 1.0 - mss)
+        if win_rate is not None:
+            threshold += base * wr_weight * max(-1.0, min(1.0, pivot - win_rate))
+        return max(lo, min(hi, threshold))
+
+    @staticmethod
+    def _float_cfg(cfg: dict, key: str, default: float) -> float:
+        try:
+            return float(cfg.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _recent_win_rate(self, portfolio: dict, signal: Signal | None = None) -> float | None:
+        candidates: list[Any] = []
+        if isinstance(portfolio, dict):
+            meta = portfolio.get("metadata")
+            if isinstance(meta, dict):
+                candidates.extend([
+                    meta.get("recent_win_rate"),
+                    meta.get("rolling_win_rate"),
+                    meta.get("realized_win_rate"),
+                    meta.get("realised_win_rate"),
+                ])
+            candidates.extend([
+                portfolio.get("recent_win_rate"),
+                portfolio.get("rolling_win_rate"),
+                portfolio.get("realized_win_rate"),
+                portfolio.get("realised_win_rate"),
+            ])
+        if signal is not None and isinstance(getattr(signal, "metadata", None), dict):
+            candidates.extend([
+                signal.metadata.get("recent_win_rate"),
+                signal.metadata.get("rolling_win_rate"),
+                signal.metadata.get("realized_win_rate"),
+                signal.metadata.get("realised_win_rate"),
+            ])
+        for raw in candidates:
+            if raw is None:
+                continue
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if v > 1.0 and v <= 100.0:
+                v = v / 100.0
+            return max(0.0, min(1.0, v))
+        return None
+
+    def _market_state_score(self, portfolio: dict, signal: Signal | None = None, *, default: float = 1.0) -> float:
+        raw = None
+        if isinstance(portfolio, dict):
+            meta = portfolio.get("metadata", {})
+            if isinstance(meta, dict):
+                raw = meta.get("market_state_score")
+        if signal is not None and isinstance(getattr(signal, "metadata", None), dict):
+            raw = signal.metadata.get("market_state_score", raw)
+        try:
+            v = float(raw) if raw is not None else float(default)
+        except (TypeError, ValueError):
+            v = float(default)
+        return max(0.0, min(1.0, v))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -155,6 +155,44 @@ def _capital_slider(portfolio_state: PortfolioState) -> Decimal:
         return Decimal("1")
 
 
+def _unleash_factor(cap_slider: Decimal, allocation_cfg: AllocationConfig) -> tuple[Decimal, dict[str, float | bool]]:
+    """Return governed deployment-pressure relaxation for shape only.
+
+    The capital slider must never erase drawdown, execution-quality, or
+    volatility safety. This factor is allowed to relax only the opportunity
+    shape term, and only up to the configured maximum.
+    """
+    cfg = getattr(allocation_cfg.gross_exposure, "unleash", None)
+    if cfg is None or not getattr(cfg, "enabled", True):
+        return Decimal("0"), {
+            "unleash_enabled": False,
+            "unleash_start_capital_pct": 0.0,
+            "unleash_full_capital_pct": 0.0,
+            "unleash_max_shape_relaxation": 0.0,
+        }
+    try:
+        start = Decimal(str(getattr(cfg, "start_capital_pct", 0.90)))
+        full = Decimal(str(getattr(cfg, "full_capital_pct", 1.00)))
+        max_relax = Decimal(str(getattr(cfg, "max_shape_relaxation", 0.50)))
+    except Exception:  # noqa: BLE001
+        start = Decimal("0.90")
+        full = Decimal("1.00")
+        max_relax = Decimal("0.50")
+    start = clip_decimal(start, Decimal("0"), Decimal("1"))
+    full = clip_decimal(full, Decimal("0"), Decimal("1"))
+    max_relax = clip_decimal(max_relax, Decimal("0"), Decimal("1"))
+    if full <= start or cap_slider <= start:
+        u = Decimal("0")
+    else:
+        u = clip_decimal((cap_slider - start) / (full - start), Decimal("0"), Decimal("1"))
+    return u * max_relax, {
+        "unleash_enabled": True,
+        "unleash_start_capital_pct": float(start),
+        "unleash_full_capital_pct": float(full),
+        "unleash_max_shape_relaxation": float(max_relax),
+    }
+
+
 def _volatility_overlay(regime_state: RegimeState) -> tuple[Decimal, dict[str, float]]:
     """
     Portfolio-level volatility throttle.
@@ -224,12 +262,10 @@ def build_allocation_decision(
 
     cap_slider = _capital_slider(portfolio_state)
     
-    # Unleash logic: if cap_slider > 0.9, we interpolate dampening multipliers to 1.0.
-    # At cap_slider = 1.0, u = 1.0, all dampening multipliers are exactly 1.0.
-    u = Decimal("0")
-    if cap_slider > Decimal("0.9"):
-        u = (cap_slider - Decimal("0.9")) / Decimal("0.1")
-        u = clip_decimal(u, Decimal("0"), Decimal("1"))
+    # Deployment pressure may relax only opportunity shaping. It must never
+    # erase measured safety dampers such as drawdown, execution quality, or
+    # volatility overlays.
+    u, unleash_meta = _unleash_factor(cap_slider, allocation_cfg)
 
     agg = aggression_multiplier_for_mode(profile_cfg, mode, regime_state)
     best = max((o.opportunity_score for o in opportunities), default=Decimal("0"))
@@ -242,17 +278,15 @@ def build_allocation_decision(
         clip_decimal(sig_arg, Decimal(str(sh.sigmoid_clip_min)), Decimal(str(sh.sigmoid_clip_max)))
     )
 
-    # Apply unleash interpolation to each modifier
-    agg_eff = agg * (Decimal("1") - u) + Decimal("1") * u
+    agg_eff = agg
     ge_shape_eff = ge_shape * (Decimal("1") - u) + Decimal("1") * u
-    eq_eff = regime_state.execution_quality * (Decimal("1") - u) + Decimal("1") * u
-    dt_eff = regime_state.drawdown_throttle * (Decimal("1") - u) + Decimal("1") * u
+    eq_eff = regime_state.execution_quality
+    dt_eff = regime_state.drawdown_throttle
 
     ge = cap_slider * agg_eff * ge_shape_eff * eq_eff * dt_eff
 
     vol_overlay, vol_meta = _volatility_overlay(regime_state)
-    vol_overlay_eff = vol_overlay * (Decimal("1") - u) + Decimal("1") * u
-    ge = ge * vol_overlay_eff
+    ge = ge * vol_overlay
 
     # Wave 8 — optional vol-targeting + drawdown overlay (gated off by default).
     wave8_cfg = _get_default_portfolio_optimisation_config()
@@ -263,7 +297,7 @@ def build_allocation_decision(
             regime_state=regime_state,
             portfolio_state=portfolio_state,
             cfg=wave8_cfg,
-            u=u,
+            u=Decimal("0"),
         )
     try:
         demand_score = float((regime_state.metadata or {}).get("demand_score", 0.0) or 0.0)
@@ -405,6 +439,7 @@ def build_allocation_decision(
             "opportunity_count": len(opportunities),
             "position_count": len(portfolio_state.positions),
             "unleash_u": float(u),
+            **unleash_meta,
             **vol_meta,
             **wave8_meta,
             "demand_score": demand_score,

@@ -2537,6 +2537,29 @@ class Orchestrator:
                 now_ts=now_ts,
                 portfolio_volatility_scalar=vol_scalar,
             )
+            if tier is not None:
+                try:
+                    from risk.drawdown_governor import (
+                        parse_open_lock_config,
+                        recovered_from_tier,
+                        should_trigger_open_lock,
+                    )
+
+                    lock_cfg = parse_open_lock_config(d_cfg.get("open_lock"))
+                    if recovered_from_tier(
+                        nav=Decimal(str(nav)),
+                        day_pnl=day_pnl,
+                        tier_threshold_pct=tier.threshold_pct,
+                        config=lock_cfg,
+                    ):
+                        risk_engine.clear_open_lock("intraday_derisk_recovered")
+                    elif should_trigger_open_lock(tier_idx=tier_idx, config=lock_cfg):
+                        risk_engine.activate_open_lock(
+                            seconds=lock_cfg.cooldown_sec,
+                            reason=f"intraday_derisk_tier_{tier_idx}",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("orchestrator | drawdown open-lock skipped | {}", exc)
             if not actions:
                 return
             assert tier is not None

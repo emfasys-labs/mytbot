@@ -256,10 +256,20 @@ class GrossExposureShapingConfig(StrictBaseModel):
     sigmoid_clip_max: float = 3.0
 
 
+class UnleashConfig(StrictBaseModel):
+    """Optional deployment-pressure relaxation for opportunity shaping only."""
+
+    enabled: bool = True
+    start_capital_pct: float = 0.90
+    full_capital_pct: float = 1.00
+    max_shape_relaxation: float = 0.50
+
+
 class GrossExposureConfig(StrictBaseModel):
     formula: str
     controls: GrossExposureControlsConfig
     shaping: GrossExposureShapingConfig = Field(default_factory=GrossExposureShapingConfig)
+    unleash: UnleashConfig = Field(default_factory=UnleashConfig)
 
 
 class PositionWeightPostAdjustmentsConfig(StrictBaseModel):
