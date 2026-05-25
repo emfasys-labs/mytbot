@@ -289,6 +289,36 @@ export type ApiRealisedCurveResponse = {
   }>;
 };
 
+export type DeploymentStage = 'paper' | 'micro_live' | 'live';
+
+export type DeploymentCheck = {
+  key: string;
+  label: string;
+  passed: boolean;
+  required: boolean;
+  detail?: string;
+  current?: number | string | null;
+  target?: number | string | null;
+};
+
+export type DeploymentReadiness = {
+  stage: DeploymentStage;
+  runtime_env: string;
+  paper_mode: boolean;
+  next_stage?: DeploymentStage | null;
+  promotion_ready: boolean;
+  promotion_action_ready?: boolean;
+  checks_passed: number;
+  checks_total: number;
+  days_left: number;
+  requirements: Record<string, number>;
+  evidence: Record<string, Record<string, unknown>>;
+  checks: DeploymentCheck[];
+  blockers: DeploymentCheck[];
+  promotion_action_blockers?: DeploymentCheck[];
+  updated_at: string;
+};
+
 export type ApiOrderRow = {
   id?: string | number;
   timestamp?: string | null;
@@ -1138,6 +1168,11 @@ export const api = {
     getJson<ApiNewsResponse>(`/news?limit=${limit}&impactful_only=${impactfulOnly ? 'true' : 'false'}`),
   getStatus: () => getJson<ApiStatusResponse>('/status'),
   getSystemStatus: () => getJson<SystemStatusResponse>('/system/status'),
+  getDeploymentReadiness: () => getJson<DeploymentReadiness>('/deployment/readiness'),
+  promoteDeployment: () =>
+    postJson<{ ok: boolean; readiness: DeploymentReadiness }>('/deployment/promote'),
+  demoteDeployment: (stage: DeploymentStage = 'paper') =>
+    postJsonBody<{ ok: boolean; readiness: DeploymentReadiness }>('/deployment/demote', { stage }),
   getConnectHub: () => getJson<ConnectHubResponse>('/connect/hub'),
   configureConnector: (body: ConnectConfigureRequest) =>
     postJsonBody<ConnectConfigureResponse>('/connect/configure', body),

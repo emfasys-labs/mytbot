@@ -66,7 +66,7 @@ export type SystemState = 'running' | 'starting' | 'stopping' | 'paused' | 'off'
 export type Density = 'comfort' | 'compact';
 export type Theme = 'dark' | 'light';
 export type Viewport = 'desktop' | 'tablet' | 'mobile';
-export type Route = 'dash' | 'signals' | 'book' | 'risk' | 'strat' | 'universe' | 'connect' | 'log';
+export type Route = 'dash' | 'activation' | 'signals' | 'book' | 'risk' | 'strat' | 'universe' | 'connect' | 'log';
 
 export interface Tweaks {
   accent: AccentName;

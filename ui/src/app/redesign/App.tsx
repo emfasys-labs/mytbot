@@ -16,6 +16,7 @@ import { MobileApp } from './mobile';
 import { Glyph, Label } from './primitives';
 import {
   BookScreen,
+  ActivationScreen,
   ConnectScreen,
   RiskScreen,
   SignalsScreen,
@@ -35,6 +36,7 @@ import { api } from '../lib/api';
 
 const TITLES: Record<Route, string> = {
   dash:    'Dashboard',
+  activation: 'Activation',
   signals: 'Signals',
   book:    'Book',
   risk:    'Risk',
@@ -237,6 +239,9 @@ export default function App() {
               armed={armed}
               live={live}
             />
+          )}
+          {effectiveRoute === 'activation' && (
+            <ActivationScreen accent={tweaks.accent} live={live} />
           )}
           {effectiveRoute === 'signals' && (
             <SignalsScreen accent={tweaks.accent} live={live} />

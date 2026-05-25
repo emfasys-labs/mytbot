@@ -348,6 +348,26 @@ class Orchestrator:
                 await self._load_persisted_capital_pct()
                 await self._load_persisted_profit_harvest_peaks()
 
+                from control.command_bus import CommandBus
+                from storage.db import get_session_factory
+                from system.deployment import build_deployment_readiness, get_configured_stage
+
+                sf = get_session_factory()
+                bus = CommandBus(sf)
+                stage_for_start = await get_configured_stage(bus)
+                readiness = await build_deployment_readiness(
+                    bus=bus,
+                    session_factory=sf,
+                    requested_stage=stage_for_start,
+                )
+                blockers = readiness.get("blockers") if isinstance(readiness, dict) else None
+                stage = readiness.get("stage") if isinstance(readiness, dict) else "unknown"
+                if blockers:
+                    reasons = ", ".join(
+                        str(b.get("key", "check")) for b in blockers[:6] if isinstance(b, dict)
+                    )
+                    raise RuntimeError(f"deployment stage {stage} is not start-ready: {reasons}")
+
                 # 3. Brokers
                 logger.info("orchestrator | discovering brokers...")
                 self._broker_report = await self._broker_manager.discover_and_connect()

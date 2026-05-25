@@ -54,6 +54,12 @@ def get_app_database() -> tuple[AsyncEngine | None, async_sessionmaker[AsyncSess
     return _bound_engine, _bound_session_factory
 
 
+def get_session_factory() -> async_sessionmaker[AsyncSession] | None:
+    """Return the shared API-bound session factory when present."""
+    _, session_factory = get_app_database()
+    return session_factory
+
+
 def database_async_url_from_env() -> str | None:
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = os.getenv("POSTGRES_PORT", "5432")

@@ -44,6 +44,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { id: 'dash',    label: 'Dashboard',  icon: I.dash },
+  { id: 'activation', label: 'Activation', icon: I.shield },
   { id: 'signals', label: 'Signals',    icon: I.signal },
   { id: 'book',    label: 'Book',       icon: I.wallet },
   { id: 'risk',    label: 'Risk',       icon: I.shield },
@@ -381,6 +382,7 @@ interface CmdItem {
 
 const CMD_ITEMS: CmdItem[] = [
   { id: 'dash',        label: 'Go to Dashboard',  hint: 'overview',       kind: 'nav',    route: 'dash' },
+  { id: 'activation',  label: 'Go to Activation', hint: 'deployment',     kind: 'nav',    route: 'activation' },
   { id: 'signals',     label: 'Go to Signals',    hint: 'conviction',     kind: 'nav',    route: 'signals' },
   { id: 'book',        label: 'Go to Book',       hint: 'positions',      kind: 'nav',    route: 'book' },
   { id: 'risk',        label: 'Go to Risk',       hint: 'approvals',      kind: 'nav',    route: 'risk' },

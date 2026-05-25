@@ -7,7 +7,7 @@ import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'reac
 import { Card, Label, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
-import { api, setApiControlToken, type AiPipelineStage, type AiPipelineView, type ConnectHubConnector, type RoutingBrokerRow } from '../lib/api';
+import { api, setApiControlToken, type AiPipelineStage, type AiPipelineView, type ConnectHubConnector, type DeploymentCheck, type DeploymentStage, type RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 import { formatStrategyDisplayName } from './strategyLabels';
 
@@ -189,6 +189,355 @@ function minutesAgo(ts: number): string {
   if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
   return `${Math.round(secs / 86400)}d ago`;
+}
+
+const STAGE_LABEL: Record<DeploymentStage, string> = {
+  paper: 'Paper',
+  micro_live: 'Micro-live',
+  live: 'Live',
+};
+
+const STAGE_COPY: Record<DeploymentStage, string> = {
+  paper: 'No real orders. The loop runs against live data and builds evidence.',
+  micro_live: 'Real orders are allowed only through tiny M8 whitelists and caps.',
+  live: 'Full operator capital path. Risk engine authority remains mandatory.',
+};
+
+function fmtTarget(v: unknown): string {
+  if (v == null || v === '') return '--';
+  if (typeof v === 'number') return Number.isInteger(v) ? `${v}` : v.toFixed(2);
+  return String(v);
+}
+
+function evidenceMetric(
+  evidence: Record<string, Record<string, unknown>> | undefined,
+  stage: DeploymentStage,
+  key: string,
+): string {
+  const raw = evidence?.[stage]?.[key];
+  if (typeof raw === 'number') return Number.isInteger(raw) ? `${raw}` : raw.toFixed(2);
+  if (typeof raw === 'string') return raw || '--';
+  return '--';
+}
+
+function CheckRow({ check }: { check: DeploymentCheck }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '22px minmax(190px, 1fr) 86px 110px minmax(220px, 1.2fr)',
+      gap: 12,
+      alignItems: 'center',
+      padding: '10px 12px',
+      borderBottom: `1px solid ${TOKENS.line}`,
+      minHeight: 44,
+    }}>
+      <input
+        type="checkbox"
+        checked={!!check.passed}
+        readOnly
+        aria-label={check.label}
+        style={{ width: 14, height: 14, accentColor: check.passed ? TOKENS.profit : TOKENS.caution }}
+      />
+      <span style={{ fontFamily: TOKENS.sans, fontSize: 13, color: TOKENS.ink1, minWidth: 0 }}>
+        {check.label}
+      </span>
+      <Pill size="sm" tone={check.passed ? 'profit' : 'caution'}>
+        {check.passed ? 'complete' : 'pending'}
+      </Pill>
+      <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink2 }}>
+        {fmtTarget(check.current)} / {fmtTarget(check.target)}
+      </span>
+      <span
+        title={check.detail || check.label}
+        style={{
+          fontFamily: TOKENS.mono,
+          fontSize: 10,
+          color: TOKENS.ink3,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {check.detail || '--'}
+      </span>
+    </div>
+  );
+}
+
+export function ActivationScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
+  const accentColor = ACCENTS[accent].main;
+  const deployment = live.deployment;
+  const [busy, setBusy] = useState<'promote' | 'paper' | 'micro_live' | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const stage: DeploymentStage = deployment?.stage ?? 'paper';
+  const readinessLoaded = !!deployment;
+  const ordered: DeploymentStage[] = ['paper', 'micro_live', 'live'];
+  const currentIdx = ordered.indexOf(stage);
+  const checks = deployment?.checks ?? [];
+  const blockers = deployment?.blockers ?? [];
+  const actionBlockers = deployment?.promotion_action_blockers ?? blockers;
+  const canPromote = readinessLoaded && !!deployment?.next_stage && !!deployment?.promotion_action_ready && !busy;
+  const progress = deployment?.checks_total
+    ? Math.round((deployment.checks_passed / deployment.checks_total) * 100)
+    : 0;
+
+  const doPromote = async () => {
+    setBusy('promote');
+    setMessage(null);
+    try {
+      await api.promoteDeployment();
+      setMessage('Promotion accepted. Restart the backend if the stage changes paper/live runtime semantics.');
+      live.refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(msg);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDemote = async (target: DeploymentStage) => {
+    setBusy(target);
+    setMessage(null);
+    try {
+      await api.demoteDeployment(target);
+      setMessage(`Demoted to ${STAGE_LABEL[target]}. Restart if the runtime environment also needs to change.`);
+      live.refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(msg);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onPhaseClick = (target: DeploymentStage) => {
+    if (!readinessLoaded || busy) return;
+    const targetIdx = ordered.indexOf(target);
+    if (targetIdx === currentIdx) return;
+    if (targetIdx < currentIdx) {
+      void doDemote(target);
+      return;
+    }
+    if (target === deployment?.next_stage && canPromote) {
+      void doPromote();
+    }
+  };
+
+  const phaseMeta = (target: DeploymentStage, idx: number) => {
+    const active = target === stage;
+    const complete = idx < currentIdx;
+    const isNext = target === deployment?.next_stage;
+    const canSelect = readinessLoaded && !busy && (complete || (isNext && canPromote));
+    const tone: 'info' | 'profit' | 'caution' | 'neutral' =
+      active ? 'info' : complete ? 'profit' : isNext && canPromote ? 'profit' : isNext ? 'caution' : 'neutral';
+    const label =
+      active ? 'current' :
+      complete ? 'click to demote' :
+      isNext && canPromote ? 'click to promote' :
+      isNext ? `${actionBlockers.length} blockers` :
+      'locked';
+    const note =
+      active ? 'You are here now.' :
+      complete ? `Click to demote back to ${STAGE_LABEL[target]}.` :
+      isNext && canPromote ? `All required selection checks are complete. Click to select ${STAGE_LABEL[target]}.` :
+      isNext ? `${actionBlockers.length} required check${actionBlockers.length === 1 ? '' : 's'} still pending before ${STAGE_LABEL[target]} can be selected.` :
+      `Complete ${STAGE_LABEL[ordered[idx - 1]]} before ${STAGE_LABEL[target]} can unlock.`;
+    return { active, complete, canSelect, tone, label, note };
+  };
+
+  return (
+    <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, marginBottom: 18 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Label accent={accentColor}>Deployment stage</Label>
+          <h1 style={{
+            margin: '8px 0 6px',
+            fontFamily: TOKENS.sans,
+            fontSize: 30,
+            lineHeight: 1.05,
+            fontWeight: 520,
+            color: TOKENS.ink0,
+            letterSpacing: 0,
+          }}>
+            {STAGE_LABEL[stage]}
+          </h1>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 12, color: TOKENS.ink2 }}>
+            {readinessLoaded
+              ? <>runtime {deployment.runtime_env} · {deployment.paper_mode ? 'paper-safe' : 'real-order capable'}</>
+              : <>deployment readiness not loaded · backend restart or API check required</>}
+          </div>
+        </div>
+        <div style={{
+          minWidth: 210,
+          border: `1px solid ${TOKENS.line}`,
+          borderRadius: 8,
+          padding: 12,
+          background: TOKENS.bg1,
+        }}>
+          <Label>Promotion progress</Label>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
+            <span style={{ fontFamily: TOKENS.sans, fontSize: 30, color: accentColor, fontVariantNumeric: 'tabular-nums' }}>
+              {progress}%
+            </span>
+            <span style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+              {readinessLoaded ? `${deployment.checks_passed}/${deployment.checks_total} checks` : 'waiting for API'}
+            </span>
+          </div>
+          <div style={{ height: 4, background: TOKENS.bg3, borderRadius: 4, overflow: 'hidden', marginTop: 8 }}>
+            <div style={{ width: `${progress}%`, height: '100%', background: accentColor }} />
+          </div>
+        </div>
+        <div style={{
+          minWidth: 180,
+          border: `1px solid ${TOKENS.line}`,
+          borderRadius: 8,
+          padding: 12,
+          background: TOKENS.bg1,
+        }}>
+          <Label>Days left</Label>
+          <div style={{ marginTop: 8, fontFamily: TOKENS.sans, fontSize: 30, color: deployment?.days_left ? TOKENS.caution : TOKENS.profit }}>
+            {deployment?.days_left ?? '--'}
+          </div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            before next stage evidence target
+          </div>
+        </div>
+      </div>
+
+      {!readinessLoaded && (
+        <div style={{
+          border: `1px solid ${TOKENS.caution}55`,
+          borderRadius: 8,
+          background: 'rgba(252,211,77,0.08)',
+          padding: '12px 14px',
+          marginBottom: 18,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 14,
+        }}>
+          <div>
+            <Label accent={TOKENS.caution}>Readiness API unavailable</Label>
+            <div style={{ marginTop: 5, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, lineHeight: 1.5 }}>
+              The UI is loaded, but `/deployment/readiness` has not returned. Restart the backend after this update, then refresh the dashboard.
+            </div>
+          </div>
+          <Pill tone="caution" size="sm">not verified</Pill>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 18 }}>
+        {ordered.map((s, i) => {
+          const meta = phaseMeta(s, i);
+          return (
+            <div
+              key={s}
+              role="button"
+              tabIndex={meta.canSelect ? 0 : -1}
+              title={meta.note}
+              onClick={() => onPhaseClick(s)}
+              onKeyDown={(e) => {
+                if (!meta.canSelect) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onPhaseClick(s);
+                }
+              }}
+              style={{
+                border: `1px solid ${meta.active ? accentColor : meta.canSelect ? `${TOKENS.profit}66` : TOKENS.line}`,
+                borderRadius: 8,
+                background: meta.active ? `${accentColor}10` : meta.canSelect ? 'rgba(94,234,212,0.06)' : TOKENS.bg1,
+                padding: 16,
+                minHeight: 166,
+                opacity: meta.active || meta.canSelect ? 1 : 0.58,
+                cursor: meta.canSelect ? 'pointer' : 'default',
+                transition: `border-color ${TOKENS.fast}ms ${TOKENS.ease}, background ${TOKENS.fast}ms ${TOKENS.ease}, opacity ${TOKENS.fast}ms ${TOKENS.ease}`,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <Label accent={meta.active ? accentColor : meta.canSelect ? TOKENS.profit : undefined}>Phase 0{i + 1}</Label>
+                <Pill size="sm" tone={meta.tone}>
+                  {meta.label}
+                </Pill>
+              </div>
+              <div style={{ marginTop: 18, fontFamily: TOKENS.sans, fontSize: 18, color: TOKENS.ink0, fontWeight: 560 }}>
+                {STAGE_LABEL[s]}
+              </div>
+              <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 11, lineHeight: 1.55, color: TOKENS.ink2 }}>
+                {STAGE_COPY[s]}
+              </div>
+              <div style={{
+                marginTop: 12,
+                paddingTop: 10,
+                borderTop: `1px solid ${TOKENS.line}`,
+                fontFamily: TOKENS.mono,
+                fontSize: 10,
+                lineHeight: 1.45,
+                color: meta.canSelect ? TOKENS.profit : meta.active ? accentColor : TOKENS.ink3,
+              }}>
+                {meta.note}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.35fr', gap: 14, alignItems: 'start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, background: TOKENS.bg1, padding: 16 }}>
+            <Label>Evidence</Label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10, marginTop: 14 }}>
+              {[
+                ['Paper days', evidenceMetric(deployment?.evidence, 'paper', 'days_observed')],
+                ['Paper signals', evidenceMetric(deployment?.evidence, 'paper', 'signals')],
+                ['Paper risk checks', evidenceMetric(deployment?.evidence, 'paper', 'risk_decisions')],
+                ['Paper drawdown', `${evidenceMetric(deployment?.evidence, 'paper', 'max_drawdown_pct')}%`],
+                ['Micro-live days', evidenceMetric(deployment?.evidence, 'micro_live', 'days_observed')],
+                ['Micro-live fills', evidenceMetric(deployment?.evidence, 'micro_live', 'fills')],
+              ].map(([k, v]) => (
+                <div key={k} style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 10, background: TOKENS.bg0 }}>
+                  <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{k}</div>
+                  <div style={{ marginTop: 5, fontFamily: TOKENS.sans, fontSize: 18, color: TOKENS.ink1, fontVariantNumeric: 'tabular-nums' }}>
+                    {v}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {message && (
+            <div style={{
+              border: `1px solid ${message.includes('blocked') || message.includes('failed') ? `${TOKENS.caution}55` : TOKENS.line}`,
+              borderRadius: 8,
+              background: message.includes('blocked') || message.includes('failed') ? 'rgba(252,211,77,0.08)' : TOKENS.bg1,
+              padding: 14,
+              fontFamily: TOKENS.mono,
+              fontSize: 10,
+              color: message.includes('blocked') || message.includes('failed') ? TOKENS.caution : TOKENS.ink2,
+              lineHeight: 1.5,
+            }}>
+              {message}
+            </div>
+          )}
+        </div>
+
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, background: TOKENS.bg1, overflow: 'hidden' }}>
+          <div style={{ padding: '14px 16px', borderBottom: `1px solid ${TOKENS.line}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <Label>{deployment?.next_stage ? `Checks for ${STAGE_LABEL[deployment.next_stage]}` : 'Promotion checks'}</Label>
+            <Pill size="sm" tone={!readinessLoaded ? 'caution' : blockers.length ? 'caution' : 'profit'}>
+              {!readinessLoaded ? 'not loaded' : blockers.length ? 'blocked' : 'ready'}
+            </Pill>
+          </div>
+          {checks.length ? checks.map((c) => <CheckRow key={c.key} check={c} />) : (
+            <div style={{ padding: 28, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3, textAlign: 'center' }}>
+              Deployment readiness has not loaded yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const CONNECT_CATEGORY_LABELS: Record<string, string> = {

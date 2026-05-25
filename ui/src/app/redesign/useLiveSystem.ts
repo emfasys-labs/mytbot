@@ -19,6 +19,7 @@ import {
   type ApiPositionsResponse,
   type ConnectHubConnector,
   type DashboardSnapshot,
+  type DeploymentReadiness,
   type ConnectHubResponse,
   type IntelligenceSignalsResponse,
   type IntelligenceUniverseResponse,
@@ -146,6 +147,7 @@ export interface LiveData {
   runtimeDemand: Record<string, unknown> | null;
   runtimeMetaLabeling: Record<string, unknown> | null;
   routingQuality: RoutingQualityResponse | null;
+  deployment: DeploymentReadiness | null;
 
   loopIteration: number;
   path: string;
@@ -321,6 +323,7 @@ export function useLiveSystem(): LiveData {
   const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
   const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
   const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
+  const [deployment, setDeployment] = useState<DeploymentReadiness | null>(null);
   const [strategyMix, setStrategyMix] = useState<StrategyCandidateMixResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
     Array<{ name: string; enabled: boolean; kind?: string }>
@@ -395,6 +398,7 @@ export function useLiveSystem(): LiveData {
     setRuntimeDemand(null);
     setRuntimeMetaLabeling(null);
     setRoutingQuality(null);
+    setDeployment(null);
     setStrategyMix(null);
     setWsEvents([]);
     setOrderEvents([]);
@@ -442,6 +446,7 @@ export function useLiveSystem(): LiveData {
         api.getSystemMode(),
         api.getRealisedCurve(400),
         api.getConnectHub(),
+        api.getDeploymentReadiness(),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -456,6 +461,8 @@ export function useLiveSystem(): LiveData {
       const modeHttpRes = res[10].status === 'fulfilled' ? res[10].value : null;
       const realisedCurveRes = res[11].status === 'fulfilled' ? res[11].value : null;
       const connectHubRes = res[12].status === 'fulfilled' ? res[12].value : null;
+      const deploymentRes = res[13].status === 'fulfilled' ? res[13].value : null;
+      setDeployment(deploymentRes);
       if (modeHttpRes?.mode) {
         const m = String(modeHttpRes.mode).toLowerCase();
         if (m === 'defender' || m === 'trader' || m === 'hunter') {
@@ -1087,6 +1094,7 @@ export function useLiveSystem(): LiveData {
     runtimeDemand,
     runtimeMetaLabeling,
     routingQuality,
+    deployment,
 
     loopIteration,
     path,

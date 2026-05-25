@@ -41,6 +41,11 @@ from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
+from system.deployment import (
+    STAGES as DEPLOYMENT_STAGES,
+    build_deployment_readiness,
+    set_stage_override,
+)
 from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
 from portfolio.global_edge_coordinator import cash_factor_for_asset_class
 from control.runtime import get_execution_engine, get_risk_engine
@@ -2636,6 +2641,81 @@ async def system_status(
     except Exception:  # noqa: BLE001
         pass
     return await _merge_providers(out)
+
+
+@app.get("/deployment/readiness")
+async def deployment_readiness(
+    bus: CommandBus = Depends(_command_bus),
+    session_factory=Depends(_optional_session_factory),
+):
+    """Current deployment stage, promotion evidence, and explicit promotion blockers."""
+    return await build_deployment_readiness(bus=bus, session_factory=session_factory)
+
+
+@app.get("/deployment/stage")
+async def deployment_stage(
+    bus: CommandBus = Depends(_command_bus),
+    session_factory=Depends(_optional_session_factory),
+):
+    return await build_deployment_readiness(bus=bus, session_factory=session_factory)
+
+
+@app.post("/deployment/promote")
+async def deployment_promote(
+    body: dict = Body(default={}),
+    _: None = Depends(_require_mutation_token),
+    bus: CommandBus = Depends(_command_bus),
+    session_factory=Depends(_optional_session_factory),
+):
+    current = await build_deployment_readiness(bus=bus, session_factory=session_factory)
+    next_stage = current.get("next_stage")
+    if not next_stage:
+        raise HTTPException(status_code=400, detail="Already at final deployment stage")
+    requested = body.get("stage") if isinstance(body, dict) else None
+    if requested and str(requested).strip().lower().replace("-", "_") != next_stage:
+        raise HTTPException(status_code=400, detail=f"Next allowed stage is {next_stage}")
+    target = await build_deployment_readiness(
+        bus=bus,
+        session_factory=session_factory,
+        requested_stage=str(next_stage),
+    )
+    action_blockers = target.get("promotion_action_blockers", target.get("blockers", []))
+    if action_blockers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"Promotion to {next_stage} is blocked",
+                "blockers": action_blockers,
+            },
+        )
+    payload = await set_stage_override(bus, str(next_stage), source="api.promote")
+    return {
+        "ok": True,
+        "stage": payload,
+        "readiness": await build_deployment_readiness(bus=bus, session_factory=session_factory),
+    }
+
+
+@app.post("/deployment/demote")
+async def deployment_demote(
+    body: dict = Body(default={}),
+    _: None = Depends(_require_mutation_token),
+    bus: CommandBus = Depends(_command_bus),
+    session_factory=Depends(_optional_session_factory),
+):
+    requested = str((body or {}).get("stage", "paper")).strip().lower().replace("-", "_")
+    if requested not in DEPLOYMENT_STAGES:
+        raise HTTPException(status_code=400, detail=f"stage must be one of {', '.join(DEPLOYMENT_STAGES)}")
+    current = await build_deployment_readiness(bus=bus, session_factory=session_factory)
+    order = {stage: i for i, stage in enumerate(DEPLOYMENT_STAGES)}
+    if order[requested] > order[str(current.get("stage", "paper"))]:
+        raise HTTPException(status_code=400, detail="Use /deployment/promote for upward stage changes")
+    payload = await set_stage_override(bus, requested, source="api.demote")
+    return {
+        "ok": True,
+        "stage": payload,
+        "readiness": await build_deployment_readiness(bus=bus, session_factory=session_factory),
+    }
 
 
 @app.get("/connect/hub")

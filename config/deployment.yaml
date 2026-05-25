@@ -1,0 +1,28 @@
+# Deployment stage control
+# ========================
+#
+# The UI and API expose this as:
+#   paper -> micro_live -> live
+#
+# Promotion is intentionally gated. Demotion is always allowed.
+
+stage: paper
+
+# Keep full live blocked until the operator deliberately edits this file or
+# persists an API stage override after reviewing micro-live evidence.
+promotion_locked: true
+
+requirements:
+  paper_soak_days: 14
+  paper_min_signals: 50
+  paper_min_risk_decisions: 50
+  paper_max_drawdown_pct: 3.0
+  paper_max_reject_rate_pct: 85.0
+
+  micro_live_soak_days: 7
+  micro_live_min_fills: 10
+  micro_live_max_drawdown_pct: 1.5
+  micro_live_max_reject_rate_pct: 75.0
+
+  # Micro-live is real money, but should remain visibly tiny.
+  micro_live_max_order_notional_usd: 250.0
