@@ -7,7 +7,7 @@
 # Update the CURRENT STATE section after each work session.
 
 ## PROJECT
-`mytbot` — personal autonomous multi-asset trading system.
+`mytbot` — open-source autonomous multi-asset trading system under AGPL v3, published by Emfasys Labs, a division of Emfasys Ltd.
 GitHub: https://github.com/kvcom/mytbot.git
 Owner: UK-based, trading stocks, bonds, ETFs, forex, crypto.
 Primary broker: IBKR Pro. Crypto: Kraken + Binance.

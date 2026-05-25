@@ -5,15 +5,16 @@
 
 ## Overview
 
-mytbot is a personal autonomous multi-asset trading system.
-**Primary runtime:** `python run.py` — orchestrator (`system/orchestrator.py`) brings up Docker-backed Postgres/Redis (via dependency manager), discovers brokers (`system/broker_manager.py`), runs the trading loop and optional pipeline, and serves **FastAPI** + **WebSocket** for the **React** dashboard in `ui/`.
+myTbot is an open-source autonomous multi-asset trading system published by Emfasys Labs, a division of Emfasys Ltd.
+**Primary runtime:** `python run.py` - orchestrator (`system/orchestrator.py`) brings up Docker-backed Postgres/Redis (via dependency manager), discovers brokers (`system/broker_manager.py`), runs the trading loop and optional pipeline, and serves **FastAPI** + **WebSocket** for the **React** dashboard in `ui/`.
 
 Signals are produced by strategies (and optional D015 opportunity path), may pass through **stateful signal accumulation** (`signals/accumulator.py`), then the signal engine; every tradable intent is **veto-capable** by the risk engine before execution routes to adapters.
 
 **Assets traded:** US equities, UK equities, ETFs, bonds, forex, crypto; **IBKR single-leg options** (opt-in via `options_trading` / `ENABLE_OPTIONS`, same Signal → Risk → Execution path)
 **Primary broker:** Interactive Brokers Pro (IBKR)
 **Crypto brokers:** Kraken, Binance
-**Capital:** Personal funds only. Not a public product.
+**Licence:** GNU Affero General Public License v3.0 (AGPL v3). Commercial licences are available separately from Emfasys Ltd for organisations that require terms outside AGPL v3.
+**Safety:** myTbot is not investment advice, portfolio management, brokerage, custody, a managed trading service, a signal-selling service or a promise of performance.
 
 ---
 

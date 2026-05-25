@@ -4,13 +4,13 @@ Last updated: 2026-05-20
 
 Audience: business users, operators, product stakeholders, engineers, data/AI teams, and risk reviewers.
 
-Status: living specification for the current myTbot platform. This document describes the implemented platform and the intended operating model. It is not investment advice and does not grant authority for unmanaged live capital deployment.
+Status: living specification for the current myTbot platform. This document describes the implemented platform and the intended operating model. myTbot is open source under AGPL v3 and published by Emfasys Labs, a division of Emfasys Ltd. It is not investment advice, portfolio management, brokerage, custody, a managed trading service, a signal-selling service or a promise of performance.
 
 ---
 
 ## 1. Executive Summary
 
-myTbot is a personal autonomous multi-asset trading platform. It connects to multiple brokers and data sources, builds a dynamic investable universe, generates trading opportunities from quantitative, news, macro, volume, and arbitrage signals, routes every trading intent through a veto-capable risk engine, and executes approved orders through broker adapters.
+myTbot is an autonomous multi-asset trading platform. It connects to multiple brokers and data sources, builds a dynamic instrument universe, generates trading opportunities from quantitative, news, macro, volume, and arbitrage signals, routes every trading intent through a veto-capable risk engine, and executes approved orders through broker adapters when configured by the operator.
 
 The platform is designed as a "one-button" system:
 
@@ -18,9 +18,9 @@ The platform is designed as a "one-button" system:
 - The UI exposes a single live control plane: start, stop, capital allocation, mode/status, Connect Hub, Universe intelligence, performance, and trading/risk visibility.
 - AI is local-first and advisory. AI can classify, score, summarize, explain, escalate, veto before risk under configured policy, and enrich signal conviction. AI cannot place orders or bypass the risk engine.
 
-**Core business promise:** give the operator a continuously adapting trading system that can monitor many assets and brokers, decide where capital is best deployed, protect against common live-trading failure modes, and keep the operator informed in plain language.
+**Core product aim:** give the operator a continuously adapting technical system that can monitor many assets and brokers, evaluate configured trading logic, apply risk controls, and keep the operator informed in plain language.
 
-**Core technical promise:** every external venue is isolated behind adapters, every order passes through risk, every important decision is auditable, and most behaviour is config-driven rather than hard-coded.
+**Core technical aim:** every external venue is isolated behind adapters, every order passes through risk, every important decision is auditable, and most behaviour is config-driven rather than hard-coded.
 
 ---
 

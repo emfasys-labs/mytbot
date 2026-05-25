@@ -1,6 +1,6 @@
 # mytbot Design System
 
-**mytbot** is a personal autonomous multi-asset trading system: equities, bonds, ETFs, forex, and crypto. Built as a single-operator control surface with full transparency, live decision intelligence, and strict risk governance. The system is never a reporting dashboard — it is a live control panel where the operator is always one action away from full governance.
+**myTbot** is an open-source autonomous multi-asset trading system under AGPL v3: equities, bonds, ETFs, forex, and crypto. It is published by Emfasys Labs, a division of Emfasys Ltd, and built as a single-operator control surface with transparent decision intelligence and risk governance. It is not investment advice, portfolio management, brokerage, custody, a managed trading service, a signal-selling service or a promise of performance.
 
 **Sources used:**
 - GitHub repo: https://github.com/kvcom/mytbot (private — `kvcom/mytbot`)

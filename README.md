@@ -1,9 +1,36 @@
-# mytbot — Autonomous Multi-Asset Trading System
+# mytbot - Autonomous Multi-Asset Trading System
 
-Personal autonomous trading system: equities, bonds, ETFs, forex, and crypto.  
-**Primary control:** `python run.py` — orchestrator starts dependencies, brokers, trading loop, pipeline, FastAPI + WebSocket, and serves the React dashboard (or use `POST /system/start` / `stop` from the UI).
+myTbot is an open-source autonomous multi-asset trading system published by Emfasys Labs, a division of Emfasys Ltd.
+
+It is provided for education, research, simulation and technical experimentation across equities, bonds, ETFs, forex and crypto.
+
+**Primary control:** `python run.py` - orchestrator starts dependencies, brokers, trading loop, pipeline, FastAPI + WebSocket, and serves the React dashboard (or use `POST /system/start` / `stop` from the UI).
 
 Architecture is **adapter-based**: add a venue without changing strategy, risk, or execution logic.
+
+## Licence
+
+myTbot is free and open source under the GNU Affero General Public License v3.0 (AGPL v3).
+
+You may use, study, modify and share myTbot under the terms of AGPL v3.
+
+Commercial licences are available separately from Emfasys Ltd for organisations that require proprietary integration, closed-source deployment, hosted services, enterprise support, private modifications, custom integrations, indemnity, warranties, or other terms outside AGPL v3.
+
+See [LICENSE](LICENSE), [COMMERCIAL.md](COMMERCIAL.md) and [docs/LICENSING.md](docs/LICENSING.md).
+
+## Community
+
+Community feedback is welcome through GitHub Issues. We welcome bug reports, feature requests, architecture questions, documentation feedback and safety observations.
+
+myTbot does not currently accept outside Pull Requests. To preserve clean IP ownership and maintain a clear commercial licensing path, all code changes are implemented internally by Emfasys Ltd. If you have a proposed code change, please describe the problem and suggested approach in an Issue rather than submitting a PR.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Safety / Financial Disclaimer
+
+myTbot is provided for education, research, simulation and technical experimentation. It is not investment advice, portfolio management, brokerage, custody, a managed trading service, a signal-selling service or a promise of performance. Trading financial instruments involves risk. Automated systems can fail, behave unexpectedly or lose money. Users are solely responsible for their own configuration, broker accounts, API keys, risk settings and any decision to enable live execution.
+
+See [DISCLAIMER.md](DISCLAIMER.md).
 
 ## Brokers
 
@@ -20,7 +47,7 @@ Architecture is **adapter-based**: add a venue without changing strategy, risk, 
 
 ```bash
 cp -r brokers/_template brokers/newexchange
-# Edit brokers/newexchange/adapter.py — implement BrokerAdapter
+# Edit brokers/newexchange/adapter.py - implement BrokerAdapter
 # Add one line to brokers/registry.py
 # Wire routing / permissions / .env.example as needed (see docs/BROKERS.md)
 ```
@@ -57,7 +84,7 @@ pytest
 ```
 
 **Existing database** created with SQLAlchemy `create_all` before Alembic: if tables already exist, early revisions may no-op DDL. To align Alembic’s version table only (no schema change): `alembic stamp head`.  
-**Downgrades:** only use on disposable DBs — some revisions call `drop_all()`.
+**Downgrades:** only use on disposable DBs - some revisions call `drop_all()`.
 
 ### Data pipeline (M2)
 
@@ -79,7 +106,7 @@ Dashboard lives in `ui/` (Vite + React). If you serve static `ui/dist` from the 
 cd ui && npm install && npm run build
 ```
 
-### UI (Vite dev — http://localhost:5173)
+### UI (Vite dev - http://localhost:5173)
 
 For the normal hot-reload dashboard, keep the API on **:8000** (`python run.py` or uvicorn) and run:
 
@@ -87,7 +114,7 @@ For the normal hot-reload dashboard, keep the API on **:8000** (`python run.py` 
 cd ui && npm install && npm run dev
 ```
 
-Open **http://localhost:5173/** — `ui/.env.development` sets `VITE_API_BASE=http://127.0.0.1:8000` so the browser talks to FastAPI, not the Vite server. Optional: copy `ui/.env.example` to `ui/.env.local` to override. Set `UI_AUTO_BUILD=0` when running `run.py` if you want to skip `npm run build` while iterating on the UI only.
+Open **http://localhost:5173/** - `ui/.env.development` sets `VITE_API_BASE=http://127.0.0.1:8000` so the browser talks to FastAPI, not the Vite server. Optional: copy `ui/.env.example` to `ui/.env.local` to override. Set `UI_AUTO_BUILD=0` when running `run.py` if you want to skip `npm run build` while iterating on the UI only.
 
 ### Windows desktop launcher (server + UI)
 
@@ -137,10 +164,10 @@ Detail: `docs/BUILD_PLAN.md`. Decisions: `docs/DECISIONS.md`. Architecture: `doc
 
 ## Architecture principles
 
-- **Risk engine is law** — no order bypasses it.
-- **AI advises, rules execute** — local-first scoring (`config/ai.yaml`); optional paid fallback; **never** places orders.
-- **Adapters are isolated** — no venue-specific imports outside `brokers/` (use `brokers/registry.py`).
-- **Paper mode first** — `paper_mode=True` default; live requires explicit config (e.g. `APP_ENV=live`, M8 profile when used).
+- **Risk engine is law** - no order bypasses it.
+- **AI advises, rules execute** - local-first scoring (`config/ai.yaml`); optional paid fallback; **never** places orders.
+- **Adapters are isolated** - no venue-specific imports outside `brokers/` (use `brokers/registry.py`).
+- **Paper mode first** - `paper_mode=True` default; live requires explicit config (e.g. `APP_ENV=live`, M8 profile when used).
 - **Decimal for money** in core trading logic; full audit logging of signals, risk, orders, and fills.
 
 ## Active strategy roster
