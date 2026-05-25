@@ -174,6 +174,17 @@ class BybitAdapter(BrokerAdapter):
         # the API with doomed requests and (b) don't spam thousands of identical
         # WARNING lines that bury real issues.
         self._invalid_symbols: set[str] = set()
+        # Circuit breaker for get_positions. Some Bybit account configurations
+        # (no UTA / linear permission missing) reject get_positions with ErrCode
+        # 400 every call. Without a breaker we log 700+ identical warnings/hour
+        # and burn the pybit retry budget on each invocation. After
+        # ``_positions_breaker_threshold`` consecutive failures we suppress the
+        # call for ``_positions_breaker_cooldown`` seconds; the breaker resets on
+        # the first successful response.
+        self._positions_fail_count: int = 0
+        self._positions_breaker_until: float = 0.0
+        self._positions_breaker_threshold: int = 3
+        self._positions_breaker_cooldown: float = 300.0
 
     def _candidate_wallet_account_types(self) -> list[str]:
         # Probe order biased by adapter category: linear perps → CONTRACT/UNIFIED first,
@@ -375,6 +386,10 @@ class BybitAdapter(BrokerAdapter):
         if self.category != "linear" or not self._private_ok or self._client is None:
             return []
 
+        now = asyncio.get_event_loop().time()
+        if now < self._positions_breaker_until:
+            return []
+
         def _fetch() -> dict[str, Any]:
             assert self._client is not None
             return self._client.get_positions(category="linear", settleCoin="USDT")
@@ -382,8 +397,26 @@ class BybitAdapter(BrokerAdapter):
         try:
             raw = await self._run_sync(_fetch)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("get_positions | Bybit | error={}", exc)
+            self._positions_fail_count += 1
+            if self._positions_fail_count >= self._positions_breaker_threshold:
+                self._positions_breaker_until = now + self._positions_breaker_cooldown
+                logger.warning(
+                    "get_positions | Bybit | breaker tripped after {} failures | suppressing for {:.0f}s | last_error={}",
+                    self._positions_fail_count,
+                    self._positions_breaker_cooldown,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "get_positions | Bybit | error ({}/{}) | {}",
+                    self._positions_fail_count,
+                    self._positions_breaker_threshold,
+                    exc,
+                )
             return []
+
+        self._positions_fail_count = 0
+        self._positions_breaker_until = 0.0
 
         out: list[Position] = []
         for row in (raw.get("result", {}) or {}).get("list") or []:

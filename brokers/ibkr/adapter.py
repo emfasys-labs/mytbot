@@ -176,6 +176,34 @@ def _is_disconnect_exc(exc: BaseException) -> bool:
     )
 
 
+def _ibkr_market_data_type_from_env(*, paper_mode: bool) -> int:
+    """Resolve IBKR market-data mode.
+
+    IBKR uses 1=real-time, 2=frozen, 3=delayed, 4=delayed-frozen. Paper
+    sessions often lack live API top-of-book subscriptions even when delayed
+    data is available, so ``auto`` defaults paper to delayed.
+    """
+    raw = (os.getenv("IBKR_MARKET_DATA_TYPE", "") or "").strip().lower()
+    if not raw or raw == "auto":
+        return 3 if paper_mode else 1
+    aliases = {
+        "1": 1,
+        "live": 1,
+        "real": 1,
+        "realtime": 1,
+        "real-time": 1,
+        "2": 2,
+        "frozen": 2,
+        "3": 3,
+        "delayed": 3,
+        "delay": 3,
+        "4": 4,
+        "delayed-frozen": 4,
+        "delayed_frozen": 4,
+    }
+    return aliases.get(raw, 3 if paper_mode else 1)
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -244,9 +272,15 @@ class IBKRAdapter(BrokerAdapter):
         # BrokerManager reads this when connect() returns False so UI shows a useful reason.
         self._last_connect_error: str | None = None
         self._ib: Optional[IB] = None
+        self._market_data_type: int = _ibkr_market_data_type_from_env(paper_mode=paper_mode)
         self._last_ib_order_snapshot_monotonic: float = -1e9
         self._ib_order_snap_lock = asyncio.Lock()
         self._qualification_cache = IBKRQualificationCache()
+        # Single-flight gate for reqAccountSummary: IB Gateway enforces a per-session
+        # cap on concurrent account-summary subscriptions and rejects parallel calls
+        # with Error 322. Serialising probes here keeps cancelAccountSummary in lock-step
+        # with reqAccountSummary even when probe + balance refresh race.
+        self._account_summary_lock = asyncio.Lock()
         # Market-data disconnect circuit breaker. IBKR drops its socket during
         # its nightly maintenance/reset window; rather than letting every
         # symbol probe raise ``ConnectionError: Socket disconnect`` (a per-symbol
@@ -261,6 +295,18 @@ class IBKRAdapter(BrokerAdapter):
             )
         except (TypeError, ValueError):
             self._md_cooldown_sec = 60.0
+
+    def _apply_market_data_type(self) -> None:
+        """Ask IBKR for the configured market-data feed type when available."""
+        if self._ib is None:
+            return
+        fn = getattr(self._ib, "reqMarketDataType", None)
+        if fn is None:
+            return
+        try:
+            fn(self._market_data_type)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("IBKR reqMarketDataType({}) failed: {}", self._market_data_type, exc)
 
     def _resolve_account(self) -> str:
         """Return configured account or the sole managed account from IB."""
@@ -893,33 +939,45 @@ class IBKRAdapter(BrokerAdapter):
             to = 12.0
         to = max(3.0, to)
 
-        tags = self._account_summary_tags()
-        self._ib.wrapper.acctSummary.clear()
-        req_id = self._ib.client.getReqId()
-        fut = self._ib.wrapper.startReq(req_id)
-        self._ib.client.reqAccountSummary(req_id, "All", tags)
+        async with self._account_summary_lock:
+            if self._ib is None or not self._ib.isConnected():
+                return []
+            tags = self._account_summary_tags()
+            self._ib.wrapper.acctSummary.clear()
+            req_id = self._ib.client.getReqId()
+            fut = self._ib.wrapper.startReq(req_id)
+            try:
+                self._ib.client.reqAccountSummary(req_id, "All", tags)
 
-        # Wait for either completion or first rows; many Gateway builds only
-        # emit accountSummaryEnd after cancel.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + to
-        while loop.time() < deadline and not fut.done():
-            if self._ib.wrapper.acctSummary:
-                break
-            await asyncio.sleep(0.05)
+                # Wait for either completion or first rows; many Gateway builds only
+                # emit accountSummaryEnd after cancel.
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + to
+                while loop.time() < deadline and not fut.done():
+                    if self._ib.wrapper.acctSummary:
+                        break
+                    await asyncio.sleep(0.05)
+            finally:
+                # cancelAccountSummary MUST run for every successful reqAccountSummary
+                # or IB Gateway accumulates subscriptions until it returns Error 322.
+                try:
+                    self._ib.client.cancelAccountSummary(req_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("cancelAccountSummary | {!r}", exc)
 
-        try:
-            self._ib.client.cancelAccountSummary(req_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("cancelAccountSummary | {!r}", exc)
+                # Drain the end-callback so the wrapper's pending-request map clears.
+                try:
+                    await asyncio.wait_for(asyncio.shield(fut), timeout=3.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                # Drop the pending future even when the end callback never arrived;
+                # leaving it in wrapper._futures leaks one slot per call.
+                try:
+                    self._ib.wrapper._endReq(req_id)
+                except Exception:  # noqa: BLE001
+                    pass
 
-        # Give the end callback a chance to run; do not fail on timeout.
-        try:
-            await asyncio.wait_for(asyncio.shield(fut), timeout=3.0)
-        except Exception:  # noqa: BLE001
-            pass
-
-        return list(self._ib.wrapper.acctSummary.values())
+            return list(self._ib.wrapper.acctSummary.values())
 
     async def _account_summary_probe_ok(self, timeout: float) -> bool:
         """True if a fresh reqAccountSummary completes with at least one row."""
@@ -979,6 +1037,7 @@ class IBKRAdapter(BrokerAdapter):
             if self._ib is None:
                 self._ib = IB()
             if self._ib.isConnected():
+                self._apply_market_data_type()
                 logger.info("connect | IBKR | already connected")
                 return True
             # ib_insync runs reqAccountUpdatesMultiAsync per account when len(accounts) <= MaxSyncedSubAccounts.
@@ -1114,6 +1173,8 @@ class IBKRAdapter(BrokerAdapter):
                     self.host,
                     self.port,
                 )
+            self._apply_market_data_type()
+            logger.info("connect | IBKR | market_data_type={}", self._market_data_type)
             return True
         except OSError as exc:
             self._last_connect_error = str(exc)[:200]
@@ -1129,6 +1190,7 @@ class IBKRAdapter(BrokerAdapter):
         except Exception as exc:  # noqa: BLE001 — broker connectivity
             if await self._connected_session_usable_after_connect_error(exc):
                 self._last_connect_error = None
+                self._apply_market_data_type()
                 return True
             self._last_connect_error = str(exc)[:200]
             logger.exception("connect | IBKR | failed | error={}", exc)
@@ -1348,6 +1410,7 @@ class IBKRAdapter(BrokerAdapter):
         c: Optional[Contract] = None
         try:
             c = await self.qualify_option_contract(spec)
+            self._apply_market_data_type()
             self._ib.reqMktData(c, "", True, False)
             await asyncio.sleep(1.2)
             t = self._ib.ticker(c)
@@ -1360,15 +1423,9 @@ class IBKRAdapter(BrokerAdapter):
                 "last": None if _is_bad_price(last) else _d(last),
                 "local_symbol": (getattr(c, "localSymbol", None) or "").strip(),
             }
-            self._ib.cancelMktData(c)
             return out
         except Exception as exc:  # noqa: BLE001
             logger.exception("get_option_market_data | IBKR | error={}", exc)
-            if c is not None and self._ib is not None:
-                try:
-                    self._ib.cancelMktData(c)
-                except Exception:  # noqa: BLE001
-                    pass
             return {"bid": None, "ask": None, "last": None, "error": str(exc)}
 
     async def get_last_price(self, symbol: str) -> Decimal:
@@ -1393,6 +1450,7 @@ class IBKRAdapter(BrokerAdapter):
         contract = self._symbol_to_contract(symbol)
         try:
             await self._ib.qualifyContractsAsync(contract)
+            self._apply_market_data_type()
             self._ib.reqMktData(contract, "", True, False)
             await asyncio.sleep(1.2)
             t = self._ib.ticker(contract)
@@ -1403,7 +1461,6 @@ class IBKRAdapter(BrokerAdapter):
                 else:
                     logger.warning("get_last_price | IBKR | no price | symbol={}", symbol)
                     return Decimal(0)
-            self._ib.cancelMktData(contract)
             # Healthy read → reset the disconnect breaker.
             self._md_disconnect_logged = False
             return _d(last)
@@ -1428,10 +1485,6 @@ class IBKRAdapter(BrokerAdapter):
                 logger.exception(
                     "get_last_price | IBKR | symbol={} | error={}", symbol, exc
                 )
-            try:
-                self._ib.cancelMktData(contract)
-            except Exception:  # noqa: BLE001
-                pass
             return Decimal(0)
 
     async def stream_prices(self, symbols: list[str]) -> AsyncIterator[Tick]:
@@ -1479,6 +1532,7 @@ class IBKRAdapter(BrokerAdapter):
 
             self._ib.pendingTickersEvent += on_pending
             subscribed = True
+            self._apply_market_data_type()
             for c in contracts:
                 self._ib.reqMktData(c, "", False, False)
 

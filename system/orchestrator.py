@@ -2159,6 +2159,31 @@ class Orchestrator:
                         continue
                 except Exception:  # noqa: BLE001 — gate must never break the tick
                     pass
+                # PositionLog can lag or diverge from the fills ledger (especially
+                # post data-reset, where PositionLog retained legacy snapshots).
+                # The ledger is the race-free authority: if it disagrees on sign
+                # or shows the position closed, the reduce-only harvest would
+                # be rejected by the oversell guard every 90s. Skip cleanly.
+                try:
+                    from storage.fills_ledger import position_state as _ledger_state
+
+                    ledger_qty, ledger_fills = await _ledger_state(sf, broker, sym)
+                    if ledger_fills > 0:
+                        if ledger_qty == 0:
+                            logger.debug(
+                                "profit-harvest | skip (ledger flat) | {} {} pos_log_qty={}",
+                                broker, sym, qty,
+                            )
+                            continue
+                        if (ledger_qty > 0) != (qty > 0):
+                            logger.debug(
+                                "profit-harvest | skip (ledger sign mismatch) | {} {} pos_log_qty={} ledger_qty={}",
+                                broker, sym, qty, ledger_qty,
+                            )
+                            continue
+                except Exception:  # noqa: BLE001 — ledger check must never break the tick
+                    pass
+
                 side = "sell" if qty > 0 else "buy"
                 harvest_key = f"{broker}:{sym}:{'long' if qty > 0 else 'short'}"
                 active_keys.add(harvest_key)

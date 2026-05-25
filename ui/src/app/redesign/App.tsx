@@ -225,9 +225,8 @@ export default function App() {
           onOpenCmd={() => setCmdOpen(true)}
           onOpenTweaks={() => setTweaksOpen((o) => !o)}
           loopIteration={live.loopIteration}
-          path={live.path}
-          wsConnected={live.wsConnected}
           mode={live.mode}
+          deploymentStage={live.deployment?.stage ?? null}
         />
         <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: TOKENS.bg0, position: 'relative' }}>
           {effectiveRoute === 'dash' && (

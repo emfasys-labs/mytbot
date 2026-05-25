@@ -21,12 +21,12 @@ import {
   Tweaks,
   Viewport,
 } from './tokens';
-import type { TradingMode } from '../lib/api';
+import type { DeploymentStage, TradingMode } from '../lib/api';
 
 const MODE_LABEL: Record<TradingMode, string> = {
-  defender: 'defender',
-  trader: 'trader',
-  hunter: 'hunter',
+  defender: 'risk profile: defender',
+  trader: 'risk profile: trader',
+  hunter: 'risk profile: hunter',
 };
 
 /** Accent per classifier output (read-only indicator). */
@@ -133,7 +133,7 @@ export function Sidebar({
 
 export function TopBar({
   state, accent, onArm, onPower, armed, currentTitle, onOpenCmd, onOpenTweaks,
-  loopIteration, path, wsConnected, mode,
+  loopIteration, mode, deploymentStage,
 }: {
   state: SystemState;
   accent: string;
@@ -144,11 +144,15 @@ export function TopBar({
   onOpenCmd: () => void;
   onOpenTweaks: () => void;
   loopIteration: number;
-  path: string;
-  wsConnected: boolean;
   mode: TradingMode;
+  deploymentStage?: DeploymentStage | null;
 }) {
   const modeColor = modeAccent(mode, accent);
+  const deploymentLabel =
+    deploymentStage === 'micro_live' ? 'micro-live mode' :
+    deploymentStage === 'live' ? 'live mode' :
+    deploymentStage === 'paper' ? 'paper mode' :
+    'stage unknown';
   return (
     <div style={{
       height: 48, flexShrink: 0, display: 'flex', alignItems: 'center',
@@ -183,36 +187,13 @@ export function TopBar({
           );
         })()}
         <span style={{ color: TOKENS.ink4 }}>·</span>
+        <span>{deploymentLabel}</span>
+        <span style={{ color: TOKENS.ink4 }}>·</span>
+        <span title="Automatic market-state mode" style={{ color: modeColor }}>{MODE_LABEL[mode]}</span>
+        <span style={{ color: TOKENS.ink4 }}>·</span>
         <span>loop #{loopIteration || 0}</span>
-        <span style={{ color: TOKENS.ink4 }}>·</span>
-        <span>{path || '—'}</span>
-        <span style={{ color: TOKENS.ink4 }}>·</span>
-        <span
-          title={wsConnected ? 'WebSocket live' : 'WebSocket disconnected'}
-          style={{ color: wsConnected ? accent : TOKENS.ink4 }}
-        >
-          {wsConnected ? 'ws' : 'ws·off'}
-        </span>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span
-          title="Market state classifier (defender / trader / hunter) — updates automatically"
-          style={{
-            padding: '4px 10px',
-            borderRadius: 8,
-            border: `1px solid ${modeColor}55`,
-            background: `${modeColor}18`,
-            color: modeColor,
-            fontFamily: TOKENS.mono,
-            fontSize: 10,
-            letterSpacing: '0.06em',
-            textTransform: 'uppercase',
-            cursor: 'default',
-            userSelect: 'none',
-          }}
-        >
-          {MODE_LABEL[mode]}
-        </span>
         <button
           onClick={onOpenCmd}
           style={{
@@ -357,13 +338,13 @@ export function MasterButton({
           {armed
             ? 'frozen'
             : running
-              ? 'live'
+              ? 'on'
               : starting
                 ? 'warming up'
                 : stopping
                   ? 'stopping'
                 : off
-                  ? 'start'
+                  ? 'off'
                   : 'error'}
         </span>
       </button>
