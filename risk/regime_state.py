@@ -372,6 +372,7 @@ def compute_regime_state_from_inputs(
     now: datetime | None = None,
     execution_quality: Decimal | None = None,
     broker_liquidity_score: Decimal | None = None,
+    previous_market_state_score: Decimal | None = None,
 ) -> RegimeState:
     """
     Build ``RegimeState`` from pre-fetched rows (tests + callers). No silent neutral
@@ -428,7 +429,18 @@ def compute_regime_state_from_inputs(
         + wc.anomaly_breadth * raw["anomaly_breadth"]
         + wc.news_conflict_score * news_conflict
     )
-    market_state_score = clip_decimal(_dec(score_f), Decimal("-2"), Decimal("2"))
+    raw_score = clip_decimal(_dec(score_f), Decimal("-2"), Decimal("2"))
+    if previous_market_state_score is not None:
+        if raw_score < previous_market_state_score:
+            # risk-off transition (fast decay alpha = 0.20)
+            alpha = Decimal("0.20")
+        else:
+            # risk-on transition (slow decay alpha = 0.05)
+            alpha = Decimal("0.05")
+        smoothed = alpha * raw_score + (Decimal("1") - alpha) * previous_market_state_score
+        market_state_score = clip_decimal(smoothed, Decimal("-2"), Decimal("2"))
+    else:
+        market_state_score = raw_score
 
     dd = max(Decimal("0"), portfolio_state.drawdown_from_hwm_pct)
     drawdown_throttle = clip_decimal(Decimal("1") - dd * Decimal("2.5"), Decimal("0.1"), Decimal("1"))
@@ -495,13 +507,27 @@ async def compute_regime_state_async(
 ) -> RegimeState:
     """Load latest feature rows + news dispersion from DB, then compute regime."""
     from sqlalchemy.ext.asyncio import AsyncSession
+    from control.command_bus import CommandBus
+    from storage.db import get_session_factory
 
     assert isinstance(session, AsyncSession)
     rows = await fetch_latest_feature_rows(session, universe_symbols, timeframe)
     news = await fetch_news_score_dispersion(
         session, lookback_hours=int(allocation_cfg.market_state.news_lookback_hours)
     )
-    return compute_regime_state_from_inputs(
+
+    prev_score: Decimal | None = None
+    sf = get_session_factory()
+    if sf is not None:
+        try:
+            bus = CommandBus(sf)
+            val = await bus.get_state("smoothed_market_state_score", None)
+            if val is not None:
+                prev_score = Decimal(str(val))
+        except Exception as exc:
+            logger.debug("regime_state | failed to load previous smoothed score: %s", exc)
+
+    regime_state = compute_regime_state_from_inputs(
         portfolio_state=portfolio_state,
         allocation_cfg=allocation_cfg,
         feature_rows=rows,
@@ -509,7 +535,17 @@ async def compute_regime_state_async(
         now=now,
         execution_quality=execution_quality,
         broker_liquidity_score=broker_liquidity_score,
+        previous_market_state_score=prev_score,
     )
+
+    if sf is not None:
+        try:
+            bus = CommandBus(sf)
+            await bus.set_state("smoothed_market_state_score", str(regime_state.market_state_score))
+        except Exception as exc:
+            logger.debug("regime_state | failed to save smoothed score: %s", exc)
+
+    return regime_state
 
 
 def compute_regime_state(

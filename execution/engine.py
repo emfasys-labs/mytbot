@@ -568,7 +568,7 @@ class ExecutionEngine:
                 "PAPER FILL (no native paper on %s) | %s %s qty=%s",
                 broker_name_l, signal.symbol, signal.side, signal.suggested_quantity,
             )
-            result = await self._simulate_fill(order, signal, broker=broker_for_quote)
+            result = await self._simulate_fill(order, signal, broker=broker_for_quote, session_factory=session_factory)
             await self._persist_result(session_factory, order, result, signal)
             return result
 
@@ -623,7 +623,7 @@ class ExecutionEngine:
                     "PAPER FILL (no broker) | %s %s qty=%s broker=%s",
                     signal.symbol, signal.side, signal.suggested_quantity, signal.broker,
                 )
-                result = await self._simulate_fill(order, signal, broker=None)
+                result = await self._simulate_fill(order, signal, broker=None, session_factory=session_factory)
                 await self._persist_result(session_factory, order, result, signal)
                 return result
             logger.error("Broker unavailable | signal_id=%s broker=%s", signal.signal_id, signal.broker)
@@ -682,7 +682,7 @@ class ExecutionEngine:
                 order.quantity,
                 signal.broker,
             )
-            result = await self._simulate_fill(order, signal, broker=broker)
+            result = await self._simulate_fill(order, signal, broker=broker, session_factory=session_factory)
             await self._persist_result(session_factory, order, result, signal)
             return result
 
@@ -719,7 +719,7 @@ class ExecutionEngine:
                     continue
                 if self.paper_mode:
                     logger.info("PAPER FILL (broker error) | %s %s", signal.symbol, signal.side)
-                    result = await self._simulate_fill(order, signal, broker=broker)
+                    result = await self._simulate_fill(order, signal, broker=broker, session_factory=session_factory)
                     await self._persist_result(session_factory, order, result, signal)
                     return result
                 self._maybe_auto_kill("place_order failure", broker=str(signal.broker or "").strip().lower())
@@ -792,7 +792,61 @@ class ExecutionEngine:
         except Exception:  # noqa: BLE001
             return 0.0
 
-    def _stale_price_cfg(self, signal: Signal | None = None) -> tuple[bool, Decimal]:
+    async def _get_rolling_average_slippage(
+        self,
+        session_factory,
+        symbol: str,
+        asset_class: str,
+        lookback: int = 50,
+    ) -> Optional[Decimal]:
+        """Query rolling average slippage_bps from fills table for symbol or asset_class."""
+        if session_factory is None:
+            return None
+        try:
+            from sqlalchemy import select
+            from storage.models import FillLog
+            
+            async with session_factory() as session:
+                # First try symbol specific
+                stmt = (
+                    select(FillLog.slippage_bps)
+                    .where(
+                        FillLog.symbol == symbol,
+                        FillLog.slippage_bps.is_not(None)
+                    )
+                    .order_by(FillLog.timestamp.desc())
+                    .limit(lookback)
+                )
+                res = await session.execute(stmt)
+                slips = [float(row) for row in res.scalars().all() if row is not None]
+                
+                # If not enough fills for symbol, fallback to asset_class
+                if len(slips) < 10 and asset_class:
+                    stmt = (
+                        select(FillLog.slippage_bps)
+                        .where(
+                            FillLog.asset_class == asset_class,
+                            FillLog.slippage_bps.is_not(None)
+                        )
+                        .order_by(FillLog.timestamp.desc())
+                        .limit(lookback)
+                    )
+                    res = await session.execute(stmt)
+                    slips = [float(row) for row in res.scalars().all() if row is not None]
+                
+                if not slips:
+                    return None
+                
+                return Decimal(str(sum(slips) / len(slips)))
+        except Exception as exc:
+            logger.debug("execution_engine | failed to query rolling average slippage: %s", exc)
+            return None
+
+    async def _stale_price_cfg(
+        self,
+        signal: Signal | None = None,
+        session_factory: Any | None = None,
+    ) -> tuple[bool, Decimal]:
         """D115/D120 — Paper-mode stale-price gate. Returns ``(enabled, max_drift_bps)``.
 
         When enabled, ``_simulate_fill`` rejects an opening order whose
@@ -860,6 +914,27 @@ class ExecutionEngine:
             # Neither YAML key present — refuse to invent a number. Gate off.
             return (False, Decimal("0"))
 
+        # Adaptive slippage adjustment
+        adaptive_cfg = sp_cfg.get("adaptive_slippage") or {}
+        if adaptive_cfg.get("enabled", False) and signal is not None:
+            lookback = int(adaptive_cfg.get("lookback", 50))
+            min_bps = Decimal(str(adaptive_cfg.get("min_bps", 10)))
+            max_bps = Decimal(str(adaptive_cfg.get("max_bps", 150)))
+            sym = str(signal.symbol or "")
+            ac_str = asset_class or ""
+            avg_slip = await self._get_rolling_average_slippage(
+                session_factory,
+                sym,
+                ac_str,
+                lookback=lookback
+            )
+            if avg_slip is not None:
+                ref_slippage = Decimal("5.0")
+                denom = max(Decimal("0.1"), avg_slip)
+                multiplier = ref_slippage / denom
+                adjusted_bps = base_bps * multiplier
+                base_bps = max(min_bps, min(max_bps, adjusted_bps))
+
         # D120: Dynamic volatility scaling. Multiplier defaults to 1 (identity)
         # when no per-signal volatility metadata is attached — that is the
         # additive-identity, not a magic threshold.
@@ -875,11 +950,13 @@ class ExecutionEngine:
                     pass
 
         return (True, base_bps * vol_scalar)
+
     async def _simulate_fill(
         self,
         order: Order,
         signal: Signal,
         broker: Any | None = None,
+        session_factory: Any | None = None,
     ) -> OrderResult:
         """
         Create a synthetic filled order for paper mode.
@@ -935,7 +1012,7 @@ class ExecutionEngine:
         # fill so the loop can either re-evaluate at the new price or sit
         # the trade out. Reduce-only and close intents are never blocked.
         if not reduce_only:
-            enabled, max_drift_bps = self._stale_price_cfg(signal)
+            enabled, max_drift_bps = await self._stale_price_cfg(signal, session_factory=session_factory)
             if enabled and signal.suggested_price is not None and signal.suggested_price > 0:
                 market_now = await _broker_last_price()
                 if market_now is not None and market_now > 0:
@@ -1081,7 +1158,7 @@ class ExecutionEngine:
 
         if self.paper_mode:
             arb_broker = await self._get_broker(signal.broker)
-            result = await self._simulate_fill(paper_order, signal, broker=arb_broker)
+            result = await self._simulate_fill(paper_order, signal, broker=arb_broker, session_factory=session_factory)
             await self._persist_result(session_factory, paper_order, result, signal)
             logger.info(
                 "ARBITRAGE PAPER | audit fill on primary broker=%s | paired venues in metadata",

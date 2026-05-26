@@ -22,6 +22,7 @@ class BrokerPermissions:
         self._lock = RLock()
         self._mtime_ns: int | None = None
         self._matrix: dict[str, dict[str, dict[str, Any]]] = {}
+        self.raw_config: dict[str, Any] = {}
         self.reload(force=True)
 
     def reload(self, *, force: bool = False) -> None:
@@ -70,9 +71,21 @@ class BrokerPermissions:
                         "reason": reason,
                         "restored_after": restored_after,
                     }
+            self.raw_config = raw
             self._matrix = normalized
             self._mtime_ns = stat.st_mtime_ns
             logger.info("broker_permissions | reloaded | brokers=%s", len(self._matrix))
+
+    def get_taker_fee_bps(self, broker: str) -> float:
+        self.reload()
+        b = broker.strip().lower()
+        return float(self.raw_config.get(b, {}).get("taker_fee_bps", 0.0))
+
+    def get_borrow_rate_annual_pct(self, broker: str) -> float:
+        self.reload()
+        b = broker.strip().lower()
+        return float(self.raw_config.get(b, {}).get("borrow_rate_annual_pct", 0.0))
+
 
     def check_permission(self, broker: str, asset_class: str) -> bool:
         self.reload()

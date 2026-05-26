@@ -54,6 +54,11 @@ class SizingInputs:
     # gets a smaller position even within the same mode. Defaults to 1.0
     # so missing data is treated as full conviction (legacy behaviour).
     confidence: float = 1.0
+    # Kelly Sizing Inputs
+    win_rate: Optional[float] = None
+    win_loss_ratio: Optional[float] = None
+    kelly_fraction: float = 0.25
+    use_kelly: bool = False
 
 
 # Operator's single risk knob per mode. These three numbers replace the
@@ -116,7 +121,21 @@ def compute_position_size(inputs: SizingInputs) -> SizingDecision:
 
     # Decide the notional first; convert to quantity only at the end.
     atr = inputs.atr_pct
-    if atr is None or atr <= 0:
+    if inputs.use_kelly and inputs.win_rate is not None and inputs.win_loss_ratio is not None and inputs.win_loss_ratio > 0:
+        p = float(inputs.win_rate)
+        b = float(inputs.win_loss_ratio)
+        f_star = p - ((1.0 - p) / b) if b > 0 else 0.0
+        if f_star > 0:
+            kelly_pct = f_star * float(inputs.kelly_fraction)
+            notional_pct = max(_MIN_NOTIONAL_PCT, min(_MAX_NOTIONAL_PCT, kelly_pct))
+            notional = nav * Decimal(str(notional_pct)) * Decimal(str(max(0.0, min(1.0, inputs.confidence))))
+            path = "kelly_sizing"
+        else:
+            # Kelly is negative or zero (no edge), fallback to minimum sized position
+            notional_pct = _MIN_NOTIONAL_PCT
+            notional = nav * Decimal(str(notional_pct)) * Decimal(str(max(0.0, min(1.0, inputs.confidence))))
+            path = "kelly_zero_edge_fallback"
+    elif atr is None or atr <= 0:
         # Fallback path — must remain bit-for-bit identical to the legacy
         # ``nav × default_position_pct`` so missing-feature symbols size
         # exactly as they did before Phase 3. **No confidence scaling**

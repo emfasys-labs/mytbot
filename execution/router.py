@@ -174,18 +174,46 @@ class SmartOrderRouter:
             return None
 
         sym_u = (symbol or "").strip().upper()
-        # Sort by fused routing score first (fee prior + online evidence), then fee.
-        # The fused score already contains the static fee prior; keeping raw fee as
-        # the primary key would prevent learned fill/slippage quality from shifting
-        # orders away from a cheap but poorly performing venue.
-        def _rank_key(b: str) -> tuple[Decimal, float]:
-            fee = BROKER_FEE_MAP.get(b, Decimal("0.01"))
+        md = metadata if isinstance(metadata, dict) else {}
+
+        def _rank_key(b: str) -> tuple[Decimal, Decimal]:
+            if hasattr(self.permissions, "get_taker_fee_bps"):
+                yaml_fee = self.permissions.get_taker_fee_bps(b)
+            else:
+                yaml_fee = 0.0
+            if yaml_fee > 0:
+                taker_fee_bps = Decimal(str(yaml_fee))
+            else:
+                taker_fee_bps = BROKER_FEE_MAP.get(b, Decimal("0.0010")) * Decimal("10000")
+
+            # slippage from rolling fills
+            em = self._exec_metrics.get((b, sym_u), {})
+            slips = [float(x) for x in (em.get("slips") or []) if isinstance(x, (int, float))]
+            p50, _ = _slippage_percentiles_bps(slips)
+            slippage_cost_bps = Decimal(str(p50)) if slips else Decimal("0.0")
+
+            # borrow cost if short
+            borrow_cost_bps = Decimal("0.0")
+            side = str(md.get("side", "long")).strip().lower()
+            if side in ("short", "sell"):
+                if hasattr(self.permissions, "get_borrow_rate_annual_pct"):
+                    yaml_borrow = self.permissions.get_borrow_rate_annual_pct(b)
+                else:
+                    yaml_borrow = 0.0
+                if yaml_borrow > 0:
+                    borrow_rate_annual = Decimal(str(yaml_borrow))
+                else:
+                    borrow_rate_annual = Decimal("6.0")
+                hold_days = float(md.get("hold_days", 5.0))
+                borrow_cost_bps = (borrow_rate_annual * Decimal("100")) * (Decimal(str(hold_days)) / Decimal("365.0"))
+
+            spread_bps = Decimal(str(md.get("spread_bps", 0.0)))
+            total_cost = spread_bps + taker_fee_bps + slippage_cost_bps + borrow_cost_bps
+
             q = self.fused_routing_score(b, sym_u)
-            return Decimal(str(-q)), fee
+            return total_cost, Decimal(str(-q))
 
         permitted.sort(key=_rank_key)
-
-        md = metadata if isinstance(metadata, dict) else {}
         try:
             demand_score = float(md.get("demand_score", 0.0) or 0.0)
         except (TypeError, ValueError):

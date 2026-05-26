@@ -267,6 +267,13 @@ volatility_scaling:
   min_scalar: 0.20
   max_scalar: 1.00
 
+# ── Kelly sizing configuration ──────────────────────────────────────────────
+kelly_sizing:
+  enabled: false
+  kelly_fraction: 0.25
+  fallback_win_rate: 0.50
+  fallback_win_loss_ratio: 1.0
+
 drawdown_scaling:
   thresholds:
     - drawdown: 0.20
@@ -346,6 +353,11 @@ stale_price_gate:
   per_asset_class:
     crypto: 75                      # 0.75% — 1h crypto bars routinely drift this far
     future: 50                      # 0.50% — futures intra-bar drift
+  adaptive_slippage:
+    enabled: false
+    lookback: 50
+    min_bps: 10
+    max_bps: 150
 
 # ── D115 — Intraday aggregate-derisk monitor ─────────────────────────────
 # Static daily-loss limit (max_daily_loss_pct, default 2%) fires only when

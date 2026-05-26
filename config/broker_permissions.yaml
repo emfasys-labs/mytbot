@@ -2,6 +2,8 @@
 # Toggle enabled=true/false at runtime without code changes.
 
 ibkr:
+  taker_fee_bps: 0.8
+  borrow_rate_annual_pct: 5.0
   equity:
     enabled: true
     reason: null
@@ -32,18 +34,24 @@ ibkr:
     restored_after: null
 
 kraken:
+  taker_fee_bps: 15.0
+  borrow_rate_annual_pct: 8.0
   crypto:
     enabled: true
     reason: null
     restored_after: null
 
 binance:
+  taker_fee_bps: 10.0
+  borrow_rate_annual_pct: 7.0
   crypto:
     enabled: true
     reason: null
     restored_after: null
 
 bybit:
+  taker_fee_bps: 6.0
+  borrow_rate_annual_pct: 7.5
   crypto:
     enabled: true
     reason: null
@@ -54,6 +62,8 @@ bybit:
     restored_after: null
 
 alpaca:
+  taker_fee_bps: 1.5
+  borrow_rate_annual_pct: 6.5
   equity:
     enabled: true
     reason: null

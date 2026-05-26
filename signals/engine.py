@@ -301,6 +301,64 @@ class SignalEngine:
 
         return news_veto, adjusted_confidence
 
+    def _get_strategy_stats_sync(self, strategy: str) -> tuple[float, float]:
+        """Query strategy historical performance from the database synchronously."""
+        import asyncio
+        import concurrent.futures
+        from sqlalchemy import select
+        from storage.db import get_session_factory
+        from storage.models import FillLog
+
+        session_factory = get_session_factory()
+        if session_factory is None:
+            # Fallback values from config
+            k_cfg = self.config.get("kelly_sizing") or {}
+            fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
+            fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
+            return fallback_wr, fallback_wlr
+
+        async def _query():
+            async with session_factory() as session:
+                stmt = (
+                    select(FillLog)
+                    .where(FillLog.strategy == strategy, FillLog.realised_pnl != 0)
+                    .order_by(FillLog.timestamp.desc())
+                    .limit(100)
+                )
+                res = await session.execute(stmt)
+                fills = list(res.scalars().all())
+                if not fills:
+                    k_cfg = self.config.get("kelly_sizing") or {}
+                    fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
+                    fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
+                    return fallback_wr, fallback_wlr
+
+                wins = [f for f in fills if f.realised_pnl > 0]
+                losses = [f for f in fills if f.realised_pnl < 0]
+                win_rate = len(wins) / len(fills)
+
+                avg_win = float(sum(f.realised_pnl for f in wins) / len(wins)) if wins else 0.0
+                avg_loss = float(sum(abs(f.realised_pnl) for f in losses) / len(losses)) if losses else 0.0
+                win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1.0
+                if win_loss_ratio <= 0:
+                    win_loss_ratio = 1.0
+                return win_rate, win_loss_ratio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(lambda: asyncio.run(_query()))
+                    return future.result()
+            else:
+                return loop.run_until_complete(_query())
+        except Exception as exc:
+            logger.debug("signal_engine | kelly stats query failed, using fallback: %s", exc)
+            k_cfg = self.config.get("kelly_sizing") or {}
+            fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
+            fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
+            return fallback_wr, fallback_wlr
+
     def process(
         self,
         raw: RawSignal,
@@ -402,12 +460,14 @@ class SignalEngine:
             # Operator opt-out: ``volatility_sizing.enabled = False`` in
             # YAML forces the legacy path (preserves the pre-Phase-3
             # contract for anyone relying on it). The default (missing
-            # or True) uses adaptive sizing.
             position_pct = self.config.get("default_position_pct", 0.05)
             vs_cfg = self.config.get("volatility_sizing") or {}
             adaptive_enabled = bool(vs_cfg.get("enabled", True)) if isinstance(vs_cfg, dict) else True
+            kelly_cfg = self.config.get("kelly_sizing") or {}
+            use_kelly = bool(kelly_cfg.get("enabled", False)) if isinstance(kelly_cfg, dict) else False
+            kelly_fraction = float(kelly_cfg.get("kelly_fraction", 0.25)) if isinstance(kelly_cfg, dict) else 0.25
 
-            if not adaptive_enabled:
+            if not adaptive_enabled and not use_kelly:
                 # Legacy path explicitly requested — preserve old behaviour.
                 suggested_quantity = self._calculate_quantity(
                     portfolio_value,
@@ -426,6 +486,12 @@ class SignalEngine:
                     except (TypeError, ValueError):
                         atr_pct_val = None
                     mode_str = str(raw_md.get("profile_mode") or self.config.get("_active_profile_mode") or "hunter")
+
+                    win_rate: float | None = None
+                    win_loss_ratio: float | None = None
+                    if use_kelly:
+                        win_rate, win_loss_ratio = self._get_strategy_stats_sync(raw.strategy)
+
                     decision = compute_position_size(
                         SizingInputs(
                             nav=portfolio_value,
@@ -434,6 +500,10 @@ class SignalEngine:
                             mode=mode_str,
                             fallback_position_pct=float(position_pct),
                             confidence=float(raw.confidence),
+                            win_rate=win_rate,
+                            win_loss_ratio=win_loss_ratio,
+                            kelly_fraction=kelly_fraction,
+                            use_kelly=use_kelly,
                         )
                     )
                     suggested_quantity = decision.quantity.quantize(tick) if decision.quantity > 0 else Decimal("0")
