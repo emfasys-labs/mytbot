@@ -51,6 +51,11 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 0.60,
         "risk_on": 1.15,
         "risk_off": 0.90,
+        # "mixed" = regime classifier is unsure. Bias mildly toward trend-
+        # following because the system's failure mode in the 2026-05 audit
+        # was mean_reversion shorting an undeclared trend (regime stayed
+        # "mixed" while equities ground higher).
+        "mixed": 1.05,
     },
     # Volume-flow has a similar trend bias but slightly less directional.
     "volume_flow": {
@@ -62,6 +67,7 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 0.65,
         "risk_on": 1.10,
         "risk_off": 0.95,
+        "mixed": 1.00,
     },
     # Mean-reversion: opposite — thrives in chop and high-vol oscillations.
     "mean_reversion": {
@@ -73,6 +79,11 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 0.60,
         "risk_on": 0.95,
         "risk_off": 1.05,
+        # In "mixed" mean-reversion is the textbook bleed source — fade
+        # confidence enough that low-conviction RSI/Bollinger signals drop
+        # below the system's min_signal_confidence threshold and never
+        # become orders. Range-bound regimes still get the 1.30 boost.
+        "mixed": 0.80,
     },
     # Volatility-regime strategy: explicitly designed for vol; loves
     # vol-rich regimes, fades calm ones.
@@ -85,6 +96,7 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 1.10,
         "risk_on": 0.90,
         "risk_off": 1.05,
+        "mixed": 0.85,
     },
     # Event-driven: news amplifies in stress, fades in calm bull markets.
     "event_driven_news": {
@@ -96,6 +108,7 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 1.10,
         "risk_on": 1.00,
         "risk_off": 1.10,
+        "mixed": 1.05,
     },
     # Pairs trading and regime rotation: mean-revert-like in nature.
     "pairs_trading": {
@@ -107,6 +120,7 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 0.70,
         "risk_on": 1.00,
         "risk_off": 1.00,
+        "mixed": 1.00,
     },
     "regime_rotation": {
         "trend_up": 1.10,
@@ -117,6 +131,7 @@ _TABLE: dict[str, dict[str, float]] = {
         "panic": 0.90,
         "risk_on": 1.10,
         "risk_off": 0.90,
+        "mixed": 1.00,
     },
 }
 

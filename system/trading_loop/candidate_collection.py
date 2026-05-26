@@ -4,10 +4,12 @@ Per-symbol raw signal collection and strategy_candidate_log row assembly (D033).
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from ai.regime import filter_by_allowed_strategies
 from signals.engine import RawSignal
+from system.adaptive_regime_weights import strategy_regime_multiplier
 from system.strategy_candidate_log import row as strategy_candidate_row
 
 
@@ -42,6 +44,82 @@ def apply_regime_filter_with_logs(
             )
         )
     return out
+
+
+def apply_regime_weighting(
+    raw_candidates: list[RawSignal],
+    *,
+    symbol: str,
+    regime_label: str | None,
+    min_confidence: float,
+    sc_rows: list[dict[str, Any]],
+    loop_iteration: int | None,
+) -> list[RawSignal]:
+    """Scale each candidate's confidence by ``strategy_regime_multiplier`` for the
+    live regime, and drop any whose scaled confidence falls below
+    ``min_confidence``.
+
+    Why this exists (D140): the multiplier table in
+    ``system/adaptive_regime_weights.py`` knows mean-reversion bleeds in
+    ``trend_up`` and momentum bleeds in ``range`` — but until now that
+    knowledge was only consulted by the optional ``opportunity_engine``,
+    NEVER by the main per-symbol candidate collection. Result: every
+    strategy fired at full confidence in every regime, and the
+    2026-05-26 audit traced ~$8K of unrealised loss to mean-reversion
+    shorting in an undeclared trend.
+
+    Behaviour:
+      * Missing or empty regime label → no change (returns input unchanged).
+      * Multiplier ≥ 1 → confidence boosted (capped at 1.0), signal always
+        passes. Stamped with ``regime_mult`` in metadata so downstream
+        sizing sees the boost.
+      * Multiplier < 1 → confidence faded. If the result drops below
+        ``min_confidence`` the signal is dropped with a
+        ``filtered_regime_weight`` row in the candidate log.
+    """
+    label = str(regime_label or "").strip().lower()
+    if not label or not raw_candidates:
+        return raw_candidates
+    kept: list[RawSignal] = []
+    for r in raw_candidates:
+        mult = strategy_regime_multiplier(str(r.strategy), label)
+        try:
+            mult_f = float(mult)
+        except (TypeError, ValueError):
+            mult_f = 1.0
+        if mult_f == 1.0:
+            kept.append(r)
+            continue
+        original = float(r.confidence or 0.0)
+        scaled = max(0.0, min(1.0, original * mult_f))
+        md = dict(getattr(r, "metadata", None) or {})
+        md["regime_mult"] = round(mult_f, 4)
+        md["regime_label"] = label
+        md["confidence_pre_regime"] = round(original, 6)
+        r.metadata = md
+        if scaled < float(min_confidence):
+            sc_rows.append(
+                strategy_candidate_row(
+                    symbol=symbol,
+                    strategy=str(r.strategy),
+                    side=str(r.side) if r.side else None,
+                    confidence=Decimal(str(round(scaled, 6))),
+                    status="filtered_regime_weight",
+                    reason=f"regime_fade:{label}:mult={mult_f:.2f}",
+                    loop_iteration=loop_iteration,
+                    metadata={
+                        "regime_label": label,
+                        "regime_mult": round(mult_f, 4),
+                        "confidence_pre_regime": round(original, 6),
+                        "confidence_post_regime": round(scaled, 6),
+                        "min_confidence": float(min_confidence),
+                    },
+                )
+            )
+            continue
+        r.confidence = scaled
+        kept.append(r)
+    return kept
 
 
 def collect_raw_signals_for_symbol(

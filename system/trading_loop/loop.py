@@ -122,6 +122,7 @@ from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
 
 from system.trading_loop.candidate_collection import (
     apply_regime_filter_with_logs,
+    apply_regime_weighting,
     collect_raw_signals_for_symbol,
 )
 from system.trading_loop.helpers import (
@@ -1593,6 +1594,28 @@ class TradingLoop:
                     demand_confidence = 0.0
                     demand_components: dict[str, Any] = {}
 
+                    # D140 — pull the most recently published regime label so
+                    # ``apply_regime_weighting`` (called per-symbol below) can
+                    # fade strategies that are mismatched with the live regime
+                    # (e.g. mean_reversion in trend_up). Updated once per
+                    # iteration; falls back to "" (no weighting) if the
+                    # dashboard snapshot is unavailable.
+                    live_regime_label = ""
+                    try:
+                        if bus is not None:
+                            snap = await bus.get_state("dashboard.snapshot", None)
+                            if isinstance(snap, dict):
+                                regime_block = snap.get("regime")
+                                if isinstance(regime_block, dict):
+                                    live_regime_label = str(
+                                        regime_block.get("regime_label") or ""
+                                    ).strip().lower()
+                    except Exception:  # noqa: BLE001 — never break the loop on a stale snapshot
+                        live_regime_label = ""
+                    regime_min_conf = float(
+                        risk_cfg.get("min_signal_confidence", 0.50) or 0.50
+                    )
+
                     if use_legacy:
                         demand_ctx = demand_engine.compute(
                             ai_result=ai_result,
@@ -1661,6 +1684,16 @@ class TradingLoop:
                                 symbol=symbol,
                                 ai_result=ai_result,
                                 ai_pipeline=ai_pipeline,
+                                sc_rows=sc_log_rows_legacy,
+                                loop_iteration=self.iterations,
+                            )
+
+                            # D140 — regime-aware confidence weighting.
+                            raw_candidates = apply_regime_weighting(
+                                raw_candidates,
+                                symbol=symbol,
+                                regime_label=live_regime_label,
+                                min_confidence=regime_min_conf,
                                 sc_rows=sc_log_rows_legacy,
                                 loop_iteration=self.iterations,
                             )
@@ -1926,6 +1959,16 @@ class TradingLoop:
                                 symbol=symbol,
                                 ai_result=ai_result,
                                 ai_pipeline=ai_pipeline,
+                                sc_rows=sc_log_rows,
+                                loop_iteration=self.iterations,
+                            )
+
+                            # D140 — regime-aware confidence weighting.
+                            raw_candidates = apply_regime_weighting(
+                                raw_candidates,
+                                symbol=symbol,
+                                regime_label=live_regime_label,
+                                min_confidence=regime_min_conf,
                                 sc_rows=sc_log_rows,
                                 loop_iteration=self.iterations,
                             )
