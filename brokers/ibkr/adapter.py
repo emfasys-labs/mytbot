@@ -1797,6 +1797,33 @@ class IBKRAdapter(BrokerAdapter):
             return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
         rows = min(depth, 5)
         contract = self._symbol_to_contract(symbol)
+        async def _top_of_book_fallback() -> OrderBook:
+            self._apply_market_data_type()
+            self._ib.reqMktData(contract, "", True, False)
+            await asyncio.sleep(1.2)
+            t = self._ib.ticker(contract)
+            if t is None:
+                return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
+            bid = getattr(t, "bid", None)
+            ask = getattr(t, "ask", None)
+            if _is_bad_price(bid) or _is_bad_price(ask):
+                return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
+            bid_size = _d(getattr(t, "bidSize", None) or 0)
+            ask_size = _d(getattr(t, "askSize", None) or 0)
+            if bid_size <= 0 or ask_size <= 0:
+                # IBKR FX snapshots often omit size. Use a conservative quote
+                # size so execution can still enforce spread/slippage without
+                # requiring a separate market-depth entitlement.
+                fallback_size = Decimal("1000000") if (contract.secType or "").upper() == "CASH" else Decimal("1")
+                bid_size = bid_size if bid_size > 0 else fallback_size
+                ask_size = ask_size if ask_size > 0 else fallback_size
+            return OrderBook(
+                symbol=symbol,
+                timestamp=_iso_now(),
+                bids=[(_d(bid), bid_size)],
+                asks=[(_d(ask), ask_size)],
+            )
+
         try:
             await self._ib.qualifyContractsAsync(contract)
             self._ib.reqMktDepth(contract, numRows=rows, isSmartDepth=False)
@@ -1809,6 +1836,10 @@ class IBKRAdapter(BrokerAdapter):
                 (_d(x.price), _d(x.size)) for x in list(t.domAsks)[:rows]
             ]
             self._ib.cancelMktDepth(contract)
+            if not bids or not asks:
+                fallback = await _top_of_book_fallback()
+                if fallback.bids and fallback.asks:
+                    return fallback
             return OrderBook(
                 symbol=symbol,
                 timestamp=_iso_now(),
@@ -1816,12 +1847,20 @@ class IBKRAdapter(BrokerAdapter):
                 asks=asks,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("get_order_book | IBKR | symbol={} | error={}", symbol, exc)
+            logger.warning("get_order_book | IBKR | depth failed; trying top-of-book | symbol={} | {}", symbol, exc)
             try:
                 self._ib.cancelMktDepth(contract)
             except Exception:  # noqa: BLE001
                 pass
-            return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
+            try:
+                return await _top_of_book_fallback()
+            except Exception as fallback_exc:  # noqa: BLE001
+                logger.exception(
+                    "get_order_book | IBKR | symbol={} | fallback error={}",
+                    symbol,
+                    fallback_exc,
+                )
+                return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
 
     async def get_supported_symbols(self) -> list[str]:
         """Return the IBKR seed universe.

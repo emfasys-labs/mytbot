@@ -1,22 +1,25 @@
 """
 strategies/momentum.py
 =======================
-Momentum Breakout Strategy — the first strategy to implement (M3).
+Momentum Breakout Strategy (M3, made symmetric 2026-05-26).
 
 Logic:
-- Price breaks above N-period rolling high with confirming volume spike
-- Volatility within acceptable range (not too quiet, not too explosive)
-- Signal: BUY on breakout, EXIT on momentum fade or stop hit
+- BUY when price breaks above N-period rolling high with confirming volume.
+- SELL (short) when price breaks below N-period rolling low with confirming volume.
+- Both sides require volatility (ATR%) inside the configured band.
 
-This is the simplest, most debuggable strategy.
-Every signal it generates has a clear, explainable reason.
+Every parameter is YAML-driven from ``config/strategies.yaml``. The class has
+**no hardcoded fallbacks** — if a key is missing the strategy refuses to
+generate a signal rather than invent a constant.
 
-Config (from config/strategies.yaml):
-    lookback_periods: 20        # rolling high window
-    volume_multiplier: 1.5      # volume must be 1.5x average
-    atr_min: 0.005              # min volatility (avoid dead markets)
-    atr_max: 0.05               # max volatility (avoid chaos)
-    momentum_threshold: 0.002   # min price move above rolling high
+Required config keys (config/strategies.yaml::strategies.momentum_breakout):
+    enabled               bool
+    lookback_periods      int    rolling high/low window
+    volume_multiplier     float  volume must be N× the rolling average
+    atr_min               float  ATR% lower bound (avoid dead markets)
+    atr_max               float  ATR% upper bound (avoid chaos)
+    momentum_threshold    float  min relative break beyond rolling high/low
+    base_target_notional  Decimal-as-string for sizing intent
 """
 
 from typing import Any, Optional
@@ -30,28 +33,67 @@ from signals.engine import RawSignal
 logger = logging.getLogger(__name__)
 
 
+_REQUIRED_KEYS = (
+    "lookback_periods",
+    "volume_multiplier",
+    "atr_min",
+    "atr_max",
+    "momentum_threshold",
+)
+
+
 class MomentumBreakoutStrategy(Strategy):
     """
-    Momentum breakout on liquid assets.
+    Momentum breakout on liquid assets, **bidirectional**.
     Suitable for: US large-cap equities, BTC, ETH, major ETFs.
     Timeframe: 5-minute to 1-hour candles.
     """
 
     name = "momentum_breakout"
 
-    def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> dict[str, str]:
+    def _resolve_params(self) -> Optional[dict[str, Any]]:
+        """Pull every required parameter from config. Return None if any
+        required key is missing — never substitute a hardcoded default."""
+        cfg = self.effective_config()
+        missing = [k for k in _REQUIRED_KEYS if cfg.get(k) is None]
+        if missing:
+            logger.debug(
+                "%s: missing required config keys %s — strategy idle",
+                self.name, missing,
+            )
+            return None
+        try:
+            return {
+                "lookback": int(cfg["lookback_periods"]),
+                "vol_mult": float(cfg["volume_multiplier"]),
+                "atr_min": float(cfg["atr_min"]),
+                "atr_max": float(cfg["atr_max"]),
+                "mom_thresh": float(cfg["momentum_threshold"]),
+                "base_notional_raw": cfg.get("base_target_notional"),
+            }
+        except (TypeError, ValueError) as exc:
+            logger.debug("%s: invalid config value (%s) — strategy idle", self.name, exc)
+            return None
+
+    def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> Optional[dict[str, str]]:
         """D032: strategy-level sizing intent (confidence + volatility aware).
 
-        Emits an absolute ``target_notional`` so downstream coordinator/execution
-        layers can respect strategy intent without falling back to NAV defaults.
+        Returns ``None`` if ``base_target_notional`` is missing from YAML — the
+        signal is then dropped rather than getting an invented size.
         """
         cfg = self.effective_config()
+        raw = cfg.get("base_target_notional")
+        if raw is None:
+            logger.debug("%s: base_target_notional missing — cannot size", self.name)
+            return None
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
+            base_notional = Decimal(str(raw))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("5000")
+            logger.debug("%s: base_target_notional=%r invalid — cannot size", self.name, raw)
+            return None
         if base_notional <= 0:
-            base_notional = Decimal("5000")
+            logger.debug("%s: base_target_notional=%s non-positive — cannot size", self.name, base_notional)
+            return None
 
         # Confidence scaling: bounded around 1.0.
         conf = max(0.0, min(1.0, float(confidence)))
@@ -88,162 +130,186 @@ class MomentumBreakoutStrategy(Strategy):
         features: pd.DataFrame,
     ) -> Optional[RawSignal]:
         """
-        Generate a BUY signal when price breaks above rolling high with volume.
-        Returns None if no breakout detected.
+        Bidirectional momentum-breakout signal generation.
+        Returns None if no breakout (either side) is detected.
         """
-
         if not self.enabled:
             return None
-
-        cfg = self.effective_config()
-        if len(features) < cfg.get("lookback_periods", 20) + 1:
-            logger.debug(f"{symbol}: not enough data ({len(features)} rows)")
+        params = self._resolve_params()
+        if params is None:
             return None
-
+        if len(features) < params["lookback"] + 1:
+            logger.debug("%s: not enough data (%d rows)", symbol, len(features))
+            return None
         try:
-            signal = self._evaluate(symbol, features)
+            signal = self._evaluate(symbol, features, params)
             if signal:
-                logger.info(f"SIGNAL {self.name} | {symbol} {signal.side} | confidence={signal.confidence:.2f}")
+                logger.info(
+                    "SIGNAL %s | %s %s | confidence=%.2f",
+                    self.name, symbol, signal.side, signal.confidence,
+                )
             return signal
-
-        except Exception as e:
-            logger.error(f"{self.name} error on {symbol}: {e}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s error on %s: %s", self.name, symbol, exc)
             return None
 
     def no_setup_snapshot(self, symbol: str, df: pd.DataFrame) -> dict[str, Any]:
-        """When :meth:`generate_signal` would return None, log near-miss diagnostics (D043)."""
-        out: dict[str, Any] = {
-            "near_miss_kind": "momentum_breakout",
-        }
+        """When :meth:`generate_signal` would return None, log near-miss diagnostics (D043).
+
+        Reports both bullish and bearish breakout gates so a single primary
+        blocker can be identified per cycle (e.g. ``price_breakout_either_side``,
+        ``volume_confirms``, ``atr_below_min``).
+        """
+        out: dict[str, Any] = {"near_miss_kind": "momentum_breakout"}
         if not self.enabled:
             out["near_miss_primary"] = "strategy_disabled"
             return out
-        cfg = self.effective_config()
-        lookback = int(cfg.get("lookback_periods", 20))
+        params = self._resolve_params()
+        if params is None:
+            out["near_miss_primary"] = "config_incomplete"
+            return out
+        lookback = params["lookback"]
         if df is None or len(df) < lookback + 1:
             out["near_miss_primary"] = "insufficient_rows"
             out["rows_available"] = 0 if df is None or df.empty else len(df)
             out["min_rows"] = lookback + 1
             return out
         try:
-            vol_mult = cfg.get("volume_multiplier", 1.5)
-            atr_min = cfg.get("atr_min", 0.005)
-            atr_max = cfg.get("atr_max", 0.05)
-            mom_thresh = cfg.get("momentum_threshold", 0.002)
             latest = df.iloc[-1]
             prev = df.iloc[:-1]
             close = float(latest["close"])
             volume = float(latest["volume"])
             rolling_high = float(prev["high"].rolling(lookback).max().iloc[-1])
+            rolling_low = float(prev["low"].rolling(lookback).min().iloc[-1])
             avg_volume = float(prev["volume"].rolling(lookback).mean().iloc[-1])
             atr = self._calculate_atr(df, lookback)
             atr_pct = float(atr / close) if close > 0 else 0.0
-            price_breakout = close > rolling_high * (1 + float(mom_thresh))
-            volume_confirms = volume > avg_volume * float(vol_mult)
-            volatility_ok = float(atr_min) <= atr_pct <= float(atr_max)
-            out["price_breakout"] = bool(price_breakout)
-            out["volume_confirms"] = bool(volume_confirms)
-            out["volatility_ok"] = bool(volatility_ok)
-            out["close"] = round(close, 8)
-            out["rolling_high"] = round(rolling_high, 8)
-            out["momentum_threshold"] = float(mom_thresh)
-            out["volume"] = round(volume, 4)
-            out["avg_volume"] = round(avg_volume, 4) if avg_volume == avg_volume else 0.0
-            out["volume_multiplier"] = float(vol_mult)
-            out["atr_pct"] = round(atr_pct, 8)
-            out["atr_min"] = float(atr_min)
-            out["atr_max"] = float(atr_max)
-            if not (price_breakout and volume_confirms and volatility_ok):
-                if not price_breakout:
-                    out["near_miss_primary"] = "price_breakout"
+            mom = params["mom_thresh"]
+            vol_mult = params["vol_mult"]
+            atr_min = params["atr_min"]
+            atr_max = params["atr_max"]
+            break_up = close > rolling_high * (1 + mom)
+            break_dn = close < rolling_low * (1 - mom) if rolling_low > 0 else False
+            volume_confirms = volume > avg_volume * vol_mult
+            volatility_ok = atr_min <= atr_pct <= atr_max
+            out.update({
+                "price_breakout_up": break_up,
+                "price_breakout_down": break_dn,
+                "volume_confirms": volume_confirms,
+                "volatility_ok": volatility_ok,
+                "close": round(close, 8),
+                "rolling_high": round(rolling_high, 8),
+                "rolling_low": round(rolling_low, 8),
+                "momentum_threshold": mom,
+                "volume": round(volume, 4),
+                "avg_volume": round(avg_volume, 4) if avg_volume == avg_volume else 0.0,
+                "volume_multiplier": vol_mult,
+                "atr_pct": round(atr_pct, 8),
+                "atr_min": atr_min,
+                "atr_max": atr_max,
+            })
+            if not ((break_up or break_dn) and volume_confirms and volatility_ok):
+                if not (break_up or break_dn):
+                    out["near_miss_primary"] = "price_breakout_either_side"
                 elif not volume_confirms:
                     out["near_miss_primary"] = "volume_confirms"
                 elif not volatility_ok:
-                    if atr_pct < float(atr_min):
+                    if atr_pct < atr_min:
                         out["near_miss_primary"] = "atr_below_min"
-                    elif atr_pct > float(atr_max):
+                    elif atr_pct > atr_max:
                         out["near_miss_primary"] = "atr_above_max"
                     else:
                         out["near_miss_primary"] = "volatility"
-                out["reason_detail"] = "triple_gate: breakout + volume + ATR band"
+                out["reason_detail"] = "triple_gate: bidirectional breakout + volume + ATR band"
         except Exception as exc:  # noqa: BLE001
             out["near_miss_primary"] = "diagnostic_error"
             out["reason_detail"] = str(exc)[:500]
         return out
 
-    def _evaluate(self, symbol: str, df: pd.DataFrame) -> Optional[RawSignal]:
+    def _evaluate(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        params: dict[str, Any],
+    ) -> Optional[RawSignal]:
+        lookback = params["lookback"]
+        vol_mult = params["vol_mult"]
+        atr_min = params["atr_min"]
+        atr_max = params["atr_max"]
+        mom = params["mom_thresh"]
 
-        cfg = self.effective_config()
-        lookback   = cfg.get("lookback_periods", 20)
-        vol_mult   = cfg.get("volume_multiplier", 1.5)
-        atr_min    = cfg.get("atr_min", 0.005)
-        atr_max    = cfg.get("atr_max", 0.05)
-        mom_thresh = cfg.get("momentum_threshold", 0.002)
+        latest = df.iloc[-1]
+        prev = df.iloc[:-1]
 
-        latest       = df.iloc[-1]
-        prev         = df.iloc[:-1]
+        close = float(latest["close"])
+        volume = float(latest["volume"])
+        rolling_high = float(prev["high"].rolling(lookback).max().iloc[-1])
+        rolling_low = float(prev["low"].rolling(lookback).min().iloc[-1])
+        avg_volume = float(prev["volume"].rolling(lookback).mean().iloc[-1])
 
-        close        = latest["close"]
-        volume       = latest["volume"]
-        rolling_high = prev["high"].rolling(lookback).max().iloc[-1]
-        avg_volume   = prev["volume"].rolling(lookback).mean().iloc[-1]
-
-        # ATR-based volatility check
         atr = self._calculate_atr(df, lookback)
-        atr_pct = atr / close if close > 0 else 0
+        atr_pct = atr / close if close > 0 else 0.0
 
-        # ── Breakout conditions ───────────────────────────────────────────────
-
-        # 1. Price breaks above rolling high
-        price_breakout = close > rolling_high * (1 + mom_thresh)
-
-        # 2. Volume confirms the move
-        volume_confirms = volume > avg_volume * vol_mult
-
-        # 3. Volatility is in acceptable range
-        volatility_ok = atr_min <= atr_pct <= atr_max
-
-        # ── Combine ───────────────────────────────────────────────────────────
-
-        if not (price_breakout and volume_confirms and volatility_ok):
+        # ── Breakout conditions (bidirectional) ──────────────────────────────
+        break_up = close > rolling_high * (1 + mom)
+        break_dn = close < rolling_low * (1 - mom) if rolling_low > 0 else False
+        if not (break_up or break_dn):
+            return None
+        if not (atr_min <= atr_pct <= atr_max):
+            return None
+        if not (avg_volume > 0 and volume > avg_volume * vol_mult):
             return None
 
-        # Confidence: 0.5 base + bonus for how clean the breakout is
-        breakout_strength = (close - rolling_high) / rolling_high
-        volume_strength   = min((volume / avg_volume) / 3, 0.3)
-        confidence        = min(0.5 + breakout_strength * 10 + volume_strength, 0.95)
+        # ── Direction + confidence ───────────────────────────────────────────
+        if break_up:
+            side = "buy"
+            breakout_strength = (close - rolling_high) / rolling_high if rolling_high > 0 else 0.0
+            ref_level = rolling_high
+        else:
+            side = "sell"
+            breakout_strength = (rolling_low - close) / rolling_low if rolling_low > 0 else 0.0
+            ref_level = rolling_low
 
-        sizing_md = self._compute_target_notional(confidence=float(confidence), atr_pct=float(atr_pct))
+        volume_strength = min((volume / avg_volume) / 3, 0.3)
+        confidence = min(0.5 + breakout_strength * 10 + volume_strength, 0.95)
+
+        sizing_md = self._compute_target_notional(
+            confidence=float(confidence), atr_pct=float(atr_pct),
+        )
+        if sizing_md is None:
+            # Config missing base_target_notional → don't fabricate a size.
+            return None
 
         return RawSignal(
             strategy=self.name,
             symbol=symbol,
-            side="buy",
+            side=side,
             confidence=float(confidence),
             broker=self.preferred_broker,
             asset_class=self.asset_class,
             metadata={
-                "rolling_high":       float(rolling_high),
-                "close":              float(close),
-                "breakout_strength":  float(breakout_strength),
-                "volume_ratio":       float(volume / avg_volume),
-                "atr_pct":            float(atr_pct),
-                "lookback":           lookback,
+                "breakout_direction": "up" if break_up else "down",
+                "rolling_high": float(rolling_high),
+                "rolling_low": float(rolling_low),
+                "ref_level": float(ref_level),
+                "close": float(close),
+                "breakout_strength": float(breakout_strength),
+                "volume_ratio": float(volume / avg_volume) if avg_volume > 0 else 0.0,
+                "atr_pct": float(atr_pct),
+                "lookback": lookback,
                 **sizing_md,
             },
         )
 
     def _calculate_atr(self, df: pd.DataFrame, period: int) -> float:
         """Average True Range — measures volatility."""
-        high   = df["high"]
-        low    = df["low"]
-        close  = df["close"]
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
         prev_close = close.shift(1)
-
         tr = pd.concat([
             high - low,
             (high - prev_close).abs(),
             (low - prev_close).abs(),
         ], axis=1).max(axis=1)
-
         return float(tr.rolling(period).mean().iloc[-1])

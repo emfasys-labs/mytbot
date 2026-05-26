@@ -229,3 +229,36 @@ def test_record_open_signal_notional_is_the_fill_path_entry():
     e = _engine()
     e.record_open_signal_notional("MSFT", Decimal("10000"))
     assert e._intraday_added_notional.get("MSFT") == Decimal("10000")
+
+
+def test_single_name_reduce_position_opposite_direction_allowed():
+    """Verify that a sell order on a long position is allowed without clamping/rejection
+    even if the existing position is near or over the cap."""
+    e = _engine()
+    portfolio = _portfolio(
+        positions={"BF-B": {"symbol": "BF-B", "quantity": "2400", "current_price": "25.0"}}
+    ) # $60k existing > $50k cap
+    
+    # Sell 800 shares ($20k) -> reduces exposure to $40k. Should pass!
+    sig = _sig(side="sell", qty="800", price="25.0")
+    ok, label = e._check_single_name_notional(sig, portfolio)
+    assert ok and label == "single_name_notional"
+    assert sig.suggested_quantity == Decimal("800")
+    assert sig.metadata.get("risk_position_reducing") is True
+
+
+def test_intraday_adds_reduce_position_opposite_direction_allowed():
+    """Verify that a sell order on a long position is exempt from daily adds cap checks."""
+    e = _engine()
+    e._intraday_added_notional["BF-B"] = Decimal("95000") # Already added $95k of $100k cap
+    e._intraday_adds_day_key = datetime.now(timezone.utc).date().isoformat()
+    portfolio = _portfolio(
+        positions={"BF-B": {"symbol": "BF-B", "quantity": "2000", "current_price": "25.0"}}
+    )
+    
+    # Sell 800 shares ($20k) -> reduces exposure. Should pass without clamping to the remaining $5k room!
+    sig = _sig(side="sell", qty="800", price="25.0")
+    ok, label = e._check_intraday_symbol_adds(sig, portfolio)
+    assert ok and label == "intraday_symbol_adds"
+    assert sig.suggested_quantity == Decimal("800")
+    assert sig.metadata.get("risk_position_reducing") is True

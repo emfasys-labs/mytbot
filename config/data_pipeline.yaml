@@ -99,6 +99,15 @@ symbols:
   - SPY
   - QQQ
   - IWM
+  # Pairs-trading legs (config/strategies.yaml::pairs_trading.pairs).
+  # Pinned here so they are always ingested AND always present in
+  # feature_map within the same loop iteration; otherwise the D118
+  # priority pre-filter de-selects them and pairs_trading goes silent
+  # because at least one leg is missing.
+  - XLE
+  - USO
+  - GLD
+  - TLT
   # Crypto anchors (routed to binance/kraken via router)
   - BTC-USD
   - ETH-USD

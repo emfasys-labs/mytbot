@@ -1376,16 +1376,14 @@ class RiskEngine:
         if proposed <= 0:
             return (True, "single_name_notional")
 
-        # Existing position notional on the same symbol (signed magnitude
-        # — we compare |projected| against the cap, so direction-agnostic
-        # for net new exposure).
-        existing = Decimal("0")
+        # Existing position quantity on the same symbol (signed)
+        existing_qty = Decimal("0")
         positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        price = Decimal("0")
         if isinstance(positions, dict):
             for pos_key, pos in positions.items():
                 if not isinstance(pos, dict):
                     continue
-                # Position keys are sometimes "broker:SYMBOL" or just "SYMBOL".
                 k_sym = str(pos.get("symbol") or pos_key).split(":", 1)[-1].strip().upper()
                 if k_sym != signal_sym:
                     continue
@@ -1395,6 +1393,7 @@ class RiskEngine:
                     continue
                 if qty == 0:
                     continue
+                existing_qty += qty
                 price_raw = (
                     pos.get("current_price")
                     or pos.get("avg_entry_price")
@@ -1405,34 +1404,67 @@ class RiskEngine:
                     price = Decimal(str(price_raw))
                 except (InvalidOperation, TypeError, ValueError):
                     continue
-                if price <= 0:
-                    continue
-                existing += abs(qty) * price
 
-        projected = existing + proposed
-        if projected <= cap_notional:
+        if price <= 0:
+            price = self._resolve_signal_price(signal)
+
+        if price <= 0:
             return (True, "single_name_notional")
 
-        # D125.1 — clamp, don't veto. The allocator routinely sizes a
-        # single action well above the per-name cap; rejecting it
-        # outright suppresses deployment. Resize the order down to the
-        # remaining room instead. Only reject when the existing position
-        # already meets/exceeds the cap (no room at all).
-        allowed = cap_notional - existing
-        if allowed <= 0 or not self._clamp_signal_to_notional(signal, allowed):
+        # Determine signal side sign
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        if side in ("buy", "long"):
+            sig_sign = 1
+        elif side in ("sell", "short"):
+            sig_sign = -1
+        else:
+            return (True, "single_name_notional")
+
+        try:
+            suggested_qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return (True, "single_name_notional")
+
+        proposed_qty_signed = Decimal(sig_sign) * suggested_qty
+        projected_qty = existing_qty + proposed_qty_signed
+
+        # Pure position reduction (no sign change, size decreases or stays the same)
+        is_pure_reduction = (existing_qty * projected_qty >= 0) and (abs(projected_qty) <= abs(existing_qty))
+        if existing_qty != 0 and is_pure_reduction:
+            meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
+            if meta is not None:
+                meta["risk_position_reducing"] = True
+            return (True, "single_name_notional")
+
+        # Projected exposure notional
+        projected_notional = abs(projected_qty) * price
+        if projected_notional <= cap_notional:
+            return (True, "single_name_notional")
+
+        # Clamp down to cap room
+        max_projected_qty = Decimal(sig_sign) * (cap_notional / price)
+        allowed_qty_signed = max_projected_qty - existing_qty
+
+        # If allowed qty is in the opposite direction of the signal, reject
+        if (allowed_qty_signed * Decimal(sig_sign)) <= 0:
             logger.warning(
                 "RISK single_name_notional REJECT | %s | existing=%s already at/over cap=%s",
-                signal_sym, str(existing), str(cap_notional),
+                signal_sym, str(abs(existing_qty) * price), str(cap_notional),
             )
             return (False, "single_name_notional")
+
+        allowed_notional = abs(allowed_qty_signed) * price
+        if not self._clamp_signal_to_notional(signal, allowed_notional):
+            return (False, "single_name_notional")
+
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
         if meta is not None:
             meta["risk_single_name_topup_clamped"] = True
-            meta["risk_single_name_existing_notional"] = str(existing)
+            meta["risk_single_name_existing_notional"] = str(abs(existing_qty) * price)
             meta["risk_single_name_cap_notional"] = str(cap_notional)
         logger.info(
             "RISK single_name_notional CLAMP | %s | proposed=%s -> %s (%.2f%% of NAV %s)",
-            signal_sym, str(proposed), str(allowed),
+            signal_sym, str(proposed), str(allowed_notional),
             float(max_pct * Decimal("100")), str(sizing_base),
         )
         return (True, "single_name_notional")
@@ -1484,23 +1516,107 @@ class RiskEngine:
         if proposed <= 0:
             return (True, "intraday_symbol_adds")
 
-        self._roll_intraday_adds_day_if_needed()
-        already = self._intraday_added_notional.get(signal_sym, Decimal("0"))
-        projected = already + proposed
-        if projected <= cap_notional:
+        # Existing position quantity on the same symbol (signed)
+        existing_qty = Decimal("0")
+        positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+        price = Decimal("0")
+        if isinstance(positions, dict):
+            for pos_key, pos in positions.items():
+                if not isinstance(pos, dict):
+                    continue
+                k_sym = str(pos.get("symbol") or pos_key).split(":", 1)[-1].strip().upper()
+                if k_sym != signal_sym:
+                    continue
+                try:
+                    qty = Decimal(str(pos.get("quantity", "0") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if qty == 0:
+                    continue
+                existing_qty += qty
+                price_raw = (
+                    pos.get("current_price")
+                    or pos.get("avg_entry_price")
+                    or pos.get("price")
+                    or "0"
+                )
+                try:
+                    price = Decimal(str(price_raw))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+
+        if price <= 0:
+            price = self._resolve_signal_price(signal)
+
+        if price <= 0:
             return (True, "intraday_symbol_adds")
 
-        # D125.1 — clamp to the remaining daily room rather than veto.
-        allowed = cap_notional - already
-        if allowed <= 0 or not self._clamp_signal_to_notional(signal, allowed):
+        # Determine signal side sign
+        side = (getattr(signal, "side", "") or "").strip().lower()
+        if side in ("buy", "long"):
+            sig_sign = 1
+        elif side in ("sell", "short"):
+            sig_sign = -1
+        else:
+            return (True, "intraday_symbol_adds")
+
+        try:
+            suggested_qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return (True, "intraday_symbol_adds")
+
+        proposed_qty_signed = Decimal(sig_sign) * suggested_qty
+        projected_qty = existing_qty + proposed_qty_signed
+
+        # Pure position reduction (no sign change, size decreases or stays the same)
+        is_pure_reduction = (existing_qty * projected_qty >= 0) and (abs(projected_qty) <= abs(existing_qty))
+        if existing_qty != 0 and is_pure_reduction:
+            meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
+            if meta is not None:
+                meta["risk_position_reducing"] = True
+            return (True, "intraday_symbol_adds")
+
+        # Determine net added exposure notional for today
+        if existing_qty * projected_qty >= 0:
+            added_notional = (abs(projected_qty) - abs(existing_qty)) * price
+        else:
+            added_notional = abs(projected_qty) * price
+
+        if added_notional <= 0:
+            return (True, "intraday_symbol_adds")
+
+        self._roll_intraday_adds_day_if_needed()
+        already = self._intraday_added_notional.get(signal_sym, Decimal("0"))
+        projected_added_notional = already + added_notional
+        if projected_added_notional <= cap_notional:
+            return (True, "intraday_symbol_adds")
+
+        # Clamp down to daily room left
+        allowed_added_notional = cap_notional - already
+        if allowed_added_notional <= 0:
             logger.warning(
                 "RISK intraday_symbol_adds REJECT | %s | added_today=%s already at/over cap=%s",
                 signal_sym, str(already), str(cap_notional),
             )
             return (False, "intraday_symbol_adds")
+
+        if existing_qty * projected_qty >= 0:
+            allowed_qty_signed = Decimal(sig_sign) * (allowed_added_notional / price)
+        else:
+            target_projected_qty = Decimal(sig_sign) * (allowed_added_notional / price)
+            allowed_qty_signed = target_projected_qty - existing_qty
+
+        allowed_notional_clamp = abs(allowed_qty_signed) * price
+        if not self._clamp_signal_to_notional(signal, allowed_notional_clamp):
+            logger.warning(
+                "RISK intraday_symbol_adds REJECT | %s | added_today=%s already at/over cap=%s",
+                signal_sym, str(already), str(cap_notional),
+            )
+            return (False, "intraday_symbol_adds")
+
         logger.info(
             "RISK intraday_symbol_adds CLAMP | %s | proposed=%s -> %s (%.2f%% of NAV %s)",
-            signal_sym, str(proposed), str(allowed),
+            signal_sym, str(proposed), str(allowed_notional_clamp),
             float(max_pct * Decimal("100")), str(sizing_base),
         )
         return (True, "intraday_symbol_adds")

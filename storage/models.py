@@ -192,16 +192,15 @@ class PriceHistory(Base):
     """OHLCV candle data — TimescaleDB hypertable."""
     __tablename__ = "price_history"
 
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp   = Column(DateTime(timezone=True), nullable=False, index=True)
-    symbol      = Column(String(20), nullable=False, index=True)
-    timeframe   = Column(String(5), nullable=False)         # "1m", "5m", "1h", "1d"
+    timestamp   = Column(DateTime(timezone=True), primary_key=True)
+    symbol      = Column(String(20), primary_key=True, index=True)
+    timeframe   = Column(String(5), primary_key=True)         # "1m", "5m", "1h", "1d"
     open        = Column(Numeric(20, 8), nullable=False)
     high        = Column(Numeric(20, 8), nullable=False)
     low         = Column(Numeric(20, 8), nullable=False)
     close       = Column(Numeric(20, 8), nullable=False)
     volume      = Column(Numeric(30, 8), nullable=False)
-    broker      = Column(String(20), nullable=False)
+    broker      = Column(String(20), primary_key=True)
 
     __table_args__ = (
         Index("ix_price_symbol_timeframe_ts", "symbol", "timeframe", "timestamp"),

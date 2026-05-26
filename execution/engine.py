@@ -799,32 +799,82 @@ class ExecutionEngine:
         ``signal.suggested_price`` has drifted against the trade direction
         by more than ``max_drift_bps``. Reduce-only / close intents are
         never blocked.
+
+        Configuration is strictly YAML-driven — no hardcoded thresholds.
+        Resolution order for the per-call ``max_drift_bps``:
+
+          1. ``stale_price_gate.per_asset_class.<asset_class>`` (e.g. ``crypto``)
+          2. ``stale_price_gate.max_adverse_drift_bps``
+          3. If neither key is present → the gate is treated as disabled
+             (returns ``(False, Decimal(0))``) so the engine never blocks a
+             paper fill on a silent-fallback constant.
+
+        The resolved base is then multiplied by ``signal.metadata
+        .symbol_volatility_scalar`` (D120 volatility overlay) when present.
         """
         risk_engine = get_risk_engine()
         cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
         sp_cfg = cfg.get("stale_price_gate") or {}
         if not isinstance(sp_cfg, dict):
-            return (False, Decimal("25"))
-        enabled = bool(sp_cfg.get("enabled", True))
-        try:
-            base_bps = Decimal(str(sp_cfg.get("max_adverse_drift_bps", 25)))
-        except Exception:  # noqa: BLE001
-            base_bps = Decimal("25")
-            
-        # D120: Dynamic volatility scaling
-        vol_scalar = Decimal("1.0")
-        if signal and signal.metadata:
-            # We can pull 'symbol_volatility_scalar' or fallback to portfolio 'market_volatility_scalar' if we passed it in signal metadata
+            return (False, Decimal("0"))
+
+        enabled = bool(sp_cfg.get("enabled", False))
+        if not enabled:
+            return (False, Decimal("0"))
+
+        # Per-asset-class override takes precedence over the global default so
+        # crypto (24/7, naturally drifts 30-60 bps within a 1h bar) can run a
+        # looser threshold without affecting FX / equity gating.
+        asset_class: str | None = None
+        if signal is not None:
+            try:
+                from brokers.base import AssetClass as _AssetClass
+
+                ac = getattr(signal, "asset_class", None)
+                if isinstance(ac, _AssetClass):
+                    asset_class = ac.value
+                elif ac is not None:
+                    asset_class = str(ac).strip().lower() or None
+            except Exception:  # noqa: BLE001
+                asset_class = None
+
+        per_class = sp_cfg.get("per_asset_class") or {}
+        per_class_bps: Decimal | None = None
+        if asset_class and isinstance(per_class, dict):
+            raw = per_class.get(asset_class)
+            if raw is not None:
+                try:
+                    per_class_bps = Decimal(str(raw))
+                except (TypeError, ValueError, InvalidOperation):
+                    per_class_bps = None
+
+        global_bps: Decimal | None = None
+        if "max_adverse_drift_bps" in sp_cfg:
+            try:
+                global_bps = Decimal(str(sp_cfg["max_adverse_drift_bps"]))
+            except (TypeError, ValueError, InvalidOperation):
+                global_bps = None
+
+        base_bps = per_class_bps if per_class_bps is not None else global_bps
+        if base_bps is None:
+            # Neither YAML key present — refuse to invent a number. Gate off.
+            return (False, Decimal("0"))
+
+        # D120: Dynamic volatility scaling. Multiplier defaults to 1 (identity)
+        # when no per-signal volatility metadata is attached — that is the
+        # additive-identity, not a magic threshold.
+        vol_scalar = Decimal("1")
+        if signal is not None and isinstance(getattr(signal, "metadata", None), dict):
             sv = signal.metadata.get("symbol_volatility_scalar")
             if sv is not None:
                 try:
-                    vol_scalar = Decimal(str(sv))
+                    candidate = Decimal(str(sv))
+                    if candidate > 0:
+                        vol_scalar = candidate
                 except (TypeError, ValueError, InvalidOperation):
                     pass
-            
-        max_bps = base_bps * (vol_scalar if vol_scalar > 0 else Decimal("1.0"))
-        
-        return (enabled, max_bps)
+
+        return (True, base_bps * vol_scalar)
     async def _simulate_fill(
         self,
         order: Order,
@@ -1244,7 +1294,11 @@ class ExecutionEngine:
             # D125.1 — update the risk engine's per-UTC-day cumulative-add
             # tracker from the *actual fill* (not at risk approval, which
             # over-counted approved-but-unfilled signals).
-            if not reduce_only:
+            is_reducing = bool(
+                reduce_only
+                or (isinstance(getattr(signal, "metadata", None), dict) and signal.metadata.get("risk_position_reducing"))
+            )
+            if not is_reducing:
                 try:
                     from control.runtime import get_risk_engine
 
@@ -2162,7 +2216,15 @@ class ExecutionEngine:
             )
             return False
 
-        min_liquidity = limits["min_liquidity_usd"] * max(Decimal("0.1"), symbol_vol_scalar)
+        # Check if book has sufficient liquidity. If the configured limit is set
+        # to a high value like $1M (intended for daily volume), we cap the book-depth
+        # requirement to a reasonable multiple of the order notional (e.g. 5x order notional
+        # or $20,000) so we don't reject liquid names (like GLD, TLT) due to top-of-book depth.
+        order_notional = abs(order.quantity) * mid
+        max_book_req = max(order_notional * Decimal("5"), Decimal("20000"))
+        resolved_min_liq = min(limits["min_liquidity_usd"], max_book_req)
+
+        min_liquidity = resolved_min_liq * max(Decimal("0.1"), symbol_vol_scalar)
         book_liquidity = self._book_liquidity_usd(ob)
         if book_liquidity < min_liquidity:
             logger.warning(
@@ -2170,7 +2232,7 @@ class ExecutionEngine:
                 order.symbol,
                 book_liquidity,
                 min_liquidity,
-                limits["min_liquidity_usd"],
+                resolved_min_liq,
                 symbol_vol_scalar,
             )
             return False

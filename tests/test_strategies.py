@@ -27,27 +27,78 @@ def _base_df(n: int = 80) -> pd.DataFrame:
     )
 
 
+_MOMENTUM_CFG = {
+    "enabled": True,
+    "lookback_periods": 20,
+    "volume_multiplier": 1.2,
+    "atr_min": 0.0,
+    "atr_max": 1.0,
+    "momentum_threshold": 0.001,
+    "base_target_notional": "5000",
+}
+
+
 def test_momentum_breakout_generates_buy_on_breakout():
     df = _base_df()
     # Force breakout on last bar.
     df.iloc[-1, df.columns.get_loc("close")] = 120.0
     df.iloc[-1, df.columns.get_loc("high")] = 121.0
     df.iloc[-1, df.columns.get_loc("volume")] = 5_000_000.0
-    strat = MomentumBreakoutStrategy(
-        {
-            "enabled": True,
-            "lookback_periods": 20,
-            "volume_multiplier": 1.2,
-            "atr_min": 0.0,
-            "atr_max": 1.0,
-            "momentum_threshold": 0.001,
-        }
-    )
+    strat = MomentumBreakoutStrategy(dict(_MOMENTUM_CFG))
     sig = strat.generate_signal("SPY", df)
     assert sig is not None
     assert sig.side == "buy"
+    assert sig.metadata["breakout_direction"] == "up"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
     assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility"
+
+
+def test_momentum_breakout_generates_sell_on_downside_breakout():
+    """Symmetric mirror of the bullish breakout — close below the rolling low
+    with confirming volume must produce a SELL signal."""
+    df = _base_df()
+    df.iloc[-1, df.columns.get_loc("close")] = 80.0
+    df.iloc[-1, df.columns.get_loc("low")] = 79.0
+    df.iloc[-1, df.columns.get_loc("volume")] = 5_000_000.0
+    strat = MomentumBreakoutStrategy(dict(_MOMENTUM_CFG))
+    sig = strat.generate_signal("SPY", df)
+    assert sig is not None
+    assert sig.side == "sell"
+    assert sig.metadata["breakout_direction"] == "down"
+    assert Decimal(str(sig.metadata["target_notional"])) > 0
+    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility"
+
+
+def test_momentum_breakout_silent_inside_range():
+    """Sideways/no-breakout bar must NOT emit a signal in either direction."""
+    df = _base_df()
+    # Last bar is mid-range; volume normal.
+    strat = MomentumBreakoutStrategy(dict(_MOMENTUM_CFG))
+    sig = strat.generate_signal("SPY", df)
+    assert sig is None
+
+
+def test_momentum_breakout_refuses_when_required_key_missing():
+    """No hardcoded fallbacks — a missing required key must idle the strategy
+    rather than invent a default."""
+    df = _base_df()
+    df.iloc[-1, df.columns.get_loc("close")] = 120.0
+    df.iloc[-1, df.columns.get_loc("high")] = 121.0
+    df.iloc[-1, df.columns.get_loc("volume")] = 5_000_000.0
+    incomplete = {k: v for k, v in _MOMENTUM_CFG.items() if k != "momentum_threshold"}
+    strat = MomentumBreakoutStrategy(incomplete)
+    assert strat.generate_signal("SPY", df) is None
+
+
+def test_momentum_breakout_refuses_when_base_target_notional_missing():
+    """If sizing config is absent the strategy must NOT fabricate a notional."""
+    df = _base_df()
+    df.iloc[-1, df.columns.get_loc("close")] = 120.0
+    df.iloc[-1, df.columns.get_loc("high")] = 121.0
+    df.iloc[-1, df.columns.get_loc("volume")] = 5_000_000.0
+    no_size = {k: v for k, v in _MOMENTUM_CFG.items() if k != "base_target_notional"}
+    strat = MomentumBreakoutStrategy(no_size)
+    assert strat.generate_signal("SPY", df) is None
 
 
 def test_mean_reversion_generates_buy_when_oversold():

@@ -12,8 +12,12 @@ from brokers.ibkr.adapter import IBKRAdapter, _ibkr_market_data_type_from_env
 class _FakeTicker:
     last = 101.25
     close = None
-    bid = None
-    ask = None
+    bid = 101.20
+    ask = 101.30
+    bidSize = None
+    askSize = None
+    domBids: list = []
+    domAsks: list = []
 
 
 class _FakeIB:
@@ -21,6 +25,8 @@ class _FakeIB:
         self.market_data_types: list[int] = []
         self.req_mkt_data_count = 0
         self.cancel_mkt_data_count = 0
+        self.req_mkt_depth_count = 0
+        self.cancel_mkt_depth_count = 0
 
     def isConnected(self) -> bool:  # noqa: N802 - mirrors ib_insync
         return True
@@ -34,11 +40,17 @@ class _FakeIB:
     def reqMktData(self, *_args, **_kwargs) -> None:  # noqa: N802 - mirrors ib_insync
         self.req_mkt_data_count += 1
 
+    def reqMktDepth(self, *_args, **_kwargs) -> None:  # noqa: N802 - mirrors ib_insync
+        self.req_mkt_depth_count += 1
+
     def ticker(self, _contract):
         return _FakeTicker()
 
     def cancelMktData(self, *_args, **_kwargs) -> None:  # noqa: N802 - mirrors ib_insync
         self.cancel_mkt_data_count += 1
+
+    def cancelMktDepth(self, *_args, **_kwargs) -> None:  # noqa: N802 - mirrors ib_insync
+        self.cancel_mkt_depth_count += 1
 
 
 def test_ibkr_market_data_type_defaults(monkeypatch) -> None:
@@ -76,3 +88,25 @@ async def test_get_last_price_applies_delayed_mode_and_does_not_cancel_snapshot(
     assert fake.req_mkt_data_count == 1
     assert fake.cancel_mkt_data_count == 0
 
+
+@pytest.mark.asyncio
+async def test_get_order_book_falls_back_to_snapshot_top_of_book_for_fx(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    fake = _FakeIB()
+    adapter._ib = fake
+
+    ob = await adapter.get_order_book("EURUSD")
+
+    assert ob.bids == [(Decimal("101.2"), Decimal("1000000"))]
+    assert ob.asks == [(Decimal("101.3"), Decimal("1000000"))]
+    assert fake.req_mkt_depth_count == 1
+    assert fake.cancel_mkt_depth_count == 1
+    assert fake.req_mkt_data_count == 1
+    assert fake.market_data_types == [3]

@@ -180,3 +180,105 @@ async def test_dynamic_volatility_expands_drift_threshold():
     sig.metadata = {"symbol_volatility_scalar": 2.0}
     result2 = await eng._simulate_fill(_order(symbol="TSLA", side=OrderSide.BUY), sig, broker=broker)
     assert result2.status == OrderStatus.FILLED
+
+
+# ---------------- per-asset-class override ----------------
+def _engine_with_cfg(cfg: dict) -> ExecutionEngine:
+    set_risk_engine(RiskEngine(cfg))
+    return ExecutionEngine(broker_configs={}, paper_mode=True)
+
+
+@pytest.mark.asyncio
+async def test_crypto_uses_per_asset_class_override():
+    """Crypto threshold (75 bps) must be applied to a crypto signal even when
+    the equity-tuned global default (25 bps) would have rejected the fill."""
+    cfg = {
+        "stale_price_gate": {
+            "enabled": True,
+            "max_adverse_drift_bps": 25,
+            "per_asset_class": {"crypto": 75},
+        },
+        "paper_fee_bps": 0,
+        "paper_slippage_bps": 0,
+    }
+    eng = _engine_with_cfg(cfg)
+    sig = _signal(symbol="AAVE-USD", side="sell", suggested_price="87.21")
+    sig.asset_class = "crypto"
+    order = _order(symbol="AAVE-USD", side=OrderSide.SELL)
+    # 70 bps adverse drift — above global 25 bps but inside crypto 75 bps.
+    broker = _FakeBroker("86.60")
+    result = await eng._simulate_fill(order, sig, broker=broker)
+    assert result.status == OrderStatus.FILLED
+
+
+@pytest.mark.asyncio
+async def test_equity_keeps_global_threshold_when_no_override():
+    """A signal whose asset class has no per-class override falls through to
+    the global ``max_adverse_drift_bps`` — never silently expanded."""
+    cfg = {
+        "stale_price_gate": {
+            "enabled": True,
+            "max_adverse_drift_bps": 25,
+            "per_asset_class": {"crypto": 75},
+        },
+        "paper_fee_bps": 0,
+        "paper_slippage_bps": 0,
+    }
+    eng = _engine_with_cfg(cfg)
+    sig = _signal(symbol="AAPL", side="buy", suggested_price="300.00")
+    sig.asset_class = "equity"
+    order = _order(symbol="AAPL", side=OrderSide.BUY)
+    broker = _FakeBroker("301.00")  # +33 bps adverse
+    result = await eng._simulate_fill(order, sig, broker=broker)
+    assert result.status == OrderStatus.REJECTED
+
+
+@pytest.mark.asyncio
+async def test_missing_config_keys_disable_gate_no_hardcoded_fallback():
+    """If neither ``max_adverse_drift_bps`` nor any ``per_asset_class`` entry
+    is supplied, the gate refuses to invent a constant and turns itself off
+    (fail-open). This is the contract: zero hardcoded thresholds in code."""
+    cfg = {
+        "stale_price_gate": {"enabled": True},  # no thresholds at all
+        "paper_fee_bps": 0,
+        "paper_slippage_bps": 0,
+    }
+    eng = _engine_with_cfg(cfg)
+    sig = _signal(symbol="AAPL", side="buy", suggested_price="300.00")
+    sig.asset_class = "equity"
+    order = _order(symbol="AAPL", side=OrderSide.BUY)
+    broker = _FakeBroker("310.00")  # 333 bps adverse — would normally reject
+    result = await eng._simulate_fill(order, sig, broker=broker)
+    assert result.status == OrderStatus.FILLED
+
+
+@pytest.mark.asyncio
+async def test_per_class_override_alone_is_sufficient():
+    """Only ``per_asset_class.crypto`` defined (no global default) — crypto
+    signal honours that threshold; equity signal falls through to disabled."""
+    cfg = {
+        "stale_price_gate": {
+            "enabled": True,
+            "per_asset_class": {"crypto": 75},
+        },
+        "paper_fee_bps": 0,
+        "paper_slippage_bps": 0,
+    }
+    eng = _engine_with_cfg(cfg)
+    # Crypto: 70 bps adverse inside the 75 bps crypto override → filled.
+    sig_c = _signal(symbol="BTC-USD", side="sell", suggested_price="100.00")
+    sig_c.asset_class = "crypto"
+    broker_c = _FakeBroker("99.30")
+    result_c = await eng._simulate_fill(
+        _order(symbol="BTC-USD", side=OrderSide.SELL), sig_c, broker=broker_c
+    )
+    assert result_c.status == OrderStatus.FILLED
+
+    # Equity: no global default, no class override → gate disabled, filled.
+    sig_e = _signal(symbol="AAPL", side="buy", suggested_price="300.00")
+    sig_e.asset_class = "equity"
+    broker_e = _FakeBroker("310.00")
+    result_e = await eng._simulate_fill(
+        _order(symbol="AAPL", side=OrderSide.BUY), sig_e, broker=broker_e
+    )
+    assert result_e.status == OrderStatus.FILLED

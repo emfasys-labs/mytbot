@@ -306,11 +306,24 @@ crypto_cluster:
 # lost its edge. The paper-fill path used to fill at the stale price
 # anyway, producing structural frictional losses (today: 200+ fills at
 # locked-in prices). When the broker shows the market has drifted against
-# the trade by more than ``max_adverse_drift_bps``, reject the paper fill.
+# the trade by more than the resolved drift threshold, reject the paper fill.
 # Reduce-only / close signals are never blocked here.
+#
+# Threshold resolution (no hardcoded fallback in code):
+#   1. ``per_asset_class.<class>`` — per asset class (e.g. crypto, fx, equity)
+#   2. ``max_adverse_drift_bps`` — global default for any other class
+#   3. If neither is set the gate auto-disables (fail-open, never invents a value).
+#
+# Why crypto gets a wider tolerance: 1h bar closes diverge 30-60 bps from
+# real-time mid in normal volatility. A 25 bps gate blocks ~all crypto
+# opens once the bar is more than a few minutes old. FX / equity bars
+# stay much closer to mid so they keep the tight default.
 stale_price_gate:
   enabled: true
-  max_adverse_drift_bps: 25         # 0.25%
+  max_adverse_drift_bps: 25         # 0.25% — default for fx, equity, etf, bond
+  per_asset_class:
+    crypto: 75                      # 0.75% — 1h crypto bars routinely drift this far
+    future: 50                      # 0.50% — futures intra-bar drift
 
 # ── D115 — Intraday aggregate-derisk monitor ─────────────────────────────
 # Static daily-loss limit (max_daily_loss_pct, default 2%) fires only when
