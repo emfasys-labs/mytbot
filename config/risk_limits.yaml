@@ -224,6 +224,28 @@ options_trading:
 max_slippage_pct: 0.005         # Reject if expected slippage > 0.5%
 min_liquidity_usd: 1000000      # Only trade assets with > $1M daily volume
 max_spread_pct: 0.003           # Reject if bid/ask spread > 0.3%
+
+# D137 — Order-book depth cap.
+#
+# ``min_liquidity_usd`` (above) is a *daily-volume* threshold but the
+# pre-trade gate compares it against the instantaneous top-of-book depth
+# (~$50–100k even on liquid ETFs like GLD / TLT). Without the cap below,
+# every order on a liquid name was rejected with "Liquidity limit breach".
+#
+# When this block is present, the effective book-depth requirement is
+#   min(min_liquidity_usd, max(order_notional × multiple_of_order, floor_usd))
+# so the gate still protects against thin books (the floor) and scales
+# with order size (the multiple), but no longer falsely rejects a $5k
+# trade against $50k of visible book on a billion-dollar ETF.
+#
+# Resolution policy: if EITHER ``multiple_of_order`` or ``floor_usd`` is
+# missing, the cap is disabled (the engine falls back to comparing
+# ``min_liquidity_usd`` directly — pre-D137 behaviour, never invents a
+# default in code).
+liquidity_check:
+  enabled: true
+  multiple_of_order: 5            # require book ≥ 5× the order's own notional
+  floor_usd: 20000                # never require less than $20k of visible book
 # Synthetic paper fills (ExecutionEngine)
 paper_fee_bps: 0.5           # Blended liquid-paper fee bps; visible without swamping edge tests
 paper_slippage_bps: 0.5      # One-way liquid-paper slippage bps (BUY higher, SELL lower)

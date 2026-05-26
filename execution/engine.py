@@ -20,7 +20,7 @@ import logging
 import os
 import random
 from dataclasses import replace
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import asyncio
@@ -2051,6 +2051,58 @@ class ExecutionEngine:
             "auto_kill_on_reconciliation_failure": bool(cfg.get("auto_kill_on_reconciliation_failure", False)),
         }
 
+    def _resolve_book_liquidity_requirement(
+        self,
+        *,
+        order_notional: Decimal,
+        configured_min_liquidity_usd: Decimal,
+    ) -> Decimal:
+        """D137 — Resolve the effective top-of-book liquidity requirement.
+
+        Returns the threshold that ``_book_liquidity_usd(ob)`` must meet or
+        exceed for the order to pass.
+
+        Resolution is strictly YAML-driven; this method never invents
+        constants. Pre-D137 behaviour (returning ``configured_min_liquidity_usd``
+        unchanged) is restored automatically when:
+
+          * the ``liquidity_check`` block is missing or disabled, or
+          * either ``multiple_of_order`` or ``floor_usd`` is absent / invalid,
+            or
+          * ``order_notional`` is non-positive (no meaningful scale).
+
+        When both keys are present and valid, the requirement is capped:
+        ``min(configured, max(order_notional × multiple, floor_usd))``. This
+        keeps the daily-volume safety bar in place for tiny orders while
+        unblocking liquid-name orders whose own notional already establishes
+        an adequate book-depth floor.
+        """
+        risk_engine = get_risk_engine()
+        cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+        block = cfg.get("liquidity_check") or {}
+        if not isinstance(block, dict):
+            return configured_min_liquidity_usd
+        if not bool(block.get("enabled", False)):
+            return configured_min_liquidity_usd
+        try:
+            multiple_raw = block.get("multiple_of_order")
+            floor_raw = block.get("floor_usd")
+        except Exception:  # noqa: BLE001
+            return configured_min_liquidity_usd
+        if multiple_raw is None or floor_raw is None:
+            return configured_min_liquidity_usd
+        try:
+            multiple = Decimal(str(multiple_raw))
+            floor_usd = Decimal(str(floor_raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return configured_min_liquidity_usd
+        if multiple <= 0 or floor_usd < 0:
+            return configured_min_liquidity_usd
+        if order_notional <= 0:
+            return configured_min_liquidity_usd
+        scaled_cap = max(order_notional * multiple, floor_usd)
+        return min(configured_min_liquidity_usd, scaled_cap)
+
     def _passes_sizing_boundary_guard(self, order: Order, signal: Signal) -> bool:
         """D031C — reject orders whose notional materially exceeds the coordinator's intent.
 
@@ -2216,13 +2268,16 @@ class ExecutionEngine:
             )
             return False
 
-        # Check if book has sufficient liquidity. If the configured limit is set
-        # to a high value like $1M (intended for daily volume), we cap the book-depth
-        # requirement to a reasonable multiple of the order notional (e.g. 5x order notional
-        # or $20,000) so we don't reject liquid names (like GLD, TLT) due to top-of-book depth.
+        # D137 — resolve the effective book-depth requirement from YAML
+        # (``liquidity_check.multiple_of_order`` / ``floor_usd``). When the
+        # block is missing or disabled the engine falls back to comparing
+        # ``min_liquidity_usd`` directly — pre-D137 behaviour, no hardcoded
+        # multipliers in code.
         order_notional = abs(order.quantity) * mid
-        max_book_req = max(order_notional * Decimal("5"), Decimal("20000"))
-        resolved_min_liq = min(limits["min_liquidity_usd"], max_book_req)
+        resolved_min_liq = self._resolve_book_liquidity_requirement(
+            order_notional=order_notional,
+            configured_min_liquidity_usd=limits["min_liquidity_usd"],
+        )
 
         min_liquidity = resolved_min_liq * max(Decimal("0.1"), symbol_vol_scalar)
         book_liquidity = self._book_liquidity_usd(ob)
