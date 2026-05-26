@@ -86,6 +86,14 @@ class BrokerPermissions:
         b = broker.strip().lower()
         return float(self.raw_config.get(b, {}).get("borrow_rate_annual_pct", 0.0))
 
+    def get_default_annual_borrow_rate_pct(self) -> float:
+        self.reload()
+        return float(self.raw_config.get("default_routing_parameters", {}).get("default_annual_borrow_rate_pct", 6.0))
+
+    def get_default_hold_days(self) -> float:
+        self.reload()
+        return float(self.raw_config.get("default_routing_parameters", {}).get("default_hold_days", 5.0))
+
 
     def check_permission(self, broker: str, asset_class: str) -> bool:
         self.reload()

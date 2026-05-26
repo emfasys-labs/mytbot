@@ -203,15 +203,22 @@ class SmartOrderRouter:
                 if yaml_borrow > 0:
                     borrow_rate_annual = Decimal(str(yaml_borrow))
                 else:
-                    borrow_rate_annual = Decimal("6.0")
-                hold_days = float(md.get("hold_days", 5.0))
+                    if hasattr(self.permissions, "get_default_annual_borrow_rate_pct"):
+                        borrow_rate_annual = Decimal(str(self.permissions.get_default_annual_borrow_rate_pct()))
+                    else:
+                        borrow_rate_annual = Decimal("6.0")
+                if hasattr(self.permissions, "get_default_hold_days"):
+                    default_hold_days = float(self.permissions.get_default_hold_days())
+                else:
+                    default_hold_days = 5.0
+                hold_days = float(md.get("hold_days", default_hold_days))
                 borrow_cost_bps = (borrow_rate_annual * Decimal("100")) * (Decimal(str(hold_days)) / Decimal("365.0"))
 
             spread_bps = Decimal(str(md.get("spread_bps", 0.0)))
             total_cost = spread_bps + taker_fee_bps + slippage_cost_bps + borrow_cost_bps
 
             q = self.fused_routing_score(b, sym_u)
-            return total_cost, Decimal(str(-q))
+            return Decimal(str(-q)), total_cost
 
         permitted.sort(key=_rank_key)
         try:

@@ -76,6 +76,10 @@ market_state:
   liquidity_enrichment:
     broker_depth_weight: 0.0
     feature_proxy_weight: 1.0
+  smoothing:
+    enabled: true
+    alpha_risk_off: 0.20
+    alpha_risk_on: 0.05
   components:
     trend_strength: 0.20
     cross_asset_confirmation: 0.15

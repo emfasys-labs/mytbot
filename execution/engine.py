@@ -116,6 +116,8 @@ class ExecutionEngine:
             )
         except (TypeError, ValueError):
             self._broker_balance_cooldown_sec = 1800.0
+        # Caching for rolling average slippage queries to avoid heavy DB traffic
+        self._slippage_cache: dict[tuple[str, str], tuple[datetime, Decimal]] = {}
         # Wave 9 — cost-aware pre-flight gate. Auto-loaded once at construction
         # so each `execute()` doesn't re-parse YAML. Disabled by default.
         try:
@@ -798,8 +800,26 @@ class ExecutionEngine:
         symbol: str,
         asset_class: str,
         lookback: int = 50,
+        min_symbol_fills: int = 10,
+        cache_ttl_sec: float | None = None,
     ) -> Optional[Decimal]:
-        """Query rolling average slippage_bps from fills table for symbol or asset_class."""
+        """Query rolling average slippage_bps from fills table for symbol or asset_class.
+
+        ``cache_ttl_sec`` controls reuse of the previous query result:
+          * ``None`` or ``<= 0`` → caching disabled (always re-query). Used when
+            the operator has not supplied a TTL in YAML — we refuse to invent
+            one.
+          * ``> 0`` → re-use the cached value (including ``None`` misses) for
+            this many seconds before re-querying the DB.
+        """
+        cache_key = (symbol, asset_class)
+        now = datetime.now(timezone.utc)
+        ttl = float(cache_ttl_sec) if cache_ttl_sec is not None else 0.0
+        if ttl > 0 and cache_key in self._slippage_cache:
+            ts, val = self._slippage_cache[cache_key]
+            if (now - ts).total_seconds() < ttl:
+                return val
+
         if session_factory is None:
             return None
         try:
@@ -821,7 +841,7 @@ class ExecutionEngine:
                 slips = [float(row) for row in res.scalars().all() if row is not None]
                 
                 # If not enough fills for symbol, fallback to asset_class
-                if len(slips) < 10 and asset_class:
+                if len(slips) < min_symbol_fills and asset_class:
                     stmt = (
                         select(FillLog.slippage_bps)
                         .where(
@@ -835,9 +855,14 @@ class ExecutionEngine:
                     slips = [float(row) for row in res.scalars().all() if row is not None]
                 
                 if not slips:
+                    if ttl > 0:
+                        self._slippage_cache[cache_key] = (now, None)
                     return None
-                
-                return Decimal(str(sum(slips) / len(slips)))
+
+                res_val = Decimal(str(sum(slips) / len(slips)))
+                if ttl > 0:
+                    self._slippage_cache[cache_key] = (now, res_val)
+                return res_val
         except Exception as exc:
             logger.debug("execution_engine | failed to query rolling average slippage: %s", exc)
             return None
@@ -920,16 +945,28 @@ class ExecutionEngine:
             lookback = int(adaptive_cfg.get("lookback", 50))
             min_bps = Decimal(str(adaptive_cfg.get("min_bps", 10)))
             max_bps = Decimal(str(adaptive_cfg.get("max_bps", 150)))
+            ref_slippage = Decimal(str(adaptive_cfg.get("reference_slippage_bps", 5.0)))
+            min_symbol_fills = int(adaptive_cfg.get("min_symbol_fills", 10))
+            # Cache TTL is YAML-driven; missing/invalid → no caching (the
+            # resolver disables the cache rather than invent a default).
+            cache_ttl_raw = adaptive_cfg.get("cache_ttl_sec")
+            try:
+                cache_ttl_sec: float | None = (
+                    float(cache_ttl_raw) if cache_ttl_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                cache_ttl_sec = None
             sym = str(signal.symbol or "")
             ac_str = asset_class or ""
             avg_slip = await self._get_rolling_average_slippage(
                 session_factory,
                 sym,
                 ac_str,
-                lookback=lookback
+                lookback=lookback,
+                min_symbol_fills=min_symbol_fills,
+                cache_ttl_sec=cache_ttl_sec,
             )
             if avg_slip is not None:
-                ref_slippage = Decimal("5.0")
                 denom = max(Decimal("0.1"), avg_slip)
                 multiplier = ref_slippage / denom
                 adjusted_bps = base_bps * multiplier

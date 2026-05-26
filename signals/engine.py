@@ -301,7 +301,22 @@ class SignalEngine:
 
         return news_veto, adjusted_confidence
 
-    def _get_strategy_stats_sync(self, strategy: str) -> tuple[float, float]:
+    def _get_min_kelly_trades(self) -> int:
+        try:
+            from control.runtime import get_risk_engine
+            re = get_risk_engine()
+            if re is not None and hasattr(re, "_parameters"):
+                return int(re._parameters.get_value("min_kelly_trades"))
+        except Exception:
+            pass
+        try:
+            from risk.parameters import ParameterManager
+            pm = ParameterManager()
+            return int(pm.get_value("min_kelly_trades"))
+        except Exception:
+            return 30  # absolute fallback
+
+    def _get_strategy_stats_sync(self, strategy: str) -> tuple[float, float, int]:
         """Query strategy historical performance from the database synchronously."""
         import asyncio
         import concurrent.futures
@@ -315,7 +330,7 @@ class SignalEngine:
             k_cfg = self.config.get("kelly_sizing") or {}
             fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
             fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
-            return fallback_wr, fallback_wlr
+            return fallback_wr, fallback_wlr, 0
 
         async def _query():
             async with session_factory() as session:
@@ -331,7 +346,7 @@ class SignalEngine:
                     k_cfg = self.config.get("kelly_sizing") or {}
                     fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
                     fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
-                    return fallback_wr, fallback_wlr
+                    return fallback_wr, fallback_wlr, 0
 
                 wins = [f for f in fills if f.realised_pnl > 0]
                 losses = [f for f in fills if f.realised_pnl < 0]
@@ -342,7 +357,7 @@ class SignalEngine:
                 win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1.0
                 if win_loss_ratio <= 0:
                     win_loss_ratio = 1.0
-                return win_rate, win_loss_ratio
+                return win_rate, win_loss_ratio, len(fills)
 
         try:
             loop = asyncio.get_event_loop()
@@ -357,7 +372,7 @@ class SignalEngine:
             k_cfg = self.config.get("kelly_sizing") or {}
             fallback_wr = float(k_cfg.get("fallback_win_rate", 0.50))
             fallback_wlr = float(k_cfg.get("fallback_win_loss_ratio", 1.0))
-            return fallback_wr, fallback_wlr
+            return fallback_wr, fallback_wlr, 0
 
     def process(
         self,
@@ -489,8 +504,14 @@ class SignalEngine:
 
                     win_rate: float | None = None
                     win_loss_ratio: float | None = None
+                    fill_count = 0
                     if use_kelly:
-                        win_rate, win_loss_ratio = self._get_strategy_stats_sync(raw.strategy)
+                        win_rate, win_loss_ratio, fill_count = self._get_strategy_stats_sync(raw.strategy)
+
+                    min_trades = self._get_min_kelly_trades()
+                    use_kelly_effective = use_kelly and (fill_count >= min_trades)
+                    if use_kelly and not use_kelly_effective:
+                        logger.info("signals | kelly sample size below minimum (%d < %d): falling back to vol-adjusted sizing", fill_count, min_trades)
 
                     decision = compute_position_size(
                         SizingInputs(
@@ -503,9 +524,13 @@ class SignalEngine:
                             win_rate=win_rate,
                             win_loss_ratio=win_loss_ratio,
                             kelly_fraction=kelly_fraction,
-                            use_kelly=use_kelly,
+                            use_kelly=use_kelly_effective,
                         )
                     )
+                    if decision.path == "kelly_negative_edge_drop":
+                        logger.info("signals | kelly negative edge or zero: dropping signal %s", raw.symbol)
+                        return None
+
                     suggested_quantity = decision.quantity.quantize(tick) if decision.quantity > 0 else Decimal("0")
                     if suggested_quantity > 0:
                         sizing_path = f"adaptive_sizing:{decision.path}"

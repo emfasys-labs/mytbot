@@ -131,10 +131,9 @@ def compute_position_size(inputs: SizingInputs) -> SizingDecision:
             notional = nav * Decimal(str(notional_pct)) * Decimal(str(max(0.0, min(1.0, inputs.confidence))))
             path = "kelly_sizing"
         else:
-            # Kelly is negative or zero (no edge), fallback to minimum sized position
-            notional_pct = _MIN_NOTIONAL_PCT
-            notional = nav * Decimal(str(notional_pct)) * Decimal(str(max(0.0, min(1.0, inputs.confidence))))
-            path = "kelly_zero_edge_fallback"
+            # Kelly is negative or zero (no edge), drop the signal
+            notional = Decimal("0")
+            path = "kelly_negative_edge_drop"
     elif atr is None or atr <= 0:
         # Fallback path — must remain bit-for-bit identical to the legacy
         # ``nav × default_position_pct`` so missing-feature symbols size

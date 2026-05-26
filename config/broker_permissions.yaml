@@ -1,6 +1,10 @@
 # Runtime broker permission matrix.
 # Toggle enabled=true/false at runtime without code changes.
 
+default_routing_parameters:
+  default_annual_borrow_rate_pct: 6.0
+  default_hold_days: 5.0
+
 ibkr:
   taker_fee_bps: 0.8
   borrow_rate_annual_pct: 5.0

@@ -358,6 +358,15 @@ stale_price_gate:
     lookback: 50
     min_bps: 10
     max_bps: 150
+    reference_slippage_bps: 5.0
+    min_symbol_fills: 10
+    # In-process cache TTL (seconds) for the per-(symbol, asset_class)
+    # rolling slippage query. Without this, every paper-fill evaluation
+    # round-trips to the fills table; with it, repeated evaluations
+    # within the TTL re-use the previous result (including misses).
+    # Missing / non-positive value disables the cache entirely — no
+    # default is invented in code.
+    cache_ttl_sec: 60
 
 # ── D115 — Intraday aggregate-derisk monitor ─────────────────────────────
 # Static daily-loss limit (max_daily_loss_pct, default 2%) fires only when

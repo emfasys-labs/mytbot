@@ -431,14 +431,19 @@ def compute_regime_state_from_inputs(
     )
     raw_score = clip_decimal(_dec(score_f), Decimal("-2"), Decimal("2"))
     if previous_market_state_score is not None:
-        if raw_score < previous_market_state_score:
-            # risk-off transition (fast decay alpha = 0.20)
-            alpha = Decimal("0.20")
+        smoothing_cfg = getattr(allocation_cfg.market_state, "smoothing", None)
+        smoothing_enabled = getattr(smoothing_cfg, "enabled", True) if smoothing_cfg else True
+        if smoothing_enabled:
+            alpha_risk_off = Decimal(str(getattr(smoothing_cfg, "alpha_risk_off", 0.20))) if smoothing_cfg else Decimal("0.20")
+            alpha_risk_on = Decimal(str(getattr(smoothing_cfg, "alpha_risk_on", 0.05))) if smoothing_cfg else Decimal("0.05")
+            if raw_score < previous_market_state_score:
+                alpha = alpha_risk_off
+            else:
+                alpha = alpha_risk_on
+            smoothed = alpha * raw_score + (Decimal("1") - alpha) * previous_market_state_score
+            market_state_score = clip_decimal(smoothed, Decimal("-2"), Decimal("2"))
         else:
-            # risk-on transition (slow decay alpha = 0.05)
-            alpha = Decimal("0.05")
-        smoothed = alpha * raw_score + (Decimal("1") - alpha) * previous_market_state_score
-        market_state_score = clip_decimal(smoothed, Decimal("-2"), Decimal("2"))
+            market_state_score = raw_score
     else:
         market_state_score = raw_score
 

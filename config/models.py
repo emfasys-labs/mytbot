@@ -228,6 +228,12 @@ class RegimeLiquidityEnrichmentConfig(StrictBaseModel):
     feature_proxy_weight: float = 1.0
 
 
+class MarketStateSmoothingConfig(StrictBaseModel):
+    enabled: bool = True
+    alpha_risk_off: float = 0.20
+    alpha_risk_on: float = 0.05
+
+
 class MarketStateConfig(StrictBaseModel):
     enabled: bool = True
     components: MarketStateComponentsConfig
@@ -237,6 +243,9 @@ class MarketStateConfig(StrictBaseModel):
     news_lookback_hours: int = 48
     liquidity_enrichment: RegimeLiquidityEnrichmentConfig = Field(
         default_factory=RegimeLiquidityEnrichmentConfig
+    )
+    smoothing: MarketStateSmoothingConfig = Field(
+        default_factory=MarketStateSmoothingConfig
     )
 
 
