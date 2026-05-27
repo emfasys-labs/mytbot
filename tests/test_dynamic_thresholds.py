@@ -286,6 +286,234 @@ def test_sizing_passthrough_when_disabled(yaml_disabled):
     assert out == Decimal("20000")
 
 
+# ── Strict-validation contract (fail closed) ──────────────────────────────
+
+
+def _with_partial_yaml(yaml_text: str):
+    """Helper: point ``_CONFIG_PATH`` at a tempfile with the given text."""
+    import tempfile
+    from pathlib import Path
+
+    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8")
+    f.write(yaml_text)
+    f.close()
+    p = Path(f.name)
+    original = dt._CONFIG_PATH
+    dt._CONFIG_PATH = p
+    dt._YAML_CACHE = None
+    dt._LOGGED_INVALID.clear()
+    return original, p
+
+
+def _restore_yaml(original, p):
+    dt._CONFIG_PATH = original
+    dt._YAML_CACHE = None
+    dt._LOGGED_INVALID.clear()
+    p.unlink(missing_ok=True)
+
+
+def test_strict_validation_strips_incomplete_rsi_group():
+    """rsi group missing one required key → group stripped from the
+    live config, formula falls back to static. The misconfig must NOT
+    silently activate a half-formula with code-baked coefficients."""
+    yaml_text = """
+dynamic_thresholds:
+  enabled: true
+  rsi:
+    base_distance: 3
+    vol_weight: 250
+    # trend_weight MISSING — should disable the rsi group entirely.
+    min_distance: 2
+    max_distance: 30
+"""
+    original, p = _with_partial_yaml(yaml_text)
+    try:
+        # Even at non-zero ATR + non-zero score, the formula must return
+        # the static thresholds because the rsi group failed validation.
+        buy, sell = rsi_thresholds(
+            atr_pct=Decimal("0.05"),
+            market_state_score=Decimal("1.5"),
+            static_buy_threshold=42,
+            static_sell_threshold=58,
+        )
+        assert buy == Decimal("42")
+        assert sell == Decimal("58")
+    finally:
+        _restore_yaml(original, p)
+
+
+def test_strict_validation_strips_only_the_incomplete_group():
+    """When one group is incomplete the OTHER groups stay live. A
+    misconfig in rsi does not kill the whole dynamic layer."""
+    yaml_text = """
+dynamic_thresholds:
+  enabled: true
+  rsi:
+    # missing trend_weight, min_distance, max_distance — incomplete.
+    base_distance: 3
+    vol_weight: 250
+  momentum_breakout:
+    atr_multiple: 0.2
+    min_threshold: 0.0005
+    max_threshold: 0.05
+"""
+    original, p = _with_partial_yaml(yaml_text)
+    try:
+        # rsi → static (group stripped).
+        buy, sell = rsi_thresholds(
+            atr_pct=Decimal("0.05"),
+            market_state_score=Decimal("1.5"),
+            static_buy_threshold=47,
+            static_sell_threshold=53,
+        )
+        assert buy == Decimal("47")
+        assert sell == Decimal("53")
+        # momentum_breakout → formula still active (group complete).
+        mom = momentum_breakout_threshold(atr_pct=Decimal("0.05"))
+        # 0.2 × 0.05 = 0.01, clamped within bounds.
+        assert mom == Decimal("0.0100")
+    finally:
+        _restore_yaml(original, p)
+
+
+def test_strict_validation_logs_once_per_misconfig(caplog):
+    """The CRITICAL log fires once per (mtime, group), not on every
+    tick. Repeated calls into the formula must NOT spam the log."""
+    yaml_text = """
+dynamic_thresholds:
+  enabled: true
+  rsi:
+    base_distance: 3
+    # all other rsi keys missing.
+"""
+    original, p = _with_partial_yaml(yaml_text)
+    try:
+        for _ in range(5):
+            rsi_thresholds(
+                atr_pct=Decimal("0.01"),
+                static_buy_threshold=47,
+                static_sell_threshold=53,
+            )
+        # Only one (mtime, "rsi") should be in the dedup set even after
+        # 5 calls. That's the "log once per misconfig" contract.
+        rsi_keys = [k for k in dt._LOGGED_INVALID if k[1] == "rsi"]
+        assert len(rsi_keys) == 1
+    finally:
+        _restore_yaml(original, p)
+
+
+def test_thresholds_snapshot_carries_every_live_value(yaml_enabled):
+    """The dashboard snapshot builder must include every formula's
+    current resolved value so the operator can see what the system
+    is using right now — and the config_hash for attribution."""
+    from system.dynamic_thresholds import build_thresholds_snapshot
+
+    snap = build_thresholds_snapshot(
+        market_features={
+            "trend_strength": 0.6,
+            "chaos_penalty": 0.2,
+            "volatility_structure": 0.3,
+            "liquidity_state": 0.7,
+        },
+        market_state_score=0.5,
+        representative_atr_pct="0.015",
+        median_atr_pct="0.015",
+        nav="1200000",
+        strategy_pnl_recent={
+            "mean_reversion": {"net_pnl": -150.0, "fills": 30, "win_rate": 0.4},
+            "momentum_breakout": {"net_pnl": +400.0, "fills": 15, "win_rate": 0.6},
+        },
+    )
+
+    # Every formula's resolved output is present.
+    assert "rsi" in snap and "buy" in snap["rsi"] and "sell" in snap["rsi"]
+    assert "bollinger_epsilon" in snap
+    assert "momentum_breakout_threshold" in snap
+    assert "volume_confirmation_multiplier" in snap
+    assert "volume_zscore_open" in snap
+    assert "volume_zscore_exhaust" in snap
+    assert "min_bar_return" in snap
+    assert "atr_band" in snap and len(snap["atr_band"]) == 2
+    assert "event_shock_threshold" in snap
+    assert "pairs_zscore_open" in snap
+    assert "regime_rotation_trigger" in snap
+    assert "anti_churn_cooldown_sec_by_mode" in snap
+
+    # Config hash for P&L attribution.
+    assert "config_hash" in snap and len(snap["config_hash"]) == 12
+
+    # Per-strategy block has multiplier + recent P&L + sample sizing.
+    per = snap["per_strategy"]
+    assert "mean_reversion" in per
+    assert "regime_multiplier" in per["mean_reversion"]
+    assert "recent_net_pnl" in per["mean_reversion"]
+    assert "recent_fills" in per["mean_reversion"]
+    assert "sample_target_notional" in per["mean_reversion"]
+    # Bleeding mean_reversion should size smaller than winning momentum.
+    assert per["mean_reversion"]["sample_target_notional"] < per["momentum_breakout"]["sample_target_notional"]
+
+
+def test_config_version_changes_when_yaml_changes():
+    """The config hash must be a stable function of YAML content —
+    same content → same hash; any edit → different hash. This is the
+    P&L-attribution contract."""
+    from system.dynamic_thresholds import config_version
+
+    text_a = """
+dynamic_thresholds:
+  enabled: true
+  rsi:
+    base_distance: 3
+"""
+    text_b = """
+dynamic_thresholds:
+  enabled: true
+  rsi:
+    base_distance: 5
+"""
+    original, p = _with_partial_yaml(text_a)
+    try:
+        hash_a = config_version()
+        assert hash_a and len(hash_a) == 12
+        _restore_yaml(original, p)
+        _, p2 = _with_partial_yaml(text_a)
+        # Same content → same hash, even from a different file.
+        assert config_version() == hash_a
+        _restore_yaml(original, p2)
+        # Edited content → different hash.
+        _, p3 = _with_partial_yaml(text_b)
+        hash_b = config_version()
+        assert hash_b != hash_a
+    finally:
+        try:
+            _restore_yaml(original, p3)
+        except Exception:
+            pass
+
+
+def test_strict_validation_unparseable_value_falls_back():
+    """A YAML key present but unparseable (e.g. a typo string) must
+    behave the same as missing — fall back to static, never substitute
+    a code-baked default."""
+    yaml_text = """
+dynamic_thresholds:
+  enabled: true
+  bollinger_epsilon:
+    atr_multiple: "not-a-number"   # parseable as string, not as Decimal
+    min_epsilon: 0.001
+    max_epsilon: 0.05
+"""
+    original, p = _with_partial_yaml(yaml_text)
+    try:
+        eps = bollinger_band_epsilon(
+            atr_pct=Decimal("0.05"),
+            static_epsilon=Decimal("0.006"),
+        )
+        assert eps == Decimal("0.006")
+    finally:
+        _restore_yaml(original, p)
+
+
 def test_sizing_zero_nav_returns_static(yaml_enabled):
     """Defensive: NAV not available → static fallback so a missing
     portfolio doesn't accidentally zero-size the strategy."""

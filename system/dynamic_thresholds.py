@@ -41,11 +41,161 @@ Dependency direction:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 import yaml
+from loguru import logger
+
+
+# ── Required-key contract per formula group ────────────────────────────────
+# When the ``dynamic_thresholds`` block is ``enabled: true`` but a group is
+# missing any of its required keys, that group is dropped from the live
+# config with a CRITICAL log. The strategy then falls back to the legacy
+# static value (passthrough), so a misconfig can never silently activate
+# a half-formula with code-baked coefficients.
+_REQUIRED_KEYS: dict[str, set[str]] = {
+    "rsi": {
+        "base_distance", "vol_weight", "trend_weight",
+        "min_distance", "max_distance",
+    },
+    "bollinger_epsilon": {
+        "atr_multiple", "min_epsilon", "max_epsilon",
+    },
+    "momentum_breakout": {
+        "atr_multiple", "min_threshold", "max_threshold",
+    },
+    "volume_confirmation": {
+        "base_multiplier", "z_weight", "min_multiplier", "max_multiplier",
+    },
+    "sizing": {
+        "base_nav_pct", "pnl_health_weight", "min_nav_pct", "max_nav_pct",
+    },
+    "volume_zscore": {
+        "open_base", "open_atr_weight", "open_min", "open_max",
+        "exhaust_base", "exhaust_atr_weight", "exhaust_min", "exhaust_max",
+    },
+    "min_bar_return": {
+        "atr_multiple", "min_threshold", "max_threshold",
+    },
+    "atr_band": {
+        "lower_multiple", "upper_multiple", "abs_min", "abs_max",
+    },
+    "event_shock": {
+        "base", "dispersion_weight", "min_threshold", "max_threshold",
+    },
+    "pairs_zscore": {
+        "base", "health_weight", "min_threshold", "max_threshold",
+    },
+    "regime_rotation": {
+        "base", "clarity_weight", "min_threshold", "max_threshold",
+    },
+    "anti_churn_cooldown": {
+        "base_by_mode", "base_default", "clarity_weight",
+        "fill_rate_weight", "min_sec", "max_sec",
+    },
+}
+
+# Track which (block_mtime, group) failures we've already logged so we
+# log once per misconfig instead of every tick.
+_LOGGED_INVALID: set[tuple[float, str]] = set()
+
+
+def _stamp_hash(payload: Any) -> str:
+    """Stable 12-char SHA-256 prefix for any JSON-serialisable payload."""
+    try:
+        blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    except Exception:  # noqa: BLE001
+        return ""
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def build_thresholds_snapshot(
+    *,
+    market_features: dict[str, Any] | None,
+    market_state_score: Any,
+    representative_atr_pct: Any = "0.01",
+    median_atr_pct: Any = "0.01",
+    nav: Any = 0,
+    strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return a JSON-serialisable summary of every live dynamic threshold.
+
+    Used by the dashboard publisher to show operators what the formulas
+    resolved to in the current tick, and (when paired with the
+    ``config_hash`` stamp on signals) why each signal carried the
+    threshold it did. All numbers come from the same formulas the live
+    strategies consume.
+
+    Inputs default to neutral so the function is safe to call even when
+    the live trading loop hasn't populated everything yet.
+    """
+    from system.adaptive_regime_weights import compute_multiplier
+
+    feats = market_features or {}
+    pnl_map = strategy_pnl_recent or {}
+
+    rsi_buy, rsi_sell = rsi_thresholds(
+        atr_pct=representative_atr_pct,
+        market_state_score=market_state_score,
+    )
+
+    out: dict[str, Any] = {
+        "config_hash": config_version(),
+        "rsi": {"buy": float(rsi_buy), "sell": float(rsi_sell)},
+        "bollinger_epsilon": float(bollinger_band_epsilon(atr_pct=representative_atr_pct)),
+        "momentum_breakout_threshold": float(momentum_breakout_threshold(atr_pct=representative_atr_pct)),
+        "volume_confirmation_multiplier": float(
+            volume_confirmation_multiplier(volume_z_recent=0)
+        ),
+        "volume_zscore_open": float(volume_zscore_open_threshold(atr_pct=representative_atr_pct)),
+        "volume_zscore_exhaust": float(volume_zscore_exhaust_threshold(atr_pct=representative_atr_pct)),
+        "min_bar_return": float(min_bar_return_threshold(atr_pct=representative_atr_pct)),
+        "atr_band": [
+            float(acceptable_atr_band(median_atr_pct=median_atr_pct)[0]),
+            float(acceptable_atr_band(median_atr_pct=median_atr_pct)[1]),
+        ],
+        "event_shock_threshold": float(event_shock_threshold(news_score_dispersion=feats.get("news_conflict_score", 0))),
+        "pairs_zscore_open": float(pairs_zscore_open_threshold(cointegration_health=feats.get("correlation_crowding", 0.5))),
+        "regime_rotation_trigger": float(regime_rotation_score_trigger(market_state_score=market_state_score)),
+        "anti_churn_cooldown_sec_by_mode": {
+            mode: float(anti_churn_cooldown_sec(
+                mode=mode,
+                market_state_score=market_state_score,
+                recent_fill_rate_per_min=0,
+            ))
+            for mode in ("hunter", "trader", "defender")
+        },
+    }
+
+    # Per-strategy resolved (regime mult, sample sizing).
+    per_strategy: dict[str, Any] = {}
+    for strat in (
+        "mean_reversion", "momentum_breakout", "volume_flow",
+        "volatility_regime", "event_driven_news", "pairs_trading",
+        "regime_rotation",
+    ):
+        regime_mult = compute_multiplier(strat, feats)
+        stats = pnl_map.get(strat, {})
+        sample_size = base_target_notional(
+            nav=nav,
+            strategy_net_pnl_recent=stats.get("net_pnl", 0),
+            strategy_total_fills_recent=stats.get("fills", 0),
+            regime_multiplier=regime_mult,
+            static_notional=0,
+        )
+        per_strategy[strat] = {
+            "regime_multiplier": float(regime_mult),
+            "recent_net_pnl": float(stats.get("net_pnl", 0) or 0),
+            "recent_fills": int(stats.get("fills", 0) or 0),
+            "recent_win_rate": float(stats.get("win_rate", 0) or 0),
+            "sample_target_notional": float(sample_size),
+        }
+    out["per_strategy"] = per_strategy
+    return out
 
 # ── Mathematical identities (NOT tuning) ────────────────────────────────────
 _RSI_MIDPOINT = Decimal("50")              # RSI's natural neutral point
@@ -56,12 +206,70 @@ _CONFIG_PATH = Path("config/strategies.yaml")
 _YAML_CACHE: tuple[float, dict[str, Any]] | None = None
 
 
-def _load_dynamic_block() -> dict[str, Any]:
-    """Return the ``dynamic_thresholds`` block from strategies.yaml, or {} if absent.
+def config_version() -> str:
+    """Stable 12-char hash of the currently-active ``dynamic_thresholds``
+    + ``regime_weights`` YAML blocks.
 
-    Missing/disabled block → empty dict. Every formula falls back to a safe
-    no-op (returning the legacy literal) if its safety coefficient is absent.
-    No tuning defaults are invented in code.
+    Every signal produced under the same config has the same hash; any
+    operator edit changes the hash within one mtime cycle. Used for
+    P&L attribution — a fill row carrying ``config_hash = "ab12cd..."``
+    can be tied back to the exact threshold regime in effect when it
+    was generated.
+
+    Returns an empty string if YAML cannot be read (degraded behaviour;
+    callers should treat empty hash as "config unknown").
+    """
+    try:
+        with _CONFIG_PATH.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    relevant = {
+        "dynamic_thresholds": data.get("dynamic_thresholds"),
+        "regime_weights": data.get("regime_weights"),
+    }
+    return _stamp_hash(relevant)
+
+
+def _validate_group(mtime: float, name: str, group: dict[str, Any]) -> bool:
+    """Return True if ``group`` has every required key (per ``_REQUIRED_KEYS``).
+
+    On failure, log CRITICAL ONCE per (mtime, name) so a stuck misconfig
+    doesn't spam the log every tick.
+    """
+    required = _REQUIRED_KEYS.get(name)
+    if required is None:
+        # Unknown group — leave it alone (operator may be staging a new formula).
+        return True
+    missing = [k for k in required if k not in group]
+    if not missing:
+        return True
+    key = (mtime, name)
+    if key not in _LOGGED_INVALID:
+        _LOGGED_INVALID.add(key)
+        logger.critical(
+            "dynamic_thresholds | group {!r} missing required keys {} — "
+            "this formula DISABLED; strategies fall back to legacy static values. "
+            "Either add the keys or remove the group entirely.",
+            name,
+            sorted(missing),
+        )
+    return False
+
+
+def _load_dynamic_block() -> dict[str, Any]:
+    """Return the validated ``dynamic_thresholds`` block from strategies.yaml.
+
+    Resolution policy (fail-closed, no silent invention):
+      * Block absent / disabled / unreadable → {} (every formula passthrough).
+      * Block present, group with all required keys → group retained.
+      * Block present, group with MISSING required keys → group **stripped**
+        from the returned config and a CRITICAL log emitted once. The
+        affected formulas then return their static-fallback path, never
+        a partially-computed value off code-baked defaults.
+
+    This makes "enabled but incomplete" fail loudly without crashing the
+    trading loop. A typo in YAML cannot silently activate a half-formula.
     """
     global _YAML_CACHE
     try:
@@ -80,8 +288,21 @@ def _load_dynamic_block() -> dict[str, Any]:
     if not isinstance(block, dict) or not block.get("enabled", False):
         _YAML_CACHE = (mtime, {})
         return {}
-    _YAML_CACHE = (mtime, block)
-    return block
+
+    # Strict validation: keep only groups whose required keys are all
+    # present. Everything else is dropped and CRITICAL-logged once.
+    validated: dict[str, Any] = {"enabled": True}
+    for name, value in block.items():
+        if name == "enabled":
+            continue
+        if not isinstance(value, dict):
+            validated[name] = value
+            continue
+        if _validate_group(mtime, name, value):
+            validated[name] = value
+        # else: silently strip — the CRITICAL log already flagged it.
+    _YAML_CACHE = (mtime, validated)
+    return validated
 
 
 def _coef(group: str, key: str) -> Decimal | None:
@@ -107,6 +328,30 @@ def _decimal_or(v: Any, fallback: Decimal) -> Decimal:
         return Decimal(str(v))
     except (InvalidOperation, TypeError, ValueError):
         return fallback
+
+
+def _strict_decimal(v: Any) -> Decimal | None:
+    """Strict Decimal cast — returns ``None`` on any parse failure so the
+    caller can fail closed instead of substituting a code-baked default."""
+    if v is None:
+        return None
+    try:
+        return Decimal(str(v))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _strict_pull(cfg: dict, *keys: str) -> tuple[Decimal, ...] | None:
+    """Pull every requested key as Decimal. Returns ``None`` if any key
+    is absent or unparseable so the calling formula can fall back to
+    its static-passthrough path. No tuning values baked in code."""
+    out: list[Decimal] = []
+    for k in keys:
+        d = _strict_decimal(cfg.get(k))
+        if d is None:
+            return None
+        out.append(d)
+    return tuple(out)
 
 
 def _clamp(value: Decimal, lo: Decimal | None, hi: Decimal | None) -> Decimal:
@@ -148,24 +393,19 @@ def rsi_thresholds(
     """
     block = _load_dynamic_block()
     cfg = block.get("rsi") if isinstance(block.get("rsi"), dict) else None
-    if not cfg:
-        # No dynamic config → preserve legacy static behaviour.
-        return (
-            _decimal_or(static_buy_threshold, Decimal("47")),
-            _decimal_or(static_sell_threshold, Decimal("53")),
-        )
-
-    base_distance = _decimal_or(cfg.get("base_distance"), Decimal("3"))
-    vol_weight = _decimal_or(cfg.get("vol_weight"), Decimal("0"))
-    trend_weight = _decimal_or(cfg.get("trend_weight"), Decimal("0"))
-    min_distance = _decimal_or(cfg.get("min_distance"), Decimal("1"))
-    max_distance = _decimal_or(
-        cfg.get("max_distance"),
-        # The largest meaningful distance is 49 (buy=1, sell=99), but
-        # we cap at 30 by default so we stay within typical RSI overshoot
-        # bands. Operator can widen via YAML if they want.
-        Decimal("30"),
+    static_pair = (
+        _decimal_or(static_buy_threshold, Decimal("47")),
+        _decimal_or(static_sell_threshold, Decimal("53")),
     )
+    if not cfg:
+        return static_pair
+    coefs = _strict_pull(
+        cfg, "base_distance", "vol_weight", "trend_weight",
+        "min_distance", "max_distance",
+    )
+    if coefs is None:
+        return static_pair
+    base_distance, vol_weight, trend_weight, min_distance, max_distance = coefs
 
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
@@ -197,18 +437,17 @@ def bollinger_band_epsilon(
     caller's existing YAML value (``static_epsilon``) is returned unchanged.
     """
     cfg = _load_dynamic_block().get("bollinger_epsilon")
+    static_val = _decimal_or(static_epsilon, Decimal("0.006"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_epsilon, Decimal("0.006"))
-
-    atr_multiple = _decimal_or(cfg.get("atr_multiple"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_epsilon"), Decimal("0.001"))
-    ceil = _decimal_or(cfg.get("max_epsilon"), Decimal("0.05"))
+        return static_val
+    coefs = _strict_pull(cfg, "atr_multiple", "min_epsilon", "max_epsilon")
+    if coefs is None:
+        return static_val
+    atr_multiple, floor, ceil = coefs
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
         atr = Decimal("0")
-
-    eps = atr_multiple * atr
-    return _clamp(eps, floor, ceil)
+    return _clamp(atr_multiple * atr, floor, ceil)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,16 +468,16 @@ def momentum_breakout_threshold(
     "vol units" required regardless of name.
     """
     cfg = _load_dynamic_block().get("momentum_breakout")
+    static_val = _decimal_or(static_threshold, Decimal("0.001"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("0.001"))
-
-    atr_multiple = _decimal_or(cfg.get("atr_multiple"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_threshold"), Decimal("0.0005"))
-    ceil = _decimal_or(cfg.get("max_threshold"), Decimal("0.05"))
+        return static_val
+    coefs = _strict_pull(cfg, "atr_multiple", "min_threshold", "max_threshold")
+    if coefs is None:
+        return static_val
+    atr_multiple, floor, ceil = coefs
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
         atr = Decimal("0")
-
     return _clamp(atr_multiple * atr, floor, ceil)
 
 
@@ -255,13 +494,15 @@ def volume_confirmation_multiplier(
     "rarity" of volume spike required regardless of the symbol's flow regime.
     """
     cfg = _load_dynamic_block().get("volume_confirmation")
+    static_val = _decimal_or(static_multiplier, Decimal("1.2"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_multiplier, Decimal("1.2"))
-
-    base = _decimal_or(cfg.get("base_multiplier"), Decimal("1.0"))
-    z_weight = _decimal_or(cfg.get("z_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_multiplier"), Decimal("1.0"))
-    ceil = _decimal_or(cfg.get("max_multiplier"), Decimal("5.0"))
+        return static_val
+    coefs = _strict_pull(
+        cfg, "base_multiplier", "z_weight", "min_multiplier", "max_multiplier",
+    )
+    if coefs is None:
+        return static_val
+    base, z_weight, floor, ceil = coefs
     z = abs(_decimal_or(volume_z_recent, Decimal("0")))
     return _clamp(base + z_weight * z, floor, ceil)
 
@@ -292,19 +533,24 @@ def base_target_notional(
     "broken account compounding loser" pattern the audit traced.
     """
     cfg = _load_dynamic_block().get("sizing")
+    static_val = _decimal_or(static_notional, Decimal("0"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_notional, Decimal("0"))
+        return static_val
+    coefs = _strict_pull(
+        cfg, "base_nav_pct", "pnl_health_weight", "min_nav_pct", "max_nav_pct",
+    )
+    if coefs is None:
+        return static_val
+    base_pct, pnl_weight, floor_pct, ceil_pct = coefs
 
-    base_pct = _decimal_or(cfg.get("base_nav_pct"), Decimal("0"))
     nav_d = _decimal_or(nav, Decimal("0"))
     if nav_d <= 0 or base_pct <= 0:
-        return _decimal_or(static_notional, Decimal("0"))
+        return static_val
 
     target_base = nav_d * base_pct
 
     # P&L health multiplier: -1 (worst recent P&L) → fade, +1 → no change.
     # We use a soft formula so a small recent loss doesn't slam the size.
-    pnl_weight = _decimal_or(cfg.get("pnl_health_weight"), Decimal("0"))
     pnl = _decimal_or(strategy_net_pnl_recent, Decimal("0"))
     fills = _decimal_or(strategy_total_fills_recent, Decimal("0"))
     pnl_per_fill = pnl / fills if fills > 0 else Decimal("0")
@@ -324,8 +570,6 @@ def base_target_notional(
     if regime_mult <= 0:
         regime_mult = _NEUTRAL
 
-    floor_pct = _decimal_or(cfg.get("min_nav_pct"), Decimal("0"))
-    ceil_pct = _decimal_or(cfg.get("max_nav_pct"), Decimal("1"))
     result = target_base * pnl_health * regime_mult
     floor_d = nav_d * floor_pct
     ceil_d = nav_d * ceil_pct
@@ -349,12 +593,13 @@ def volume_zscore_open_threshold(
     quiet market it's meaningful).
     """
     cfg = _load_dynamic_block().get("volume_zscore")
+    static_val = _decimal_or(static_threshold, Decimal("0.75"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("0.75"))
-    base = _decimal_or(cfg.get("open_base"), Decimal("0"))
-    atr_weight = _decimal_or(cfg.get("open_atr_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("open_min"), Decimal("0.3"))
-    ceil = _decimal_or(cfg.get("open_max"), Decimal("3.0"))
+        return static_val
+    coefs = _strict_pull(cfg, "open_base", "open_atr_weight", "open_min", "open_max")
+    if coefs is None:
+        return static_val
+    base, atr_weight, floor, ceil = coefs
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
         atr = Decimal("0")
@@ -372,12 +617,15 @@ def volume_zscore_exhaust_threshold(
     in a wild market we require an even more extreme outlier.
     """
     cfg = _load_dynamic_block().get("volume_zscore")
+    static_val = _decimal_or(static_threshold, Decimal("3.4"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("3.4"))
-    base = _decimal_or(cfg.get("exhaust_base"), Decimal("0"))
-    atr_weight = _decimal_or(cfg.get("exhaust_atr_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("exhaust_min"), Decimal("2.0"))
-    ceil = _decimal_or(cfg.get("exhaust_max"), Decimal("8.0"))
+        return static_val
+    coefs = _strict_pull(
+        cfg, "exhaust_base", "exhaust_atr_weight", "exhaust_min", "exhaust_max",
+    )
+    if coefs is None:
+        return static_val
+    base, atr_weight, floor, ceil = coefs
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
         atr = Decimal("0")
@@ -399,11 +647,13 @@ def min_bar_return_threshold(
     fits-all and meaningless on a high-vol crypto. The formula gives the
     same "fraction of one ATR" gate across asset classes."""
     cfg = _load_dynamic_block().get("min_bar_return")
+    static_val = _decimal_or(static_threshold, Decimal("0.0005"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("0.0005"))
-    atr_multiple = _decimal_or(cfg.get("atr_multiple"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_threshold"), Decimal("0.0001"))
-    ceil = _decimal_or(cfg.get("max_threshold"), Decimal("0.05"))
+        return static_val
+    coefs = _strict_pull(cfg, "atr_multiple", "min_threshold", "max_threshold")
+    if coefs is None:
+        return static_val
+    atr_multiple, floor, ceil = coefs
     atr = _decimal_or(atr_pct, Decimal("0"))
     if atr < 0:
         atr = Decimal("0")
@@ -426,15 +676,16 @@ def acceptable_atr_band(
     most utility stocks. The formula expresses the band as multiples of
     the symbol's own typical ATR — adapts per name automatically."""
     cfg = _load_dynamic_block().get("atr_band")
+    static_pair = (
+        _decimal_or(static_min, Decimal("0.0001")),
+        _decimal_or(static_max, Decimal("1")),
+    )
     if not isinstance(cfg, dict):
-        return (
-            _decimal_or(static_min, Decimal("0.0001")),
-            _decimal_or(static_max, Decimal("1")),
-        )
-    lo_mult = _decimal_or(cfg.get("lower_multiple"), Decimal("0.25"))
-    hi_mult = _decimal_or(cfg.get("upper_multiple"), Decimal("4.0"))
-    abs_floor = _decimal_or(cfg.get("abs_min"), Decimal("0.0001"))
-    abs_ceil = _decimal_or(cfg.get("abs_max"), Decimal("1.0"))
+        return static_pair
+    coefs = _strict_pull(cfg, "lower_multiple", "upper_multiple", "abs_min", "abs_max")
+    if coefs is None:
+        return static_pair
+    lo_mult, hi_mult, abs_floor, abs_ceil = coefs
     median = _decimal_or(median_atr_pct, Decimal("0"))
     if median <= 0:
         return (
@@ -464,12 +715,13 @@ def event_shock_threshold(
     (lots of noisy headlines → require a bigger signal to stand out)
     and tightens in calm news regimes (a moderate score is meaningful)."""
     cfg = _load_dynamic_block().get("event_shock")
+    static_val = _decimal_or(static_threshold, Decimal("0.45"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("0.45"))
-    base = _decimal_or(cfg.get("base"), Decimal("0.3"))
-    disp_weight = _decimal_or(cfg.get("dispersion_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_threshold"), Decimal("0.2"))
-    ceil = _decimal_or(cfg.get("max_threshold"), Decimal("0.9"))
+        return static_val
+    coefs = _strict_pull(cfg, "base", "dispersion_weight", "min_threshold", "max_threshold")
+    if coefs is None:
+        return static_val
+    base, disp_weight, floor, ceil = coefs
     disp = _decimal_or(news_score_dispersion, Decimal("0"))
     if disp < 0:
         disp = Decimal("0")
@@ -494,14 +746,15 @@ def pairs_zscore_open_threshold(
     spread stationarity / hedge-ratio stability (caller supplies it).
     """
     cfg = _load_dynamic_block().get("pairs_zscore")
+    static_val = _decimal_or(static_threshold, Decimal("2.0"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("2.0"))
-    base = _decimal_or(cfg.get("base"), Decimal("1.5"))
-    health_weight = _decimal_or(cfg.get("health_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_threshold"), Decimal("1.0"))
-    ceil = _decimal_or(cfg.get("max_threshold"), Decimal("4.0"))
-    health = _decimal_or(cointegration_health, Decimal("0.5"))
-    # Higher health → tighter (lower) threshold. Subtract weight×(health-0.5).
+        return static_val
+    coefs = _strict_pull(cfg, "base", "health_weight", "min_threshold", "max_threshold")
+    if coefs is None:
+        return static_val
+    base, health_weight, floor, ceil = coefs
+    health = _decimal_or(cointegration_health, _FEATURE_MIDPOINT)
+    # Higher health → tighter (lower) threshold.
     delta = health_weight * (health - _FEATURE_MIDPOINT)
     return _clamp(base - delta, floor, ceil)
 
@@ -521,12 +774,13 @@ def regime_rotation_score_trigger(
     confident); raises when score is near zero (regime mixed, require
     a stronger demand signal before rotating)."""
     cfg = _load_dynamic_block().get("regime_rotation")
+    static_val = _decimal_or(static_threshold, Decimal("0.35"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_threshold, Decimal("0.35"))
-    base = _decimal_or(cfg.get("base"), Decimal("0.4"))
-    clarity_weight = _decimal_or(cfg.get("clarity_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_threshold"), Decimal("0.2"))
-    ceil = _decimal_or(cfg.get("max_threshold"), Decimal("0.7"))
+        return static_val
+    coefs = _strict_pull(cfg, "base", "clarity_weight", "min_threshold", "max_threshold")
+    if coefs is None:
+        return static_val
+    base, clarity_weight, floor, ceil = coefs
     score_abs = abs(_decimal_or(market_state_score, Decimal("0")))
     return _clamp(base - clarity_weight * score_abs, floor, ceil)
 
@@ -553,24 +807,26 @@ def anti_churn_cooldown_sec(
         extend cooldown to dampen overtrading.
     """
     cfg = _load_dynamic_block().get("anti_churn_cooldown")
+    static_val = _decimal_or(static_cooldown, Decimal("180"))
     if not isinstance(cfg, dict):
-        return _decimal_or(static_cooldown, Decimal("180"))
+        return static_val
     bases = cfg.get("base_by_mode") or {}
     if not isinstance(bases, dict):
-        bases = {}
-    base = _decimal_or(bases.get(str(mode).strip().lower()), None)
+        return static_val
+    # Try mode-specific base; fall back to base_default. Both come from
+    # YAML strictly — no code-baked default.
+    base = _strict_decimal(bases.get(str(mode).strip().lower()))
     if base is None:
-        base = _decimal_or(cfg.get("base_default"), None)
+        base = _strict_decimal(cfg.get("base_default"))
     if base is None:
-        return _decimal_or(static_cooldown, Decimal("180"))
-    clarity_weight = _decimal_or(cfg.get("clarity_weight"), Decimal("0"))
-    fill_rate_weight = _decimal_or(cfg.get("fill_rate_weight"), Decimal("0"))
-    floor = _decimal_or(cfg.get("min_sec"), Decimal("30"))
-    ceil = _decimal_or(cfg.get("max_sec"), Decimal("1800"))
+        return static_val
+    coefs = _strict_pull(cfg, "clarity_weight", "fill_rate_weight", "min_sec", "max_sec")
+    if coefs is None:
+        return static_val
+    clarity_weight, fill_rate_weight, floor, ceil = coefs
     score_abs = abs(_decimal_or(market_state_score, Decimal("0")))
     rate = _decimal_or(recent_fill_rate_per_min, Decimal("0"))
     if rate < 0:
         rate = Decimal("0")
-    # Strong regime → shorter; high fill rate → longer.
     adjustment = (-clarity_weight * score_abs) + (fill_rate_weight * rate)
     return _clamp(base + adjustment, floor, ceil)

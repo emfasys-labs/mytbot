@@ -1414,11 +1414,23 @@ class TradingLoop:
                 except (TypeError, ValueError, ZeroDivisionError):
                     _ctx_deployed = 0.0
                 _ctx_deploy_pressure = max(0.0, min(1.0, float(self.capital_pct) - _ctx_deployed))
-                dynamic_threshold_ctx: dict[str, float] = {
+                dynamic_threshold_ctx: dict[str, Any] = {
                     "market_state_score": _ctx_mss,
                     "market_volatility_scalar": _ctx_vol,
                     "deployment_pressure": _ctx_deploy_pressure,
                 }
+                # D141 — config-version hash. Computed once per iteration
+                # (it only changes when YAML changes). Stamped on every
+                # raw signal's metadata via ``dynamic_threshold_ctx``
+                # propagation, so fills carry it into the ledger for
+                # P&L attribution per threshold-regime.
+                try:
+                    from system.dynamic_thresholds import config_version as _cv
+                    _ctx_config_hash = _cv()
+                    if _ctx_config_hash:
+                        dynamic_threshold_ctx["config_hash"] = _ctx_config_hash
+                except Exception:  # noqa: BLE001
+                    pass
                 if meta_enabled and (self.iterations % meta_adapt_every_n == 0):
                     try:
                         dyn_bias, dyn_diag = await compute_dynamic_strategy_bias(
@@ -1609,6 +1621,17 @@ class TradingLoop:
                         logger.debug("trading_loop | strategy pnl fetch failed: {}", exc)
                         _strategy_pnl = {}
 
+                    # D141 — hash of the live dynamic_thresholds + regime_weights
+                    # YAML blocks. Stamped on every signal's metadata so a fill
+                    # in the ledger can be attributed to the exact threshold
+                    # regime that produced it. Empty string when YAML cannot be
+                    # read (degraded but non-fatal).
+                    try:
+                        from system.dynamic_thresholds import config_version
+                        _config_hash = config_version()
+                    except Exception:  # noqa: BLE001
+                        _config_hash = ""
+
                     for name, strategy in strategies.items():
                         try:
                             if isinstance(getattr(strategy, "config", None), dict):
@@ -1629,6 +1652,7 @@ class TradingLoop:
                                 # ``total_equity`` is the loop's live NAV
                                 # computed above via ``live_portfolio_value``.
                                 strategy.config["_nav"] = str(total_equity or 0)
+                                strategy.config["_config_hash"] = _config_hash
                         except Exception:  # noqa: BLE001
                             pass
 
@@ -1876,6 +1900,10 @@ class TradingLoop:
                                 thesis = item.thesis
                                 d_signals = item.signals
                                 for ds in d_signals:
+                                    ds.metadata = dict(getattr(ds, "metadata", {}) or {})
+                                    if dynamic_threshold_ctx:
+                                        for _k, _v in dynamic_threshold_ctx.items():
+                                            ds.metadata.setdefault(_k, _v)
                                     if ai_result is not None:
                                         ds.news_score = ai_result.news_scores.get(ds.symbol)
                                         ds.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -2197,6 +2225,10 @@ class TradingLoop:
                                 thesis = item.thesis
                                 d_signals = item.signals
                                 for ds in d_signals:
+                                    ds.metadata = dict(getattr(ds, "metadata", {}) or {})
+                                    if dynamic_threshold_ctx:
+                                        for _k, _v in dynamic_threshold_ctx.items():
+                                            ds.metadata.setdefault(_k, _v)
                                     if ai_result is not None:
                                         ds.news_score = ai_result.news_scores.get(ds.symbol)
                                         ds.metadata["ai_macro_regime"] = ai_result.macro_regime
@@ -2264,6 +2296,7 @@ class TradingLoop:
                                     resolve_price=_resolve_price_for_symbol,
                                     strat_cfg=strat_cfg,
                                     sc_log_buffer=sc_log_rows,
+                                    strategy_pnl_recent=_strategy_pnl,
                                 )
                                 if ge_dash_ok:
                                     dashboard_snapshot_published = True
@@ -2385,6 +2418,7 @@ class TradingLoop:
                                         decision=dec,
                                         plan=plan,
                                         portfolio_state=ps_rt,
+                                        strategy_pnl_recent=_strategy_pnl,
                                     )
                                     dashboard_snapshot_published = True
                                 except Exception as pub_exc:  # noqa: BLE001
@@ -2726,6 +2760,7 @@ class TradingLoop:
         resolve_price,
         strat_cfg: dict[str, Any],
         sc_log_buffer: list[dict[str, Any]] | None = None,
+        strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[int, bool]:
         """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution.
 
@@ -3410,6 +3445,7 @@ class TradingLoop:
                     "alert": dict(demand_alert) if demand_alert is not None else None,
                     "alert_history": list(demand_alert_history[-8:]),
                 },
+                strategy_pnl_recent=strategy_pnl_recent,
             )
             dashboard_snapshot_written = True
         except Exception as pub_exc:  # noqa: BLE001

@@ -472,6 +472,7 @@ async def publish_dashboard_snapshot_d015(
     plan: ExecutionPlan,
     portfolio_state: PortfolioState,
     max_opps: int = 15,
+    strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     ranked = sorted(opportunities, key=lambda o: o.opportunity_score, reverse=True)[:max_opps]
     acc_blob: dict[str, Any] | None = None
@@ -489,6 +490,31 @@ async def publish_dashboard_snapshot_d015(
             "alert_history": regime.metadata.get("demand_alert_history", []),
         }
 
+    # D141 — operator-visible block showing what every dynamic formula
+    # is currently resolving to under the live market state. Lets the
+    # operator see "why this threshold moved" at a glance.
+    dyn_thresholds_blob: dict[str, Any] | None = None
+    try:
+        from system.dynamic_thresholds import build_thresholds_snapshot
+
+        feats = {}
+        mss = 0
+        if regime is not None:
+            mss = float(regime.market_state_score)
+            try:
+                feats = {k: float(v) for k, v in regime.components.as_dict().items()}
+            except Exception:  # noqa: BLE001
+                feats = {}
+        dyn_thresholds_blob = build_thresholds_snapshot(
+            market_features=feats,
+            market_state_score=mss,
+            nav=getattr(portfolio_state, "nav", 0),
+            strategy_pnl_recent=strategy_pnl_recent,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("dashboard | dynamic_thresholds snapshot failed: {}", exc)
+        dyn_thresholds_blob = None
+
     payload: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "path": path,
@@ -500,6 +526,7 @@ async def publish_dashboard_snapshot_d015(
         "execution_plan": serialize_execution_plan(plan),
         "portfolio": serialize_held_positions(portfolio_state),
         "demand": demand_blob,
+        "dynamic_thresholds": dyn_thresholds_blob,
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)
@@ -521,12 +548,36 @@ async def publish_dashboard_snapshot_global_edge(
     regime: RegimeState | None = None,
     demand: dict[str, Any] | None = None,
     max_opps: int = 15,
+    strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     acc_blob: dict[str, Any] | None = None
     if accumulator is not None:
         acc_blob = accumulator.dashboard_snapshot(top_n=10)
 
     ranked = sorted(strategy_opportunities, key=lambda o: o.priority_score, reverse=True)[:max_opps]
+    # D141 — same live-threshold snapshot on the global_edge path.
+    dyn_thresholds_blob_ge: dict[str, Any] | None = None
+    try:
+        from system.dynamic_thresholds import build_thresholds_snapshot
+
+        feats_ge: dict[str, Any] = {}
+        mss_ge: Any = 0
+        if regime is not None:
+            mss_ge = float(regime.market_state_score)
+            try:
+                feats_ge = {k: float(v) for k, v in regime.components.as_dict().items()}
+            except Exception:  # noqa: BLE001
+                feats_ge = {}
+        dyn_thresholds_blob_ge = build_thresholds_snapshot(
+            market_features=feats_ge,
+            market_state_score=mss_ge,
+            nav=getattr(portfolio_state, "nav", 0),
+            strategy_pnl_recent=strategy_pnl_recent,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("dashboard | dynamic_thresholds snapshot failed: {}", exc)
+        dyn_thresholds_blob_ge = None
+
     payload: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "path": "global_edge",
@@ -550,6 +601,7 @@ async def publish_dashboard_snapshot_global_edge(
             "coordinator_actions": serialize_coordinator_actions(coordinator_actions, limit=25),
         },
         "demand": demand or {},
+        "dynamic_thresholds": dyn_thresholds_blob_ge,
     }
     payload["fingerprint"] = snapshot_fingerprint(payload)
     await bus.set_state(DASHBOARD_SNAPSHOT_KEY, payload)

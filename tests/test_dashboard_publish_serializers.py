@@ -15,6 +15,7 @@ from system.dashboard_publish import (
     REGIME_TRANSITION_SHADOW_HISTORY_KEY,
     _transition_history_entry,
     append_regime_transition_shadow_history,
+    publish_dashboard_snapshot_global_edge,
     publish_dashboard_snapshot_heartbeat,
     serialize_coordinator_actions,
     serialize_regime_state,
@@ -114,6 +115,44 @@ async def test_heartbeat_snapshot_writes_bus_and_shape():
     assert isinstance(raw.get("execution_plan"), dict)
     assert raw["execution_plan"].get("instructions") == []
     assert isinstance(raw.get("fingerprint"), str) and len(raw["fingerprint"]) >= 8
+
+
+@pytest.mark.asyncio
+async def test_global_edge_snapshot_carries_strategy_pnl_health():
+    bus = _FakeBus()
+    now = datetime.now(timezone.utc)
+    ps = PortfolioState(
+        timestamp=now,
+        mode="trader",
+        nav=Decimal("100000"),
+        cash=Decimal("100000"),
+        available_buying_power=Decimal("100000"),
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+        leverage_ratio=Decimal("0"),
+    )
+
+    await publish_dashboard_snapshot_global_edge(
+        bus,  # type: ignore[arg-type]
+        loop_iteration=3,
+        accumulator=None,
+        held=[],
+        strategy_opportunities=[],
+        coordinator_actions=[],
+        portfolio_state=ps,
+        strategy_pnl_recent={
+            "mean_reversion": {"net_pnl": Decimal("-123.45"), "fills": 7, "win_rate": 0.25},
+        },
+    )
+
+    raw = bus.state[DASHBOARD_SNAPSHOT_KEY]
+    assert isinstance(raw, dict)
+    dyn = raw.get("dynamic_thresholds")
+    assert isinstance(dyn, dict)
+    mr = dyn["per_strategy"]["mean_reversion"]
+    assert mr["recent_net_pnl"] == -123.45
+    assert mr["recent_fills"] == 7
+    assert mr["recent_win_rate"] == 0.25
 
 
 def test_coordinator_action_includes_action_alias():

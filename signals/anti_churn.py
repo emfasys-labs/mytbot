@@ -32,6 +32,7 @@ in-process only; restart resets the gate.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -123,6 +124,19 @@ class AntiChurnGate:
         self._last_fill: dict[tuple[str, str], _FillState] = {}
         self._contradiction_tombstone: dict[str, datetime] = {}
 
+        # D141 — rolling per-(broker, symbol) fill timestamps so we can
+        # compute the live fill density (fills/min) for the dynamic
+        # cooldown formula. Capped to the most recent N events per pair
+        # to keep memory bounded; cap is large enough that any realistic
+        # session-long churn pattern is fully captured.
+        self._fill_density_window_sec = float(
+            (cfg.get("fill_density_window_sec") or 600)
+        )
+        self._fill_density_max_events = int(
+            cfg.get("fill_density_max_events") or 200
+        )
+        self._fill_history: dict[tuple[str, str], deque[datetime]] = {}
+
         self._stats: dict[str, int] = {
             "dedup_blocked": 0,
             "contradiction_blocked": 0,
@@ -175,12 +189,25 @@ class AntiChurnGate:
                 (profile_mode or "hunter").lower(),
                 self.post_fill_cooldown_by_mode["hunter"],
             )
+            # D141 — derive the fill density live from our own state when
+            # the caller hasn't supplied it. This is the change that
+            # closes the gap: previously the parameter was wired but
+            # nothing populated it, so cooldown only ever responded to
+            # regime clarity. Now it also responds to symbol-level churn.
+            effective_fill_rate = recent_fill_rate_per_min
+            if effective_fill_rate is None:
+                try:
+                    effective_fill_rate = self.compute_recent_fill_rate_per_min(
+                        broker=broker, symbol=sym, now=n,
+                    )
+                except Exception:  # noqa: BLE001
+                    effective_fill_rate = 0.0
             try:
                 from system.dynamic_thresholds import anti_churn_cooldown_sec
                 cooldown = float(anti_churn_cooldown_sec(
                     mode=profile_mode or "hunter",
                     market_state_score=market_state_score or 0,
-                    recent_fill_rate_per_min=recent_fill_rate_per_min or 0,
+                    recent_fill_rate_per_min=effective_fill_rate or 0,
                     static_cooldown=static_cooldown,
                 ))
             except Exception:  # noqa: BLE001 — never break the gate on a YAML hiccup
@@ -315,8 +342,50 @@ class AntiChurnGate:
         n = now or datetime.now(timezone.utc)
         sym = (symbol or "").upper()
         canonical = _canonicalize_side(side) or "buy"
-        self._last_fill[(broker or "", sym)] = _FillState(timestamp=n, side=canonical)
+        key = (broker or "", sym)
+        self._last_fill[key] = _FillState(timestamp=n, side=canonical)
+        # D141 — push into the rolling density window. Bounded deque so
+        # an extreme runaway symbol can't blow memory.
+        dq = self._fill_history.get(key)
+        if dq is None:
+            dq = deque(maxlen=self._fill_density_max_events)
+            self._fill_history[key] = dq
+        dq.append(n)
         self._maybe_compact(n)
+
+    # ---------------- live fill-density derivation ----------------
+    def compute_recent_fill_rate_per_min(
+        self,
+        *,
+        broker: str,
+        symbol: str,
+        now: Optional[datetime] = None,
+    ) -> float:
+        """Return fills/min for the (broker, symbol) over the most recent
+        ``fill_density_window_sec`` (YAML-driven). Zero when no history.
+
+        This is what ``check()`` consumes when the caller doesn't supply
+        an external ``recent_fill_rate_per_min`` — so the dynamic
+        cooldown actually adapts to symbol churn, not just regime
+        clarity. Pure derivation from the gate's own state; no extra
+        DB round-trips.
+        """
+        n = now or datetime.now(timezone.utc)
+        key = ((broker or ""), (symbol or "").upper())
+        dq = self._fill_history.get(key)
+        if not dq:
+            return 0.0
+        horizon = n - timedelta(seconds=self._fill_density_window_sec)
+        # Drop stale events from the front (deque is in insertion order).
+        while dq and dq[0] < horizon:
+            dq.popleft()
+        if not dq:
+            return 0.0
+        # Effective window = max(elapsed_since_first, 1s) so a single
+        # very-recent fill doesn't divide-by-zero into infinity.
+        first = dq[0]
+        elapsed_min = max((n - first).total_seconds() / 60.0, 1.0 / 60.0)
+        return float(len(dq)) / float(elapsed_min)
 
     # ---------------- helpers ----------------
     def _round_conf(self, value: object) -> str:
@@ -350,6 +419,12 @@ class AntiChurnGate:
         horizon = now - timedelta(seconds=horizon_sec)
         self._recent = {k: v for k, v in self._recent.items() if v.last_seen >= horizon}
         self._last_fill = {k: v for k, v in self._last_fill.items() if v.timestamp >= horizon}
+        for key in list(self._fill_history.keys()):
+            dq = self._fill_history[key]
+            while dq and dq[0] < horizon:
+                dq.popleft()
+            if not dq:
+                del self._fill_history[key]
         for sym in list(self._directional.keys()):
             self._directional[sym] = {
                 sd: st for sd, st in self._directional[sym].items() if st.timestamp >= horizon
@@ -364,6 +439,7 @@ class AntiChurnGate:
         return {
             "recent_signal_keys": len(self._recent),
             "last_fill_keys": len(self._last_fill),
+            "fill_history_keys": len(self._fill_history),
             "directional_symbols": len(self._directional),
             "contradiction_tombstones_active": sum(
                 1 for ts in self._contradiction_tombstone.values()

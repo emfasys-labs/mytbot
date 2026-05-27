@@ -250,6 +250,9 @@ def test_higher_confidence_current_side_still_tombstoned():
 
 # ---------------------------- post-fill cooldown ----------------------------
 def test_post_fill_cooldown_blocks_reentry_in_window():
+    """Static-cooldown test: passes explicit fill_rate=0 so the dynamic
+    formula collapses to the base per-mode value. Self-derivation
+    behaviour is covered by ``test_cooldown_self_derives_fill_rate_from_recorded_fills``."""
     g = _gate(dedup_enabled=False, contradiction_enabled=False)
     n = _now()
     g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n)
@@ -262,6 +265,8 @@ def test_post_fill_cooldown_blocks_reentry_in_window():
         broker="ibkr",
         profile_mode="hunter",
         now=n + timedelta(seconds=60),
+        market_state_score=0.0,
+        recent_fill_rate_per_min=0.0,
     )
     assert not decision.allow
     assert decision.reason == "post_fill_cooldown"
@@ -281,6 +286,8 @@ def test_post_fill_cooldown_allows_after_window():
         broker="ibkr",
         profile_mode="hunter",
         now=n + timedelta(seconds=121),
+        market_state_score=0.0,
+        recent_fill_rate_per_min=0.0,
     )
     assert after.allow
 
@@ -299,6 +306,8 @@ def test_post_fill_cooldown_mode_aware_defender_longer():
         broker="ibkr",
         profile_mode="defender",
         now=n + timedelta(seconds=500),
+        market_state_score=0.0,
+        recent_fill_rate_per_min=0.0,
     )
     assert not blocked_at_500.allow
     assert blocked_at_500.details["cooldown_sec"] == 600.0
@@ -550,6 +559,49 @@ def test_cooldown_longer_when_symbol_is_churning():
     )
     assert not d_churn.allow
     assert d_churn.details["cooldown_sec"] > 120.0
+
+
+def test_cooldown_self_derives_fill_rate_from_recorded_fills():
+    """Gap 2 fix: when the caller doesn't pass recent_fill_rate_per_min,
+    the gate computes it live from its own ``_fill_history`` deque so
+    the dynamic cooldown actually responds to symbol churn — not just
+    regime clarity."""
+    g = _gate(dedup_enabled=False, contradiction_enabled=False)
+    n = _now()
+    # Record 4 fills inside the last 60s → density ≈ 4 fills/min.
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n - timedelta(seconds=45))
+    g.record_fill(broker="ibkr", symbol="AAPL", side="sell", now=n - timedelta(seconds=30))
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n - timedelta(seconds=15))
+    g.record_fill(broker="ibkr", symbol="AAPL", side="sell", now=n)
+    rate = g.compute_recent_fill_rate_per_min(broker="ibkr", symbol="AAPL", now=n)
+    assert rate > 3.0, f"expected ≈4 fills/min, got {rate}"
+    # And the gate uses that rate without anybody passing it externally.
+    d = g.check(
+        strategy="volatility_regime", symbol="AAPL", side="buy",
+        confidence=0.7, suggested_price=297.0, broker="ibkr",
+        profile_mode="hunter", now=n + timedelta(seconds=130),
+        market_state_score=0.0,
+        # recent_fill_rate_per_min intentionally omitted — the gate
+        # must self-derive it.
+    )
+    # 130s elapsed, base hunter cooldown 120s; with ~4 fills/min ×
+    # fill_rate_weight (30s/fill/min) ≈ +120s → effective ≈ 240s →
+    # 130 < 240 → blocked.
+    assert not d.allow
+    assert d.details["cooldown_sec"] > 120.0
+
+
+def test_fill_history_compacts_with_last_fill_state():
+    """Fill-density history should not keep dead symbol keys after the
+    anti-churn state compactor prunes old fill state."""
+    g = _gate(dedup_enabled=False, contradiction_enabled=False, max_entries=0)
+    n = _now()
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n - timedelta(seconds=3000))
+    g._maybe_compact(n)
+
+    snap = g.snapshot()
+    assert snap["last_fill_keys"] == 0
+    assert snap["fill_history_keys"] == 0
 
 
 def test_cooldown_dynamic_clamped_to_yaml_bounds():

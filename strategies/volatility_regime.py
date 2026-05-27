@@ -14,19 +14,33 @@ import pandas as pd
 
 from signals.engine import RawSignal
 from strategies.base import Strategy
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
+from system.dynamic_thresholds import base_target_notional as dyn_base_notional
 
 
 class VolatilityRegimeStrategy(Strategy):
     name = "volatility_regime"
 
     def _compute_target_notional(self, confidence: float, atr_ratio: float) -> dict[str, str]:
+        # D141 — dynamic base notional (NAV × P&L health × regime mult);
+        # confidence + ATR-ratio scaling still apply on top.
         cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "4500")))
+            static_base = Decimal(str(cfg.get("base_target_notional", "4500")))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("4500")
-        if base_notional <= 0:
-            base_notional = Decimal("4500")
+            static_base = Decimal("4500")
+        if static_base <= 0:
+            static_base = Decimal("4500")
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=cfg.get("_nav") or 0,
+            strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
+            strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
         conf_scale = Decimal(str(max(0.80, min(1.35, 0.75 + confidence * 0.65))))
         atr_scale = Decimal(str(max(0.75, min(1.30, 1.0 + (atr_ratio - 1.0) * 0.3))))
         target = (base_notional * conf_scale * atr_scale).quantize(Decimal("0.01"))
@@ -35,7 +49,8 @@ class VolatilityRegimeStrategy(Strategy):
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_vol_regime_scale": str(atr_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "volatility_regime",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "volatility_regime_dyn",
         }
 
     def no_setup_snapshot(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
