@@ -14,6 +14,11 @@ import numpy as np
 import pandas as pd
 
 from signals.engine import RawSignal
+from system.dynamic_thresholds import (
+    base_target_notional as dyn_base_notional,
+    pairs_zscore_open_threshold,
+)
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
 
 
 class PairsTradingStrategy:
@@ -36,13 +41,24 @@ class PairsTradingStrategy:
         return cfg
 
     def _compute_target_notional(self, confidence: float, z_abs: float) -> dict[str, str]:
+        # D141 — dynamic base notional.
         cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
+            static_base = Decimal(str(cfg.get("base_target_notional", "5000")))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("5000")
-        if base_notional <= 0:
-            base_notional = Decimal("5000")
+            static_base = Decimal("5000")
+        if static_base <= 0:
+            static_base = Decimal("5000")
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=cfg.get("_nav") or 0,
+            strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
+            strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
         conf_scale = Decimal(str(max(0.8, min(1.4, 0.75 + confidence * 0.70))))
         z_scale = Decimal(str(max(0.9, min(1.5, 0.90 + z_abs * 0.20))))
         target = (base_notional * conf_scale * z_scale).quantize(Decimal("0.01"))
@@ -51,7 +67,8 @@ class PairsTradingStrategy:
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_pairs_z_scale": str(z_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "pairs_spread_zscore",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "pairs_spread_zscore_dyn",
         }
 
     def generate_signals(self, feature_map: dict[str, pd.DataFrame]) -> list[RawSignal]:
@@ -106,8 +123,29 @@ class PairsTradingStrategy:
         if std <= 0:
             return None
         z = float((spread.iloc[-1] - spread.mean()) / std)
-        if abs(z) < z_open:
+
+        # D141 — cointegration health = 1 - (spread autocorrelation at lag 1).
+        # Strong mean-reversion (low autocorr) → high health → tighter z gate.
+        # Weak / drifting spread → high autocorr → low health → wider gate.
+        try:
+            spread_lag = spread.shift(1).dropna()
+            spread_now = spread.iloc[1:]
+            if len(spread_lag) == len(spread_now) and len(spread_lag) > 5:
+                autocorr = float(np.corrcoef(spread_now.values, spread_lag.values)[0, 1])
+                if not np.isfinite(autocorr):
+                    autocorr = 0.0
+            else:
+                autocorr = 0.0
+        except Exception:  # noqa: BLE001
+            autocorr = 0.0
+        coint_health = max(0.0, min(1.0, 1.0 - abs(autocorr)))
+        z_open_dyn = float(pairs_zscore_open_threshold(
+            cointegration_health=coint_health,
+            static_threshold=z_open,
+        ))
+        if abs(z) < z_open_dyn:
             return None
+        z_open = z_open_dyn
 
         # Long the undervalued leg, short the overvalued leg.
         # Emit one leg per cycle (allocator can still combine with other opportunities).
@@ -129,6 +167,8 @@ class PairsTradingStrategy:
                 "pair_beta": round(beta, 6),
                 "pair_spread_z": round(z, 6),
                 "pair_side_note": f"{a} {'short' if side == 'sell' else 'long'} vs {b}",
+                "pair_cointegration_health": round(coint_health, 6),
+                "pair_zscore_open_dyn": z_open,
                 **md,
             },
         )

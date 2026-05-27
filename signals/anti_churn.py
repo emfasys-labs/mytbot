@@ -144,6 +144,8 @@ class AntiChurnGate:
         broker: str,
         profile_mode: str = "hunter",
         now: Optional[datetime] = None,
+        market_state_score: Optional[float] = None,
+        recent_fill_rate_per_min: Optional[float] = None,
     ) -> AntiChurnDecision:
         """Decide whether a fresh signal candidate should proceed."""
         n = now or datetime.now(timezone.utc)
@@ -164,10 +166,25 @@ class AntiChurnGate:
                 )
 
         if self.post_fill_enabled:
-            cooldown = self.post_fill_cooldown_by_mode.get(
+            # D141 — cooldown computed live from regime + recent fill rate.
+            # Strong regime → shorter (catch the trend); high fill rate
+            # on this symbol → longer (dampen churn). Falls back to the
+            # static per-mode value when the dynamic_thresholds YAML
+            # block is disabled.
+            static_cooldown = self.post_fill_cooldown_by_mode.get(
                 (profile_mode or "hunter").lower(),
                 self.post_fill_cooldown_by_mode["hunter"],
             )
+            try:
+                from system.dynamic_thresholds import anti_churn_cooldown_sec
+                cooldown = float(anti_churn_cooldown_sec(
+                    mode=profile_mode or "hunter",
+                    market_state_score=market_state_score or 0,
+                    recent_fill_rate_per_min=recent_fill_rate_per_min or 0,
+                    static_cooldown=static_cooldown,
+                ))
+            except Exception:  # noqa: BLE001 — never break the gate on a YAML hiccup
+                cooldown = static_cooldown
             fill = self._last_fill.get((broker or "", sym))
             if fill is not None:
                 elapsed = (n - fill.timestamp).total_seconds()

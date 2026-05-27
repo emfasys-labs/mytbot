@@ -805,7 +805,18 @@ class SignalEngine:
         try:
             last_price = self._extract_last_price(raw.metadata or {})
             price_float: Optional[float] = float(last_price) if last_price is not None else None
-            profile_mode = str((raw.metadata or {}).get("profile_mode") or "hunter")
+            md = raw.metadata or {}
+            profile_mode = str(md.get("profile_mode") or "hunter")
+            # D141 — pass live regime + fill-rate context so the gate's
+            # cooldown is computed dynamically.
+            try:
+                mss = float(md.get("market_state_score") or 0)
+            except (TypeError, ValueError):
+                mss = 0.0
+            try:
+                fill_rate = float(md.get("recent_fill_rate_per_min") or 0)
+            except (TypeError, ValueError):
+                fill_rate = 0.0
             decision = self.anti_churn.check(
                 strategy=str(raw.strategy or ""),
                 symbol=str(raw.symbol or ""),
@@ -815,6 +826,8 @@ class SignalEngine:
                 broker=str(raw.broker or ""),
                 profile_mode=profile_mode,
                 now=now,
+                market_state_score=mss,
+                recent_fill_rate_per_min=fill_rate,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("anti_churn | check failed (passing through): %s", exc)

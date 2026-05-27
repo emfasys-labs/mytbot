@@ -12,6 +12,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from signals.engine import RawSignal
+from system.dynamic_thresholds import (
+    base_target_notional as dyn_base_notional,
+    regime_rotation_score_trigger,
+)
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
 
 
 class RegimeRotationStrategy:
@@ -33,20 +38,32 @@ class RegimeRotationStrategy:
         return cfg
 
     def _compute_target_notional(self, confidence: float) -> dict[str, str]:
+        # D141 — dynamic base notional.
         cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "5500")))
+            static_base = Decimal(str(cfg.get("base_target_notional", "5500")))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("5500")
-        if base_notional <= 0:
-            base_notional = Decimal("5500")
+            static_base = Decimal("5500")
+        if static_base <= 0:
+            static_base = Decimal("5500")
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=cfg.get("_nav") or 0,
+            strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
+            strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
         conf_scale = Decimal(str(max(0.8, min(1.4, 0.75 + confidence * 0.70))))
         target = (base_notional * conf_scale).quantize(Decimal("0.01"))
         return {
             "target_notional": str(target),
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "regime_rotation",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "regime_rotation_dyn",
         }
 
     def generate_from_demand(
@@ -65,7 +82,14 @@ class RegimeRotationStrategy:
         s = symbol.strip().upper()
         risk_on = {x.strip().upper() for x in cfg.get("risk_on_symbols", ["SPY", "QQQ", "XLE", "BTC-USD"])}
         risk_off = {x.strip().upper() for x in cfg.get("risk_off_symbols", ["TLT", "GLD", "UUP"])}
-        trigger = float(cfg.get("score_trigger", 0.35))
+        # D141 — trigger threshold computed live from market_state_score
+        # clarity. Strong regime → lower trigger (high-conviction rotation);
+        # mixed regime → higher trigger (require more demand signal).
+        market_state_score = cfg.get("_market_state_score", 0)
+        trigger = float(regime_rotation_score_trigger(
+            market_state_score=market_state_score,
+            static_threshold=cfg.get("score_trigger", 0.35),
+        ))
         if abs(demand_score) < trigger:
             return None
 
@@ -94,6 +118,7 @@ class RegimeRotationStrategy:
                 "demand_trend": demand_trend,
                 "demand_confidence": round(float(demand_confidence), 6),
                 "regime_bucket": regime_bucket,
+                "score_trigger_dyn": trigger,
                 **md,
             },
         )

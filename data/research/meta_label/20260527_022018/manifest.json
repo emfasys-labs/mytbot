@@ -1,0 +1,50 @@
+{
+  "built_at": "2026-05-27T02:25:36.392075+00:00",
+  "feature_columns": [
+    "strategy_confidence",
+    "raw_confidence",
+    "side_sign",
+    "accumulator_score",
+    "accumulator_confidence",
+    "atr_pct",
+    "volume_z_score",
+    "demand_score",
+    "demand_confidence",
+    "ai_macro_confidence",
+    "rsi_14",
+    "mom_10",
+    "fracdiff_0_4",
+    "garch_vol_1d",
+    "hurst_dfa_128",
+    "vpin_proxy_50",
+    "relative_dollar_volume",
+    "volume_z",
+    "vol_ratio"
+  ],
+  "feature_snapshot_rows": 1773038,
+  "horizon_bars": 10,
+  "label_counts": {
+    "0": 984,
+    "1": 1822
+  },
+  "pt_mult": 2.0,
+  "rows": 2806,
+  "signal_rows": 12753,
+  "skipped": {
+    "insufficient_future_bars": 4351,
+    "missing_symbol_features": 5596
+  },
+  "sl_mult": 1.5,
+  "strategy_counts": {
+    "adaptive_shed": 1,
+    "capital_recycle": 23,
+    "global_edge_rotation": 47,
+    "held_position": 15,
+    "mean_reversion": 2285,
+    "momentum_breakout": 1,
+    "volatility_regime": 369,
+    "volume_flow": 65
+  },
+  "timeframe": "1h",
+  "vol_window": 20
+}

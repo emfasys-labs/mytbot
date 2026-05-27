@@ -29,6 +29,13 @@ import logging
 
 from strategies.base import Strategy
 from signals.engine import RawSignal
+from system.dynamic_thresholds import (
+    acceptable_atr_band,
+    base_target_notional as dyn_base_notional,
+    momentum_breakout_threshold,
+    volume_confirmation_multiplier,
+)
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +83,10 @@ class MomentumBreakoutStrategy(Strategy):
             return None
 
     def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> Optional[dict[str, str]]:
-        """D032: strategy-level sizing intent (confidence + volatility aware).
-
-        Returns ``None`` if ``base_target_notional`` is missing from YAML — the
-        signal is then dropped rather than getting an invented size.
+        """D141 — base notional resolved live from NAV + strategy P&L
+        health + regime multiplier. Confidence + volatility scaling
+        still apply on top. The static YAML value is used as a
+        structural fallback (no tuning invented in code).
         """
         cfg = self.effective_config()
         raw = cfg.get("base_target_notional")
@@ -87,13 +94,25 @@ class MomentumBreakoutStrategy(Strategy):
             logger.debug("%s: base_target_notional missing — cannot size", self.name)
             return None
         try:
-            base_notional = Decimal(str(raw))
+            static_base = Decimal(str(raw))
         except (InvalidOperation, TypeError, ValueError):
             logger.debug("%s: base_target_notional=%r invalid — cannot size", self.name, raw)
             return None
-        if base_notional <= 0:
-            logger.debug("%s: base_target_notional=%s non-positive — cannot size", self.name, base_notional)
+        if static_base <= 0:
+            logger.debug("%s: base_target_notional=%s non-positive — cannot size", self.name, static_base)
             return None
+
+        # Pull live inputs from the trading loop's per-iteration config push.
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=cfg.get("_nav") or 0,
+            strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
+            strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
 
         # Confidence scaling: bounded around 1.0.
         conf = max(0.0, min(1.0, float(confidence)))
@@ -121,7 +140,8 @@ class MomentumBreakoutStrategy(Strategy):
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_volatility_scale": str(vol_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "strategy_confidence_volatility",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "strategy_confidence_volatility_dyn",
         }
 
     def generate_signal(
@@ -184,10 +204,30 @@ class MomentumBreakoutStrategy(Strategy):
             avg_volume = float(prev["volume"].rolling(lookback).mean().iloc[-1])
             atr = self._calculate_atr(df, lookback)
             atr_pct = float(atr / close) if close > 0 else 0.0
-            mom = params["mom_thresh"]
-            vol_mult = params["vol_mult"]
-            atr_min = params["atr_min"]
-            atr_max = params["atr_max"]
+            # D141 — diagnostics use the live thresholds so the candidate
+            # log shows the actual gate values the strategy compared
+            # against, not stale YAML literals.
+            median_atr_pct = float(prev["high"].sub(prev["low"]).div(prev["close"]).rolling(lookback).median().iloc[-1])
+            vol_std = float(prev["volume"].tail(lookback).std()) if len(prev) >= lookback else 0.0
+            vol_mean = float(prev["volume"].tail(lookback).mean()) if len(prev) >= lookback else 1.0
+            vol_z = ((volume - vol_mean) / vol_std) if vol_std > 0 else 0.0
+            atr_min_d, atr_max_d = acceptable_atr_band(
+                median_atr_pct=median_atr_pct,
+                static_min=params["atr_min"],
+                static_max=params["atr_max"],
+            )
+            mom_d = momentum_breakout_threshold(
+                atr_pct=atr_pct,
+                static_threshold=params["mom_thresh"],
+            )
+            vol_mult_d = volume_confirmation_multiplier(
+                volume_z_recent=vol_z,
+                static_multiplier=params["vol_mult"],
+            )
+            mom = float(mom_d)
+            vol_mult = float(vol_mult_d)
+            atr_min = float(atr_min_d)
+            atr_max = float(atr_max_d)
             break_up = close > rolling_high * (1 + mom)
             break_dn = close < rolling_low * (1 - mom) if rolling_low > 0 else False
             volume_confirms = volume > avg_volume * vol_mult
@@ -233,10 +273,7 @@ class MomentumBreakoutStrategy(Strategy):
         params: dict[str, Any],
     ) -> Optional[RawSignal]:
         lookback = params["lookback"]
-        vol_mult = params["vol_mult"]
-        atr_min = params["atr_min"]
-        atr_max = params["atr_max"]
-        mom = params["mom_thresh"]
+        cfg = self.effective_config()
 
         latest = df.iloc[-1]
         prev = df.iloc[:-1]
@@ -249,6 +286,32 @@ class MomentumBreakoutStrategy(Strategy):
 
         atr = self._calculate_atr(df, lookback)
         atr_pct = atr / close if close > 0 else 0.0
+
+        # D141 — replace static thresholds with live formulas. ATR drives
+        # the momentum threshold + acceptable band; recent volume z drives
+        # the confirmation multiplier.
+        median_atr_pct = float(prev["high"].sub(prev["low"]).div(prev["close"]).rolling(lookback).median().iloc[-1])
+        vol_std = float(prev["volume"].tail(lookback).std()) if len(prev) >= lookback else 0.0
+        vol_mean = float(prev["volume"].tail(lookback).mean()) if len(prev) >= lookback else 1.0
+        vol_z = ((volume - vol_mean) / vol_std) if vol_std > 0 else 0.0
+
+        atr_min_d, atr_max_d = acceptable_atr_band(
+            median_atr_pct=median_atr_pct,
+            static_min=params["atr_min"],
+            static_max=params["atr_max"],
+        )
+        mom_d = momentum_breakout_threshold(
+            atr_pct=atr_pct,
+            static_threshold=params["mom_thresh"],
+        )
+        vol_mult_d = volume_confirmation_multiplier(
+            volume_z_recent=vol_z,
+            static_multiplier=params["vol_mult"],
+        )
+        atr_min = float(atr_min_d)
+        atr_max = float(atr_max_d)
+        mom = float(mom_d)
+        vol_mult = float(vol_mult_d)
 
         # ── Breakout conditions (bidirectional) ──────────────────────────────
         break_up = close > rolling_high * (1 + mom)
@@ -297,6 +360,13 @@ class MomentumBreakoutStrategy(Strategy):
                 "volume_ratio": float(volume / avg_volume) if avg_volume > 0 else 0.0,
                 "atr_pct": float(atr_pct),
                 "lookback": lookback,
+                # D141 — forensic record of which live thresholds fired.
+                "momentum_threshold_dyn": mom,
+                "volume_multiplier_dyn": vol_mult,
+                "atr_min_dyn": atr_min,
+                "atr_max_dyn": atr_max,
+                "median_atr_pct": median_atr_pct,
+                "volume_z_recent": vol_z,
                 **sizing_md,
             },
         )

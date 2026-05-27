@@ -1557,10 +1557,78 @@ class TradingLoop:
                                 )
                         except Exception:  # noqa: BLE001
                             pass
-                    for strategy in strategies.values():
+                    # D140 + D141 — pull the live regime snapshot (label,
+                    # continuous feature components, smoothed market_state_score)
+                    # so it can be (a) injected into each strategy's config
+                    # for ``dynamic_thresholds`` formulas to consume, and
+                    # (b) passed into ``apply_regime_weighting`` below for
+                    # the per-symbol confidence weighting. Both come from
+                    # the dashboard snapshot written by the previous
+                    # iteration's ``compute_regime_state_async``. Missing
+                    # snapshot → empty inputs → passthrough.
+                    live_regime_label = ""
+                    live_regime_features: dict[str, Any] = {}
+                    _live_mss: Any = 0
+                    try:
+                        if bus is not None:
+                            snap = await bus.get_state("dashboard.snapshot", None)
+                            if isinstance(snap, dict):
+                                regime_block = snap.get("regime")
+                                if isinstance(regime_block, dict):
+                                    live_regime_label = str(
+                                        regime_block.get("regime_label") or ""
+                                    ).strip().lower()
+                                    components = regime_block.get("components")
+                                    if isinstance(components, dict):
+                                        for k, v in components.items():
+                                            try:
+                                                live_regime_features[str(k)] = float(v)
+                                            except (TypeError, ValueError):
+                                                continue
+                            _val = await bus.get_state("smoothed_market_state_score", None)
+                            if _val is not None:
+                                _live_mss = _val
+                    except Exception:  # noqa: BLE001 — never break the loop on a stale snapshot
+                        live_regime_label = ""
+                        live_regime_features = {}
+                        _live_mss = 0
+                    regime_min_conf = float(
+                        risk_cfg.get("min_signal_confidence", 0.50) or 0.50
+                    )
+
+                    # D141 Phase 3 — pull each strategy's recent net P&L
+                    # so dynamic sizing can shrink bleeding strategies and
+                    # grow winners. Cached 5 min so we don't hit the DB
+                    # every iteration; falls back to {} on any failure.
+                    _strategy_pnl: dict[str, dict[str, Any]] = {}
+                    try:
+                        from system.strategy_pnl_health import fetch_strategy_pnl_recent
+
+                        _strategy_pnl = await fetch_strategy_pnl_recent(session_factory)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("trading_loop | strategy pnl fetch failed: {}", exc)
+                        _strategy_pnl = {}
+
+                    for name, strategy in strategies.items():
                         try:
                             if isinstance(getattr(strategy, "config", None), dict):
                                 strategy.config["_active_profile_mode"] = mode_raw
+                                strategy.config["_market_state_score"] = _live_mss
+                                strategy.config["_regime_label"] = live_regime_label
+                                strategy.config["_regime_features"] = (
+                                    dict(live_regime_features) if live_regime_features else {}
+                                )
+                                # Per-strategy live P&L health.
+                                _stats = _strategy_pnl.get(name, {})
+                                strategy.config["_strategy_pnl_recent"] = str(
+                                    _stats.get("net_pnl", "0")
+                                )
+                                strategy.config["_strategy_fills_recent"] = int(
+                                    _stats.get("fills", 0) or 0
+                                )
+                                # ``total_equity`` is the loop's live NAV
+                                # computed above via ``live_portfolio_value``.
+                                strategy.config["_nav"] = str(total_equity or 0)
                         except Exception:  # noqa: BLE001
                             pass
 
@@ -1593,28 +1661,6 @@ class TradingLoop:
                     demand_trend = "flat"
                     demand_confidence = 0.0
                     demand_components: dict[str, Any] = {}
-
-                    # D140 — pull the most recently published regime label so
-                    # ``apply_regime_weighting`` (called per-symbol below) can
-                    # fade strategies that are mismatched with the live regime
-                    # (e.g. mean_reversion in trend_up). Updated once per
-                    # iteration; falls back to "" (no weighting) if the
-                    # dashboard snapshot is unavailable.
-                    live_regime_label = ""
-                    try:
-                        if bus is not None:
-                            snap = await bus.get_state("dashboard.snapshot", None)
-                            if isinstance(snap, dict):
-                                regime_block = snap.get("regime")
-                                if isinstance(regime_block, dict):
-                                    live_regime_label = str(
-                                        regime_block.get("regime_label") or ""
-                                    ).strip().lower()
-                    except Exception:  # noqa: BLE001 — never break the loop on a stale snapshot
-                        live_regime_label = ""
-                    regime_min_conf = float(
-                        risk_cfg.get("min_signal_confidence", 0.50) or 0.50
-                    )
 
                     if use_legacy:
                         demand_ctx = demand_engine.compute(
@@ -1688,11 +1734,13 @@ class TradingLoop:
                                 loop_iteration=self.iterations,
                             )
 
-                            # D140 — regime-aware confidence weighting.
+                            # D140 — regime-aware confidence weighting,
+                            # computed live from market-feature components.
                             raw_candidates = apply_regime_weighting(
                                 raw_candidates,
                                 symbol=symbol,
                                 regime_label=live_regime_label,
+                                market_features=live_regime_features or None,
                                 min_confidence=regime_min_conf,
                                 sc_rows=sc_log_rows_legacy,
                                 loop_iteration=self.iterations,
@@ -1963,11 +2011,13 @@ class TradingLoop:
                                 loop_iteration=self.iterations,
                             )
 
-                            # D140 — regime-aware confidence weighting.
+                            # D140 — regime-aware confidence weighting,
+                            # computed live from market-feature components.
                             raw_candidates = apply_regime_weighting(
                                 raw_candidates,
                                 symbol=symbol,
                                 regime_label=live_regime_label,
+                                market_features=live_regime_features or None,
                                 min_confidence=regime_min_conf,
                                 sc_rows=sc_log_rows,
                                 loop_iteration=self.iterations,

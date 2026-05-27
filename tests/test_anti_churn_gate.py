@@ -504,3 +504,68 @@ def test_signal_engine_record_fill_starts_cooldown():
     )
     out = eng.process(raw, portfolio_value=D("1000000"))
     assert out is None, "post-fill cooldown should block re-entry"
+
+
+# ── D141 Phase 4 — dynamic cooldown ───────────────────────────────────────
+
+
+def test_cooldown_shorter_in_clear_regime():
+    """A strong (high |market_state_score|) regime → shorter post-fill
+    cooldown, so we don't miss the trend."""
+    g = _gate(dedup_enabled=False, contradiction_enabled=False)
+    n = _now()
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n)
+    # 60s after fill, mixed regime (score=0): static 120s cooldown → blocked.
+    d_mixed = g.check(
+        strategy="volatility_regime", symbol="AAPL", side="buy",
+        confidence=0.7, suggested_price=297.0, broker="ibkr",
+        profile_mode="hunter", now=n + timedelta(seconds=60),
+        market_state_score=0.0, recent_fill_rate_per_min=0.0,
+    )
+    assert not d_mixed.allow
+    # Same time, clear regime (|score|=1.5): formula subtracts up to
+    # 60s × 1.5 = 90s from the 120 base → 30s effective cooldown → ALLOWED.
+    d_clear = g.check(
+        strategy="volatility_regime", symbol="AAPL", side="buy",
+        confidence=0.7, suggested_price=297.0, broker="ibkr",
+        profile_mode="hunter", now=n + timedelta(seconds=60),
+        market_state_score=1.5, recent_fill_rate_per_min=0.0,
+    )
+    assert d_clear.allow
+
+
+def test_cooldown_longer_when_symbol_is_churning():
+    """High recent-fill-rate on a (broker, symbol) → extend cooldown
+    to dampen overtrading."""
+    g = _gate(dedup_enabled=False, contradiction_enabled=False)
+    n = _now()
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n)
+    # 130s after fill: static 120 → allowed; dynamic with high fill rate
+    # → +30 × 1.0 fill/min = 150s effective → still blocked.
+    d_churn = g.check(
+        strategy="volatility_regime", symbol="AAPL", side="buy",
+        confidence=0.7, suggested_price=297.0, broker="ibkr",
+        profile_mode="hunter", now=n + timedelta(seconds=130),
+        market_state_score=0.0, recent_fill_rate_per_min=1.0,
+    )
+    assert not d_churn.allow
+    assert d_churn.details["cooldown_sec"] > 120.0
+
+
+def test_cooldown_dynamic_clamped_to_yaml_bounds():
+    """Even with extreme inputs the cooldown stays within YAML
+    [min_sec, max_sec] — the operator's hard safety band."""
+    g = _gate(dedup_enabled=False, contradiction_enabled=False)
+    n = _now()
+    g.record_fill(broker="ibkr", symbol="AAPL", side="buy", now=n)
+    # Wildly clear regime would push below the floor; the clamp catches it.
+    d = g.check(
+        strategy="volatility_regime", symbol="AAPL", side="buy",
+        confidence=0.7, suggested_price=297.0, broker="ibkr",
+        profile_mode="hunter", now=n + timedelta(seconds=10),
+        market_state_score=10.0, recent_fill_rate_per_min=0.0,
+    )
+    # If clamped to min_sec=30, 10s elapsed → still blocked, but
+    # cooldown_sec should be at the floor (no negative).
+    assert d.details["cooldown_sec"] >= 30.0
+    assert d.details["cooldown_sec"] <= 1800.0

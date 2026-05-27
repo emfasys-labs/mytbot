@@ -9,7 +9,10 @@ from typing import Any
 
 from ai.regime import filter_by_allowed_strategies
 from signals.engine import RawSignal
-from system.adaptive_regime_weights import strategy_regime_multiplier
+from system.adaptive_regime_weights import (
+    compute_multiplier as compute_regime_multiplier,
+    strategy_regime_multiplier,
+)
 from system.strategy_candidate_log import row as strategy_candidate_row
 
 
@@ -50,39 +53,51 @@ def apply_regime_weighting(
     raw_candidates: list[RawSignal],
     *,
     symbol: str,
-    regime_label: str | None,
+    regime_label: str | None = None,
+    market_features: dict[str, Any] | None = None,
     min_confidence: float,
     sc_rows: list[dict[str, Any]],
     loop_iteration: int | None,
 ) -> list[RawSignal]:
-    """Scale each candidate's confidence by ``strategy_regime_multiplier`` for the
-    live regime, and drop any whose scaled confidence falls below
-    ``min_confidence``.
+    """Scale each candidate's confidence by a multiplier **computed live**
+    from continuous market features, and drop any whose scaled confidence
+    falls below ``min_confidence``.
 
-    Why this exists (D140): the multiplier table in
-    ``system/adaptive_regime_weights.py`` knows mean-reversion bleeds in
-    ``trend_up`` and momentum bleeds in ``range`` — but until now that
-    knowledge was only consulted by the optional ``opportunity_engine``,
-    NEVER by the main per-symbol candidate collection. Result: every
-    strategy fired at full confidence in every regime, and the
-    2026-05-26 audit traced ~$8K of unrealised loss to mean-reversion
-    shorting in an undeclared trend.
+    The multiplier is a smooth function of feature intensity, not a
+    discrete table lookup — mean-reversion's fade in a weak trend is
+    mild and in a strong trend it's heavy, automatically, with no
+    threshold flip. See
+    :func:`system.adaptive_regime_weights.compute_multiplier`.
+
+    Preferred input: ``market_features`` (dict of live
+    ``RegimeState.components`` values). Falls back to the legacy
+    label-based path via ``regime_label`` when features aren't
+    available — useful for older callers / tests but loses the
+    continuous-intensity benefit.
 
     Behaviour:
-      * Missing or empty regime label → no change (returns input unchanged).
-      * Multiplier ≥ 1 → confidence boosted (capped at 1.0), signal always
-        passes. Stamped with ``regime_mult`` in metadata so downstream
-        sizing sees the boost.
-      * Multiplier < 1 → confidence faded. If the result drops below
-        ``min_confidence`` the signal is dropped with a
-        ``filtered_regime_weight`` row in the candidate log.
+      * No features AND no label → passthrough.
+      * Multiplier exactly 1.0 → passthrough.
+      * Multiplier ≠ 1.0 → confidence scaled, metadata stamped; signals
+        whose scaled confidence falls below ``min_confidence`` are
+        dropped with a ``filtered_regime_weight`` row in the candidate
+        log.
     """
-    label = str(regime_label or "").strip().lower()
-    if not label or not raw_candidates:
+    if not raw_candidates:
         return raw_candidates
+    label = str(regime_label or "").strip().lower()
+    feats = market_features if isinstance(market_features, dict) else None
+    if feats is None and not label:
+        return raw_candidates
+
     kept: list[RawSignal] = []
     for r in raw_candidates:
-        mult = strategy_regime_multiplier(str(r.strategy), label)
+        # Live-feature path first; only fall back to label-based when
+        # no features supplied.
+        if feats is not None:
+            mult = compute_regime_multiplier(str(r.strategy), feats)
+        else:
+            mult = strategy_regime_multiplier(str(r.strategy), label)
         try:
             mult_f = float(mult)
         except (TypeError, ValueError):
@@ -94,7 +109,8 @@ def apply_regime_weighting(
         scaled = max(0.0, min(1.0, original * mult_f))
         md = dict(getattr(r, "metadata", None) or {})
         md["regime_mult"] = round(mult_f, 4)
-        md["regime_label"] = label
+        md["regime_label"] = label or None
+        md["regime_features_present"] = list(feats.keys()) if feats else []
         md["confidence_pre_regime"] = round(original, 6)
         r.metadata = md
         if scaled < float(min_confidence):
@@ -105,11 +121,18 @@ def apply_regime_weighting(
                     side=str(r.side) if r.side else None,
                     confidence=Decimal(str(round(scaled, 6))),
                     status="filtered_regime_weight",
-                    reason=f"regime_fade:{label}:mult={mult_f:.2f}",
+                    reason=(
+                        f"regime_fade:features:mult={mult_f:.2f}"
+                        if feats is not None
+                        else f"regime_fade:{label}:mult={mult_f:.2f}"
+                    ),
                     loop_iteration=loop_iteration,
                     metadata={
-                        "regime_label": label,
+                        "regime_label": label or None,
                         "regime_mult": round(mult_f, 4),
+                        "regime_features_present": (
+                            list(feats.keys()) if feats else []
+                        ),
                         "confidence_pre_regime": round(original, 6),
                         "confidence_post_regime": round(scaled, 6),
                         "min_confidence": float(min_confidence),

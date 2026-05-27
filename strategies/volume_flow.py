@@ -16,19 +16,39 @@ import pandas as pd
 
 from signals.engine import RawSignal
 from strategies.base import Strategy
+from system.dynamic_thresholds import (
+    base_target_notional as dyn_base_notional,
+    min_bar_return_threshold,
+    volume_zscore_exhaust_threshold,
+    volume_zscore_open_threshold,
+)
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
 
 
 class VolumeFlowStrategy(Strategy):
     name = "volume_flow"
 
     def _compute_target_notional(self, *, confidence: float, flow_strength: float) -> dict[str, str]:
+        # D141 — base notional resolved live from NAV + strategy P&L
+        # health + regime multiplier. Confidence + flow_strength
+        # scaling still applies on top.
         cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "4000")))
+            static_base = Decimal(str(cfg.get("base_target_notional", "4000")))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("4000")
-        if base_notional <= 0:
-            base_notional = Decimal("4000")
+            static_base = Decimal("4000")
+        if static_base <= 0:
+            static_base = Decimal("4000")
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=cfg.get("_nav") or 0,
+            strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
+            strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
 
         conf = max(0.0, min(1.0, float(confidence)))
         conf_scale = Decimal(str(0.80 + 0.50 * conf))
@@ -39,7 +59,8 @@ class VolumeFlowStrategy(Strategy):
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_flow_scale": str(flow_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "volume_flow_confidence",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "volume_flow_confidence_dyn",
         }
 
     def no_setup_snapshot(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
@@ -55,9 +76,27 @@ class VolumeFlowStrategy(Strategy):
         out["rows_available"] = n
         cfg = self.effective_config()
         lookback = int(cfg.get("volume_lookback", 20))
-        z_open = float(cfg.get("zscore_open_threshold", 1.8))
-        z_exhaust = float(cfg.get("zscore_exhaust_threshold", 3.4))
-        min_ret = float(cfg.get("min_bar_return", 0.0015))
+        # D141 — diagnostics quote the LIVE thresholds (formula output),
+        # so the candidate log shows what the gate actually compared.
+        prev_for_atr = features.iloc[:-1]
+        try:
+            atr_close = float(prev_for_atr["close"].iloc[-1])
+            atr_range = float((prev_for_atr["high"] - prev_for_atr["low"]).tail(lookback).mean())
+            atr_pct_diag = atr_range / atr_close if atr_close > 0 else 0.0
+        except Exception:  # noqa: BLE001
+            atr_pct_diag = 0.0
+        z_open = float(volume_zscore_open_threshold(
+            atr_pct=atr_pct_diag,
+            static_threshold=cfg.get("zscore_open_threshold", 1.8),
+        ))
+        z_exhaust = float(volume_zscore_exhaust_threshold(
+            atr_pct=atr_pct_diag,
+            static_threshold=cfg.get("zscore_exhaust_threshold", 3.4),
+        ))
+        min_ret = float(min_bar_return_threshold(
+            atr_pct=atr_pct_diag,
+            static_threshold=cfg.get("min_bar_return", 0.0015),
+        ))
         out["zscore_open_threshold"] = z_open
         out["zscore_exhaust_threshold"] = z_exhaust
         out["min_bar_return"] = min_ret
@@ -125,9 +164,9 @@ class VolumeFlowStrategy(Strategy):
 
         cfg = self.effective_config()
         lookback = int(cfg.get("volume_lookback", 20))
-        z_open = float(cfg.get("zscore_open_threshold", 1.8))
-        z_exhaust = float(cfg.get("zscore_exhaust_threshold", 3.4))
-        min_ret = float(cfg.get("min_bar_return", 0.0015))
+        static_z_open = float(cfg.get("zscore_open_threshold", 1.8))
+        static_z_exhaust = float(cfg.get("zscore_exhaust_threshold", 3.4))
+        static_min_ret = float(cfg.get("min_bar_return", 0.0015))
 
         latest = features.iloc[-1]
         prev = features.iloc[:-1]
@@ -147,6 +186,28 @@ class VolumeFlowStrategy(Strategy):
             return None
         bar_ret = (latest_close - prev_close) / prev_close
         z = (float(latest["volume"]) - mean_v) / std_v
+
+        # D141 — replace static thresholds with live-formula values.
+        # ATR drives both the z-score thresholds (wild market → require
+        # bigger spike) and the min-bar-return floor.
+        try:
+            atr_close = float(prev["close"].iloc[-1])
+            atr_range = float((prev["high"] - prev["low"]).tail(lookback).mean())
+            atr_pct_now = atr_range / atr_close if atr_close > 0 else 0.0
+        except Exception:  # noqa: BLE001
+            atr_pct_now = 0.0
+        z_open = float(volume_zscore_open_threshold(
+            atr_pct=atr_pct_now,
+            static_threshold=static_z_open,
+        ))
+        z_exhaust = float(volume_zscore_exhaust_threshold(
+            atr_pct=atr_pct_now,
+            static_threshold=static_z_exhaust,
+        ))
+        min_ret = float(min_bar_return_threshold(
+            atr_pct=atr_pct_now,
+            static_threshold=static_min_ret,
+        ))
 
         ema_fast = float(features["close"].ewm(span=8, adjust=False).mean().iloc[-1])
         ema_slow = float(features["close"].ewm(span=21, adjust=False).mean().iloc[-1])

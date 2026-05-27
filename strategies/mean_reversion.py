@@ -14,6 +14,12 @@ import pandas as pd
 
 from signals.engine import RawSignal
 from strategies.base import Strategy
+from system.dynamic_thresholds import (
+    base_target_notional as dyn_base_notional,
+    bollinger_band_epsilon,
+    rsi_thresholds,
+)
+from system.adaptive_regime_weights import compute_multiplier as compute_regime_multiplier
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +33,36 @@ class MeanReversionStrategy(Strategy):
     name = "mean_reversion"
 
     def _compute_target_notional(self, *, confidence: float, atr_pct: float) -> dict[str, str]:
-        """D032: emit per-signal sizing intent for coordinator consumption."""
+        """D141 — base notional is now derived live from NAV, recent
+        per-strategy P&L health, and the live regime multiplier. The
+        confidence + volatility scalings still apply on top. Static
+        ``base_target_notional`` is used only as a fallback when the
+        ``dynamic_thresholds`` YAML block is disabled or NAV is
+        unavailable."""
         cfg = self.effective_config()
         try:
-            base_notional = Decimal(str(cfg.get("base_target_notional", "5000")))
+            static_base = Decimal(str(cfg.get("base_target_notional", "5000")))
         except (InvalidOperation, TypeError, ValueError):
-            base_notional = Decimal("5000")
-        if base_notional <= 0:
-            base_notional = Decimal("5000")
+            static_base = Decimal("5000")
+        if static_base <= 0:
+            static_base = Decimal("5000")
+
+        # Pull live inputs that the trading loop pushes into config each
+        # iteration. If they aren't there we degrade gracefully to the
+        # static base (legacy behaviour).
+        nav_raw = cfg.get("_nav") or 0
+        pnl_raw = cfg.get("_strategy_pnl_recent") or 0
+        fills_raw = cfg.get("_strategy_fills_recent") or 0
+        live_features = cfg.get("_regime_features") or {}
+        regime_mult = compute_regime_multiplier(self.name, live_features)
+        dyn_base = dyn_base_notional(
+            nav=nav_raw,
+            strategy_net_pnl_recent=pnl_raw,
+            strategy_total_fills_recent=fills_raw,
+            regime_multiplier=regime_mult,
+            static_notional=static_base,
+        )
+        base_notional = dyn_base if dyn_base > 0 else static_base
 
         conf = max(0.0, min(1.0, float(confidence)))
         conf_scale = Decimal(str(0.75 + 0.5 * conf))  # 0.75x .. 1.25x
@@ -59,7 +87,8 @@ class MeanReversionStrategy(Strategy):
             "sizing_base_notional": str(base_notional.quantize(Decimal("0.01"))),
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_volatility_scale": str(vol_scale.quantize(Decimal("0.0001"))),
-            "sizing_intent_source": "strategy_confidence_volatility",
+            "sizing_regime_mult": str(regime_mult),
+            "sizing_intent_source": "strategy_confidence_volatility_dyn",
         }
 
     def generate_signal(self, symbol: str, features: pd.DataFrame) -> Optional[RawSignal]:
@@ -85,9 +114,25 @@ class MeanReversionStrategy(Strategy):
         if rsi is None or bb_lower is None or bb_upper is None:
             return None
 
-        rsi_buy = float(cfg.get("rsi_buy_threshold", 30.0))
-        rsi_sell = float(cfg.get("rsi_sell_threshold", 70.0))
-        band_epsilon = float(cfg.get("band_epsilon", 0.0))
+        # D141 — compute thresholds LIVE from the symbol's own ATR and the
+        # market-wide state score. Falls back to the legacy YAML literals
+        # when dynamic_thresholds is disabled in YAML.
+        atr_for_rsi = self._calculate_atr(df, lookback)
+        atr_pct_now = (atr_for_rsi / close) if close > 0 else 0.0
+        market_state_score = cfg.get("_market_state_score", 0)
+        rsi_buy_d, rsi_sell_d = rsi_thresholds(
+            atr_pct=atr_pct_now,
+            market_state_score=market_state_score,
+            static_buy_threshold=cfg.get("rsi_buy_threshold", 30.0),
+            static_sell_threshold=cfg.get("rsi_sell_threshold", 70.0),
+        )
+        band_epsilon_d = bollinger_band_epsilon(
+            atr_pct=atr_pct_now,
+            static_epsilon=cfg.get("band_epsilon", 0.0),
+        )
+        rsi_buy = float(rsi_buy_d)
+        rsi_sell = float(rsi_sell_d)
+        band_epsilon = float(band_epsilon_d)
 
         buy_setup = rsi <= rsi_buy and close <= bb_lower * (1.0 + band_epsilon)
         sell_setup = rsi >= rsi_sell and close >= bb_upper * (1.0 - band_epsilon)
@@ -98,8 +143,9 @@ class MeanReversionStrategy(Strategy):
         center = (bb_lower + bb_upper) / 2.0
         stretch = abs(close - center) / center if center > 0 else 0.0
         confidence = min(0.55 + stretch * 5.0, 0.95)
-        atr = self._calculate_atr(df, lookback)
-        atr_pct = float(atr / close) if close > 0 else 0.0
+        # ATR already computed above for the dynamic threshold step;
+        # reuse it (avoid double-compute on every signal).
+        atr_pct = atr_pct_now
 
         sizing_md = self._compute_target_notional(confidence=float(confidence), atr_pct=float(atr_pct))
 
@@ -117,6 +163,13 @@ class MeanReversionStrategy(Strategy):
                 "bb_upper": bb_upper,
                 "stretch": stretch,
                 "atr_pct": atr_pct,
+                # D141 — record the live-computed thresholds so the
+                # candidate log can show exactly which RSI / band-prox
+                # values fired the setup at this market state.
+                "rsi_buy_threshold_dyn": rsi_buy,
+                "rsi_sell_threshold_dyn": rsi_sell,
+                "band_epsilon_dyn": band_epsilon,
+                "market_state_score_used": float(market_state_score or 0),
                 **sizing_md,
             },
         )

@@ -61,6 +61,161 @@ backtest:
   walk_forward_test_bars: 63
   walk_forward_step_bars: 63
 
+# ── D140 — Dynamic regime × strategy multipliers ──────────────────────────
+# Signal-confidence multipliers are COMPUTED LIVE from continuous market
+# features, not looked up from a stored table. The formula in
+# ``system/adaptive_regime_weights.py`` is:
+#
+#     score      = Σ over features:  affinity_sign * feature_value
+#     multiplier = 1 + sensitivity * tanh(score)
+#     clamped to [bounds.min, bounds.max]
+#
+# Where:
+#   * feature_value comes from the live ``RegimeState.components`` —
+#     trend_strength, chaos_penalty, volatility_structure, etc. These
+#     update every regime tick, so the multiplier varies continuously
+#     with the market: mean-reversion's fade in a weak trend is mild;
+#     in a strong trend it's heavy — without any threshold flip.
+#   * affinity_sign is a categorical descriptor of each strategy's
+#     nature (aligned / opposed / neutral per feature), defined in code.
+#     These are design statements about each strategy's edge, not
+#     tuning constants.
+#
+# Operator knobs (this block):
+#   * sensitivity   — how strongly the live feature pushes the multiplier
+#                     away from 1.0. With tanh-bounding, the multiplier
+#                     stays in (1 - sensitivity, 1 + sensitivity).
+#   * bounds        — absolute safety floor / ceiling, applied after
+#                     the formula. A bad strategy affinity row can
+#                     never silence or 10× a strategy.
+#
+# Resolution policy (no hardcoded fallbacks in code):
+#   * Block absent / disabled / sensitivity missing / bounds missing
+#     or invalid → multiplier = 1.0 for every input (safe no-op).
+regime_weights:
+  enabled: true
+  sensitivity: 0.50          # max deviation from neutral at full alignment
+  bounds:
+    min: 0.50                # absolute multiplier floor (safety clamp)
+    max: 1.50                # absolute multiplier ceiling (safety clamp)
+
+# ── D141 — Dynamic strategy thresholds ────────────────────────────────────
+# Every Category-C tuning constant used to be a fixed YAML value (e.g.
+# ``rsi_buy_threshold: 47``). With this block enabled, strategies pull
+# their thresholds via ``system/dynamic_thresholds.py`` instead — and
+# the threshold becomes a formula of live market features (ATR%,
+# market_state_score, volume z-score, …) plus recent strategy P&L health.
+#
+# Values below are **safety coefficients** for those formulas, NOT the
+# thresholds themselves. They limit how far live features can move a
+# threshold; the formula handles the rest.
+#
+# When ``enabled: false``, every strategy falls back to its legacy YAML
+# value — no behaviour change, complete opt-out.
+dynamic_thresholds:
+  enabled: true
+
+  # mean_reversion: RSI buy/sell thresholds widen when the market is
+  # volatile or trending (don't fade a runaway move; don't catch a
+  # falling knife). Symmetric around RSI = 50 by definition.
+  rsi:
+    base_distance: 3         # baseline distance from 50 in calm range
+    vol_weight: 250          # multiplied by atr_pct (so 0.02 ATR → +5 distance)
+    trend_weight: 8          # multiplied by |market_state_score| (so 1.0 score → +8 distance)
+    min_distance: 2          # tightest band (buy=48, sell=52)
+    max_distance: 30         # widest band (buy=20, sell=80)
+
+  # Bollinger band proximity = atr_multiple × atr_pct. Tightens when
+  # vol is low (need to be closer to the band), loosens when vol is high.
+  bollinger_epsilon:
+    atr_multiple: 0.5        # half an ATR away from the band counts as "at the band"
+    min_epsilon: 0.001       # 10 bps floor
+    max_epsilon: 0.05        # 5% ceiling
+
+  # momentum_breakout: threshold above rolling high to confirm. Scales
+  # with the symbol's own ATR — same "vol units" required regardless of
+  # whether it's BIL or BTC.
+  momentum_breakout:
+    atr_multiple: 0.2        # break must exceed 0.2 × ATR to count
+    min_threshold: 0.0005    # 5 bps absolute floor
+    max_threshold: 0.05      # 5% ceiling
+
+  # volume_flow / momentum: required multiple of rolling-mean volume.
+  # base 1.0 = "above average"; the live z-score variance pushes the
+  # bar higher when the symbol's volume itself is wild.
+  volume_confirmation:
+    base_multiplier: 1.0
+    z_weight: 0.4            # +0.4 × |recent vol z-score|
+    min_multiplier: 1.0
+    max_multiplier: 5.0
+
+  # Per-strategy base sizing: replaces fixed ``base_target_notional``
+  # in each strategy block. nav × base_nav_pct is the neutral size;
+  # recent P&L per fill scales it (bleeding strategies shrink, winning
+  # strategies grow) and the regime multiplier scales it again.
+  sizing:
+    base_nav_pct: 0.020      # neutral: 2% of NAV per trade
+    pnl_health_weight: 0.5   # max ±50% adjustment based on recent P&L
+    min_nav_pct: 0.002       # never below 0.2% NAV
+    max_nav_pct: 0.05        # never above 5% NAV (matches single_name cap)
+
+  # volume_flow: z-score open / exhaustion thresholds widen in vol.
+  volume_zscore:
+    open_base: 0.6           # baseline z-score required for continuation
+    open_atr_weight: 30      # +30 × atr_pct
+    open_min: 0.3
+    open_max: 3.0
+    exhaust_base: 3.0
+    exhaust_atr_weight: 40
+    exhaust_min: 2.0
+    exhaust_max: 8.0
+
+  # Minimum bar return — expressed as a fraction of the symbol's ATR.
+  min_bar_return:
+    atr_multiple: 0.1        # 10% of ATR
+    min_threshold: 0.0001
+    max_threshold: 0.05
+
+  # Acceptable ATR band — multiples of the symbol's median realised ATR.
+  atr_band:
+    lower_multiple: 0.25     # 0.25 × median ATR
+    upper_multiple: 4.0      # 4 × median ATR
+    abs_min: 0.0001          # absolute hard floor
+    abs_max: 1.0             # absolute hard ceiling
+
+  # Event-driven news shock threshold — widens when news scores are noisy.
+  event_shock:
+    base: 0.3
+    dispersion_weight: 1.5
+    min_threshold: 0.20
+    max_threshold: 0.90
+
+  # Pairs-trading z-score open threshold — tightens with cointegration health.
+  pairs_zscore:
+    base: 2.0                # neutral entry z
+    health_weight: 2.0       # max ±1.0 deviation at strong/weak health
+    min_threshold: 1.0
+    max_threshold: 4.0
+
+  # Regime-rotation score trigger — lowers in clear regimes.
+  regime_rotation:
+    base: 0.45
+    clarity_weight: 0.1
+    min_threshold: 0.20
+    max_threshold: 0.70
+
+  # Anti-churn cooldown — base per-mode plus regime and fill-rate adjustments.
+  anti_churn_cooldown:
+    base_by_mode:
+      hunter: 120
+      trader: 180
+      defender: 600
+    base_default: 180
+    clarity_weight: 60       # subtract up to 60s × |score| (clearer regimes faster)
+    fill_rate_weight: 30     # add 30s per fill/min
+    min_sec: 30
+    max_sec: 1800
+
 strategies:
   # Phase 5: per-strategy ``mode_calibration`` blocks removed. Mode is now a
   # derived indicator (see ``system/adaptive_mode.py``) and hunter is the

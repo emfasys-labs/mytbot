@@ -50,7 +50,7 @@ def test_momentum_breakout_generates_buy_on_breakout():
     assert sig.side == "buy"
     assert sig.metadata["breakout_direction"] == "up"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
-    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility"
+    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility_dyn"
 
 
 def test_momentum_breakout_generates_sell_on_downside_breakout():
@@ -66,7 +66,7 @@ def test_momentum_breakout_generates_sell_on_downside_breakout():
     assert sig.side == "sell"
     assert sig.metadata["breakout_direction"] == "down"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
-    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility"
+    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility_dyn"
 
 
 def test_momentum_breakout_silent_inside_range():
@@ -118,7 +118,7 @@ def test_mean_reversion_generates_buy_when_oversold():
     assert sig is not None
     assert sig.side == "buy"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
-    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility"
+    assert sig.metadata["sizing_intent_source"] == "strategy_confidence_volatility_dyn"
 
 
 def test_momentum_target_notional_scales_with_atr() -> None:
@@ -168,11 +168,17 @@ def test_volume_flow_generates_continuation_signal() -> None:
     assert Decimal(str(sig.metadata["target_notional"])) > 0
 
 
-def test_volume_flow_hunter_mode_relaxes_open_gate() -> None:
+def test_volume_flow_hunter_mode_overrides_sizing() -> None:
+    """D141: thresholds are now formula-driven so mode_calibration's
+    threshold overrides are inert. mode_calibration still controls
+    sizing (base_target_notional) which the strategy reads via
+    ``effective_config()``. This test confirms the sizing override still
+    fires under hunter mode."""
     df = _base_df()
+    # Force a clean continuation signal that fires under either mode.
     df.iloc[-2, df.columns.get_loc("close")] = 100.0
-    df.iloc[-1, df.columns.get_loc("close")] = 100.12
-    df.iloc[-1, df.columns.get_loc("volume")] = 1_040_000.0
+    df.iloc[-1, df.columns.get_loc("close")] = 103.0
+    df.iloc[-1, df.columns.get_loc("volume")] = 8_000_000.0
     strat = VolumeFlowStrategy(
         {
             "enabled": True,
@@ -181,18 +187,20 @@ def test_volume_flow_hunter_mode_relaxes_open_gate() -> None:
             "base_target_notional": 4000,
             "mode_calibration": {
                 "hunter": {
-                    "zscore_open_threshold": 0.5,
-                    "min_bar_return": 0.0005,
                     "base_target_notional": 5000,
                 }
             },
         }
     )
-    assert strat.generate_signal("SPY", df) is None
+    # Default (trader) mode → 4000 sizing.
+    sig_default = strat.generate_signal("SPY", df)
+    assert sig_default is not None
+    assert Decimal(str(sig_default.metadata["sizing_base_notional"])) == Decimal("4000.00")
+    # Hunter override → 5000 sizing.
     strat.config["_active_profile_mode"] = "hunter"
-    sig = strat.generate_signal("SPY", df)
-    assert sig is not None
-    assert Decimal(str(sig.metadata["sizing_base_notional"])) == Decimal("5000.00")
+    sig_hunter = strat.generate_signal("SPY", df)
+    assert sig_hunter is not None
+    assert Decimal(str(sig_hunter.metadata["sizing_base_notional"])) == Decimal("5000.00")
 
 
 def test_event_driven_news_generates_on_shock() -> None:
@@ -228,7 +236,7 @@ def test_pairs_trading_generates_signal_on_spread_dislocation() -> None:
     assert "pair_spread_z" in sig.metadata
     assert abs(float(sig.metadata["pair_spread_z"])) >= 1.0
     assert "pair_beta" in sig.metadata
-    assert sig.metadata.get("sizing_intent_source") == "pairs_spread_zscore"
+    assert sig.metadata.get("sizing_intent_source") == "pairs_spread_zscore_dyn"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
 
 
@@ -339,7 +347,7 @@ def test_regime_rotation_generates_proxy_signal() -> None:
     assert sig is not None
     assert sig.side == "buy"
     assert sig.metadata.get("regime_bucket") == "risk_on_proxy"
-    assert sig.metadata.get("sizing_intent_source") == "regime_rotation"
+    assert sig.metadata.get("sizing_intent_source") == "regime_rotation_dyn"
     assert Decimal(str(sig.metadata["target_notional"])) > 0
 
 
