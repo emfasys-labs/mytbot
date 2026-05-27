@@ -257,6 +257,33 @@ def test_sizing_scales_with_regime_multiplier(yaml_enabled):
     assert out_boost > out_fade
 
 
+def test_sizing_composes_with_strategy_quarantine_multiplier(yaml_enabled):
+    normal = base_target_notional(
+        nav=Decimal("1000000"),
+        strategy_net_pnl_recent=Decimal("0"),
+        strategy_total_fills_recent=Decimal("20"),
+        regime_multiplier=Decimal("1.2"),
+        quarantine_multiplier=Decimal("1"),
+    )
+    reduced = base_target_notional(
+        nav=Decimal("1000000"),
+        strategy_net_pnl_recent=Decimal("0"),
+        strategy_total_fills_recent=Decimal("20"),
+        regime_multiplier=Decimal("1.2"),
+        quarantine_multiplier=Decimal("0.5"),
+    )
+    blocked = base_target_notional(
+        nav=Decimal("1000000"),
+        strategy_net_pnl_recent=Decimal("0"),
+        strategy_total_fills_recent=Decimal("20"),
+        regime_multiplier=Decimal("1.2"),
+        quarantine_multiplier=Decimal("0"),
+    )
+
+    assert reduced < normal
+    assert blocked == Decimal("0")
+
+
 def test_sizing_clamped_to_nav_pct_bounds(yaml_enabled):
     """No matter the inputs, sizing must stay inside [min_nav_pct, max_nav_pct]
     of NAV — the operator's hard safety band."""

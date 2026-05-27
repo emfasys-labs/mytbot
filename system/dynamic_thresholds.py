@@ -518,6 +518,7 @@ def base_target_notional(
     strategy_net_pnl_recent: Any = 0,
     strategy_total_fills_recent: Any = 0,
     regime_multiplier: Any = 1,
+    quarantine_multiplier: Any = 1,
     static_notional: Any | None = None,
 ) -> Decimal:
     """The per-trade target notional, **derived from live state**:
@@ -527,6 +528,7 @@ def base_target_notional(
         health" multiplier — bleeding strategies size down automatically)
       * scales with the regime multiplier already computed by
         :mod:`system.adaptive_regime_weights`
+      * composes with the rolling strategy-quarantine multiplier
 
     Static config used 20_000 / 25_000 — the same dollar size on every
     trade regardless of account size or strategy performance. That's the
@@ -569,8 +571,13 @@ def base_target_notional(
     regime_mult = _decimal_or(regime_multiplier, _NEUTRAL)
     if regime_mult <= 0:
         regime_mult = _NEUTRAL
+    quarantine_mult = _decimal_or(quarantine_multiplier, _NEUTRAL)
+    if quarantine_mult < 0:
+        quarantine_mult = Decimal("0")
+    if quarantine_mult == 0:
+        return Decimal("0")
 
-    result = target_base * pnl_health * regime_mult
+    result = target_base * pnl_health * regime_mult * quarantine_mult
     floor_d = nav_d * floor_pct
     ceil_d = nav_d * ceil_pct
     return _clamp(result, floor_d, ceil_d)

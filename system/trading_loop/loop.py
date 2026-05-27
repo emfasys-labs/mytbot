@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -1649,6 +1650,21 @@ class TradingLoop:
                                 strategy.config["_strategy_fills_recent"] = int(
                                     _stats.get("fills", 0) or 0
                                 )
+                                try:
+                                    from system.strategy_quarantine import decide_strategy_quarantine
+
+                                    _q = decide_strategy_quarantine(
+                                        name,
+                                        _stats,
+                                        strat_cfg.get("strategy_quarantine") if isinstance(strat_cfg, dict) else None,
+                                    )
+                                    strategy.config["_strategy_quarantine_mult"] = str(_q.multiplier)
+                                    strategy.config["_strategy_quarantine_state"] = _q.state
+                                    strategy.config["_strategy_quarantine_reason"] = _q.reason
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug("trading_loop | strategy quarantine failed: {}", exc)
+                                    strategy.config["_strategy_quarantine_mult"] = "1"
+                                    strategy.config["_strategy_quarantine_state"] = "unknown"
                                 # ``total_equity`` is the loop's live NAV
                                 # computed above via ``live_portfolio_value``.
                                 strategy.config["_nav"] = str(total_equity or 0)
@@ -3356,22 +3372,15 @@ class TradingLoop:
                 await save_replacement_context_to_bus(bus, repl_ctx)
             except Exception as exc:  # noqa: BLE001
                 self._swallow("save_replacement_context", exc)
-        if buf is not None and actions:
-            for act in actions:
-                try:
-                    buf.append(
-                        strategy_candidate_row(
-                            symbol=str(act.symbol),
-                            strategy=str(act.strategy_name),
-                            status="selected_for_allocation",
-                            reason="global_edge_coordinator",
-                            metadata={"priority_score": str(act.priority_score), "kind": str(act.kind)},
-                            loop_iteration=self.iterations,
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self._swallow("sc_buffer_selected_for_allocation", exc)
-        elif buf is not None and new_opps:
+        actions, preflight_rows = await self._preflight_coordinator_actions(
+            actions,
+            session_factory=session_factory,
+            portfolio_dict=portfolio_dict,
+            portfolio_value=tradable,
+        )
+        if buf is not None and preflight_rows:
+            buf.extend(preflight_rows)
+        if buf is not None and not actions and new_opps:
             try:
                 buf.append(
                     strategy_candidate_row(
@@ -3548,6 +3557,48 @@ class TradingLoop:
                         log_arb_event("reject", reason="planner_error", symbol=sig.symbol)
                         continue
 
+            block_reason, block_meta = await self._preflight_built_signal(
+                sig,
+                action,
+                portfolio_dict=portfolio_dict,
+                session_factory=session_factory,
+            )
+            if block_reason:
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=str(getattr(sig, "symbol", "") or ""),
+                            strategy=str(getattr(sig, "strategy", "") or ""),
+                            side=str(getattr(sig, "side", "") or ""),
+                            confidence=float(getattr(sig, "confidence", 0) or 0),
+                            status="filtered_preflight_viability",
+                            reason=block_reason,
+                            loop_iteration=self.iterations,
+                            metadata={
+                                "kind": str(getattr(action, "kind", "") or ""),
+                                "priority_score": str(getattr(action, "priority_score", "") or ""),
+                                **block_meta,
+                            },
+                        )
+                    )
+                log_arb_event("reject", reason=block_reason, symbol=getattr(sig, "symbol", ""))
+                continue
+
+            if sc_log_buffer is not None:
+                try:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=str(action.symbol),
+                            strategy=str(action.strategy_name),
+                            status="selected_for_allocation",
+                            reason="global_edge_coordinator",
+                            metadata={"priority_score": str(action.priority_score), "kind": str(action.kind)},
+                            loop_iteration=self.iterations,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._swallow("sc_buffer_selected_for_allocation", exc)
+
             ok = await self._process_signal_global(
                 sig,
                 session_factory,
@@ -3560,6 +3611,349 @@ class TradingLoop:
                 executed += 1
                 log_arb_event("execute", symbol=sig.symbol, strategy=sig.strategy, side=sig.side)
         return executed, dashboard_snapshot_written
+
+    async def _preflight_built_signal(
+        self,
+        signal: Any,
+        action: Any,
+        *,
+        portfolio_dict: dict[str, Any],
+        session_factory: Any | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Preflight the exact signal instance that is about to be executed."""
+        md = getattr(signal, "metadata", None)
+        md = md if isinstance(md, dict) else {}
+        is_reduce = bool(
+            md.get("reduce_only")
+            or md.get("close_only")
+            or str(md.get("coordinator_kind", "")).lower() == "trim_symbol"
+        )
+        preferred_broker = str(md.get("broker") or getattr(signal, "broker", "") or "").strip().lower()
+        if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
+            routed = preferred_broker
+        elif self.router is not None:
+            routed = self.router.route(signal.asset_class, signal.symbol, metadata=md)
+        else:
+            routed = preferred_broker
+        if routed is None:
+            return "no_route", {"broker": ""}
+        signal.broker = routed
+        native = broker_symbol_for(signal.symbol, routed)
+        if native and native != signal.symbol:
+            signal.metadata = dict(md)
+            signal.metadata.setdefault("pipeline_symbol", signal.symbol)
+            signal.symbol = native
+            md = signal.metadata
+
+        if self.risk_engine is not None:
+            try:
+                pre = self.risk_engine.preflight_capacity(signal, portfolio_dict)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("global_edge | built-signal risk preflight failed open | {}", exc)
+                pre = None
+            if pre is not None and not pre.ok:
+                return str(pre.reason), {
+                    "checks_failed": list(pre.checks_failed or []),
+                    "effective_notional": str(pre.effective_notional),
+                    "broker": str(routed),
+                }
+            if pre is not None:
+                try:
+                    effective_qty = Decimal(str(pre.effective_quantity))
+                    current_qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    effective_qty = current_qty = Decimal("0")
+                if effective_qty > 0 and current_qty > 0 and effective_qty < current_qty:
+                    probe = deepcopy(signal)
+                    probe.suggested_quantity = effective_qty
+                    probe_md = dict(getattr(probe, "metadata", None) or {})
+                    probe_md["preflight_capacity_effective_quantity"] = str(effective_qty)
+                    probe_md["preflight_capacity_effective_notional"] = str(pre.effective_notional)
+                    probe.metadata = probe_md
+                    signal_for_execution_preflight = probe
+                else:
+                    signal_for_execution_preflight = signal
+            else:
+                signal_for_execution_preflight = signal
+
+        cost_block_reason, cost_meta = self._preflight_wave9_cost(signal_for_execution_preflight)
+        if cost_block_reason:
+            return cost_block_reason, {"broker": str(routed), **cost_meta}
+
+        exec_block_reason, exec_meta = await self._preflight_execution_limits(
+            signal_for_execution_preflight,
+            session_factory=session_factory,
+        )
+        if exec_block_reason:
+            return exec_block_reason, {"broker": str(routed), **exec_meta}
+
+        return None, {"broker": str(routed)}
+
+    async def _preflight_coordinator_actions(
+        self,
+        actions: list[Any],
+        *,
+        session_factory: Any,
+        portfolio_dict: dict[str, Any],
+        portfolio_value: Decimal,
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        """Filter allocator actions using final-stage risk/cost gates.
+
+        This deliberately calls ``RiskEngine.preflight_capacity`` and Wave 9's
+        runtime cost gate rather than duplicating their rules in the allocator.
+        The final risk/execution pass still runs later; this pass only stops
+        known dead-on-arrival opens from being logged as selected work.
+        """
+        if not actions or self.sig_engine is None:
+            return actions, []
+
+        viable: list[Any] = []
+        rows: list[dict[str, Any]] = []
+        for action in actions:
+            try:
+                sig = process_coordinator_action(
+                    action,
+                    self.sig_engine,
+                    portfolio_value=portfolio_value,
+                    news_score=None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                sig = None
+                logger.debug("global_edge | preflight signal build failed | {}", exc)
+            if sig is None:
+                rows.append(
+                    strategy_candidate_row(
+                        symbol=str(getattr(action, "symbol", "") or ""),
+                        strategy=str(getattr(action, "strategy_name", "") or ""),
+                        status="filtered_preflight_viability",
+                        reason="signal_engine_returned_none",
+                        loop_iteration=self.iterations,
+                        metadata={"kind": str(getattr(action, "kind", "") or "")},
+                    )
+                )
+                continue
+
+            md = getattr(sig, "metadata", None)
+            md = md if isinstance(md, dict) else {}
+            is_reduce = bool(
+                md.get("reduce_only")
+                or md.get("close_only")
+                or str(md.get("coordinator_kind", "")).lower() == "trim_symbol"
+            )
+            preferred_broker = str(md.get("broker") or getattr(sig, "broker", "") or "").strip().lower()
+            if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
+                routed = preferred_broker
+            elif self.router is not None:
+                routed = self.router.route(sig.asset_class, sig.symbol, metadata=md)
+            else:
+                routed = preferred_broker
+            if routed is None:
+                rows.append(
+                    strategy_candidate_row(
+                        symbol=str(getattr(sig, "symbol", "") or ""),
+                        strategy=str(getattr(sig, "strategy", "") or ""),
+                        side=str(getattr(sig, "side", "") or ""),
+                        confidence=float(getattr(sig, "confidence", 0) or 0),
+                        status="filtered_preflight_viability",
+                        reason="no_route",
+                        loop_iteration=self.iterations,
+                        metadata={"kind": str(getattr(action, "kind", "") or "")},
+                    )
+                )
+                continue
+            sig.broker = routed
+            native = broker_symbol_for(sig.symbol, routed)
+            if native and native != sig.symbol:
+                sig.metadata = dict(md)
+                sig.metadata.setdefault("pipeline_symbol", sig.symbol)
+                sig.symbol = native
+                md = sig.metadata
+
+            if self.risk_engine is not None:
+                try:
+                    pre = self.risk_engine.preflight_capacity(sig, portfolio_dict)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("global_edge | risk preflight failed open | {}", exc)
+                    pre = None
+                if pre is not None and not pre.ok:
+                    rows.append(
+                        strategy_candidate_row(
+                            symbol=str(getattr(sig, "symbol", "") or ""),
+                            strategy=str(getattr(sig, "strategy", "") or ""),
+                            side=str(getattr(sig, "side", "") or ""),
+                            confidence=float(getattr(sig, "confidence", 0) or 0),
+                            status="filtered_preflight_viability",
+                            reason=str(pre.reason),
+                            loop_iteration=self.iterations,
+                            metadata={
+                                "kind": str(getattr(action, "kind", "") or ""),
+                                "checks_failed": list(pre.checks_failed or []),
+                                "effective_notional": str(pre.effective_notional),
+                                "broker": str(routed),
+                            },
+                        )
+                    )
+                    continue
+                if pre is not None:
+                    try:
+                        effective_qty = Decimal(str(pre.effective_quantity))
+                        current_qty = Decimal(str(getattr(sig, "suggested_quantity", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        effective_qty = current_qty = Decimal("0")
+                    if effective_qty > 0 and current_qty > 0 and effective_qty < current_qty:
+                        sig_probe = deepcopy(sig)
+                        sig_probe.suggested_quantity = effective_qty
+                        sig_probe_md = dict(getattr(sig_probe, "metadata", None) or {})
+                        sig_probe_md["preflight_capacity_effective_quantity"] = str(effective_qty)
+                        sig_probe_md["preflight_capacity_effective_notional"] = str(pre.effective_notional)
+                        sig_probe.metadata = sig_probe_md
+                        sig_for_execution_preflight = sig_probe
+                    else:
+                        sig_for_execution_preflight = sig
+                else:
+                    sig_for_execution_preflight = sig
+            else:
+                sig_for_execution_preflight = sig
+
+            cost_block_reason, cost_meta = self._preflight_wave9_cost(sig_for_execution_preflight)
+            if cost_block_reason:
+                rows.append(
+                    strategy_candidate_row(
+                        symbol=str(getattr(sig, "symbol", "") or ""),
+                        strategy=str(getattr(sig, "strategy", "") or ""),
+                        side=str(getattr(sig, "side", "") or ""),
+                        confidence=float(getattr(sig, "confidence", 0) or 0),
+                        status="filtered_preflight_viability",
+                        reason=cost_block_reason,
+                        loop_iteration=self.iterations,
+                        metadata={
+                            "kind": str(getattr(action, "kind", "") or ""),
+                            "broker": str(routed),
+                            **cost_meta,
+                        },
+                    )
+                )
+                continue
+
+            exec_block_reason, exec_meta = await self._preflight_execution_limits(
+                sig_for_execution_preflight,
+                session_factory=session_factory,
+            )
+            if exec_block_reason:
+                rows.append(
+                    strategy_candidate_row(
+                        symbol=str(getattr(sig, "symbol", "") or ""),
+                        strategy=str(getattr(sig, "strategy", "") or ""),
+                        side=str(getattr(sig, "side", "") or ""),
+                        confidence=float(getattr(sig, "confidence", 0) or 0),
+                        status="filtered_preflight_viability",
+                        reason=exec_block_reason,
+                        loop_iteration=self.iterations,
+                        metadata={
+                            "kind": str(getattr(action, "kind", "") or ""),
+                            "broker": str(routed),
+                            **exec_meta,
+                        },
+                    )
+                )
+                continue
+
+            viable.append(action)
+        return viable, rows
+
+    def _preflight_wave9_cost(self, signal: Any) -> tuple[str | None, dict[str, Any]]:
+        """Run the same Wave 9 edge/cost gate used by execution, if loaded."""
+        md = getattr(signal, "metadata", None)
+        md = md if isinstance(md, dict) else {}
+        is_reduce = bool(
+            md.get("reduce_only")
+            or md.get("close_only")
+            or str(md.get("coordinator_kind", "")).lower() == "trim_symbol"
+        )
+        if is_reduce or self.execution_engine is None:
+            return None, {}
+        wave9_cfg = getattr(self.execution_engine, "_wave9_cfg", None)
+        if wave9_cfg is None or not getattr(wave9_cfg, "enabled", False):
+            return None, {}
+        try:
+            from execution.wave9_runtime import pre_flight_cost_gate
+
+            gate = pre_flight_cost_gate(
+                config=wave9_cfg,
+                broker=str(getattr(signal, "broker", "") or ""),
+                symbol=str(getattr(signal, "symbol", "") or ""),
+                asset_class=str(getattr(signal, "asset_class", "") or "other"),
+                quantity=float(getattr(signal, "suggested_quantity", 0) or 0),
+                signal_metadata=md,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("global_edge | wave9 preflight failed open | {}", exc)
+            return None, {}
+        if not getattr(gate, "used", False) or getattr(gate, "allow", True):
+            return None, dict(getattr(gate, "metadata", {}) or {})
+        return f"wave9_gate:{getattr(gate, 'reason', 'blocked')}", dict(
+            getattr(gate, "metadata", {}) or {}
+        )
+
+    async def _preflight_execution_limits(
+        self,
+        signal: Any,
+        *,
+        session_factory: Any | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Run execution quantity and microstructure limits before selection."""
+        md = getattr(signal, "metadata", None)
+        md = md if isinstance(md, dict) else {}
+        is_reduce = bool(
+            md.get("reduce_only")
+            or md.get("close_only")
+            or str(md.get("coordinator_kind", "")).lower() == "trim_symbol"
+        )
+        if is_reduce or self.execution_engine is None:
+            return None, {}
+        try:
+            broker = await self.execution_engine._get_broker(str(getattr(signal, "broker", "") or ""))  # noqa: SLF001
+            if broker is None:
+                return "broker_unavailable", {"execution_preflight_stage": "broker_resolution"}
+            order = self.execution_engine._build_order(signal)  # noqa: SLF001
+            pre_qty = order.quantity
+            pre_price = order.limit_price
+            order = await self.execution_engine._apply_marketable_limit(order, signal, broker)  # noqa: SLF001
+            order = await self.execution_engine._normalize_order_for_broker(order, signal, broker)  # noqa: SLF001
+            meta = {
+                "execution_preflight_stage": "execution_limits",
+                "pre_normalized_quantity": str(pre_qty),
+                "post_normalized_quantity": str(order.quantity),
+                "pre_normalized_limit_price": str(pre_price),
+                "post_normalized_limit_price": str(order.limit_price),
+            }
+            for key in (
+                "preflight_capacity_effective_quantity",
+                "preflight_capacity_effective_notional",
+            ):
+                if key in md:
+                    meta[key] = str(md[key])
+            if order.quantity <= 0:
+                return "invalid_quantity_after_normalization", meta
+            stale_reason, stale_meta = await self.execution_engine._paper_stale_price_precheck(  # noqa: SLF001
+                order,
+                signal,
+                broker=broker,
+                session_factory=session_factory,
+            )
+            if stale_reason:
+                return stale_reason, {**meta, **stale_meta}
+            ok = await self.execution_engine._passes_execution_limits(  # noqa: SLF001
+                broker,
+                order,
+                broker_name=str(getattr(signal, "broker", "") or "").strip().lower(),
+            )
+            if not ok:
+                return "execution_precheck_rejected", meta
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("global_edge | execution preflight failed open | {}", exc)
+            return None, {}
+        return None, {}
 
     async def _process_signal_global(
         self,
@@ -3695,6 +4089,7 @@ class TradingLoop:
             engine_reason = str(
                 getattr(self.execution_engine, "last_skip_reason", "") or "execution_no_result"
             )
+            engine_meta = getattr(self.execution_engine, "last_skip_metadata", {}) or {}
             if sc_log_buffer is not None:
                 sc_log_buffer.append(
                     strategy_candidate_row(
@@ -3708,6 +4103,7 @@ class TradingLoop:
                         metadata={
                             "execution_stage": "no_order_from_engine",
                             "execution_skip_reason": engine_reason,
+                            **(engine_meta if isinstance(engine_meta, dict) else {}),
                         },
                     )
                 )

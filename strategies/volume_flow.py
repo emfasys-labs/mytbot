@@ -46,6 +46,7 @@ class VolumeFlowStrategy(Strategy):
             strategy_net_pnl_recent=cfg.get("_strategy_pnl_recent") or 0,
             strategy_total_fills_recent=cfg.get("_strategy_fills_recent") or 0,
             regime_multiplier=regime_mult,
+            quarantine_multiplier=cfg.get("_strategy_quarantine_mult") or 1,
             static_notional=static_base,
         )
         base_notional = dyn_base if dyn_base > 0 else static_base
@@ -60,6 +61,8 @@ class VolumeFlowStrategy(Strategy):
             "sizing_confidence_scale": str(conf_scale.quantize(Decimal("0.0001"))),
             "sizing_flow_scale": str(flow_scale.quantize(Decimal("0.0001"))),
             "sizing_regime_mult": str(regime_mult),
+            "sizing_quarantine_mult": str(cfg.get("_strategy_quarantine_mult") or "1"),
+            "strategy_quarantine_state": str(cfg.get("_strategy_quarantine_state") or "normal"),
             "sizing_intent_source": "volume_flow_confidence_dyn",
         }
 

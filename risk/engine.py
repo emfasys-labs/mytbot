@@ -16,6 +16,7 @@ All thresholds live in config/risk_limits.yaml — editable without code changes
 """
 
 from dataclasses import dataclass
+from copy import deepcopy
 from datetime import datetime, timezone
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
@@ -46,6 +47,17 @@ class RiskDecision:
     signal_id: str
     checks_passed: list[str]
     checks_failed: list[str]
+
+
+@dataclass(frozen=True)
+class RiskPreflightDecision:
+    ok: bool
+    reason: str
+    signal_id: str
+    checks_passed: list[str]
+    checks_failed: list[str]
+    effective_quantity: Decimal
+    effective_notional: Decimal
 
 
 @dataclass
@@ -219,6 +231,58 @@ class RiskEngine:
             signal_id=signal.signal_id,
             checks_passed=checks_passed,
             checks_failed=[],
+        )
+
+    def preflight_capacity(self, signal: Signal, portfolio_state: dict) -> RiskPreflightDecision:
+        """Run the same capacity gates used by final risk without persistence.
+
+        This is intentionally a thin wrapper around the production gate methods,
+        not a second implementation. It lets upstream allocators discard
+        dead-on-arrival opens before they are marked selected, while the final
+        ``evaluate`` call remains the authority immediately before execution.
+        Clamp-capable checks are run on a cloned signal so preflight can report
+        the effective size without mutating the real signal.
+        """
+        probe = deepcopy(signal)
+        checks_passed: list[str] = []
+        checks_failed: list[str] = []
+        self._last_signal_symbol = str(getattr(probe, "symbol", "")).strip().upper()
+
+        checks = [
+            self._check_minimum_order_size,
+            self._check_fx_cluster_exposure,
+            self._check_equity_index_cluster_exposure,
+            self._check_crypto_cluster_exposure,
+            self._check_single_name_notional,
+            self._check_intraday_symbol_adds,
+        ]
+        if self._is_reduce_only_signal(probe):
+            checks = []
+
+        for check in checks:
+            ok, label = check(probe, portfolio_state)
+            if ok:
+                checks_passed.append(label)
+            else:
+                checks_failed.append(label)
+                return RiskPreflightDecision(
+                    ok=False,
+                    reason=label,
+                    signal_id=str(getattr(signal, "signal_id", "")),
+                    checks_passed=checks_passed,
+                    checks_failed=checks_failed,
+                    effective_quantity=Decimal(str(getattr(probe, "suggested_quantity", "0") or "0")),
+                    effective_notional=self._requested_notional(probe),
+                )
+
+        return RiskPreflightDecision(
+            ok=True,
+            reason="preflight_capacity_ok",
+            signal_id=str(getattr(signal, "signal_id", "")),
+            checks_passed=checks_passed,
+            checks_failed=[],
+            effective_quantity=Decimal(str(getattr(probe, "suggested_quantity", "0") or "0")),
+            effective_notional=self._requested_notional(probe),
         )
 
     async def evaluate_and_persist(self, session_factory, signal: Signal, portfolio_state: dict) -> RiskDecision:

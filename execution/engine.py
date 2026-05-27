@@ -94,6 +94,7 @@ class ExecutionEngine:
             self.dedup_window_sec = 604800.0
         self.dedup_skipped = 0  # observability counter
         self.last_skip_reason: str | None = None
+        self.last_skip_metadata: dict[str, Any] = {}
         # Marketable-limit slippage buffer. Every LIMIT order's price is
         # rewritten just before placement so BUYs sit at or above the current
         # ask (and SELLs at or below the current bid), making them likely to
@@ -265,6 +266,7 @@ class ExecutionEngine:
         execution pre-checks fail, so the signal still produces a visible order.
         """
         self.last_skip_reason = None
+        self.last_skip_metadata = {}
 
         if risk_decision.verdict != RiskVerdict.APPROVED:
             logger.warning(f"Attempted to execute rejected signal {signal.signal_id}")
@@ -636,9 +638,22 @@ class ExecutionEngine:
             return None
 
         order = await self._apply_marketable_limit(order, signal, broker)
+        _pre_norm_qty = order.quantity
+        _pre_norm_price = order.limit_price
         order = await self._normalize_order_for_broker(order, signal, broker)
         await _stamp_microstructure_shadow(broker)
         if order.quantity <= 0:
+            self.last_skip_metadata = {
+                "signal_id": str(getattr(signal, "signal_id", "") or ""),
+                "symbol": str(getattr(signal, "symbol", "") or ""),
+                "broker": str(getattr(signal, "broker", "") or ""),
+                "asset_class": str(getattr(signal, "asset_class", "") or ""),
+                "pre_normalized_quantity": str(_pre_norm_qty),
+                "post_normalized_quantity": str(order.quantity),
+                "pre_normalized_limit_price": str(_pre_norm_price),
+                "post_normalized_limit_price": str(order.limit_price),
+                "side": str(getattr(signal, "side", "") or ""),
+            }
             logger.warning(
                 "Execution quantity invalid after broker normalization | signal_id=%s symbol=%s broker=%s qty=%s",
                 signal.signal_id,
@@ -669,6 +684,15 @@ class ExecutionEngine:
         )
 
         if not await self._passes_execution_limits(broker, order, broker_name=str(signal.broker or "").strip().lower()):
+            self.last_skip_metadata = {
+                "signal_id": str(getattr(signal, "signal_id", "") or ""),
+                "symbol": str(getattr(signal, "symbol", "") or ""),
+                "broker": str(getattr(signal, "broker", "") or ""),
+                "asset_class": str(getattr(signal, "asset_class", "") or ""),
+                "quantity": str(order.quantity),
+                "limit_price": str(order.limit_price),
+                "side": str(getattr(signal, "side", "") or ""),
+            }
             logger.warning(
                 "Execution pre-check rejected | signal_id=%s symbol=%s broker=%s",
                 signal.signal_id, signal.symbol, signal.broker,
@@ -988,6 +1012,71 @@ class ExecutionEngine:
 
         return (True, base_bps * vol_scalar)
 
+    async def _paper_stale_price_precheck(
+        self,
+        order: Order,
+        signal: Signal,
+        *,
+        broker: Any | None = None,
+        session_factory: Any | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Return a stale-price block reason using the paper-fill rule."""
+        if not self.paper_mode or broker is None:
+            return None, {}
+        sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        reduce_only = bool(
+            getattr(order, "reduce_only", False)
+            or getattr(signal, "reduce_only", False)
+            or sig_md.get("reduce_only")
+            or sig_md.get("close_only")
+            or str(sig_md.get("coordinator_kind", "")).strip().lower() == "trim_symbol"
+        )
+        if reduce_only:
+            return None, {}
+        suggested = getattr(signal, "suggested_price", None)
+        if suggested is None:
+            return None, {}
+        try:
+            suggested = Decimal(str(suggested))
+        except Exception:  # noqa: BLE001
+            return None, {}
+        if suggested <= 0:
+            return None, {}
+
+        enabled, max_drift_bps = await self._stale_price_cfg(
+            signal,
+            session_factory=session_factory,
+        )
+        if not enabled:
+            return None, {}
+        try:
+            market_now = Decimal(str(await broker.get_last_price(order.symbol)))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Paper stale-price precheck: get_last_price failed | symbol=%s | %s",
+                order.symbol,
+                exc,
+            )
+            return None, {}
+        if market_now <= 0:
+            return None, {}
+
+        drift_bps = abs(market_now - suggested) / suggested * Decimal("10000")
+        side_value = str(getattr(order.side, "value", order.side)).strip().lower()
+        adverse = (
+            (side_value == "buy" and market_now > suggested)
+            or (side_value == "sell" and market_now < suggested)
+        )
+        if adverse and drift_bps > max_drift_bps:
+            return f"stale_signal_price_drift_{int(drift_bps)}bps", {
+                "execution_preflight_stage": "stale_price_gate",
+                "suggested_price": str(suggested),
+                "market_price": str(market_now),
+                "drift_bps": str(drift_bps),
+                "max_adverse_drift_bps": str(max_drift_bps),
+            }
+        return None, {}
+
     async def _simulate_fill(
         self,
         order: Order,
@@ -1048,43 +1137,36 @@ class ExecutionEngine:
         # locked-in prices, each one a small structural loss. Reject the
         # fill so the loop can either re-evaluate at the new price or sit
         # the trade out. Reduce-only and close intents are never blocked.
-        if not reduce_only:
-            enabled, max_drift_bps = await self._stale_price_cfg(signal, session_factory=session_factory)
-            if enabled and signal.suggested_price is not None and signal.suggested_price > 0:
-                market_now = await _broker_last_price()
-                if market_now is not None and market_now > 0:
-                    drift_abs = abs(market_now - signal.suggested_price)
-                    drift_bps = drift_abs / signal.suggested_price * Decimal("10000")
-                    if drift_bps > max_drift_bps:
-                        adverse = (
-                            (order.side == OrderSide.BUY and market_now > signal.suggested_price)
-                            or (order.side == OrderSide.SELL and market_now < signal.suggested_price)
-                        )
-                        if adverse:
-                            logger.warning(
-                                "Paper fill REJECTED stale_price | symbol=%s side=%s suggested=%s market=%s drift_bps=%.2f threshold=%s",
-                                order.symbol,
-                                getattr(order.side, "value", order.side),
-                                signal.suggested_price,
-                                market_now,
-                                float(drift_bps),
-                                max_drift_bps,
-                            )
-                            self.last_skip_reason = (
-                                f"stale_signal_price_drift_{int(drift_bps)}bps"
-                            )
-                            return OrderResult(
-                                broker_order_id=f"paper-rej-{uuid.uuid4().hex[:12]}",
-                                client_order_id=order.client_order_id,
-                                status=OrderStatus.REJECTED,
-                                symbol=order.symbol,
-                                side=order.side,
-                                quantity=order.quantity,
-                                filled_quantity=Decimal("0"),
-                                avg_fill_price=None,
-                                fee=Decimal("0"),
-                                timestamp=datetime.now(timezone.utc).isoformat(),
-                            )
+        stale_reason, stale_meta = await self._paper_stale_price_precheck(
+            order,
+            signal,
+            broker=broker,
+            session_factory=session_factory,
+        )
+        if stale_reason:
+            logger.warning(
+                "Paper fill REJECTED stale_price | symbol=%s side=%s suggested=%s market=%s drift_bps=%.2f threshold=%s",
+                order.symbol,
+                getattr(order.side, "value", order.side),
+                stale_meta.get("suggested_price"),
+                stale_meta.get("market_price"),
+                float(stale_meta.get("drift_bps") or 0),
+                stale_meta.get("max_adverse_drift_bps"),
+            )
+            self.last_skip_reason = stale_reason
+            self.last_skip_metadata = dict(stale_meta)
+            return OrderResult(
+                broker_order_id=f"paper-rej-{uuid.uuid4().hex[:12]}",
+                client_order_id=order.client_order_id,
+                status=OrderStatus.REJECTED,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=Decimal("0"),
+                avg_fill_price=None,
+                fee=Decimal("0"),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
 
         # ── 1. Determine base fill price ──────────────────────────────────────
         fill_price: Decimal | None = None

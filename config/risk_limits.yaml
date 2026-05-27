@@ -382,6 +382,15 @@ intraday_derisk:
   enabled: true
   monitor_interval_sec: 30
   close_cooldown_sec: 120
+  # Tier 0 — per-position underwater governor. This fires before the aggregate
+  # NAV tiers when an individual holding is already a material drag. It is
+  # still reduce-only and still goes through RiskEngine + ExecutionEngine.
+  position_loss_tier:
+    enabled: true
+    min_loss_nav_pct: 0.0005    # position unrealised loss >= 0.05% NAV
+    min_loss_pct: 0.005         # and position is losing >= 0.5% vs entry
+    trim_pct: 0.25              # trim 25%; leave recovery optionality
+    max_actions: 2
   open_lock:
     enabled: true
     trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -0.50% tier

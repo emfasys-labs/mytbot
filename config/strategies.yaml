@@ -99,6 +99,26 @@ regime_weights:
     min: 0.50                # absolute multiplier floor (safety clamp)
     max: 1.50                # absolute multiplier ceiling (safety clamp)
 
+# Rolling strategy quarantine. This composes with regime weights:
+# final_strategy_weight = regime_mult × quarantine_mult.
+# A strategy with poor recent realised expectancy is size-reduced or blocked
+# from fresh opens by evidence, not by manual toggles. Reduce-only exits remain
+# allowed elsewhere in the system.
+strategy_quarantine:
+  enabled: true
+  min_fills: 20
+  reduced_pnl_per_fill: -5
+  blocked_pnl_per_fill: -15
+  reduce_only_pnl_per_fill: -30
+  reduced_win_rate: 0.40
+  blocked_win_rate: 0.30
+  reduce_only_win_rate: 0.20
+  multipliers:
+    normal: 1.00
+    reduced_size: 0.50
+    blocked_new_opens: 0.00
+    reduce_only: 0.00
+
 # ── D141 — Dynamic strategy thresholds ────────────────────────────────────
 # Every Category-C tuning constant used to be a fixed YAML value (e.g.
 # ``rsi_buy_threshold: 47``). With this block enabled, strategies pull

@@ -2494,6 +2494,7 @@ class Orchestrator:
         try:
             from risk.intraday_derisk import (
                 evaluate_intraday_derisk,
+                parse_position_loss_tier,
                 parse_tiers,
             )
             from storage.db import init_async_database, dispose_engine as _dispose
@@ -2506,7 +2507,8 @@ class Orchestrator:
             return
 
         tiers = parse_tiers(d_cfg.get("tiers"))
-        if not tiers:
+        position_loss_tier = parse_position_loss_tier(d_cfg.get("position_loss_tier"))
+        if not tiers and position_loss_tier is None:
             return
         try:
             cooldown_sec = max(5.0, float(d_cfg.get("close_cooldown_sec", 120.0)))
@@ -2581,6 +2583,7 @@ class Orchestrator:
                 last_action_ts=self._intraday_derisk_last_action_ts,
                 now_ts=now_ts,
                 portfolio_volatility_scalar=vol_scalar,
+                position_loss_tier=position_loss_tier,
             )
             if tier is not None:
                 try:

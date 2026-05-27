@@ -17,6 +17,7 @@ import pytest
 from risk.intraday_derisk import (
     DeriskTier,
     evaluate_intraday_derisk,
+    parse_position_loss_tier,
     parse_tiers,
 )
 
@@ -270,3 +271,40 @@ def test_dynamic_scalar_adjusts_thresholds():
     assert tier is not None
     assert tier.threshold_pct == Decimal("-0.0050")  # The original tier config
     assert len(actions) == 1
+
+
+def test_position_loss_tier_trims_material_underwater_loser_before_nav_drawdown():
+    tier0 = parse_position_loss_tier(
+        {
+            "enabled": True,
+            "min_loss_nav_pct": "0.0005",
+            "min_loss_pct": "0.005",
+            "trim_pct": "0.25",
+            "max_actions": 2,
+        }
+    )
+    assert tier0 is not None
+
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("100"),  # aggregate day green; position still unhealthy
+        positions=[
+            _pos("XLE", "ibkr", "1000", "100", "99.90"),  # -$100, 0.1% NAV, 0.1% loss
+            _pos("AAPL", "ibkr", "100", "300", "298"),    # -$200, 0.2% NAV, 0.67% loss
+        ],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        position_loss_tier=tier0,
+    )
+
+    assert tier is tier0
+    assert idx == -2
+    assert len(actions) == 1
+    assert actions[0].symbol == "AAPL"
+    assert actions[0].reduce_quantity == Decimal("25.00000000")
+
+
+def test_position_loss_tier_disabled_when_config_incomplete():
+    assert parse_position_loss_tier({"enabled": True, "trim_pct": "0.25"}) is None

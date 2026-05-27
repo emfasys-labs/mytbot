@@ -84,6 +84,27 @@ def parse_tiers(raw: Iterable[Mapping[str, Any]] | None) -> list[DeriskTier]:
     return tiers
 
 
+def parse_position_loss_tier(raw: Mapping[str, Any] | None) -> DeriskTier | None:
+    """Parse the per-position Tier 0 derisk trigger.
+
+    This tier is configured separately from NAV drawdown tiers and fires from
+    position-level evidence: a losing holding may be trimmed even before the
+    aggregate day reaches -0.5% NAV. All required values must be present; an
+    incomplete block disables Tier 0 rather than inventing constants in code.
+    """
+    if not isinstance(raw, Mapping) or not bool(raw.get("enabled", False)):
+        return None
+    required = ("min_loss_nav_pct", "trim_pct", "max_actions", "min_loss_pct")
+    if any(k not in raw for k in required):
+        return None
+    return DeriskTier(
+        threshold_pct=-_to_decimal(raw.get("min_loss_nav_pct")),
+        trim_pct=_to_decimal(raw.get("trim_pct")),
+        max_actions=int(raw.get("max_actions") or 0),
+        min_loss_pct=_to_decimal(raw.get("min_loss_pct")),
+    )
+
+
 def _position_loss_pct(pos: Mapping[str, Any]) -> Decimal:
     """Loss % vs entry, expressed as a positive number (e.g. 0.0123 = 1.23% loss).
     Returns 0 for non-losing positions."""
@@ -130,6 +151,7 @@ def evaluate_intraday_derisk(
     now_ts: float,
     qty_decimals: int = 8,
     portfolio_volatility_scalar: Decimal = Decimal("1.0"),
+    position_loss_tier: DeriskTier | None = None,
 ) -> tuple[list[DeriskAction], Optional[DeriskTier], int]:
     """Decide which positions to trim/close at current intraday drawdown.
 
@@ -143,7 +165,7 @@ def evaluate_intraday_derisk(
     The function is pure — no I/O, no order placement. The orchestrator
     is responsible for routing the actions through risk + execution.
     """
-    if nav <= 0 or not tiers:
+    if nav <= 0 or (not tiers and position_loss_tier is None):
         return ([], None, -1)
 
     pnl_pct = day_pnl / nav if nav else _ZERO
@@ -159,6 +181,9 @@ def evaluate_intraday_derisk(
             active_idx = idx
             active_tier = tier
             break
+    if active_tier is None and position_loss_tier is not None:
+        active_tier = position_loss_tier
+        active_idx = -2
     if active_tier is None:
         return ([], None, -1)
 
@@ -171,6 +196,10 @@ def evaluate_intraday_derisk(
         loss_pct = _position_loss_pct(pos)
         if loss_pct < active_tier.min_loss_pct:
             continue
+        if active_idx == -2:
+            loss_nav_pct = abs(upnl) / nav if nav > 0 else _ZERO
+            if loss_nav_pct < abs(active_tier.threshold_pct):
+                continue
         ranked.append((upnl, loss_pct, pos))
 
     ranked.sort(key=lambda r: r[0])  # most negative upnl first
