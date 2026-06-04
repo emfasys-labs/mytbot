@@ -38,7 +38,7 @@ from control.runtime import set_execution_engine, set_risk_engine
 from execution.d015_instruction_executor import risk_signal_from_execution_instruction
 from execution.engine import ExecutionEngine
 from execution.planner import build_execution_plan
-from execution.router import SmartOrderRouter
+from execution.router import BROKER_ASSET_MAP, SmartOrderRouter
 from graph.engine import DependencyGraphEngine
 from graph.pipeline import DiscoveryPipeline
 from portfolio.allocation_engine import build_allocation_decision
@@ -1409,11 +1409,27 @@ class TradingLoop:
                 except (TypeError, ValueError):
                     _ctx_vol = 1.0
                 try:
-                    _ctx_gross = float(portfolio_state.get("current_gross_exposure", 0) or 0)
                     _ctx_nav = float(total_equity)
-                    _ctx_deployed = (_ctx_gross / _ctx_nav) if _ctx_nav > 0 else 0.0
+                    _ctx_deployed = -1.0
+                    if bus is not None:
+                        try:
+                            _snap_for_pressure = await bus.get_state("dashboard.snapshot", None)
+                            if isinstance(_snap_for_pressure, dict):
+                                _snap_port = _snap_for_pressure.get("portfolio")
+                                if isinstance(_snap_port, dict):
+                                    _ctx_deployed = float(_snap_port.get("cash_deployed_pct", -1.0))
+                        except Exception:  # noqa: BLE001
+                            _ctx_deployed = -1.0
+                    if _ctx_deployed < 0:
+                        _ctx_cash_used = float(self._get_held_cash_used(portfolio_state))
+                        _ctx_deployed = (_ctx_cash_used / _ctx_nav) if _ctx_nav > 0 else 0.0
                 except (TypeError, ValueError, ZeroDivisionError):
-                    _ctx_deployed = 0.0
+                    try:
+                        _ctx_gross = float(portfolio_state.get("current_gross_exposure", 0) or 0)
+                        _ctx_nav = float(total_equity)
+                        _ctx_deployed = (_ctx_gross / _ctx_nav) if _ctx_nav > 0 else 0.0
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        _ctx_deployed = 0.0
                 _ctx_deploy_pressure = max(0.0, min(1.0, float(self.capital_pct) - _ctx_deployed))
                 dynamic_threshold_ctx: dict[str, Any] = {
                     "market_state_score": _ctx_mss,
@@ -1782,6 +1798,7 @@ class TradingLoop:
                                 regime_label=live_regime_label,
                                 market_features=live_regime_features or None,
                                 min_confidence=regime_min_conf,
+                                deployment_pressure=_ctx_deploy_pressure,
                                 sc_rows=sc_log_rows_legacy,
                                 loop_iteration=self.iterations,
                             )
@@ -2063,6 +2080,7 @@ class TradingLoop:
                                 regime_label=live_regime_label,
                                 market_features=live_regime_features or None,
                                 min_confidence=regime_min_conf,
+                                deployment_pressure=_ctx_deploy_pressure,
                                 sc_rows=sc_log_rows,
                                 loop_iteration=self.iterations,
                             )
@@ -3187,9 +3205,21 @@ class TradingLoop:
                 if remaining_cash > build_threshold:
                     adaptive_kwargs["gross_target_capital"] = remaining_cash
                     adaptive_kwargs["concentration_exponent"] = _concentration
-                    if enforce_static_exposure_caps:
-                        # Legacy compatibility: only clip to per-position
-                        # notional when static caps are explicitly enabled.
+                    single_name_cfg = risk_cfg.get("single_name_notional") or {}
+                    single_name_cap = None
+                    if bool(single_name_cfg.get("enabled", True)):
+                        try:
+                            single_name_cap = Decimal(str(single_name_cfg.get("max_pct_nav", "0.05")))
+                        except Exception:  # noqa: BLE001
+                            single_name_cap = Decimal("0.05")
+                    if single_name_cap is not None and single_name_cap > 0:
+                        # The single-name cap is unconditional in RiskEngine.
+                        # Tell the coordinator up front so at-cap symbols do
+                        # not consume action slots only to be clamped to dust.
+                        adaptive_kwargs["max_position_notional"] = total_equity * single_name_cap
+                    elif enforce_static_exposure_caps:
+                        # Legacy compatibility for installs that disable the
+                        # single-name rail but still opt into static caps.
                         adaptive_kwargs["max_position_notional"] = total_equity * max_pos_pct
             else:
                 adaptive_budget_active = False
@@ -3631,6 +3661,8 @@ class TradingLoop:
         preferred_broker = str(md.get("broker") or getattr(signal, "broker", "") or "").strip().lower()
         if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
             routed = preferred_broker
+        elif self._can_route_broker(preferred_broker, str(signal.asset_class)) and "broker" in md:
+            routed = preferred_broker
         elif self.router is not None:
             routed = self.router.route(signal.asset_class, signal.symbol, metadata=md)
         else:
@@ -3685,9 +3717,99 @@ class TradingLoop:
             session_factory=session_factory,
         )
         if exec_block_reason:
+            if exec_block_reason == "execution_precheck_rejected":
+                original_symbol = str(getattr(signal, "symbol", "") or "")
+                original_md = dict(md)
+                for alt in self._alternate_brokers_for_signal(signal, routed, metadata=original_md):
+                    alt_sig = deepcopy(signal)
+                    alt_sig.symbol = original_symbol
+                    alt_sig.metadata = dict(original_md)
+                    alt_sig.broker = alt
+                    native_alt = broker_symbol_for(alt_sig.symbol, alt)
+                    if native_alt and native_alt != alt_sig.symbol:
+                        alt_sig.metadata.setdefault("pipeline_symbol", alt_sig.symbol)
+                        alt_sig.symbol = native_alt
+                    alt_for_execution = alt_sig
+                    if self.risk_engine is not None:
+                        try:
+                            alt_pre = self.risk_engine.preflight_capacity(alt_sig, portfolio_dict)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("global_edge | fallback risk preflight failed open | {}", exc)
+                            alt_pre = None
+                        if alt_pre is not None and not alt_pre.ok:
+                            continue
+                        if alt_pre is not None:
+                            try:
+                                alt_effective_qty = Decimal(str(alt_pre.effective_quantity))
+                                alt_current_qty = Decimal(str(getattr(alt_sig, "suggested_quantity", "0") or "0"))
+                            except Exception:  # noqa: BLE001
+                                alt_effective_qty = alt_current_qty = Decimal("0")
+                            if alt_effective_qty > 0 and alt_current_qty > 0 and alt_effective_qty < alt_current_qty:
+                                alt_for_execution = deepcopy(alt_sig)
+                                alt_for_execution.suggested_quantity = alt_effective_qty
+                                alt_md = dict(getattr(alt_for_execution, "metadata", None) or {})
+                                alt_md["preflight_capacity_effective_quantity"] = str(alt_effective_qty)
+                                alt_md["preflight_capacity_effective_notional"] = str(alt_pre.effective_notional)
+                                alt_for_execution.metadata = alt_md
+                    alt_cost_reason, _alt_cost_meta = self._preflight_wave9_cost(alt_for_execution)
+                    if alt_cost_reason:
+                        continue
+                    alt_exec_reason, alt_exec_meta = await self._preflight_execution_limits(
+                        alt_for_execution,
+                        session_factory=session_factory,
+                    )
+                    if alt_exec_reason is None:
+                        signal.broker = alt
+                        signal.metadata = dict(original_md)
+                        signal.metadata["broker"] = alt
+                        signal.metadata["execution_preflight_fallback_from"] = str(routed)
+                        if getattr(action, "metadata", None) is not None:
+                            action.metadata["broker"] = alt
+                            action.metadata["execution_preflight_fallback_from"] = str(routed)
+                        return None, {
+                            "broker": alt,
+                            "execution_preflight_fallback_from": str(routed),
+                            **alt_exec_meta,
+                        }
             return exec_block_reason, {"broker": str(routed), **exec_meta}
 
         return None, {"broker": str(routed)}
+
+    def _can_route_broker(self, broker: str, asset_class: str) -> bool:
+        b = str(broker or "").strip().lower()
+        ac = str(asset_class or "").strip().lower()
+        if not b or b not in set(self.available_brokers or []):
+            return False
+        if ac not in BROKER_ASSET_MAP.get(b, set()):
+            return False
+        try:
+            return bool(self.router is None or self.router.permissions.check_permission(b, ac))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _alternate_brokers_for_signal(
+        self,
+        signal: Any,
+        routed: str | None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[str]:
+        md = metadata if isinstance(metadata, dict) else {}
+        asset_class = str(getattr(signal, "asset_class", "") or "").strip().lower()
+        current = str(routed or "").strip().lower()
+        out: list[str] = []
+        for broker in self.available_brokers or []:
+            b = str(broker or "").strip().lower()
+            if not b or b == current or not self._can_route_broker(b, asset_class):
+                continue
+            if asset_class == "crypto" and b == "alpaca" and not md.get("allow_alpaca_crypto"):
+                continue
+            out.append(b)
+        if asset_class in {"equity", "etf"}:
+            out.sort(key=lambda b: (0 if b == "ibkr" else 1, b))
+        elif asset_class == "crypto":
+            out.sort(key=lambda b: ({"kraken": 0, "binance": 1, "bybit": 2, "ibkr": 3}.get(b, 9), b))
+        return out
 
     async def _preflight_coordinator_actions(
         self,
@@ -3742,6 +3864,8 @@ class TradingLoop:
             )
             preferred_broker = str(md.get("broker") or getattr(sig, "broker", "") or "").strip().lower()
             if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
+                routed = preferred_broker
+            elif self._can_route_broker(preferred_broker, str(sig.asset_class)) and "broker" in md:
                 routed = preferred_broker
             elif self.router is not None:
                 routed = self.router.route(sig.asset_class, sig.symbol, metadata=md)
@@ -3840,6 +3964,56 @@ class TradingLoop:
                 session_factory=session_factory,
             )
             if exec_block_reason:
+                fallback_broker = ""
+                if exec_block_reason == "execution_precheck_rejected":
+                    original_symbol = str(getattr(sig, "symbol", "") or "")
+                    original_md = dict(md)
+                    for alt in self._alternate_brokers_for_signal(sig, routed, metadata=original_md):
+                        alt_sig = deepcopy(sig)
+                        alt_sig.symbol = original_symbol
+                        alt_sig.metadata = dict(original_md)
+                        alt_sig.broker = alt
+                        native_alt = broker_symbol_for(alt_sig.symbol, alt)
+                        if native_alt and native_alt != alt_sig.symbol:
+                            alt_sig.metadata.setdefault("pipeline_symbol", alt_sig.symbol)
+                            alt_sig.symbol = native_alt
+                        alt_for_execution = alt_sig
+                        if self.risk_engine is not None:
+                            try:
+                                alt_pre = self.risk_engine.preflight_capacity(alt_sig, portfolio_dict)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug("global_edge | coordinator fallback risk preflight failed open | {}", exc)
+                                alt_pre = None
+                            if alt_pre is not None and not alt_pre.ok:
+                                continue
+                            if alt_pre is not None:
+                                try:
+                                    alt_effective_qty = Decimal(str(alt_pre.effective_quantity))
+                                    alt_current_qty = Decimal(str(getattr(alt_sig, "suggested_quantity", "0") or "0"))
+                                except Exception:  # noqa: BLE001
+                                    alt_effective_qty = alt_current_qty = Decimal("0")
+                                if alt_effective_qty > 0 and alt_current_qty > 0 and alt_effective_qty < alt_current_qty:
+                                    alt_for_execution = deepcopy(alt_sig)
+                                    alt_for_execution.suggested_quantity = alt_effective_qty
+                                    alt_md = dict(getattr(alt_for_execution, "metadata", None) or {})
+                                    alt_md["preflight_capacity_effective_quantity"] = str(alt_effective_qty)
+                                    alt_md["preflight_capacity_effective_notional"] = str(alt_pre.effective_notional)
+                                    alt_for_execution.metadata = alt_md
+                        alt_cost_reason, _alt_cost_meta = self._preflight_wave9_cost(alt_for_execution)
+                        if alt_cost_reason:
+                            continue
+                        alt_exec_reason, _alt_exec_meta = await self._preflight_execution_limits(
+                            alt_for_execution,
+                            session_factory=session_factory,
+                        )
+                        if alt_exec_reason is None:
+                            action.metadata["broker"] = alt
+                            action.metadata["execution_preflight_fallback_from"] = str(routed)
+                            fallback_broker = alt
+                            break
+                if fallback_broker:
+                    viable.append(action)
+                    continue
                 rows.append(
                     strategy_candidate_row(
                         symbol=str(getattr(sig, "symbol", "") or ""),
@@ -3949,6 +4123,9 @@ class TradingLoop:
                 broker_name=str(getattr(signal, "broker", "") or "").strip().lower(),
             )
             if not ok:
+                limit_meta = getattr(self.execution_engine, "_last_execution_limit_meta", {}) or {}
+                if isinstance(limit_meta, dict):
+                    meta.update({str(k): str(v) for k, v in limit_meta.items()})
                 return "execution_precheck_rejected", meta
         except Exception as exc:  # noqa: BLE001
             logger.debug("global_edge | execution preflight failed open | {}", exc)
@@ -3999,6 +4176,8 @@ class TradingLoop:
             return False
         preferred_broker = str(sig_md.get("broker") or getattr(signal, "broker", "") or "").strip().lower()
         if is_reduce and preferred_broker and (preferred_broker in self.available_brokers or self.paper_mode):
+            routed = preferred_broker
+        elif self._can_route_broker(preferred_broker, str(signal.asset_class)) and "broker" in sig_md:
             routed = preferred_broker
         else:
             routed = self.router.route(

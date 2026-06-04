@@ -2252,6 +2252,7 @@ class ExecutionEngine:
         *,
         order_notional: Decimal,
         configured_min_liquidity_usd: Decimal,
+        paper_mode: bool = False,
     ) -> Decimal:
         """D137 — Resolve the effective top-of-book liquidity requirement.
 
@@ -2280,6 +2281,10 @@ class ExecutionEngine:
             return configured_min_liquidity_usd
         if not bool(block.get("enabled", False)):
             return configured_min_liquidity_usd
+        if paper_mode:
+            paper_block = block.get("paper_mode") or {}
+            if isinstance(paper_block, dict):
+                block = {**block, **paper_block}
         try:
             multiple_raw = block.get("multiple_of_order")
             floor_raw = block.get("floor_usd")
@@ -2428,11 +2433,16 @@ class ExecutionEngine:
         return True
 
     async def _passes_execution_limits(self, broker, order: Order, *, broker_name: str) -> bool:
+        self._last_execution_limit_meta = {}
         limits = self._execution_limits()
         try:
             ob: OrderBook = await broker.get_order_book(order.symbol, depth=10)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Order book fetch failed | symbol=%s | %s", order.symbol, exc)
+            self._last_execution_limit_meta = {
+                "execution_limit_reason": "order_book_fetch_failed",
+                "execution_limit_error": str(exc),
+            }
             self._maybe_auto_kill("order book fetch failure", broker=broker_name or None)
             return False
 
@@ -2440,6 +2450,13 @@ class ExecutionEngine:
         best_ask = ob.asks[0][0] if ob.asks else Decimal("0")
         if best_bid <= 0 or best_ask <= 0:
             logger.warning("Invalid order book top-of-book | symbol=%s", order.symbol)
+            self._last_execution_limit_meta = {
+                "execution_limit_reason": "invalid_top_of_book",
+                "best_bid": str(best_bid),
+                "best_ask": str(best_ask),
+                "bid_levels": str(len(ob.bids or [])),
+                "ask_levels": str(len(ob.asks or [])),
+            }
             return False
 
         symbol_vol_scalar = Decimal("1.0")
@@ -2452,6 +2469,19 @@ class ExecutionEngine:
         # D120: Scale spread and slippage allowance by asset volatility
         max_spread = limits["max_spread_pct"] * max(Decimal("1.0"), symbol_vol_scalar)
         max_slippage = limits["max_slippage_pct"] * max(Decimal("1.0"), symbol_vol_scalar)
+        paper_liquidity_cfg: dict[str, Any] = {}
+        if self.paper_mode:
+            try:
+                risk_engine = get_risk_engine()
+                risk_cfg = getattr(risk_engine, "config", {}) if risk_engine is not None else {}
+                block = risk_cfg.get("liquidity_check") or {}
+                paper_cfg = block.get("paper_mode") if isinstance(block, dict) else {}
+                paper_liquidity_cfg = paper_cfg if isinstance(paper_cfg, dict) else {}
+                paper_spread_raw = paper_liquidity_cfg.get("max_spread_pct")
+                if paper_spread_raw is not None:
+                    max_spread = max(max_spread, Decimal(str(paper_spread_raw)))
+            except Exception:  # noqa: BLE001
+                paper_liquidity_cfg = {}
 
         mid = (best_bid + best_ask) / Decimal("2")
         spread_pct = (best_ask - best_bid) / mid if mid > 0 else Decimal("1")
@@ -2462,6 +2492,13 @@ class ExecutionEngine:
                 spread_pct,
                 max_spread,
             )
+            self._last_execution_limit_meta = {
+                "execution_limit_reason": "spread_limit",
+                "spread_pct": str(spread_pct),
+                "max_spread_pct": str(max_spread),
+                "best_bid": str(best_bid),
+                "best_ask": str(best_ask),
+            }
             return False
 
         # D137 — resolve the effective book-depth requirement from YAML
@@ -2473,10 +2510,22 @@ class ExecutionEngine:
         resolved_min_liq = self._resolve_book_liquidity_requirement(
             order_notional=order_notional,
             configured_min_liquidity_usd=limits["min_liquidity_usd"],
+            paper_mode=self.paper_mode,
         )
 
         min_liquidity = resolved_min_liq * max(Decimal("0.1"), symbol_vol_scalar)
         book_liquidity = self._book_liquidity_usd(ob)
+        if (
+            self.paper_mode
+            and book_liquidity <= 0
+            and bool(paper_liquidity_cfg.get("allow_zero_visible_size", False))
+        ):
+            logger.info(
+                "Paper liquidity size unavailable; allowing valid top-of-book | symbol=%s min=%s",
+                order.symbol,
+                min_liquidity,
+            )
+            book_liquidity = min_liquidity
         if book_liquidity < min_liquidity:
             logger.warning(
                 "Liquidity limit breach | symbol=%s liquidity=%s min=%s (scaled from %s by vol %s)",
@@ -2486,6 +2535,17 @@ class ExecutionEngine:
                 resolved_min_liq,
                 symbol_vol_scalar,
             )
+            self._last_execution_limit_meta = {
+                "execution_limit_reason": "liquidity_limit",
+                "book_liquidity_usd": str(book_liquidity),
+                "min_liquidity_usd": str(min_liquidity),
+                "resolved_min_liquidity_usd": str(resolved_min_liq),
+                "order_notional": str(order_notional),
+                "best_bid": str(best_bid),
+                "best_ask": str(best_ask),
+                "bid_levels": str(len(ob.bids or [])),
+                "ask_levels": str(len(ob.asks or [])),
+            }
             return False
 
         if order.order_type == OrderType.MARKET:
@@ -2497,8 +2557,20 @@ class ExecutionEngine:
                     slippage_pct,
                     max_slippage,
                 )
+                self._last_execution_limit_meta = {
+                    "execution_limit_reason": "slippage_limit",
+                    "slippage_pct": str(slippage_pct),
+                    "max_slippage_pct": str(max_slippage),
+                    "order_notional": str(order_notional),
+                }
                 return False
 
+        self._last_execution_limit_meta = {
+            "execution_limit_reason": "passed",
+            "book_liquidity_usd": str(book_liquidity),
+            "min_liquidity_usd": str(min_liquidity),
+            "spread_pct": str(spread_pct),
+        }
         return True
 
     async def _publish_symbol_constraints(self, signal: Signal, broker) -> None:

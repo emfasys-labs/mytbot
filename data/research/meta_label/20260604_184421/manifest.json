@@ -1,0 +1,53 @@
+{
+  "built_at": "2026-06-04T18:49:59.430822+00:00",
+  "feature_columns": [
+    "strategy_confidence",
+    "raw_confidence",
+    "side_sign",
+    "accumulator_score",
+    "accumulator_confidence",
+    "atr_pct",
+    "volume_z_score",
+    "demand_score",
+    "demand_confidence",
+    "ai_macro_confidence",
+    "rsi_14",
+    "mom_10",
+    "fracdiff_0_4",
+    "garch_vol_1d",
+    "hurst_dfa_128",
+    "vpin_proxy_50",
+    "relative_dollar_volume",
+    "volume_z",
+    "vol_ratio"
+  ],
+  "feature_snapshot_rows": 1784879,
+  "horizon_bars": 10,
+  "label_counts": {
+    "0": 5294,
+    "1": 2602
+  },
+  "pt_mult": 2.0,
+  "rows": 7896,
+  "signal_rows": 14298,
+  "skipped": {
+    "insufficient_future_bars": 358,
+    "missing_symbol_features": 6044
+  },
+  "sl_mult": 1.5,
+  "strategy_counts": {
+    "adaptive_shed": 2,
+    "capital_recycle": 26,
+    "event_driven_news": 37,
+    "global_edge_rotation": 57,
+    "held_position": 16,
+    "mean_reversion": 5371,
+    "momentum_breakout": 47,
+    "pairs_trading": 516,
+    "session_exit_policy": 19,
+    "volatility_regime": 1281,
+    "volume_flow": 524
+  },
+  "timeframe": "1h",
+  "vol_window": 20
+}

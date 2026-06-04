@@ -56,6 +56,7 @@ def apply_regime_weighting(
     regime_label: str | None = None,
     market_features: dict[str, Any] | None = None,
     min_confidence: float,
+    deployment_pressure: float = 0.0,
     sc_rows: list[dict[str, Any]],
     loop_iteration: int | None,
 ) -> list[RawSignal]:
@@ -89,6 +90,14 @@ def apply_regime_weighting(
     feats = market_features if isinstance(market_features, dict) else None
     if feats is None and not label:
         return raw_candidates
+    try:
+        pressure = max(0.0, min(1.0, float(deployment_pressure)))
+    except (TypeError, ValueError):
+        pressure = 0.0
+    # When the operator's slider is far above actual deployment, relax only
+    # the post-regime confidence floor. The multiplier still fades signals;
+    # this just stops borderline candidates from starving breadth.
+    effective_min_confidence = max(0.25, float(min_confidence) - (0.30 * pressure))
 
     kept: list[RawSignal] = []
     for r in raw_candidates:
@@ -113,7 +122,7 @@ def apply_regime_weighting(
         md["regime_features_present"] = list(feats.keys()) if feats else []
         md["confidence_pre_regime"] = round(original, 6)
         r.metadata = md
-        if scaled < float(min_confidence):
+        if scaled < effective_min_confidence:
             sc_rows.append(
                 strategy_candidate_row(
                     symbol=symbol,
@@ -136,6 +145,8 @@ def apply_regime_weighting(
                         "confidence_pre_regime": round(original, 6),
                         "confidence_post_regime": round(scaled, 6),
                         "min_confidence": float(min_confidence),
+                        "effective_min_confidence": round(effective_min_confidence, 6),
+                        "deployment_pressure": round(pressure, 6),
                     },
                 )
             )

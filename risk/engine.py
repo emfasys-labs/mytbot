@@ -1906,13 +1906,22 @@ class RiskEngine:
         pivot = self._float_cfg(block, "win_rate_pivot", 0.55)
         wr_weight = self._float_cfg(block, "win_rate_weight", 0.35)
         ms_weight = self._float_cfg(block, "market_state_weight", 0.25)
+        deployment_weight = self._float_cfg(block, "deployment_pressure_weight", 0.0)
 
         mss = self._market_state_score(portfolio, signal, default=1.0)
         win_rate = self._recent_win_rate(portfolio, signal)
+        pressure = 0.0
+        if isinstance(getattr(signal, "metadata", None), dict):
+            try:
+                pressure = float(signal.metadata.get("deployment_pressure", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                pressure = 0.0
+        pressure = max(0.0, min(1.0, pressure))
         threshold = base
         threshold += base * ms_weight * max(0.0, 1.0 - mss)
         if win_rate is not None:
             threshold += base * wr_weight * max(-1.0, min(1.0, pivot - win_rate))
+        threshold -= deployment_weight * pressure
         return max(lo, min(hi, threshold))
 
     @staticmethod

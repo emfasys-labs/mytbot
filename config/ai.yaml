@@ -93,7 +93,7 @@ providers:
     enabled: true
     provider: ollama
     base_url: http://localhost:11434
-    model_name: qwen2.5:7b         # primary: strong structured JSON, multilingual
+    model_name: qwen3.5:9b         # primary: strong structured JSON, multilingual
     fallback_model: llama3.1:8b     # secondary: runs in parallel for consensus
     temperature: 0.1
     max_tokens: 400

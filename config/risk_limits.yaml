@@ -176,12 +176,14 @@ dynamic_quality_thresholds:
     win_rate_pivot: 0.55
     win_rate_weight: 0.35
     market_state_weight: 0.25
+    deployment_pressure_weight: 0.18
   trade_quality:
     min: 0.25
     max: 0.85
     win_rate_pivot: 0.55
     win_rate_weight: 0.35
     market_state_weight: 0.25
+    deployment_pressure_weight: 0.10
 
 # ── Catalyst requirement ───────────────────────────────────────────────────────
 # Set to true to require at least one of: volume spike OR news sentiment.
@@ -246,6 +248,11 @@ liquidity_check:
   enabled: true
   multiple_of_order: 5            # require book ≥ 5× the order's own notional
   floor_usd: 20000                # never require less than $20k of visible book
+  paper_mode:
+    multiple_of_order: 1          # paper extended-hours quotes often expose shallow size
+    floor_usd: 20000
+    max_spread_pct: 0.006         # allow wider extended-hours paper rehearsal spreads
+    allow_zero_visible_size: true # treat valid bid/ask with zero size as unknown, not no-liquidity
 # Synthetic paper fills (ExecutionEngine)
 paper_fee_bps: 0.5           # Blended liquid-paper fee bps; visible without swamping edge tests
 paper_slippage_bps: 0.5      # One-way liquid-paper slippage bps (BUY higher, SELL lower)
