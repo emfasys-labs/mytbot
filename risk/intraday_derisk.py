@@ -223,6 +223,7 @@ def evaluate_intraday_derisk(
     position_loss_tier: DeriskTier | None = None,
     dynamic_position_loss: bool = False,
     position_loss_notional_reference_pct: Decimal | None = None,
+    require_open_book_loss_for_aggregate_actions: bool = True,
 ) -> tuple[list[DeriskAction], Optional[DeriskTier], int]:
     """Decide which positions to trim/close at current intraday drawdown.
 
@@ -257,6 +258,11 @@ def evaluate_intraday_derisk(
         active_idx = -2
     if active_tier is None:
         return ([], None, -1)
+
+    if active_idx >= 0 and require_open_book_loss_for_aggregate_actions:
+        open_book_unrealised = sum((_position_unrealised(pos) for pos in positions), _ZERO)
+        if open_book_unrealised >= 0:
+            return ([], active_tier, active_idx)
 
     # Rank positions by worst |unrealised_pnl| (i.e. biggest losers first).
     ranked: list[tuple[Decimal, Decimal, Mapping[str, Any]]] = []

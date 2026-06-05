@@ -1797,6 +1797,30 @@ class IBKRAdapter(BrokerAdapter):
             return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
         rows = min(depth, 5)
         contract = self._symbol_to_contract(symbol)
+
+        def _order_book_source() -> str:
+            raw = os.getenv("IBKR_ORDER_BOOK_SOURCE", "auto").strip().lower()
+            if raw in {"depth", "dom", "market_depth"}:
+                return "depth"
+            if raw in {"top", "snapshot", "top_of_book", "quote"}:
+                return "top"
+            return "auto"
+
+        def _should_request_depth() -> bool:
+            source = _order_book_source()
+            if source == "depth":
+                return True
+            if source == "top":
+                return False
+            # In paper or delayed-data sessions IBKR commonly returns 10092
+            # for DOM on liquid stocks/ETFs while a top-of-book snapshot is
+            # still available. Avoid paying the failed-depth round trip in
+            # the hot execution preflight path; live real-time sessions may
+            # still use depth when entitlement exists.
+            if self.paper_mode or self._market_data_type in {3, 4}:
+                return False
+            return True
+
         async def _top_of_book_fallback() -> OrderBook:
             self._apply_market_data_type()
             self._ib.reqMktData(contract, "", True, False)
@@ -1826,6 +1850,8 @@ class IBKRAdapter(BrokerAdapter):
 
         try:
             await self._ib.qualifyContractsAsync(contract)
+            if not _should_request_depth():
+                return await _top_of_book_fallback()
             self._ib.reqMktDepth(contract, numRows=rows, isSmartDepth=False)
             await asyncio.sleep(1.5)
             t = self._ib.ticker(contract)

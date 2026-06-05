@@ -44,7 +44,13 @@ def parse_open_lock_config(raw: Mapping[str, Any] | None) -> DrawdownOpenLockCon
 
 
 def should_trigger_open_lock(*, tier_idx: int, config: DrawdownOpenLockConfig) -> bool:
-    return bool(config.enabled and tier_idx >= config.trigger_tier_idx and config.cooldown_sec > 0)
+    if not config.enabled or config.cooldown_sec <= 0 or tier_idx < 0:
+        return False
+    # Intraday derisk tiers are sorted most-severe-first:
+    #   0 = deepest drawdown tier, 1 = next deepest, ...
+    # A configured trigger index therefore locks opens only at that tier or
+    # a more severe one. Less-severe higher indexes must not freeze redeploys.
+    return tier_idx <= config.trigger_tier_idx
 
 
 def derisk_execution_reduced_exposure(result: Any) -> bool:

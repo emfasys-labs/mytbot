@@ -385,10 +385,15 @@ stale_price_gate:
 # All actions are reduce-only and still pass through the normal
 # SignalEngine + RiskEngine + ExecutionEngine path. The risk engine
 # retains unconditional veto. Cooldown prevents thrashing the same name.
-intraday_derisk:
-  enabled: true
-  monitor_interval_sec: 30
-  close_cooldown_sec: 120
+  intraday_derisk:
+    enabled: true
+    monitor_interval_sec: 30
+    close_cooldown_sec: 120
+    # Aggregate tiers react to currently-at-risk open-book loss, not merely
+    # losses already realised earlier in the day. When true, a bad realised
+    # day can still keep the system cautious, but it will not keep chopping
+    # the current book if open positions are net profitable.
+    require_open_book_loss_for_aggregate_actions: true
   # Tier 0 — per-position underwater governor. This fires before the aggregate
   # NAV tiers when an individual holding is already a material drag. It is
   # still reduce-only and still goes through RiskEngine + ExecutionEngine.

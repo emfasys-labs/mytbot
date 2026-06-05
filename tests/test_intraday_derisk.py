@@ -16,7 +16,11 @@ from types import SimpleNamespace
 import pytest
 
 from brokers.base import OrderStatus
-from risk.drawdown_governor import derisk_execution_reduced_exposure
+from risk.drawdown_governor import (
+    DrawdownOpenLockConfig,
+    derisk_execution_reduced_exposure,
+    should_trigger_open_lock,
+)
 from risk.intraday_derisk import (
     DeriskTier,
     evaluate_intraday_derisk,
@@ -58,6 +62,15 @@ def test_derisk_open_lock_refresh_requires_filled_reduce_result():
     assert derisk_execution_reduced_exposure(
         SimpleNamespace(status=OrderStatus.PARTIALLY_FILLED, filled_quantity=Decimal("0.1"))
     ) is True
+
+
+def test_open_lock_tier_trigger_respects_most_severe_first_ordering():
+    cfg = DrawdownOpenLockConfig(enabled=True, trigger_tier_idx=1, cooldown_sec=900)
+
+    assert should_trigger_open_lock(tier_idx=0, config=cfg) is True
+    assert should_trigger_open_lock(tier_idx=1, config=cfg) is True
+    assert should_trigger_open_lock(tier_idx=2, config=cfg) is False
+    assert should_trigger_open_lock(tier_idx=-1, config=cfg) is False
 
 
 def test_tiers_sorted_most_severe_first():
@@ -238,6 +251,45 @@ def test_winners_never_trimmed():
     )
     # Even at the severe tier, winners are not trimmed by intraday derisk.
     assert all(a.symbol == "MSFT" for a in actions)
+
+
+def test_aggregate_derisk_does_not_chop_book_when_realised_loss_already_locked():
+    positions = [
+        _pos("SPY", "ibkr", "100", "700", "710"),   # +$1000
+        _pos("QQQ", "ibkr", "1", "600", "599"),     # tiny loser
+    ]
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1200"),  # aggregate tier breached by already-realised loss
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+    )
+    assert tier is not None
+    assert idx == 1
+    assert actions == []
+
+
+def test_aggregate_derisk_can_be_configured_to_act_on_realised_loss_day():
+    positions = [
+        _pos("SPY", "ibkr", "100", "700", "710"),
+        _pos("QQQ", "ibkr", "1", "600", "597"),
+    ]
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("-1200"),
+        positions=positions,
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        require_open_book_loss_for_aggregate_actions=False,
+    )
+    assert tier is not None
+    assert idx == 1
+    assert [a.symbol for a in actions] == ["QQQ"]
 
 
 def test_empty_positions_no_action():

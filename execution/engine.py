@@ -1354,6 +1354,8 @@ class ExecutionEngine:
         """
         try:
             from storage.fills_ledger import position_state
+            from storage.models import PositionLog
+            from sqlalchemy import select
         except Exception:  # noqa: BLE001
             return True
         try:
@@ -1372,18 +1374,55 @@ class ExecutionEngine:
             return False
         side = (getattr(signal, "side", "") or "").strip().lower()
         # A SELL reduces a long (held > 0); a BUY reduces a short (held < 0).
+        reducible: Decimal | None = None
         if side in ("sell", "short") and held > 0:
             reducible = held
         elif side in ("buy", "long") and held < 0:
             reducible = abs(held)
         else:
-            # Order would not reduce the position (flat, or same side as
-            # holding). A reduce-only order in that state is a no-op.
-            logger.warning(
-                "oversell guard | %s %s broker=%s | nothing to reduce (held=%s) — skipping",
-                signal.symbol, side, signal.broker, held,
-            )
-            return False
+            # The fills ledger is primary, but paper-mode restart/reconcile
+            # races can leave it flat or opposite-signed while the latest
+            # marked position snapshot still contains the open lot. Protective
+            # exits must be able to reduce that displayed holding.
+            try:
+                b = (signal.broker or "").strip().lower()
+                s = str(signal.symbol or "").strip().upper()
+                async with session_factory() as session:
+                    q = await session.execute(
+                        select(PositionLog)
+                        .where(PositionLog.broker == b, PositionLog.symbol == s)
+                        .order_by(PositionLog.timestamp.desc(), PositionLog.id.desc())
+                        .limit(1)
+                    )
+                    snap = q.scalars().first()
+                snap_qty = Decimal(str(getattr(snap, "quantity", 0) or 0)) if snap is not None else Decimal("0")
+            except Exception:  # noqa: BLE001
+                snap_qty = Decimal("0")
+            if side in ("sell", "short") and snap_qty > 0:
+                reducible = snap_qty
+            elif side in ("buy", "long") and snap_qty < 0:
+                reducible = abs(snap_qty)
+            if reducible is not None and reducible > 0:
+                try:
+                    if not isinstance(getattr(signal, "metadata", None), dict):
+                        signal.metadata = {}
+                    signal.metadata["oversell_guard_snapshot_fallback"] = True
+                    signal.metadata["oversell_guard_ledger_held"] = str(held)
+                    signal.metadata["oversell_guard_snapshot_qty"] = str(snap_qty)
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "oversell guard | %s %s broker=%s | ledger held=%s but snapshot qty=%s — using snapshot fallback",
+                    signal.symbol, side, signal.broker, held, snap_qty,
+                )
+            else:
+                # Order would not reduce the position (flat, or same side as
+                # holding). A reduce-only order in that state is a no-op.
+                logger.warning(
+                    "oversell guard | %s %s broker=%s | nothing to reduce (held=%s) — skipping",
+                    signal.symbol, side, signal.broker, held,
+                )
+                return False
 
         if requested > reducible:
             logger.warning(

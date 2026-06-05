@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from ai.news_classifier import NewsScore
@@ -221,3 +222,34 @@ async def test_score_news_skips_low_signal_institutional_filing_rows():
     ]
     await p._score_news(symbols=["SPY"], rows=rows)
     assert [i.headline for i in clf.last_items] == ["Fed signals rate path shift after inflation surprise"]
+
+
+@pytest.mark.asyncio
+async def test_local_reasoning_cools_down_after_timeout(monkeypatch):
+    from ai.providers.local_reasoning_provider import LocalReasoningProvider
+
+    provider = LocalReasoningProvider(
+        {
+            "model_name": "gpt-oss:20b",
+            "timeout_seconds": 0.01,
+            "failure_cooldown_seconds": 60,
+        }
+    )
+    provider._available = True
+    provider._active_model = "gpt-oss:20b"
+    calls = {"n": 0}
+
+    async def _timeout(*_args, **_kwargs):
+        calls["n"] += 1
+        raise httpx.ReadTimeout("slow local model")
+
+    monkeypatch.setattr(provider, "_call_llm", _timeout)
+
+    first = await provider.score_headline("Fed decision", None, "Reuters", "2026-06-05T19:00:00Z")
+    second = await provider.score_headline("Fed decision", None, "Reuters", "2026-06-05T19:00:00Z")
+
+    assert first.success is False
+    assert "slow local model" in (first.error or "")
+    assert second.success is False
+    assert second.error == "cooldown_after_timeout"
+    assert calls["n"] == 1

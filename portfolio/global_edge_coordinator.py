@@ -1384,12 +1384,16 @@ class GlobalEdgeCoordinator:
                     cap_i = crypto_room_budget
                     cash_i = cap_i * cf
                     crypto_clamped = True
-                crypto_room_budget -= cap_i
 
             cap_i = cap_i.quantize(Decimal("0.01"))
             cash_i = cash_i.quantize(Decimal("0.01"))
             if cap_i <= 0:
                 continue
+            min_n = _min_order_notional(opp_ac, symbol=opp.symbol, cfg_overrides=min_overrides)
+            if cap_i < min_n:
+                continue
+            if crypto_room_budget is not None and opp_ac == "crypto":
+                crypto_room_budget -= cap_i
 
             if emit_trim and trim_edge is not None:
                 trim_meta = dict(trim_edge.metadata or {})

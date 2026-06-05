@@ -97,8 +97,9 @@ providers:
     fallback_model: null            # no weaker local checker; escalate externally on real conflicts
     temperature: 0.1
     max_tokens: 900
-    timeout_seconds: 120           # GPU: 2-3s typical; CPU needs 60-90s + model swap time
-    gpu_concurrency: 4              # 20B model is heavier; keep headroom for the trading loop
+    timeout_seconds: 20            # fail fast; rules/FinBERT remain primary and premium resolves true conflicts
+    failure_cooldown_seconds: 120   # after a timeout, skip local calls for a cooldown window
+    gpu_concurrency: 1              # 20B model is heavy; avoid parallel local calls starving the trading loop
     use_json_mode: true
     ensemble:
       enabled: false                # rules/FinBERT/local conflicts escalate to premium fallback instead

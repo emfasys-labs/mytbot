@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from risk.engine import RiskPreflightDecision
+from portfolio.global_edge_coordinator import CoordinatorAction
 from system.trading_loop.loop import TradingLoop
 
 
@@ -88,3 +89,27 @@ async def test_built_signal_preflight_uses_risk_effective_quantity_for_normaliza
     assert meta["post_normalized_quantity"] == "0"
     assert meta["preflight_capacity_effective_quantity"] == "0.4"
 
+
+def test_coordinator_action_resize_carries_risk_effective_notional():
+    loop = TradingLoop({}, ["ibkr"], paper_mode=True)
+    action = CoordinatorAction(
+        kind="open_strategy",
+        symbol="SPY",
+        strategy_name="mean_reversion",
+        capital=Decimal("1000"),
+        priority_score=Decimal("0.5"),
+        metadata={"sizing_cash_factor": "1.0", "sizing_final_capital_required": "1000"},
+    )
+
+    resized = loop._coordinator_action_with_effective_capacity(
+        action,
+        effective_notional=Decimal("250"),
+        effective_quantity=Decimal("1.25"),
+    )
+
+    assert resized is not action
+    assert resized.capital == Decimal("250")
+    assert resized.metadata["risk_notional_override"] == "250"
+    assert resized.metadata["target_notional"] == "250"
+    assert resized.metadata["sizing_final_capital_required"] == "250"
+    assert resized.metadata["preflight_capacity_original_action_capital"] == "1000"

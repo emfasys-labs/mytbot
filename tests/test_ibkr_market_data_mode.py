@@ -90,8 +90,33 @@ async def test_get_last_price_applies_delayed_mode_and_does_not_cancel_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_get_order_book_falls_back_to_snapshot_top_of_book_for_fx(monkeypatch) -> None:
+async def test_get_order_book_uses_top_of_book_in_paper_mode(monkeypatch) -> None:
     monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_ORDER_BOOK_SOURCE", raising=False)
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    fake = _FakeIB()
+    adapter._ib = fake
+
+    ob = await adapter.get_order_book("EURUSD")
+
+    assert ob.bids == [(Decimal("101.2"), Decimal("1000000"))]
+    assert ob.asks == [(Decimal("101.3"), Decimal("1000000"))]
+    assert fake.req_mkt_depth_count == 0
+    assert fake.cancel_mkt_depth_count == 0
+    assert fake.req_mkt_data_count == 1
+    assert fake.market_data_types == [3]
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_can_force_depth_then_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.setenv("IBKR_ORDER_BOOK_SOURCE", "depth")
 
     async def _fast_sleep(_seconds: float) -> None:
         return None

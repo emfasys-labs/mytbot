@@ -9,6 +9,7 @@ import pytest
 
 from risk.engine import RiskVerdict
 from risk.profit_harvest import evaluate_profit_harvest, resolve_harvest_thresholds
+from risk.profit_harvest import should_defer_profit_harvest_for_redeployment
 from system.orchestrator import Orchestrator
 
 
@@ -76,6 +77,38 @@ def test_profit_harvest_partial_take_profit() -> None:
     assert decision.should_reduce is True
     assert decision.reason == "partial_take_profit"
     assert decision.reduce_fraction == Decimal("0.50")
+
+
+def test_profit_harvest_defers_when_underdeployed_and_redeployment_locked() -> None:
+    assert should_defer_profit_harvest_for_redeployment(
+        cash_deployed=Decimal("30000"),
+        nav=Decimal("100000"),
+        capital_pct=Decimal("1.0"),
+        open_lock_active=True,
+        tolerance_pct=Decimal("0.0025"),
+    )
+    assert not should_defer_profit_harvest_for_redeployment(
+        cash_deployed=Decimal("30000"),
+        nav=Decimal("100000"),
+        capital_pct=Decimal("1.0"),
+        open_lock_active=False,
+        tolerance_pct=Decimal("0.0025"),
+    )
+    assert not should_defer_profit_harvest_for_redeployment(
+        cash_deployed=Decimal("99900"),
+        nav=Decimal("100000"),
+        capital_pct=Decimal("1.0"),
+        open_lock_active=True,
+        tolerance_pct=Decimal("0.0025"),
+    )
+    assert not should_defer_profit_harvest_for_redeployment(
+        cash_deployed=Decimal("30000"),
+        nav=Decimal("100000"),
+        capital_pct=Decimal("1.0"),
+        open_lock_active=True,
+        open_lock_blocks_redeployment=False,
+        tolerance_pct=Decimal("0.0025"),
+    )
 
 
 def test_profit_harvest_trailing_lock_closes() -> None:

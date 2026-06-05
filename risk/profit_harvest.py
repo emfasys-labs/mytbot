@@ -48,6 +48,32 @@ class HarvestThresholds:
     rationale: dict[str, str] = field(default_factory=dict)
 
 
+def should_defer_profit_harvest_for_redeployment(
+    *,
+    cash_deployed: Decimal,
+    nav: Decimal,
+    capital_pct: Decimal,
+    open_lock_active: bool,
+    open_lock_blocks_redeployment: bool = True,
+    tolerance_pct: Decimal = Decimal("0.0025"),
+) -> bool:
+    """Defer voluntary harvesting when cash cannot currently be redeployed.
+
+    Profit harvesting is a recycling action: bank gains, then let the allocator
+    reuse the freed cash. If fresh opens are blocked by a drawdown open-lock
+    and the book is already below the operator's capital target, harvesting
+    more winners only drains exposure further. Stop-loss and derisk monitors
+    are separate safety paths and are intentionally unaffected.
+    """
+    if not open_lock_active or not open_lock_blocks_redeployment or nav <= 0 or capital_pct <= 0:
+        return False
+    target_cash = nav * max(_ZERO, min(_ONE, capital_pct))
+    if target_cash <= 0:
+        return False
+    tolerance = target_cash * max(_ZERO, tolerance_pct)
+    return cash_deployed < (target_cash - tolerance)
+
+
 def _to_decimal(value: Any, default: Decimal) -> Decimal:
     if value is None or value == "":
         return default

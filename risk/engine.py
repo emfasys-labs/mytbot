@@ -483,6 +483,17 @@ class RiskEngine:
         meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
         if bool(meta.get("hedge") or meta.get("protective_hedge")):
             return (True, "drawdown_open_lock")
+        if self._open_lock_allows_target_redeployment(signal, portfolio, meta):
+            logger.info(
+                "RISK drawdown_open_lock ALLOW redeploy | %s | exposure=%s target=%s proposed=%s until=%s reason=%s",
+                getattr(signal, "symbol", ""),
+                self._decimal_from_portfolio(portfolio, "current_gross_exposure", Decimal("0")),
+                self._decimal_from_portfolio(portfolio, "tradable_capital", Decimal("0")),
+                self._open_lock_signal_notional(signal, meta),
+                self._open_lock_until.isoformat(),
+                self._open_lock_reason,
+            )
+            return (True, "drawdown_open_lock")
         logger.warning(
             "RISK drawdown_open_lock REJECT | %s | until=%s reason=%s",
             getattr(signal, "symbol", ""),
@@ -490,6 +501,36 @@ class RiskEngine:
             self._open_lock_reason,
         )
         return (False, "drawdown_open_lock")
+
+    def _open_lock_signal_notional(self, signal, meta: dict[str, Any]) -> Decimal:
+        for key in ("target_notional", "sizing_final_action_capital", "notional", "capital"):
+            raw = meta.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = Decimal(str(raw)).copy_abs()
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        try:
+            qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0")).copy_abs()
+            px = Decimal(str(getattr(signal, "suggested_price", "0") or "0")).copy_abs()
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+        return qty * px if qty > 0 and px > 0 else Decimal("0")
+
+    def _open_lock_allows_target_redeployment(self, signal, portfolio, meta: dict[str, Any]) -> bool:
+        if not bool(meta.get("allocation_selected")):
+            return False
+        target = self._decimal_from_portfolio(portfolio, "tradable_capital", Decimal("0"))
+        exposure = self._decimal_from_portfolio(portfolio, "current_gross_exposure", Decimal("0"))
+        if target <= 0 or exposure >= target:
+            return False
+        proposed = self._open_lock_signal_notional(signal, meta)
+        if proposed <= 0:
+            return False
+        return proposed <= (target - exposure)
 
     def _check_broker_certification(self, signal, portfolio) -> tuple[bool, str]:
         """D127 P2 — only Certified-tier brokers may place trades.
@@ -1922,7 +1963,15 @@ class RiskEngine:
         if win_rate is not None:
             threshold += base * wr_weight * max(-1.0, min(1.0, pivot - win_rate))
         threshold -= deployment_weight * pressure
-        return max(lo, min(hi, threshold))
+        floor = lo
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        if bool(meta.get("allocation_selected")) and pressure > 0.0 and deployment_weight > 0.0:
+            floor = max(0.0, lo - deployment_weight * pressure)
+            try:
+                meta[f"risk_{block_key}_floor_dynamic"] = round(float(floor), 4)
+            except Exception:  # noqa: BLE001
+                pass
+        return max(floor, min(hi, threshold))
 
     @staticmethod
     def _float_cfg(cfg: dict, key: str, default: float) -> float:
@@ -1933,15 +1982,63 @@ class RiskEngine:
 
     def _recent_win_rate(self, portfolio: dict, signal: Signal | None = None) -> float | None:
         candidates: list[Any] = []
+        strategy_names: list[str] = []
+        if signal is not None:
+            for raw_name in (
+                getattr(signal, "strategy", None),
+                getattr(signal, "strategy_name", None),
+            ):
+                if raw_name:
+                    strategy_names.append(str(raw_name).strip())
+            if isinstance(getattr(signal, "metadata", None), dict):
+                for key in ("strategy_name", "coordinator_strategy_name", "source_strategy"):
+                    raw_name = signal.metadata.get(key)
+                    if raw_name:
+                        strategy_names.append(str(raw_name).strip())
+        strategy_keys = {
+            name.strip().lower()
+            for name in strategy_names
+            if name and name.strip()
+        }
+
+        def _strategy_candidates(container: Any) -> list[Any]:
+            if not isinstance(container, dict) or not strategy_keys:
+                return []
+            out: list[Any] = []
+            for raw_key, stats in container.items():
+                if str(raw_key).strip().lower() not in strategy_keys:
+                    continue
+                if isinstance(stats, dict):
+                    out.extend([
+                        stats.get("recent_win_rate"),
+                        stats.get("rolling_win_rate"),
+                        stats.get("realized_win_rate"),
+                        stats.get("realised_win_rate"),
+                        stats.get("win_rate"),
+                    ])
+                else:
+                    out.append(stats)
+            return out
+
         if isinstance(portfolio, dict):
             meta = portfolio.get("metadata")
             if isinstance(meta, dict):
+                dyn = meta.get("dynamic_thresholds")
+                if isinstance(dyn, dict):
+                    candidates.extend(_strategy_candidates(dyn.get("per_strategy")))
+                candidates.extend(_strategy_candidates(meta.get("per_strategy")))
+                candidates.extend(_strategy_candidates(meta.get("strategy_win_rates")))
                 candidates.extend([
                     meta.get("recent_win_rate"),
                     meta.get("rolling_win_rate"),
                     meta.get("realized_win_rate"),
                     meta.get("realised_win_rate"),
                 ])
+            dyn = portfolio.get("dynamic_thresholds")
+            if isinstance(dyn, dict):
+                candidates.extend(_strategy_candidates(dyn.get("per_strategy")))
+            candidates.extend(_strategy_candidates(portfolio.get("per_strategy")))
+            candidates.extend(_strategy_candidates(portfolio.get("strategy_win_rates")))
             candidates.extend([
                 portfolio.get("recent_win_rate"),
                 portfolio.get("rolling_win_rate"),
@@ -1949,6 +2046,11 @@ class RiskEngine:
                 portfolio.get("realised_win_rate"),
             ])
         if signal is not None and isinstance(getattr(signal, "metadata", None), dict):
+            dyn = signal.metadata.get("dynamic_thresholds")
+            if isinstance(dyn, dict):
+                candidates.extend(_strategy_candidates(dyn.get("per_strategy")))
+            candidates.extend(_strategy_candidates(signal.metadata.get("per_strategy")))
+            candidates.extend(_strategy_candidates(signal.metadata.get("strategy_win_rates")))
             candidates.extend([
                 signal.metadata.get("recent_win_rate"),
                 signal.metadata.get("rolling_win_rate"),

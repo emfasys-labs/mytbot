@@ -8,13 +8,14 @@ impossible.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from storage.models import Base
+from storage.models import Base, PositionLog
 from storage.fills_ledger import (
     _compute_wac,
     available_quantity,
@@ -249,3 +250,40 @@ async def test_oversell_guard_skips_wrong_direction(sf):
     sig = _reduce_only_signal("AAPL", "buy", Decimal("50"))
     ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_oversell_guard_uses_position_snapshot_for_protective_exit(sf):
+    from execution.engine import ExecutionEngine
+
+    # Ledger says flat/opposite after stale rows, but the latest marked
+    # position snapshot still contains the open lot the stop-loss is trying
+    # to reduce. This mirrors the crypto paper derisk failure mode.
+    await record_fill(sf, broker="kraken", symbol="AAVE-USD", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("100"))
+    await record_fill(sf, broker="kraken", symbol="AAVE-USD", side="sell",
+                      quantity=Decimal("100"), fill_price=Decimal("101"))
+    async with sf() as session:
+        session.add(
+            PositionLog(
+                timestamp=datetime.now(timezone.utc),
+                symbol="AAVE-USD",
+                broker="kraken",
+                quantity=Decimal("42"),
+                avg_entry_price=Decimal("100"),
+                current_price=Decimal("90"),
+                unrealised_pnl=Decimal("-420"),
+                asset_class="crypto",
+            )
+        )
+        await session.commit()
+
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    sig = _reduce_only_signal("AAVE-USD", "sell", Decimal("50"))
+    sig.broker = "kraken"
+    sig.asset_class = "crypto"
+    ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
+
+    assert ok is True
+    assert sig.suggested_quantity == Decimal("42")
+    assert sig.metadata["oversell_guard_snapshot_fallback"] is True

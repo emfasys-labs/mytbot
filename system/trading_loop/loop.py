@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import Counter
 from copy import deepcopy
+from dataclasses import is_dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -1652,6 +1653,30 @@ class TradingLoop:
                     except Exception:  # noqa: BLE001
                         _config_hash = ""
 
+                    try:
+                        pmeta = portfolio_state.get("metadata")
+                        if not isinstance(pmeta, dict):
+                            pmeta = {}
+                            portfolio_state["metadata"] = pmeta
+                        dyn_meta = pmeta.get("dynamic_thresholds")
+                        if not isinstance(dyn_meta, dict):
+                            dyn_meta = {}
+                            pmeta["dynamic_thresholds"] = dyn_meta
+                        per_strategy_meta: dict[str, dict[str, Any]] = {}
+                        for _name, _stats in (_strategy_pnl or {}).items():
+                            if not isinstance(_stats, dict):
+                                continue
+                            per_strategy_meta[str(_name)] = {
+                                "recent_net_pnl": _stats.get("net_pnl", 0),
+                                "recent_fills": _stats.get("fills", 0),
+                                "recent_win_rate": _stats.get("win_rate", 0),
+                                "sample_target_notional": _stats.get("sample_target_notional", 0),
+                            }
+                        if per_strategy_meta:
+                            dyn_meta["per_strategy"] = per_strategy_meta
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("trading_loop | risk strategy-performance metadata failed: {}", exc)
+
                     for name, strategy in strategies.items():
                         try:
                             if isinstance(getattr(strategy, "config", None), dict):
@@ -2830,6 +2855,30 @@ class TradingLoop:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("global_edge | broker position merge timeout/error | {}", exc)
 
+        try:
+            pmeta = portfolio_dict.get("metadata")
+            if not isinstance(pmeta, dict):
+                pmeta = {}
+                portfolio_dict["metadata"] = pmeta
+            dyn_meta = pmeta.get("dynamic_thresholds")
+            if not isinstance(dyn_meta, dict):
+                dyn_meta = {}
+                pmeta["dynamic_thresholds"] = dyn_meta
+            per_strategy_meta: dict[str, dict[str, Any]] = {}
+            for name, stats in (strategy_pnl_recent or {}).items():
+                if not isinstance(stats, dict):
+                    continue
+                per_strategy_meta[str(name)] = {
+                    "recent_net_pnl": stats.get("net_pnl", 0),
+                    "recent_fills": stats.get("fills", 0),
+                    "recent_win_rate": stats.get("win_rate", 0),
+                    "sample_target_notional": stats.get("sample_target_notional", 0),
+                }
+            if per_strategy_meta:
+                dyn_meta["per_strategy"] = per_strategy_meta
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("global_edge | risk strategy-performance metadata failed: {}", exc)
+
         # The operator's capital allocation slider is the deployment target.
         # Static position ceilings are legacy rails and are only applied when
         # ``enforce_static_exposure_caps`` is explicitly enabled.
@@ -3835,6 +3884,7 @@ class TradingLoop:
         viable: list[Any] = []
         rows: list[dict[str, Any]] = []
         for action in actions:
+            selected_action = action
             try:
                 sig = process_coordinator_action(
                     action,
@@ -3935,6 +3985,11 @@ class TradingLoop:
                         sig_probe_md["preflight_capacity_effective_notional"] = str(pre.effective_notional)
                         sig_probe.metadata = sig_probe_md
                         sig_for_execution_preflight = sig_probe
+                        selected_action = self._coordinator_action_with_effective_capacity(
+                            action,
+                            effective_notional=pre.effective_notional,
+                            effective_quantity=effective_qty,
+                        )
                     else:
                         sig_for_execution_preflight = sig
                 else:
@@ -4010,12 +4065,14 @@ class TradingLoop:
                             session_factory=session_factory,
                         )
                         if alt_exec_reason is None:
-                            action.metadata["broker"] = alt
-                            action.metadata["execution_preflight_fallback_from"] = str(routed)
+                            selected_meta = dict(getattr(selected_action, "metadata", {}) or {})
+                            selected_meta["broker"] = alt
+                            selected_meta["execution_preflight_fallback_from"] = str(routed)
+                            selected_action = self._coordinator_action_with_metadata(selected_action, selected_meta)
                             fallback_broker = alt
                             break
                 if fallback_broker:
-                    viable.append(action)
+                    viable.append(selected_action)
                     continue
                 rows.append(
                     strategy_candidate_row(
@@ -4035,8 +4092,66 @@ class TradingLoop:
                 )
                 continue
 
-            viable.append(action)
+            viable.append(selected_action)
         return viable, rows
+
+    def _coordinator_action_with_metadata(self, action: Any, metadata: dict[str, Any]) -> Any:
+        """Return an action copy carrying updated metadata when possible."""
+        if is_dataclass(action):
+            try:
+                return dataclass_replace(action, metadata=metadata)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            action.metadata = metadata
+        except Exception:  # noqa: BLE001
+            pass
+        return action
+
+    def _coordinator_action_with_effective_capacity(
+        self,
+        action: Any,
+        *,
+        effective_notional: Decimal,
+        effective_quantity: Decimal,
+    ) -> Any:
+        """Resize a selected coordinator action to risk's executable capacity.
+
+        Risk preflight may clamp an open to remaining single-name / cluster /
+        daily-add room. The execution preflight already checks that smaller
+        probe; this also carries the smaller notional back into the selected
+        action so dashboard rows, sizing metadata, and final processing stay
+        aligned with the executable reality.
+        """
+        if effective_notional <= 0:
+            return action
+        meta = dict(getattr(action, "metadata", {}) or {})
+        original_capital = getattr(action, "capital", None)
+        meta.setdefault("preflight_capacity_original_action_capital", str(original_capital))
+        meta["preflight_capacity_effective_quantity"] = str(effective_quantity)
+        meta["preflight_capacity_effective_notional"] = str(effective_notional)
+        meta["target_notional"] = str(effective_notional)
+        meta["risk_notional_override"] = str(effective_notional)
+        meta["sizing_final_capital_required"] = str(effective_notional)
+        meta["sizing_final_action_capital"] = str(effective_notional)
+        try:
+            cash_factor = Decimal(str(meta.get("sizing_cash_factor", "1") or "1"))
+        except Exception:  # noqa: BLE001
+            cash_factor = Decimal("1")
+        if cash_factor <= 0:
+            cash_factor = Decimal("1")
+        meta["sizing_cash_used"] = str((effective_notional * cash_factor).quantize(Decimal("0.01")))
+        if is_dataclass(action):
+            try:
+                return dataclass_replace(action, capital=effective_notional, metadata=meta)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            action.capital = effective_notional
+            action.metadata = meta
+        except Exception:  # noqa: BLE001
+            pass
+        return action
 
     def _preflight_wave9_cost(self, signal: Any) -> tuple[str | None, dict[str, Any]]:
         """Run the same Wave 9 edge/cost gate used by execution, if loaded."""

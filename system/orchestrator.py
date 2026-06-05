@@ -31,7 +31,11 @@ from loguru import logger
 
 from risk.engine import Signal as RiskSignal
 from risk.engine import RiskVerdict
-from risk.profit_harvest import evaluate_profit_harvest, resolve_harvest_thresholds
+from risk.profit_harvest import (
+    evaluate_profit_harvest,
+    resolve_harvest_thresholds,
+    should_defer_profit_harvest_for_redeployment,
+)
 from risk.stop_loss import evaluate_stop_loss
 from system.local_paper_flatten import flatten_local_paper_book
 from system.broker_manager import BrokerManager, BrokerReport
@@ -2132,6 +2136,61 @@ class Orchestrator:
             if not positions:
                 self._profit_harvest_peak_pnl.clear()
                 return
+            defer_harvest_for_redeploy = False
+            try:
+                runtime = risk_engine.snapshot_runtime_state()
+                raw_until = runtime.get("open_lock_until") if isinstance(runtime, dict) else None
+                open_lock_active = False
+                if isinstance(raw_until, str) and raw_until.strip():
+                    until = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+                    if until.tzinfo is None:
+                        until = until.replace(tzinfo=timezone.utc)
+                    open_lock_active = datetime.now(timezone.utc) < until.astimezone(timezone.utc)
+
+                from portfolio.global_edge_coordinator import cash_factor_for_asset_class
+
+                ge_cfg = getattr(tl, "_global_edge_cfg", {}) or {}
+                cash_overrides = ge_cfg.get("cash_factors") if isinstance(ge_cfg, dict) else None
+                cash_deployed = Decimal("0")
+                for row in positions.values():
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        row_qty = abs(Decimal(str(row.get("quantity", "0") or "0")))
+                        row_px = Decimal(str(row.get("current_price", "0") or "0"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if row_qty <= 0 or row_px <= 0:
+                        continue
+                    row_ac = str(row.get("asset_class") or "").strip().lower()
+                    row_sym = str(row.get("symbol") or "").strip().upper()
+                    cash_deployed += row_qty * row_px * cash_factor_for_asset_class(
+                        row_ac,
+                        cash_overrides,
+                        symbol=row_sym,
+                    )
+                adaptive_cfg = ge_cfg.get("adaptive") if isinstance(ge_cfg, dict) else {}
+                try:
+                    tolerance_pct = Decimal(str((adaptive_cfg or {}).get("target_tolerance_pct", "0.0025")))
+                except Exception:  # noqa: BLE001
+                    tolerance_pct = Decimal("0.0025")
+                defer_harvest_for_redeploy = should_defer_profit_harvest_for_redeployment(
+                    cash_deployed=cash_deployed,
+                    nav=nav,
+                    capital_pct=Decimal(str(self.capital_pct)),
+                    open_lock_active=open_lock_active,
+                    open_lock_blocks_redeployment=False,
+                    tolerance_pct=tolerance_pct,
+                )
+                if defer_harvest_for_redeploy:
+                    logger.info(
+                        "profit-harvest | deferred while redeployment locked | cash_deployed={} target={} open_lock_until={}",
+                        cash_deployed,
+                        nav * Decimal(str(self.capital_pct)),
+                        raw_until,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("profit-harvest | redeploy defer check failed open | {}", exc)
 
             now_ts = datetime.now(timezone.utc).timestamp()
             active_keys: set[str] = set()
@@ -2245,6 +2304,8 @@ class Orchestrator:
                     peak_lock_min_nav_pct=thresholds.peak_lock_min_nav_pct,
                 )
                 if not decision.should_reduce:
+                    continue
+                if defer_harvest_for_redeploy:
                     continue
 
                 reduce_qty = (abs(qty) * decision.reduce_fraction).quantize(Decimal("0.00000001"))
@@ -2605,16 +2666,22 @@ class Orchestrator:
                 position_loss_tier=position_loss_tier,
                 dynamic_position_loss=dynamic_position_loss,
                 position_loss_notional_reference_pct=position_loss_notional_reference_pct,
+                require_open_book_loss_for_aggregate_actions=bool(
+                    d_cfg.get("require_open_book_loss_for_aggregate_actions", True)
+                ),
             )
             if tier is not None:
                 try:
                     from risk.drawdown_governor import (
                         parse_open_lock_config,
                         recovered_from_tier,
+                        should_trigger_open_lock,
                     )
 
                     lock_cfg = parse_open_lock_config(d_cfg.get("open_lock"))
-                    if recovered_from_tier(
+                    if not should_trigger_open_lock(tier_idx=tier_idx, config=lock_cfg):
+                        risk_engine.clear_open_lock("intraday_derisk_below_lock_tier")
+                    elif recovered_from_tier(
                         nav=Decimal(str(nav)),
                         day_pnl=day_pnl,
                         tier_threshold_pct=tier.threshold_pct,

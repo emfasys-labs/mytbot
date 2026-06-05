@@ -106,6 +106,71 @@ def test_dynamic_confidence_threshold_tightens_after_low_win_rate() -> None:
     assert "confidence_threshold" in (decision.reason or "")
 
 
+def test_allocator_redeploy_uses_strategy_win_rate_and_dynamic_floor() -> None:
+    cfg = _default_cfg()
+    cfg["min_trade_quality_score"] = "0"
+    cfg["dynamic_quality_thresholds"] = {
+        "enabled": True,
+        "confidence": {
+            "min": 0.40,
+            "max": 0.85,
+            "deployment_pressure_weight": 0.18,
+            "market_state_weight": 0.0,
+            "win_rate_weight": 0.35,
+            "win_rate_pivot": 0.55,
+        },
+    }
+    eng = RiskEngine(cfg)
+    portfolio = {
+        "portfolio_value": "10000",
+        "metadata": {
+            "market_state_score": 1.0,
+            "dynamic_thresholds": {
+                "per_strategy": {
+                    "momentum_breakout": {"recent_win_rate": 0.91},
+                },
+            },
+        },
+    }
+
+    sig = _signal(
+        confidence=0.35,
+        metadata={"allocation_selected": True, "deployment_pressure": 0.60},
+    )
+    decision = eng.evaluate(sig, portfolio)
+
+    assert decision.verdict.value == "approved"
+    assert sig.metadata["risk_confidence_floor_dynamic"] == pytest.approx(0.292)
+    assert sig.metadata["risk_min_confidence_dynamic"] == pytest.approx(0.329)
+
+
+def test_non_allocator_signal_keeps_configured_confidence_floor() -> None:
+    cfg = _default_cfg()
+    cfg["min_trade_quality_score"] = "0"
+    cfg["dynamic_quality_thresholds"] = {
+        "enabled": True,
+        "confidence": {
+            "min": 0.40,
+            "max": 0.85,
+            "deployment_pressure_weight": 0.18,
+            "market_state_weight": 0.0,
+            "win_rate_weight": 0.0,
+        },
+    }
+    eng = RiskEngine(cfg)
+    portfolio = {
+        "portfolio_value": "10000",
+        "metadata": {"market_state_score": 1.0},
+    }
+
+    sig = _signal(confidence=0.35, metadata={"deployment_pressure": 0.60})
+    decision = eng.evaluate(sig, portfolio)
+
+    assert decision.verdict.value == "rejected"
+    assert "confidence_threshold" in (decision.reason or "")
+    assert "risk_confidence_floor_dynamic" not in sig.metadata
+
+
 def test_drawdown_open_lock_blocks_opens_but_allows_reduce_only() -> None:
     cfg = _default_cfg()
     eng = RiskEngine(cfg)
@@ -119,6 +184,52 @@ def test_drawdown_open_lock_blocks_opens_but_allows_reduce_only() -> None:
     reduce_sig = _signal(confidence=1.0, side="sell", metadata={"reduce_only": True})
     decision = eng.evaluate(reduce_sig, portfolio)
     assert decision.verdict.value == "approved"
+
+
+def test_drawdown_open_lock_allows_allocator_redeployment_below_target() -> None:
+    cfg = _default_cfg()
+    eng = RiskEngine(cfg)
+    eng.activate_open_lock(seconds=60, reason="intraday_derisk_tier_1")
+    portfolio = {
+        "portfolio_value": "10000",
+        "tradable_capital": "10000",
+        "current_gross_exposure": "3000",
+        "metadata": {"market_state_score": 1.0},
+    }
+
+    sig = _signal(
+        qty="10",
+        price="100",
+        confidence=1.0,
+        metadata={"allocation_selected": True, "target_notional": "1000"},
+    )
+    decision = eng.evaluate(sig, portfolio)
+    assert decision.verdict.value == "approved"
+
+
+def test_drawdown_open_lock_still_rejects_non_allocator_or_oversized_redeploy() -> None:
+    cfg = _default_cfg()
+    eng = RiskEngine(cfg)
+    eng.activate_open_lock(seconds=60, reason="intraday_derisk_tier_1")
+    portfolio = {
+        "portfolio_value": "10000",
+        "tradable_capital": "10000",
+        "current_gross_exposure": "9500",
+        "metadata": {"market_state_score": 1.0},
+    }
+
+    oversized = _signal(
+        confidence=1.0,
+        metadata={"allocation_selected": True, "target_notional": "1000"},
+    )
+    decision = eng.evaluate(oversized, portfolio)
+    assert decision.verdict.value == "rejected"
+    assert "drawdown_open_lock" in (decision.reason or "")
+
+    non_allocator = _signal(confidence=1.0, metadata={"target_notional": "100"})
+    decision = eng.evaluate(non_allocator, portfolio)
+    assert decision.verdict.value == "rejected"
+    assert "drawdown_open_lock" in (decision.reason or "")
 
 
 def test_dynamic_consecutive_losses() -> None:
@@ -170,6 +281,3 @@ def test_dynamic_consecutive_losses() -> None:
     decision = eng2.evaluate(sig, portfolio2)
     assert decision.verdict.value == "rejected"
     assert "consecutive_losses" in (decision.reason or "")
-
-
-

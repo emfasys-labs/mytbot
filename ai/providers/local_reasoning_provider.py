@@ -59,6 +59,8 @@ class LocalReasoningProvider(AIProvider):
         self._temperature = float(cfg.get("temperature", 0.1))
         self._max_tokens = int(cfg.get("max_tokens", 400))
         self._timeout = float(cfg.get("timeout_seconds", 15))
+        self._failure_cooldown_seconds = float(cfg.get("failure_cooldown_seconds", self._timeout))
+        self._disabled_until: float = 0.0
         self._use_json_mode = bool(cfg.get("use_json_mode", True))
         self._available = False
         self._active_model: str | None = None
@@ -93,6 +95,7 @@ class LocalReasoningProvider(AIProvider):
                 if self._model_available(model, installed):
                     self._active_model = model
                     self._available = True
+                    self._disabled_until = 0.0
                     label = "primary" if model == self._model else "fallback"
                     logger.info(
                         "local_reasoning | {} model active | model={} url={} style={}",
@@ -146,6 +149,8 @@ class LocalReasoningProvider(AIProvider):
     ) -> ProviderResult:
         if not self._available:
             return ProviderResult(provider_name=self.name, success=False, error="endpoint_unavailable")
+        if self._cooldown_active():
+            return ProviderResult(provider_name=self.name, success=False, error="cooldown_after_timeout")
 
         t0 = time.monotonic()
         body_preview = (body or "").strip()[:800]
@@ -177,6 +182,9 @@ class LocalReasoningProvider(AIProvider):
                         "local_reasoning | model '{}' failed, trying fallback | {}",
                         model, last_error,
                     )
+                if isinstance(exc, (TimeoutError, httpx.TimeoutException, asyncio.TimeoutError)):
+                    self._trip_cooldown(model=model, error=last_error)
+                    break
 
         elapsed = int((time.monotonic() - t0) * 1000)
         logger.warning("local_reasoning | all models failed ({}ms) | {}", elapsed, last_error)
@@ -200,6 +208,11 @@ class LocalReasoningProvider(AIProvider):
         if not self._available:
             return (
                 ProviderResult(provider_name=self.name, success=False, error="endpoint_unavailable"),
+                None,
+            )
+        if self._cooldown_active():
+            return (
+                ProviderResult(provider_name=self.name, success=False, error="cooldown_after_timeout"),
                 None,
             )
 
@@ -226,6 +239,8 @@ class LocalReasoningProvider(AIProvider):
                 return result
             except Exception as exc:  # noqa: BLE001
                 elapsed = int((time.monotonic() - t0) * 1000)
+                if isinstance(exc, (TimeoutError, httpx.TimeoutException, asyncio.TimeoutError)):
+                    self._trip_cooldown(model=model, error=str(exc)[:200])
                 return ProviderResult(
                     provider_name=f"local_reasoning({model})",
                     success=False, error=str(exc)[:200], latency_ms=elapsed,
@@ -241,6 +256,8 @@ class LocalReasoningProvider(AIProvider):
 
     async def generate_rationale(self, signal_context: dict[str, Any]) -> str | None:
         if not self._available:
+            return None
+        if self._cooldown_active():
             return None
         prompt = (
             f"Given this trade context, write one clear sentence explaining "
@@ -259,6 +276,21 @@ class LocalReasoningProvider(AIProvider):
         except Exception as exc:  # noqa: BLE001
             logger.warning("local_reasoning | rationale failed | {}", exc)
             return None
+
+    def _cooldown_active(self) -> bool:
+        return time.monotonic() < self._disabled_until
+
+    def _trip_cooldown(self, *, model: str, error: str) -> None:
+        cooldown = max(0.0, self._failure_cooldown_seconds)
+        if cooldown <= 0:
+            return
+        self._disabled_until = max(self._disabled_until, time.monotonic() + cooldown)
+        logger.warning(
+            "local_reasoning | model timeout; cooling down local LLM | model={} cooldown_sec={} | {}",
+            model,
+            cooldown,
+            error,
+        )
 
     async def _call_llm(
         self, user_msg: str, system: str | None = None, model_override: str | None = None,
