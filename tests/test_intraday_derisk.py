@@ -11,9 +11,12 @@ the response with severity, and must only ever emit reduce-only actions.
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from brokers.base import OrderStatus
+from risk.drawdown_governor import derisk_execution_reduced_exposure
 from risk.intraday_derisk import (
     DeriskTier,
     evaluate_intraday_derisk,
@@ -42,6 +45,19 @@ def _pos(symbol, broker, qty, entry, current, asset_class="equity") -> dict:
         "asset_class": asset_class,
         "unrealised_pnl": (Decimal(current) - Decimal(entry)) * Decimal(qty),
     }
+
+
+def test_derisk_open_lock_refresh_requires_filled_reduce_result():
+    assert derisk_execution_reduced_exposure(None) is False
+    assert derisk_execution_reduced_exposure(
+        SimpleNamespace(status=OrderStatus.REJECTED, filled_quantity=Decimal("10"))
+    ) is False
+    assert derisk_execution_reduced_exposure(
+        SimpleNamespace(status=OrderStatus.FILLED, filled_quantity=Decimal("0"))
+    ) is False
+    assert derisk_execution_reduced_exposure(
+        SimpleNamespace(status=OrderStatus.PARTIALLY_FILLED, filled_quantity=Decimal("0.1"))
+    ) is True
 
 
 def test_tiers_sorted_most_severe_first():

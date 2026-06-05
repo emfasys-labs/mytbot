@@ -2611,7 +2611,6 @@ class Orchestrator:
                     from risk.drawdown_governor import (
                         parse_open_lock_config,
                         recovered_from_tier,
-                        should_trigger_open_lock,
                     )
 
                     lock_cfg = parse_open_lock_config(d_cfg.get("open_lock"))
@@ -2622,11 +2621,6 @@ class Orchestrator:
                         config=lock_cfg,
                     ):
                         risk_engine.clear_open_lock("intraday_derisk_recovered")
-                    elif should_trigger_open_lock(tier_idx=tier_idx, config=lock_cfg):
-                        risk_engine.activate_open_lock(
-                            seconds=lock_cfg.cooldown_sec,
-                            reason=f"intraday_derisk_tier_{tier_idx}",
-                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("orchestrator | drawdown open-lock skipped | {}", exc)
             if not actions:
@@ -2695,6 +2689,24 @@ class Orchestrator:
                         action.broker, action.symbol,
                     )
                     continue
+                try:
+                    from risk.drawdown_governor import (
+                        derisk_execution_reduced_exposure,
+                        parse_open_lock_config,
+                        should_trigger_open_lock,
+                    )
+
+                    lock_cfg = parse_open_lock_config(d_cfg.get("open_lock"))
+                    if (
+                        derisk_execution_reduced_exposure(result)
+                        and should_trigger_open_lock(tier_idx=tier_idx, config=lock_cfg)
+                    ):
+                        risk_engine.activate_open_lock(
+                            seconds=lock_cfg.cooldown_sec,
+                            reason=f"intraday_derisk_tier_{tier_idx}",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("orchestrator | drawdown open-lock activation skipped | {}", exc)
                 logger.warning(
                     "orchestrator | intraday-derisk submitted | broker={} symbol={} side={} qty={} reason={}",
                     action.broker, action.symbol, action.side, action.reduce_quantity, action.reason,

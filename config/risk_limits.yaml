@@ -402,8 +402,8 @@ intraday_derisk:
       enabled: true             # widen for volatile names, tighten for oversized ones
   open_lock:
     enabled: true
-    trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -0.50% tier
-    cooldown_sec: 900            # no fresh opens for 15 minutes after tier-2 derisk
+    trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -1.00% tier
+    cooldown_sec: 900            # no fresh opens for 15 minutes after a filled tier-1+ derisk
     recover_hysteresis_pct: 0.0015
   tiers:
     - threshold_pct: -0.0050    # -0.50% intraday day P&L

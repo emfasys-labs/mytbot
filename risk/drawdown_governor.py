@@ -47,6 +47,26 @@ def should_trigger_open_lock(*, tier_idx: int, config: DrawdownOpenLockConfig) -
     return bool(config.enabled and tier_idx >= config.trigger_tier_idx and config.cooldown_sec > 0)
 
 
+def derisk_execution_reduced_exposure(result: Any) -> bool:
+    """Return true only when a derisk order actually filled exposure reduction.
+
+    The open-lock is a post-derisk cooldown, not a standing drawdown-state
+    switch. Tying it to filled reduce-only execution prevents an old realised
+    loss from refreshing the lock forever when no new derisk work succeeded.
+    """
+    if result is None:
+        return False
+    status = getattr(result, "status", None)
+    status_value = str(getattr(status, "value", status) or "").strip().lower()
+    if status_value not in {"filled", "partially_filled"}:
+        return False
+    try:
+        filled = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return filled > 0
+
+
 def recovered_from_tier(
     *,
     nav: Decimal,
