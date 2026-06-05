@@ -337,7 +337,25 @@ async def _load_portfolio_state(
                 except Exception:  # noqa: BLE001
                     daily_loss_accumulated = Decimal("0")
 
-        hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
+        # HWM must NOT consult rows that were written during a coverage
+        # gap (e.g. IBKR disconnected → ``portfolio_value`` was the
+        # active-only NAV). Filter out rows stamped
+        # ``strategy_breakdown.partial_coverage = true``. Other rows
+        # (including legacy rows with no flag at all) participate normally.
+        try:
+            from sqlalchemy.dialects.postgresql import JSONB  # noqa: F401
+            hwm_q = await session.execute(
+                select(func.max(DailyPnL.portfolio_value)).where(
+                    func.coalesce(
+                        DailyPnL.strategy_breakdown[
+                            "partial_coverage"
+                        ].as_string(),
+                        "false",
+                    ) != "true"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            hwm_q = await session.execute(select(func.max(DailyPnL.portfolio_value)))
         hwm_raw = hwm_q.scalar_one_or_none()
 
         latest_by_key = (
@@ -854,9 +872,7 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
                 unrealised_pnl=unreal,
                 total_fees=fee_delta,
                 trade_count=int(portfolio_state.get("trades_today", 0)),
-                # Skip portfolio_value during a coverage gap so HWM (max over
-                # daily rows) does not ratchet down on the partial NAV.
-                portfolio_value=(state_pv if coverage_full else Decimal("0")),
+                portfolio_value=state_pv,
                 strategy_breakdown=breakdown,
             )
             session.add(row)
@@ -870,10 +886,11 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
                     prev_fees = Decimal("0")
                 row.total_fees = prev_fees + fee_delta
             row.trade_count = int(portfolio_state.get("trades_today", 0))
-            if coverage_full:
-                row.portfolio_value = state_pv
-            # else: leave existing portfolio_value untouched (don't overwrite
-            # a previously-written full-coverage value with the partial one).
+            # Always write the live NAV the heartbeat just observed so the
+            # dashboard sees a fresh row. The HWM reader filters out rows
+            # stamped ``partial_coverage = true``, so persisting the
+            # active-scope NAV during a gap is safe.
+            row.portfolio_value = state_pv
             row.strategy_breakdown = breakdown
         await session.commit()
 

@@ -63,7 +63,16 @@ def _session_factory(existing_row=None):
 
 class _FakeReport:
     def __init__(self, *, full): self._full = full
-    def coverage(self): return {"full": self._full, "included": [], "excluded": []}
+    def coverage(self):
+        return {
+            "full": self._full,
+            # Non-empty so the runtime helper recognises this as a
+            # populated report (an empty ``configured`` is treated as the
+            # startup window and defaults to "full / no filter").
+            "configured": ["ibkr", "kraken"],
+            "included": ["kraken"] if not self._full else ["ibkr", "kraken"],
+            "excluded": [] if self._full else [{"name": "ibkr"}],
+        }
 
 
 class _FakeBM:
@@ -98,10 +107,10 @@ async def test_full_coverage_writes_portfolio_value():
 
 
 @pytest.mark.asyncio
-async def test_partial_coverage_does_not_write_partial_nav():
-    # Fresh insert: no prior row exists. Under partial coverage the writer
-    # must NOT seed the row with the active-only NAV (which would
-    # immediately establish an artificially low HWM).
+async def test_partial_coverage_writes_nav_with_flag():
+    # The writer must still persist the live (active-scope) NAV so the
+    # dashboard sees a fresh row — but it stamps ``partial_coverage=True``
+    # so the HWM reader can skip it.
     runtime.set_broker_manager(_FakeBM(full=False))
     sf = _session_factory(existing_row=None)
     state = {
@@ -115,34 +124,68 @@ async def test_partial_coverage_does_not_write_partial_nav():
     }
     await _upsert_daily_pnl(sf, state)
     row: DailyPnL = sf.sess.added[0]
-    assert Decimal(str(row.portfolio_value)) == Decimal("0")
+    assert Decimal(str(row.portfolio_value)) == Decimal("255000")
     assert row.strategy_breakdown["partial_coverage"] is True
 
 
 @pytest.mark.asyncio
-async def test_partial_coverage_preserves_existing_portfolio_value():
-    # An earlier full-coverage tick wrote portfolio_value = 1.23M. A later
-    # partial-coverage tick must NOT overwrite it with the active-only NAV.
+async def test_full_then_partial_then_full_in_same_day():
+    # A row that was full at noon may flip to partial at 1pm and back to
+    # full at 2pm. Each tick reflects its own coverage in the flag and the
+    # latest observation in portfolio_value. The HWM reader is responsible
+    # for ignoring whichever rows happen to be partial when it runs.
     existing = SimpleNamespace(
         portfolio_value=Decimal("1230000"),
         realised_pnl=Decimal("0"),
         unrealised_pnl=Decimal("0"),
         total_fees=Decimal("0"),
         trade_count=0,
-        strategy_breakdown={},
+        strategy_breakdown={"partial_coverage": False},
     )
+    # Partial tick lands.
     runtime.set_broker_manager(_FakeBM(full=False))
     sf = _session_factory(existing_row=existing)
-    state = {
+    await _upsert_daily_pnl(sf, {
         "portfolio_value": Decimal("255000"),
-        "trades_today": 7,
-        "consecutive_losses": 0,
-        "cooldown_until": None,
-        "daily_loss_accumulated": "0",
-        "positions": {},
-        "fees_today_delta": Decimal("0"),
+        "trades_today": 7, "consecutive_losses": 0, "cooldown_until": None,
+        "daily_loss_accumulated": "0", "positions": {}, "fees_today_delta": Decimal("0"),
+    })
+    assert existing.portfolio_value == Decimal("255000")
+    assert existing.strategy_breakdown["partial_coverage"] is True
+
+    # Full tick lands later — flag clears, NAV updates.
+    runtime.set_broker_manager(_FakeBM(full=True))
+    sf2 = _session_factory(existing_row=existing)
+    await _upsert_daily_pnl(sf2, {
+        "portfolio_value": Decimal("1240000"),
+        "trades_today": 9, "consecutive_losses": 0, "cooldown_until": None,
+        "daily_loss_accumulated": "0", "positions": {}, "fees_today_delta": Decimal("0"),
+    })
+    assert existing.portfolio_value == Decimal("1240000")
+    assert existing.strategy_breakdown["partial_coverage"] is False
+    assert existing.trade_count == 9
+
+
+@pytest.mark.asyncio
+async def test_startup_with_unpopulated_report_is_not_partial():
+    # Right after orchestrator construction, ``BrokerReport.brokers`` is {}.
+    # That is NOT a partial-coverage state — it's just "the report isn't
+    # populated yet". The writer should treat it as full so the very first
+    # NAV heartbeat doesn't permanently flag today's row as partial.
+    class _EmptyReport:
+        def coverage(self): return {"full": False, "configured": [], "included": [], "excluded": []}
+
+    class _EmptyBM:
+        report = _EmptyReport()
+
+    runtime.set_broker_manager(_EmptyBM())
+    sf = _session_factory(existing_row=None)
+    state = {
+        "portfolio_value": Decimal("100000"),
+        "trades_today": 0, "consecutive_losses": 0, "cooldown_until": None,
+        "daily_loss_accumulated": "0", "positions": {}, "fees_today_delta": Decimal("0"),
     }
     await _upsert_daily_pnl(sf, state)
-    assert existing.portfolio_value == Decimal("1230000")
-    assert existing.trade_count == 7  # non-NAV fields still update
-    assert existing.strategy_breakdown["partial_coverage"] is True
+    row = sf.sess.added[0]
+    assert Decimal(str(row.portfolio_value)) == Decimal("100000")
+    assert row.strategy_breakdown["partial_coverage"] is False

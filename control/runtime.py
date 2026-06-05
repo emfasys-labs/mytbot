@@ -41,12 +41,21 @@ def get_broker_manager() -> Any:
 def current_active_brokers() -> set[str] | None:
     """Lowercased broker names currently in dashboard/accounting scope.
 
-    ``None`` means the broker manager is not registered or coverage is full
-    (no filtering needed). A possibly-empty ``set`` means partial coverage:
-    only these names should be summed into NAV-denominated portfolio totals.
-    Mirrors :func:`api.server._current_nav_broker_filter` so the trading
-    loop / risk engine and the dashboard / accounting paths agree on which
-    brokers are "in scope" for a given tick.
+    ``None`` means "don't filter" — either the broker manager isn't
+    registered yet, no brokers have been configured at all (very early
+    startup), or coverage is full. A non-None set means partial coverage:
+    only these names should be summed into NAV-denominated portfolio
+    totals. Mirrors :func:`api.server._current_nav_broker_filter` so the
+    trading loop / risk engine and the dashboard / accounting paths agree
+    on which brokers are "in scope" for a given tick.
+
+    Critically: an empty ``configured`` list is NOT treated as partial
+    coverage. ``BrokerManager.__init__`` registers the broker manager
+    before ``discover_and_connect`` runs, so during a brief startup
+    window ``report.brokers`` is empty — returning ``set()`` then would
+    classify every persisted position as offline and zero out
+    ``current_gross_exposure``, which in turn makes the trading loop
+    behave as if the book were empty.
     """
     bm = _BROKER_MANAGER
     if bm is None:
@@ -58,18 +67,26 @@ def current_active_brokers() -> set[str] | None:
         cov = report.coverage()
     except Exception:  # noqa: BLE001
         return None
-    if not isinstance(cov, dict) or bool(cov.get("full")):
+    if not isinstance(cov, dict):
+        return None
+    if not cov.get("configured"):
+        # Report not populated yet — fall back to "no filter".
+        return None
+    if bool(cov.get("full")):
         return None
     included = cov.get("included") or []
     return {str(n).strip().lower() for n in included if str(n).strip()}
 
 
 def coverage_is_full() -> bool:
-    """``True`` when every configured broker is connected + balance_ready.
+    """``True`` when every configured broker is connected + balance_ready,
+    OR when no brokers are configured yet (startup window).
 
-    Used by the daily-PnL writer to decide whether a row reflects the full
-    book or a partial coverage window (in which case ``portfolio_value`` is
-    not written so the HWM does not regress).
+    Used by the daily-PnL writer to stamp a ``partial_coverage`` flag.
+    The actual HWM-ratchet guard lives in the *reader* (the HWM query
+    filters out rows stamped partial), not in the writer — so the
+    heartbeat can still persist the active-scope NAV during a gap and
+    operators see a live row rather than a zero.
     """
     bm = _BROKER_MANAGER
     if bm is None:
@@ -81,5 +98,9 @@ def coverage_is_full() -> bool:
         cov = report.coverage()
     except Exception:  # noqa: BLE001
         return True
-    return bool(isinstance(cov, dict) and cov.get("full", True))
+    if not isinstance(cov, dict):
+        return True
+    if not cov.get("configured"):
+        return True
+    return bool(cov.get("full", True))
 

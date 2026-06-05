@@ -83,14 +83,22 @@ def _pos(symbol, broker, qty, price, asset_class="equity"):
 
 
 class _FakeReport:
-    def __init__(self, *, full: bool, included: list[str]):
-        self._cov = {"full": full, "included": list(included), "excluded": []}
+    def __init__(self, *, full: bool, included: list[str], configured: list[str] | None = None):
+        cfg = list(configured) if configured is not None else (
+            list(included) + (["ibkr"] if not full and "ibkr" not in included else [])
+        )
+        self._cov = {
+            "full": full,
+            "configured": cfg,
+            "included": list(included),
+            "excluded": [{"name": n} for n in cfg if n not in included],
+        }
     def coverage(self): return self._cov
 
 
 class _FakeBM:
-    def __init__(self, *, full: bool, included: list[str]):
-        self.report = _FakeReport(full=full, included=included)
+    def __init__(self, *, full: bool, included: list[str], configured: list[str] | None = None):
+        self.report = _FakeReport(full=full, included=included, configured=configured)
 
 
 @pytest.fixture(autouse=True)
@@ -130,6 +138,28 @@ async def test_partial_coverage_partitions_exposure():
     # (which feeds the risk engine's leverage ratio).
     brokers_in_scope = {p["broker"] for p in state["positions"].values()}
     assert brokers_in_scope == {"kraken"}
+
+
+@pytest.mark.asyncio
+async def test_startup_with_empty_report_does_not_flag_offline():
+    # During the orchestrator-init → discover_and_connect window the broker
+    # manager exists but ``report.brokers`` is empty. That must NOT be read
+    # as "every broker is offline" — otherwise every persisted position
+    # would be moved into offline_exposure and current_gross_exposure would
+    # zero out, making the trading loop behave as if the book were empty.
+    class _EmptyReport:
+        def coverage(self): return {"full": False, "configured": [], "included": [], "excluded": []}
+
+    class _EmptyBM:
+        report = _EmptyReport()
+
+    runtime.set_broker_manager(_EmptyBM())
+    rows = [_pos("AAPL", "ibkr", 10, 100), _pos("BTC-USD", "kraken", 1, 50_000)]
+    sf = _session_factory(rows)
+    state = await _load_portfolio_state(sf, fallback_portfolio_value=Decimal("100000"))
+    assert state["current_gross_exposure"] == Decimal("51000")
+    assert state["offline_exposure"] == Decimal("0")
+    assert state["coverage_partial"] is False
 
 
 @pytest.mark.asyncio
