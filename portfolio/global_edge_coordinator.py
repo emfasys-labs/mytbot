@@ -1272,6 +1272,17 @@ class GlobalEdgeCoordinator:
             tot = sum(exps) or 1.0
             return [e / tot for e in exps]
 
+        def _norm_sym(s: str) -> str:
+            s = s.strip().upper()
+            for suf in ("=X", "=F"):
+                if s.endswith(suf):
+                    s = s[: -len(suf)]
+                    break
+            if s.endswith("-USD") and len(s) > 4:
+                # crypto: CAKE-USD ≡ CAKEUSDT for some reconciliation
+                s = s[:-4]
+            return s
+
         # Iteratively shrink the qualifying set until every survivor's
         # softmax-allocated notional clears its asset-class minimum.
         while qualifying:
@@ -1289,8 +1300,18 @@ class GlobalEdgeCoordinator:
                 # loop so we don't fail-and-drop opps that would have been
                 # legitimately clipped (and still clear the minimum).
                 if max_position_notional is not None and max_position_notional > 0:
-                    if notional > max_position_notional:
-                        notional = max_position_notional
+                    opp_norm = _norm_sym(opp.symbol)
+                    existing_sym_notional = sum(
+                        (h.notional for h in held if _norm_sym(h.symbol) == opp_norm),
+                        Decimal("0"),
+                    )
+                    # Add a small safety buffer (1%) so we land just inside the
+                    # cap rather than exactly at it (avoids float-edge rejects).
+                    room = (max_position_notional - existing_sym_notional) * Decimal("0.99")
+                    if room < 0:
+                        room = Decimal("0")
+                    if notional > room:
+                        notional = room
                 min_n = _min_order_notional(ac, symbol=opp.symbol, cfg_overrides=min_overrides)
                 if notional < min_n:
                     below_min.append(idx)
@@ -1337,22 +1358,6 @@ class GlobalEdgeCoordinator:
             # max_concentration_pct. Account for existing held exposure on
             # this symbol so the new open lands inside the remaining cap.
             if max_position_notional is not None and max_position_notional > 0:
-                # Risk engine concentration aggregates across symbol variants
-                # (USDCHF and USDCHF=X both map to the same forex pair). Strip
-                # common yfinance suffixes when matching existing exposure so
-                # we don't propose a new opp at the full cap when the same
-                # asset is already deployed under a different ticker form.
-                def _norm_sym(s: str) -> str:
-                    s = s.strip().upper()
-                    for suf in ("=X", "=F"):
-                        if s.endswith(suf):
-                            s = s[: -len(suf)]
-                            break
-                    if s.endswith("-USD") and len(s) > 4:
-                        # crypto: CAKE-USD ≡ CAKEUSDT for some reconciliation
-                        s = s[:-4]
-                    return s
-
                 opp_norm = _norm_sym(opp.symbol)
                 existing_sym_notional = sum(
                     (h.notional for h in held if _norm_sym(h.symbol) == opp_norm),

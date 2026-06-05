@@ -34,7 +34,7 @@ from risk.options_env import merge_options_env_into_risk_cfg
 from signals.accumulator import SignalAccumulator
 from signals.engine import RawSignal, SignalEngine
 from storage.db import dispose_engine, init_async_database
-from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, OrderLog, PositionLog, SignalLog
+from storage.models import AIOutputLog, DailyPnL, FeatureSnapshot, FillLog, OrderLog, PositionLog, SignalLog
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumBreakoutStrategy
 
@@ -291,6 +291,14 @@ async def _load_portfolio_state(
     """
     daily_realized_pnl = Decimal("0")
     current_gross_exposure = Decimal("0")
+    # Sidecar: notional held at brokers that are currently outside the
+    # dashboard/accounting scope (e.g. IBKR is disconnected). Risk hard rails
+    # ([[project_risk_hard_rails]]) still need to see these so they cannot
+    # silently lift a global cap during a coverage gap — but they must be kept
+    # OUT of ``current_gross_exposure`` so the leverage ratio computed against
+    # the IBKR-excluded NAV is not mechanically inflated.
+    offline_exposure = Decimal("0")
+    offline_brokers: set[str] = set()
     symbol_exposure: dict[str, Decimal] = {}
     asset_class_exposure: dict[str, Decimal] = {}
     positions: dict[str, dict[str, Any]] = {}
@@ -300,6 +308,12 @@ async def _load_portfolio_state(
     daily_loss_accumulated = Decimal("0")
     pv_from_db = Decimal("0")
     option_premium_exposure = Decimal("0")
+
+    try:
+        from control.runtime import current_active_brokers as _cur_active
+        active_brokers = _cur_active()
+    except Exception:  # noqa: BLE001
+        active_brokers = None
 
     async with session_factory() as session:
         latest_pnl_q = await session.execute(
@@ -353,15 +367,26 @@ async def _load_portfolio_state(
                     continue
                 px = Decimal(str(row.current_price or signal_price_fallback or "0"))
                 notional, is_option_row = _position_log_notional(row, signal_price_fallback)
+                broker_key = (row.broker or "").strip()[:20]
+                broker_lc = broker_key.lower()
+                is_offline = active_brokers is not None and broker_lc not in active_brokers
+                if is_offline:
+                    offline_exposure += notional
+                    if broker_lc:
+                        offline_brokers.add(broker_lc)
+                    # Keep ``positions``/``symbol_exposure``/``asset_class_exposure``
+                    # consistent with the active scope so risk caps that divide
+                    # by ``portfolio_value`` (NAV) don't pair active-only NAV
+                    # against a full-book numerator.
+                    continue
                 current_gross_exposure += notional
                 if is_option_row:
                     option_premium_exposure += notional
                 symbol = (row.symbol or "").strip()
                 if symbol:
-                    broker_key = (row.broker or "").strip()[:20]
                     position_key = symbol
                     existing = positions.get(position_key)
-                    if existing is not None and str(existing.get("broker", "")).strip().lower() != broker_key.lower():
+                    if existing is not None and str(existing.get("broker", "")).strip().lower() != broker_lc:
                         position_key = f"{broker_key}:{symbol}"
                     symbol_exposure[symbol] = symbol_exposure.get(symbol, Decimal("0")) + notional
                     entry: dict[str, Any] = {
@@ -428,6 +453,13 @@ async def _load_portfolio_state(
         "cooldown_until": cooldown_until,
         "daily_loss_accumulated": daily_loss_accumulated,
         "option_premium_exposure": option_premium_exposure,
+        # Sidecar: positions held at brokers currently outside dashboard
+        # scope. Risk hard rails consult ``offline_exposure`` so a coverage
+        # gap cannot silently lift a global cap, while leverage ratios use
+        # ``current_gross_exposure`` paired with the same-scope NAV.
+        "offline_exposure": offline_exposure,
+        "offline_brokers": sorted(offline_brokers),
+        "coverage_partial": active_brokers is not None,
     }
 
 
@@ -733,83 +765,43 @@ async def _refresh_position_marks_and_persist(
 
 
 async def _compute_today_realised_pnl(session) -> Decimal:
-    """Round-trip realised P&L from today's filled orders.
+    """Sum today's realised P&L from the FillLog ledger (D126).
 
-    Replays the day's fill sequence against a per-(broker, symbol) position
-    state and sums ``(gross - fee)`` whenever a fill closes part of an
-    existing position. Mirrors the API's ``_filled_order_net_pnl_for_period``
-    so the persisted ``daily_pnl.realised_pnl`` always equals what the API
-    computes — previously the column read 0 while the API showed thousands.
-
-    Returns 0 when no fills are found.
+    ``FillLog.realised_pnl`` is computed by the fills ledger on every closing
+    fill using weighted-average cost basis, and is the canonical analytics
+    source per [[project_fills_ledger]]. Summing it for today's UTC window is
+    drift-free and correctly attributes the close P&L of positions opened on
+    prior days (the pre-fix per-day OrderLog replay started from an empty
+    position state, so a sell of a position opened yesterday was treated as
+    "opening a short" — its realised P&L silently vanished).
     """
     today = datetime.now(timezone.utc).date()
     start_dt = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     end_dt = start_dt + timedelta(days=1)
     q = await session.execute(
-        select(OrderLog)
-        .where(
-            OrderLog.timestamp >= start_dt,
-            OrderLog.timestamp < end_dt,
-            OrderLog.status.in_(("filled", "partially_filled")),
-        )
-        .order_by(OrderLog.timestamp.asc(), OrderLog.id.asc())
+        select(func.coalesce(func.sum(FillLog.realised_pnl), 0))
+        .where(FillLog.timestamp >= start_dt, FillLog.timestamp < end_dt)
     )
-    rows = list(q.scalars().all())
-    if not rows:
+    try:
+        return Decimal(str(q.scalar_one() or 0))
+    except (TypeError, ValueError, InvalidOperation):
         return Decimal("0")
-
-    state: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
-    total = Decimal("0")
-    for r in rows:
-        broker = str(r.broker or "").strip().lower()
-        symbol = str(r.symbol or "").strip().upper()
-        key = (broker, symbol)
-        pos_qty, pos_avg = state.get(key, (Decimal("0"), Decimal("0")))
-        try:
-            fill_qty = Decimal(str(r.filled_quantity if r.filled_quantity is not None else r.quantity or 0))
-            fill_price = Decimal(str(r.avg_fill_price if r.avg_fill_price is not None else r.limit_price or 0))
-            fee = Decimal(str(r.fee or 0))
-        except (TypeError, ValueError, InvalidOperation):
-            continue
-        side_l = str(r.side or "").strip().lower()
-        if side_l not in {"buy", "sell"} or fill_qty <= 0 or fill_price <= 0:
-            continue
-        signed_fill = fill_qty if side_l == "buy" else -fill_qty
-        closing_qty = Decimal("0")
-        gross = Decimal("0")
-        if pos_qty > 0 and signed_fill < 0:
-            closing_qty = min(pos_qty, abs(signed_fill))
-            gross = (fill_price - pos_avg) * closing_qty
-        elif pos_qty < 0 and signed_fill > 0:
-            closing_qty = min(abs(pos_qty), signed_fill)
-            gross = (pos_avg - fill_price) * closing_qty
-        if closing_qty > 0:
-            fee_alloc = fee * (closing_qty / fill_qty)
-            total += gross - fee_alloc
-        new_qty = pos_qty + signed_fill
-        eps = Decimal("0.00000001")
-        if abs(new_qty) <= eps:
-            new_qty = Decimal("0")
-            new_avg = fill_price
-        elif pos_qty == 0 or (pos_qty > 0 and signed_fill > 0) or (pos_qty < 0 and signed_fill < 0):
-            total_abs = abs(pos_qty) + abs(signed_fill)
-            new_avg = (
-                ((abs(pos_qty) * pos_avg) + (abs(signed_fill) * fill_price)) / total_abs
-                if total_abs > 0
-                else fill_price
-            )
-        elif abs(signed_fill) < abs(pos_qty):
-            new_avg = pos_avg
-        else:
-            new_avg = fill_price
-        state[key] = (new_qty, new_avg)
-    return total
 
 
 async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
     d = now.date().isoformat()
+    # When coverage is partial (a configured broker is disconnected /
+    # balance-not-ready), ``portfolio_value`` is the active-only NAV and
+    # writing it to the canonical ``daily_pnl`` row would ratchet HWM /
+    # drawdown computations against a denominator that does not reflect the
+    # full book. Realised / fees come from the broker-agnostic FillLog so
+    # they remain authoritative even during a gap.
+    try:
+        from control.runtime import coverage_is_full as _cov_full
+        coverage_full = bool(_cov_full())
+    except Exception:  # noqa: BLE001
+        coverage_full = True
     # `fees_today_delta` is set by the trading loop when a fill produces fees;
     # we accumulate into the existing row rather than overwriting, so we don't
     # lose earlier fills' fees when later fills land on the same day.
@@ -848,6 +840,13 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
             realised_today = Decimal(str(portfolio_state.get("daily_realized_pnl", "0")))
         q = await session.execute(select(DailyPnL).where(DailyPnL.date == d).limit(1))
         row = q.scalars().first()
+        state_pv = Decimal(str(portfolio_state.get("portfolio_value", "0")))
+        breakdown = {
+            "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
+            "risk_cooldown_until": portfolio_state.get("cooldown_until"),
+            "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
+            "partial_coverage": (not coverage_full),
+        }
         if row is None:
             row = DailyPnL(
                 date=d,
@@ -855,12 +854,10 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
                 unrealised_pnl=unreal,
                 total_fees=fee_delta,
                 trade_count=int(portfolio_state.get("trades_today", 0)),
-                portfolio_value=Decimal(str(portfolio_state.get("portfolio_value", "0"))),
-                strategy_breakdown={
-                    "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
-                    "risk_cooldown_until": portfolio_state.get("cooldown_until"),
-                    "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
-                },
+                # Skip portfolio_value during a coverage gap so HWM (max over
+                # daily rows) does not ratchet down on the partial NAV.
+                portfolio_value=(state_pv if coverage_full else Decimal("0")),
+                strategy_breakdown=breakdown,
             )
             session.add(row)
         else:
@@ -873,12 +870,11 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
                     prev_fees = Decimal("0")
                 row.total_fees = prev_fees + fee_delta
             row.trade_count = int(portfolio_state.get("trades_today", 0))
-            row.portfolio_value = Decimal(str(portfolio_state.get("portfolio_value", "0")))
-            row.strategy_breakdown = {
-                "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
-                "risk_cooldown_until": portfolio_state.get("cooldown_until"),
-                "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
-            }
+            if coverage_full:
+                row.portfolio_value = state_pv
+            # else: leave existing portfolio_value untouched (don't overwrite
+            # a previously-written full-coverage value with the partial one).
+            row.strategy_breakdown = breakdown
         await session.commit()
 
 

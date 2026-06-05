@@ -1392,6 +1392,9 @@ class TradingLoop:
                     signal_price_fallback=None,
                     capital_pct=Decimal(str(self.capital_pct)),
                 )
+                total_equity = portfolio_state["portfolio_value"]
+                tradable = portfolio_state["tradable_capital"]
+                effective_value = float(tradable)
 
                 # D122 — dynamic threshold context. Computed once per
                 # loop iteration and stamped on each raw signal so

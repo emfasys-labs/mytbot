@@ -102,6 +102,11 @@ class Orchestrator:
         paper_mode = os.getenv("APP_ENV", "paper").strip().lower() != "live"
         self._broker_manager = BrokerManager(paper_mode=paper_mode)
         self._broker_report: BrokerReport | None = None
+        try:
+            from control.runtime import set_broker_manager
+            set_broker_manager(self._broker_manager)
+        except Exception:  # noqa: BLE001
+            pass
 
         self._trading_loop: TradingLoop | None = None
         self._pipeline_task: asyncio.Task | None = None

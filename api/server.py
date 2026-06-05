@@ -2105,17 +2105,11 @@ async def get_pnl(
     live_value = live_snap.value if live_snap is not None else Decimal(0)
     coverage_full = bool(nav_status.get("coverage_full", nav_status.get("complete", False)))
     configured_nav = _configured_paper_nav()
-    # When brokers report a positive live sum, that figure wins — do not `max` with
-    # `daily_pnl` or older persisted rows that were written while an excluded/buggy
-    # broker was still in the pre-allowlist live sum (D031). The DB is used only
-    # when `live_value` is still zero (e.g. slow first snapshot post-restart).
-    live_value_used = live_value > 0
-    if live_value_used:
-        display_value = live_value
-    else:
-        display_value = max(live_value, db_value, last_persisted_value, configured_nav)
-    if APP_ENV != "live" and not live_value_used:
-        display_value = max(Decimal(0), display_value + today_unrealised)
+    from run_m3 import _resolve_portfolio_value_for_state
+    display_value = _resolve_portfolio_value_for_state(
+        live_value,
+        max(db_value, last_persisted_value, configured_nav)
+    )
 
     orch = _get_orchestrator()
     cap_pct = 1.0
@@ -2278,12 +2272,22 @@ async def get_dashboard_snapshot(
             }
         )
     portfolio = dict(out.get("portfolio") or {})
+    orig_nav = Decimal("0")
+    if "nav" in portfolio:
+        try:
+            orig_nav = Decimal(str(portfolio["nav"]))
+        except Exception:
+            pass
+    if orig_nav <= 0:
+        orig_nav = nav
+
     if nav > 0:
         portfolio["nav"] = _decimal_str(nav)
     portfolio["gross_exposure"] = _decimal_str(gross)
     portfolio["net_exposure"] = _decimal_str(net)
     portfolio["cash_deployed"] = _decimal_str(cash_deployed)
-    portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
+    portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / orig_nav) if orig_nav > 0 else Decimal("0"))
+    portfolio["active_exposure_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
     portfolio["positions_sample"] = sample[:24]
     portfolio["weakest_by_hold_score"] = []
     portfolio["highest_exit_pressure"] = []

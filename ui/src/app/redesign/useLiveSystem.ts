@@ -116,6 +116,13 @@ export interface LiveData {
     pending: number;
     working: number;
     source: 'dashboard_snapshot' | 'positions_orders';
+    /** ``cash_deployed / full_book_nav`` — what the trading loop uses for
+     *  deployment-pressure (loop-consistent across coverage gaps). */
+    cashDeployedPct: number | null;
+    /** ``cash_deployed / active_nav`` — what the operator sees on the
+     *  scoped dashboard. Can exceed 1.0 during partial coverage when
+     *  positions held at active brokers exceed active-broker NAV. */
+    activeExposurePct: number | null;
   };
 
   exposure: {
@@ -914,17 +921,30 @@ export function useLiveSystem(): LiveData {
       ? snapshot.portfolio as Record<string, unknown>
       : null;
     const deployed = toNumber(portfolio?.cash_deployed, Number.NaN);
+    // Backend ([api/server.py]) now publishes both ratios on the snapshot:
+    //   - ``cash_deployed_pct``    = cash_deployed / full_book_nav (loop basis)
+    //   - ``active_exposure_pct``  = cash_deployed / active_nav (operator view)
+    // Surface both so the capital card can show the operator view while
+    // diagnostics can compare against the loop's deployment-pressure basis.
+    const cashDeployedPctRaw = toNumber(portfolio?.cash_deployed_pct, Number.NaN);
+    const activeExposurePctRaw = toNumber(portfolio?.active_exposure_pct, Number.NaN);
+    const cashDeployedPct = Number.isFinite(cashDeployedPctRaw) ? cashDeployedPctRaw : null;
+    const activeExposurePct = Number.isFinite(activeExposurePctRaw) ? activeExposurePctRaw : null;
     if (Number.isFinite(deployed) && deployed >= 0) {
       return {
         deployed,
         pending: 0,
         working: deployed,
         source: 'dashboard_snapshot' as const,
+        cashDeployedPct,
+        activeExposurePct,
       };
     }
     return {
       ...localCapitalAtWork,
       source: 'positions_orders' as const,
+      cashDeployedPct,
+      activeExposurePct,
     };
   }, [snapshot, localCapitalAtWork]);
   const conviction = useMemo(() => mapConviction(snapshot, positionChanges), [snapshot, positionChanges]);

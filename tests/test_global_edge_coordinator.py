@@ -815,3 +815,79 @@ def test_d031_arbitrage_path_capital_unchanged() -> None:
     # Arb path does not populate D031 sizing audit keys; that's fine — the
     # execution boundary guard exempts arbitrage sides explicitly.
     assert "sizing_source" not in opp.metadata
+
+
+def test_propose_actions_adaptive_concentration_clamping() -> None:
+    cfg = {
+        "emit_trim_actions": True,
+        "adaptive": {
+            "softmax_lambda": 5.0,
+            "target_tolerance_pct": "0.0025",
+        },
+        "minimum_order_sizes_usd": {
+            "equity": "500",
+        },
+        "max_actions_per_tick": 3,
+        "max_notional_fraction_per_action": "1.0",
+    }
+    coord = GlobalEdgeCoordinator(cfg)
+    held = [
+        HeldPositionEdge(
+            symbol="AAA",
+            notional=Decimal("4600"),
+            expected_remaining_edge=Decimal("0.10"),
+            metadata={"side": "long", "asset_class": "equity"},
+        ),
+        HeldPositionEdge(
+            symbol="BBB",
+            notional=Decimal("1000"),
+            expected_remaining_edge=Decimal("0.12"),
+            metadata={"side": "long", "asset_class": "equity"},
+        )
+    ]
+    new_opps = [
+        StrategyOpportunity(
+            strategy_name="momentum_breakout",
+            symbol="AAA",
+            side="long",
+            created_at=datetime.now(timezone.utc),
+            expected_edge=Decimal("0.80"),
+            confidence=Decimal("0.80"),
+            capital_required=Decimal("5000"),
+            expected_holding_hours=24,
+            liquidity_score=Decimal("0.8"),
+            execution_score=Decimal("0.8"),
+            regime_fit_score=Decimal("0.8"),
+            risk_cost_score=Decimal("0.05"),
+            priority_score=Decimal("0.80"),
+            metadata={"asset_class": "equity"},
+        ),
+        StrategyOpportunity(
+            strategy_name="momentum_breakout",
+            symbol="CCC",
+            side="long",
+            created_at=datetime.now(timezone.utc),
+            expected_edge=Decimal("0.70"),
+            confidence=Decimal("0.70"),
+            capital_required=Decimal("5000"),
+            expected_holding_hours=24,
+            liquidity_score=Decimal("0.8"),
+            execution_score=Decimal("0.8"),
+            regime_fit_score=Decimal("0.8"),
+            risk_cost_score=Decimal("0.05"),
+            priority_score=Decimal("0.70"),
+            metadata={"asset_class": "equity"},
+        )
+    ]
+    actions = coord.propose_actions(
+        held,
+        new_opps,
+        active_mode="trader",
+        gross_target_capital=Decimal("5000"),
+        concentration_exponent=Decimal("1.0"),
+        max_position_notional=Decimal("5000"),
+    )
+    assert len(actions) == 1
+    assert actions[0].symbol == "CCC"
+    assert actions[0].capital == Decimal("4950.00")
+
