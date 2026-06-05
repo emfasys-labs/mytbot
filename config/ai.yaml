@@ -93,15 +93,15 @@ providers:
     enabled: true
     provider: ollama
     base_url: http://localhost:11434
-    model_name: qwen3.5:9b         # primary: strong structured JSON, multilingual
-    fallback_model: llama3.1:8b     # secondary: runs in parallel for consensus
+    model_name: gpt-oss:20b         # primary local reasoning model
+    fallback_model: null            # no weaker local checker; escalate externally on real conflicts
     temperature: 0.1
-    max_tokens: 400
+    max_tokens: 900
     timeout_seconds: 120           # GPU: 2-3s typical; CPU needs 60-90s + model swap time
-    gpu_concurrency: 8              # parallel LLM calls (GPU can handle 8; use 3 for CPU)
+    gpu_concurrency: 4              # 20B model is heavier; keep headroom for the trading loop
     use_json_mode: true
     ensemble:
-      enabled: true                 # run both models in parallel when escalated
+      enabled: false                # rules/FinBERT/local conflicts escalate to premium fallback instead
       hard_disagree_threshold: 0.4  # sentiment distance for soft → hard disagree
       confidence_boost: 0.15        # bonus confidence when both models agree
 
@@ -123,8 +123,10 @@ escalation:
   escalation_threshold: 0.55
 
   # Weights for escalation score computation (starting heuristics).
-  # llm_disagreement is the ensemble signal — when Qwen and Llama disagree,
-  # that's the strongest indicator the task genuinely needs premium AI.
+  # llm_disagreement is kept for backward compatibility with the escalation
+  # scorer, but the local ensemble is disabled by default. Real conflicts now
+  # come from rules/FinBERT/local confidence, materiality, novelty, and data
+  # disagreement; premium fallback resolves those cases.
   weights:
     ambiguity: 0.25
     materiality: 0.25
