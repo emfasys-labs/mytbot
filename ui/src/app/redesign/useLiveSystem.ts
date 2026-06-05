@@ -111,6 +111,12 @@ export interface LiveData {
   pnlRollups: { d: number; w: number; m: number; y: number };
   tradableCapital: number | null;
   capitalPct: number;
+  capitalAtWork: {
+    deployed: number;
+    pending: number;
+    working: number;
+    source: 'dashboard_snapshot' | 'positions_orders';
+  };
 
   exposure: {
     gross: number;
@@ -899,6 +905,28 @@ export function useLiveSystem(): LiveData {
   );
 
   const positions = useMemo(() => mapPositions(positionsRaw, nav), [positionsRaw, nav]);
+  const localCapitalAtWork = useMemo(
+    () => capitalAtWork(positions, orders),
+    [positions, orders],
+  );
+  const scopedCapitalAtWork = useMemo(() => {
+    const portfolio = snapshot?.portfolio && typeof snapshot.portfolio === 'object'
+      ? snapshot.portfolio as Record<string, unknown>
+      : null;
+    const deployed = toNumber(portfolio?.cash_deployed, Number.NaN);
+    if (Number.isFinite(deployed) && deployed >= 0) {
+      return {
+        deployed,
+        pending: 0,
+        working: deployed,
+        source: 'dashboard_snapshot' as const,
+      };
+    }
+    return {
+      ...localCapitalAtWork,
+      source: 'positions_orders' as const,
+    };
+  }, [snapshot, localCapitalAtWork]);
   const conviction = useMemo(() => mapConviction(snapshot, positionChanges), [snapshot, positionChanges]);
   const { approved, rejected } = useMemo(() => mapApprovedRejected(intelligence), [intelligence]);
   const executionRejections = useMemo(() => mapExecutionRejections(orders), [orders]);
@@ -909,7 +937,7 @@ export function useLiveSystem(): LiveData {
   const exposure = useMemo(() => {
     const mapped = mapExposure(snapshot, pnl);
     if (nav <= 0 || positions.length === 0) return mapped;
-    const { working: capitalAtWorkValue } = capitalAtWork(positions, orders);
+    const { working: capitalAtWorkValue } = localCapitalAtWork;
     const grossNotional = positions.reduce((sum, p) => sum + Math.abs(p.notional || 0), 0);
     const netNotional = Math.abs(
       positions.reduce((sum, p) => {
@@ -931,7 +959,7 @@ export function useLiveSystem(): LiveData {
       net: netClamped,
       cash: Math.max(0, 1 - grossClamped),
     };
-  }, [snapshot, pnl, positions, orders, nav]);
+  }, [snapshot, pnl, positions, localCapitalAtWork, nav]);
   const newsRows = useMemo(() => mapNews(news), [news]);
   const pnlRollups = useMemo(
     () => mapPnlRollups(pnl, nav, equitySeries),
@@ -1068,6 +1096,7 @@ export function useLiveSystem(): LiveData {
     pnlRollups,
     tradableCapital: navReady ? tradableCapital : null,
     capitalPct,
+    capitalAtWork: scopedCapitalAtWork,
 
     exposure,
     equity: equityValues,

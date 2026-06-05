@@ -100,6 +100,24 @@ def _nav_allowlist(broker_manager: Any) -> set[str] | None:
     return {str(n).strip().lower() for n in getattr(report, "included_names", []) or []}
 
 
+def _mark_balance_not_ready(broker_manager: Any, name: str, reason: str) -> None:
+    """Demote stale coverage when a live NAV poll proves the account is warming."""
+    try:
+        report = getattr(broker_manager, "report", None)
+        status = getattr(report, "brokers", {}).get(name)
+    except Exception:  # noqa: BLE001
+        status = None
+    if status is None:
+        return
+    try:
+        status.balance_ready = False
+        if hasattr(status, "balance_ready_since"):
+            status.balance_ready_since = None
+        status.error = reason
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _disabled_broker_names() -> frozenset[str]:
     re = get_risk_engine()
     if re is None:
@@ -186,6 +204,11 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
                 per_broker[n] = str(cached)
             else:
                 missing.append(n)
+                _mark_balance_not_ready(
+                    broker_manager,
+                    n,
+                    "Balance snapshot warming up after reconnect",
+                )
             continue
         value = _per_adapter_total(balances)
         if value > 0:
@@ -202,6 +225,11 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
                 per_broker[n] = str(cached)
             else:
                 missing.append(n)
+                _mark_balance_not_ready(
+                    broker_manager,
+                    n,
+                    "Balance snapshot warming up after reconnect",
+                )
     if allow is not None:
         known = {str(name).strip().lower() for name in getattr(broker_manager, "adapters", {})}
         for n in sorted(allow - disabled - known):

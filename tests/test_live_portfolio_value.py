@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from brokers.base import Balance
+from system.broker_manager import BrokerReport, BrokerStatus
 from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
 
 
@@ -76,6 +77,40 @@ async def test_returns_zero_when_broker_manager_is_none() -> None:
 async def test_returns_zero_when_no_adapters() -> None:
     bm = _StubBrokerManager({})
     assert await live_portfolio_value(bm) == Decimal(0)
+
+
+@pytest.mark.asyncio
+async def test_missing_included_balance_demotes_broker_readiness() -> None:
+    """A socket-reconnected broker must not rejoin dashboard NAV before balance warms."""
+    report = BrokerReport()
+    report.brokers["alpaca"] = BrokerStatus(
+        name="alpaca",
+        configured=True,
+        connected=True,
+        balance_ready=True,
+    )
+    report.brokers["ibkr"] = BrokerStatus(
+        name="ibkr",
+        configured=True,
+        connected=True,
+        balance_ready=True,
+    )
+    bm = SimpleNamespace(
+        adapters={
+            "alpaca": _StubAdapter([_bal("USD", "250000")]),
+            "ibkr": _StubAdapter([]),
+        },
+        report=report,
+    )
+
+    snap = await live_portfolio_snapshot(bm)
+
+    assert snap.complete is False
+    assert "ibkr" in snap.missing
+    assert report.brokers["ibkr"].connected is True
+    assert report.brokers["ibkr"].balance_ready is False
+    assert "warming up" in (report.brokers["ibkr"].error or "")
+    assert report.coverage()["full"] is False
 
 
 @pytest.mark.asyncio

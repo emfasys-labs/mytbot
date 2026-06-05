@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CapitalPanel } from './capital';
 import { Conviction, Coverage, LiveEvent, Position } from './data';
-import { capitalAtWork, prettySymbol } from './mapping';
+import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } from './tokens';
 import type { BackendSystemState } from '../lib/api';
@@ -246,8 +246,23 @@ export function DashboardScreen({
 
   const pad = density === 'compact' ? 12 : 20;
   const gap = density === 'compact' ? 10 : 14;
+  const activeProviderScope = state !== 'off' && !live.coverage.full && live.coverage.excluded.length > 0;
   const dayChange = Number.isFinite(live.pnlRollups.d) ? live.pnlRollups.d : navValue - live.navOpen;
   const dayPct = live.navOpen > 0 ? (dayChange / live.navOpen) * 100 : 0;
+  const latestHistoricalNav = useMemo(() => {
+    for (let i = live.equitySeries.length - 1; i >= 0; i -= 1) {
+      const v = live.equitySeries[i]?.value;
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+    return 0;
+  }, [live.equitySeries]);
+  const navHistoryMismatch = state !== 'off'
+    && !activeProviderScope
+    && navValue > 0
+    && latestHistoricalNav > 0
+    && navValue < latestHistoricalNav * 0.65
+    && Math.abs(dayChange) < Math.max(1000, latestHistoricalNav * 0.02);
+  const scopedMetricMode = activeProviderScope || navHistoryMismatch;
 
   // Cumulative realised P&L re-based to zero at the start of the selected
   // window. "Today" uses the live intraday buffer so it animates as fills
@@ -259,15 +274,29 @@ export function DashboardScreen({
   const topConviction = live.conviction[0];
   const tradable = live.tradableCapital;
   const navPending = state !== 'off' && !live.navReady;
+  const performanceHistory = useMemo(
+    () => (scopedMetricMode && navValue > 0
+      ? [{ date: ymdUtc(new Date()), value: navValue }]
+      : live.equitySeries),
+    [scopedMetricMode, live.equitySeries, navValue],
+  );
   const perf = useMemo(
-    () => performanceStats(live.equitySeries, navValue),
-    [live.equitySeries, navValue],
+    () => performanceStats(performanceHistory, navValue),
+    [performanceHistory, navValue],
   );
   const deploymentPct = useMemo(() => {
     if (navValue <= 0) return null;
-    const working = capitalAtWork(live.positions, live.orders).working;
+    const working = live.capitalAtWork.working;
     return Math.max(0, (working / navValue) * 100);
-  }, [live.positions, live.orders, navValue]);
+  }, [live.capitalAtWork, navValue]);
+  const shownDeploymentPct = deploymentPct == null
+    ? null
+    : scopedMetricMode
+      ? Math.min(100, deploymentPct)
+      : deploymentPct;
+  const deploymentSub = scopedMetricMode && deploymentPct != null && deploymentPct > 100
+    ? `${fmtPct(deploymentPct, 0)} active exposure`
+    : 'capital at work';
 
   return (
     <div style={{
@@ -288,7 +317,7 @@ export function DashboardScreen({
             opacity: 0.8, pointerEvents: 'none', animation: 'ds-fade-out-slow 2s ease',
           }} />
         )}
-        {state !== 'off' && !live.coverage.full && live.coverage.excluded.length > 0 && (
+        {activeProviderScope && (
           <PartialCoverageBanner coverage={live.coverage} />
         )}
         {state !== 'off' && live.navMissing.length > 0 && (
@@ -328,7 +357,9 @@ export function DashboardScreen({
           <>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 32, flexWrap: 'wrap' }}>
               <div>
-                <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>Net asset value</Label>
+                <Label accent={TOKENS.ink3} style={{ marginBottom: 8 }}>
+                  {activeProviderScope ? 'Active portfolio NAV' : 'Net asset value'}
+                </Label>
                 <NavNumber value={navValue} accent={dayChange >= 0 ? TOKENS.profit : TOKENS.loss} size={density === 'compact' ? 54 : 68} />
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginTop: 10 }}>
                   <span style={{
@@ -357,7 +388,8 @@ export function DashboardScreen({
                 sampleCount={perf.sampleCount}
                 maxDrawdownPct={perf.maxDrawdownPct}
                 drawdownLabel={perf.drawdownLabel}
-                deploymentPct={deploymentPct}
+                deploymentPct={shownDeploymentPct}
+                deploymentSub={deploymentSub}
               />
             </div>
 
@@ -418,14 +450,14 @@ export function DashboardScreen({
                     · system {state === 'starting' ? 'warming up' : state}
                   </span>
                 )}
-                {!live.coverage.full && live.coverage.excluded.length > 0 && (
+                {activeProviderScope && (
                   <span
                     style={{ color: TOKENS.caution }}
                     title={live.coverage.excluded
                       .map((e) => `${e.name}: ${e.reason}`)
                       .join('\n')}
                   >
-                    · partial NAV (excl. {live.coverage.excluded.map((e) => e.name).join(', ')})
+                    · active scope excludes {live.coverage.excluded.map((e) => e.name).join(', ')}
                   </span>
                 )}
               </div>
@@ -507,16 +539,12 @@ function BookFooter({ live }: { live: LiveData }) {
 }
 
 /**
- * Amber banner sitting at the top of the NAV card whenever the aggregated
- * NAV is missing one or more configured brokers.
+ * Amber banner sitting at the top of the NAV card whenever dashboard metrics
+ * are scoped to connected providers only.
  *
- * The NAV number itself is unchanged — showing zero brokers is never
- * "zero notional"; it's an incomplete view of the real book. The banner
- * names the missing wallets and surfaces the backend's reason on hover so
- * the operator can go straight to the fix (launch the Gateway, rotate keys,
- * whatever the ``reason`` says). Without this the dashboard silently showed
- * a partial NAV with no indication that anything was wrong — the bug
- * behind the "£98k" scare on 2026-04-22.
+ * This is dashboard/accounting scope only. Risk and strategy still account
+ * for last-known offline positions; the UI just avoids mixing disconnected
+ * wallets into active-provider NAV, deployment, and performance metrics.
  */
 function PartialCoverageBanner({ coverage }: { coverage: Coverage }) {
   const names = coverage.excluded.map((e) => e.name).join(', ');
@@ -542,11 +570,11 @@ function PartialCoverageBanner({ coverage }: { coverage: Coverage }) {
       }}
     >
       <span style={{ fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-        Partial NAV
+        Active portfolio
       </span>
       <span style={{ color: TOKENS.ink2 }}>
-        NAV below reflects {coverage.included.length} of {coverage.configured.length} configured brokers.
-        Excluded: {names}. Hover for details.
+        Dashboard metrics include {coverage.included.length} of {coverage.configured.length} connected providers.
+        Excluded from dashboard: {names}. Risk still tracks last-known offline positions.
       </span>
     </div>
   );
@@ -663,6 +691,7 @@ function PerformanceStrip({
   maxDrawdownPct,
   drawdownLabel,
   deploymentPct,
+  deploymentSub,
 }: {
   returnPct: number | null;
   returnLabel: string;
@@ -672,6 +701,7 @@ function PerformanceStrip({
   maxDrawdownPct: number | null;
   drawdownLabel: string;
   deploymentPct: number | null;
+  deploymentSub: string;
 }) {
   const returnColor = returnPct == null ? TOKENS.ink3 : returnPct >= 0 ? TOKENS.profit : TOKENS.loss;
   const sharpeColor = sharpe == null
@@ -704,7 +734,7 @@ function PerformanceStrip({
       titleExtra: sampleCount > 0 ? `${sampleCount} daily returns` : '',
     },
     { label: 'Max DD', value: fmtPct(maxDrawdownPct, 1), sub: drawdownLabel, color: drawdownColor },
-    { label: 'Deployment', value: fmtPct(deploymentPct, 0), sub: 'capital at work', color: deploymentColor },
+    { label: 'Deployment', value: fmtPct(deploymentPct, 0), sub: deploymentSub, color: deploymentColor },
   ];
   return (
     <div style={{

@@ -23,6 +23,7 @@ This file pins the full contract:
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -83,6 +84,21 @@ class TestCoverageShape:
         assert cov["included"] == ["alpaca"]
         assert [e["name"] for e in cov["excluded"]] == ["ibkr"]
         assert cov["excluded"][0]["reason"] == "not ready"  # empty error -> placeholder
+
+    def test_fresh_balance_snapshot_settles_before_full_coverage(self) -> None:
+        """A reconnect needs a short dashboard hold after the first balance row."""
+        report = _mk_report(
+            ("alpaca", True, True, True, None),
+            ("ibkr", True, True, True, None),
+        )
+        report.brokers["ibkr"].balance_ready_since = time.monotonic()
+
+        cov = report.coverage()
+
+        assert cov["full"] is False
+        assert cov["included"] == ["alpaca"]
+        assert cov["excluded"][0]["name"] == "ibkr"
+        assert cov["excluded"][0]["reason"] == "balance snapshot settling"
 
     def test_unconfigured_brokers_do_not_count_toward_coverage(self) -> None:
         """A broker with no API keys in .env is not part of the NAV contract."""

@@ -56,6 +56,21 @@ def _balance_poll_mean_ready(name: str, balances: list[Any]) -> bool:
     return True
 
 
+def _dashboard_ready_hold_sec() -> float:
+    try:
+        return max(0.0, float(os.getenv("BROKER_DASHBOARD_READY_HOLD_SEC", "8")))
+    except (TypeError, ValueError):
+        return 8.0
+
+
+def _balance_ready_mature(status: "BrokerStatus", *, now: float | None = None) -> bool:
+    if not (status.connected and status.balance_ready):
+        return False
+    if status.balance_ready_since is None:
+        return True
+    return ((now if now is not None else time.monotonic()) - status.balance_ready_since) >= _dashboard_ready_hold_sec()
+
+
 @dataclass
 class BrokerStatus:
     """Per-broker row for status; balance_ready after first non-empty get_balance snapshot."""
@@ -64,6 +79,7 @@ class BrokerStatus:
     configured: bool = False
     connected: bool = False
     balance_ready: bool = False
+    balance_ready_since: float | None = None
     error: str | None = None
 
 
@@ -82,14 +98,15 @@ class BrokerReport:
     @property
     def included_names(self) -> list[str]:
         """Brokers whose balances are trustworthy and reflected in NAV."""
-        return [n for n, s in self.brokers.items() if s.connected and s.balance_ready]
+        now = time.monotonic()
+        return [n for n, s in self.brokers.items() if _balance_ready_mature(s, now=now)]
 
     @property
     def excluded(self) -> list[BrokerStatus]:
         """Configured brokers that are NOT contributing to NAV right now."""
         return [
             s for s in self.brokers.values()
-            if s.configured and not (s.connected and s.balance_ready)
+            if s.configured and not _balance_ready_mature(s)
         ]
 
     def coverage(self) -> dict[str, Any]:
@@ -110,7 +127,10 @@ class BrokerReport:
                 "name": s.name,
                 "connected": bool(s.connected),
                 "balance_ready": bool(s.balance_ready),
-                "reason": (s.error or "not ready").strip(),
+                "reason": (
+                    s.error
+                    or ("balance snapshot settling" if s.connected and s.balance_ready else "not ready")
+                ).strip(),
             }
             for s in self.excluded
         ]
@@ -127,6 +147,7 @@ class BrokerReport:
                 "configured": s.configured,
                 "connected": s.connected,
                 "balance_ready": s.balance_ready,
+                "balance_ready_since": s.balance_ready_since,
                 "error": s.error,
             }
             for name, s in self.brokers.items()
@@ -533,12 +554,16 @@ class BrokerManager:
         try:
             balances = await asyncio.wait_for(adapter.get_balance(), timeout=timeout)
             if balances is not None and _balance_poll_mean_ready(name, list(balances)):
+                if not status.balance_ready:
+                    status.balance_ready_since = time.monotonic()
                 status.balance_ready = True
                 logger.info("broker | {} | balance snapshot ready ({} rows)", name, len(balances))
             else:
                 status.balance_ready = False
+                status.balance_ready_since = None
         except Exception as exc:  # noqa: BLE001
             status.balance_ready = False
+            status.balance_ready_since = None
             logger.debug("broker | {} | balance snapshot not ready: {}", name, exc)
 
     async def _background_ibkr_connect(
@@ -557,6 +582,7 @@ class BrokerManager:
                     status.connected = True
                     status.error = None
                     status.balance_ready = False
+                    status.balance_ready_since = None
                     self.adapters["ibkr"] = adapter
                     self._ibkr_fail_count = 0
                     logger.info("broker | ibkr | connected (background)")
@@ -604,6 +630,7 @@ class BrokerManager:
                 status.connected = True
                 status.error = None
                 status.balance_ready = False
+                status.balance_ready_since = None
                 self.adapters[name] = adapter
                 self._broker_fail_count[name] = 0
                 self._broker_ready_state[name] = True
@@ -814,6 +841,7 @@ class BrokerManager:
             if status is not None:
                 status.connected = False
                 status.balance_ready = False
+                status.balance_ready_since = None
                 status.error = "Disconnected"
             self._broker_fail_count[name] = max(1, self._broker_fail_count.get(name, 0))
             logger.warning("broker | {} | disconnected (health poll)", name)
@@ -854,6 +882,7 @@ class BrokerManager:
             if st is not None:
                 st.connected = False
                 st.balance_ready = False
+                st.balance_ready_since = None
 
     def get_adapter(self, name: str) -> BrokerAdapter | None:
         return self.adapters.get(name)

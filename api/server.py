@@ -2218,6 +2218,11 @@ async def get_dashboard_snapshot(
     if not isinstance(raw, dict):
         return {}
     out = dict(raw)
+    live_nav_snapshot = await live_portfolio_snapshot(getattr(_get_orchestrator(), "_broker_manager", None))
+    nav = live_nav_snapshot.value
+    coverage = _current_broker_coverage() or {}
+    broker_filter = _current_nav_broker_filter()
+    active_scope = broker_filter is not None
     session_factory = getattr(app.state, "db_session_factory", None)
     if APP_ENV != "live":
         if session_factory is not None:
@@ -2229,8 +2234,8 @@ async def get_dashboard_snapshot(
             position_source = "position_log"
     else:
         position_rows = await _live_broker_positions(500)
+        position_rows = _filter_rows_to_current_nav_brokers(position_rows)
         position_source = "live_broker"
-    nav = await _live_portfolio_value()
     gross = Decimal(0)
     net = Decimal(0)
     cash_deployed = Decimal(0)
@@ -2284,7 +2289,34 @@ async def get_dashboard_snapshot(
     portfolio["highest_exit_pressure"] = []
     portfolio["unrealised_pnl"] = _decimal_str(total_unrealised)
     portfolio["source"] = position_source
+    portfolio["scope"] = "active_providers" if active_scope else "all_configured_providers"
+    portfolio["dashboard_scope"] = portfolio["scope"]
+    portfolio["scope_label"] = "Active portfolio" if active_scope else "Portfolio"
+    included_brokers = [
+        str(n).strip().lower()
+        for n in (coverage.get("included") or [])
+        if str(n).strip()
+    ]
+    portfolio["active_brokers"] = sorted(list(broker_filter or set(included_brokers)))
+    portfolio["excluded_brokers"] = [
+        str(e.get("name") or "").strip()
+        for e in (coverage.get("excluded") or [])
+        if isinstance(e, dict) and str(e.get("name") or "").strip()
+    ]
+    portfolio["coverage_full"] = bool(coverage.get("full", True))
     out["portfolio"] = portfolio
+    out["dashboard_scope"] = {
+        "kind": portfolio["scope"],
+        "label": portfolio["scope_label"],
+        "coverage_full": portfolio["coverage_full"],
+        "active_brokers": portfolio["active_brokers"],
+        "excluded_brokers": portfolio["excluded_brokers"],
+        "metrics_note": (
+            "Dashboard metrics include connected providers only; risk still tracks last-known offline positions."
+            if active_scope
+            else ""
+        ),
+    }
     ge = dict(out.get("global_edge") or {})
     ge["held_edges"] = held_edges
     out["global_edge"] = ge

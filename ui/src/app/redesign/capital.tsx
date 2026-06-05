@@ -48,7 +48,6 @@ import {
 } from 'react';
 import { Card, Label } from './primitives';
 import { CURRENCY_SYMBOL, SystemState, TOKENS } from './tokens';
-import { capitalAtWork } from './mapping';
 import type { LiveData } from './useLiveSystem';
 import type { Position } from './data';
 
@@ -124,19 +123,13 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
   const interactive = systemState !== 'off';
   const nav = live.nav;
   const ceilingPct = live.capitalPct;
-  // Gauge the slider against **capital at work** — positions + pending
-  // orders — because that's what the backend's ``cap_slider`` actually
-  // gates (see ``portfolio/allocation_engine.py`` and ``mapping.capitalAtWork``).
-  // Using positions-only here under-reports commitment by the pending-order
-  // book, which puts the snap landmark and "free to deploy" headroom in the
-  // wrong place. ``deployedValue`` is still tracked separately so the trim
-  // close list can honestly show which positions are actually closable.
-  const { deployed: deployedValue, pending: pendingValue, working: workingValue } = useMemo(
-    () => capitalAtWork(live.positions, live.orders),
-    [live.positions, live.orders],
-  );
+  // Gauge the slider against the backend-scoped capital-at-work number when
+  // available. During partial provider coverage this keeps the denominator
+  // and numerator in the same active-provider universe.
+  const { deployed: deployedValue, pending: pendingValue, working: workingValue } = live.capitalAtWork;
   const workingRatio = nav > 0 ? Math.max(0, workingValue / nav) : 0;
   const workingPct = nav > 0 ? Math.min(1, workingValue / nav) : 0;
+  const activeScopeOverage = !live.coverage.full && workingRatio > 1.005;
 
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -437,7 +430,7 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
                   }}
                 >
                   <span style={{ width: 14, height: 1, background: TOKENS.ink2 }} />
-                  at work · {(workingRatio * 100).toFixed(1)}%
+                  {activeScopeOverage ? 'active exposure' : 'at work'} · {(workingRatio * 100).toFixed(1)}%
                 </div>
               </>
             )}
@@ -504,6 +497,7 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
               deployedValue={deployedValue}
               pendingValue={pendingValue}
               workingValue={workingValue}
+              activeScopeOverage={activeScopeOverage}
               accent={accent}
             />
           ) : isFlatten ? (
@@ -575,6 +569,7 @@ function IdleInfo({
   deployedValue,
   pendingValue,
   workingValue,
+  activeScopeOverage,
   accent,
 }: {
   ceilingPct: number;
@@ -584,6 +579,7 @@ function IdleInfo({
   deployedValue: number;
   pendingValue: number;
   workingValue: number;
+  activeScopeOverage: boolean;
   accent: string;
 }) {
   const targetValue = nav * shownPct;
@@ -624,7 +620,7 @@ function IdleInfo({
           gap: 8,
         }}
       >
-        <Row label="At work" value={money(workingValue, 12, TOKENS.ink1)} />
+        <Row label={activeScopeOverage ? 'Active exposure' : 'At work'} value={money(workingValue, 12, TOKENS.ink1)} />
         {showPendingBreakdown && (
           <div
             style={{
