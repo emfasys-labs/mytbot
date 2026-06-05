@@ -497,11 +497,130 @@ def _resolve_price_from_signal(signal) -> Decimal:
     return Decimal("0")
 
 
-def _apply_signal_to_portfolio_state(portfolio_state: dict[str, Any], signal) -> None:
+def _recompute_portfolio_exposures(portfolio_state: dict[str, Any]) -> None:
+    positions = portfolio_state.get("positions", {}) or {}
+    symbol_exposure: dict[str, Decimal] = {}
+    asset_class_exposure: dict[str, Decimal] = {}
+    current_gross_exposure = Decimal("0")
+    option_premium_exposure = Decimal("0")
+    for sym, p in positions.items():
+        notional = _position_dict_notional(p)
+        current_gross_exposure += notional
+        persisted_symbol = str(p.get("symbol") or sym)
+        symbol_exposure[persisted_symbol] = symbol_exposure.get(persisted_symbol, Decimal("0")) + notional
+        asset = str(p.get("asset_class", "")).strip().lower()
+        if asset:
+            asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
+        if asset == "option":
+            option_premium_exposure += notional
+
+    portfolio_state["positions"] = positions
+    portfolio_state["symbol_exposure"] = symbol_exposure
+    portfolio_state["asset_class_exposure"] = asset_class_exposure
+    portfolio_state["current_gross_exposure"] = current_gross_exposure
+    portfolio_state["option_premium_exposure"] = option_premium_exposure
+
+
+def _apply_ledger_fill_to_portfolio_state(portfolio_state: dict[str, Any], signal, result) -> None:
+    """Apply the authoritative fills-ledger post-fill quantity to snapshot state."""
+    try:
+        qty_after = Decimal(str(getattr(result, "ledger_position_qty_after")))
+    except Exception:  # noqa: BLE001
+        _apply_intended_signal_to_portfolio_state(portfolio_state, signal)
+        return
+
+    positions = dict(portfolio_state.get("positions", {}) or {})
+    meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+    spec = parse_option_contract_from_metadata(meta)
+    symbol = spec.position_key() if spec is not None else str(signal.symbol or "")
+    broker = str(getattr(signal, "broker", "") or "").strip()[:20]
+    broker_l = broker.lower()
+    price = Decimal("0")
+    avg_fill = getattr(result, "avg_fill_price", None)
+    if avg_fill is not None:
+        try:
+            price = Decimal(str(avg_fill))
+        except Exception:  # noqa: BLE001
+            price = Decimal("0")
+    if price <= 0:
+        price = _resolve_price_from_signal(signal)
+    try:
+        avg_basis = Decimal(str(getattr(result, "ledger_avg_cost_basis")))
+    except Exception:  # noqa: BLE001
+        avg_basis = Decimal("0")
+    if avg_basis <= 0:
+        avg_basis = price
+
+    position_key = str(meta.get("position_key") or symbol)
+    existing_key = None
+    for k, candidate in positions.items():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_symbol = str(candidate.get("symbol") or k).strip()
+        candidate_broker = str(candidate.get("broker", "")).strip().lower()
+        if candidate_symbol == symbol and candidate_broker == broker_l:
+            existing_key = str(k)
+            break
+    if existing_key is not None:
+        position_key = existing_key
+    elif position_key in positions:
+        existing_broker = str(positions[position_key].get("broker", "")).strip().lower()
+        if existing_broker and existing_broker != broker_l:
+            position_key = f"{broker}:{symbol}"
+
+    for k, candidate in list(positions.items()):
+        if not isinstance(candidate, dict) or str(k) == position_key:
+            continue
+        candidate_symbol = str(candidate.get("symbol") or k).strip()
+        candidate_broker = str(candidate.get("broker", "")).strip().lower()
+        if candidate_symbol == symbol and candidate_broker == broker_l:
+            positions.pop(k, None)
+
+    if qty_after == 0:
+        closed = list(portfolio_state.get("_closed_position_tombstones") or [])
+        prior = positions.pop(position_key, {})
+        closed.append(
+            {
+                "symbol": symbol,
+                "broker": broker or str(prior.get("broker", "ibkr"))[:20] or "ibkr",
+                "avg_entry_price": Decimal(str(prior.get("avg_entry_price", avg_basis) or avg_basis)),
+                "current_price": price,
+                "asset_class": str(prior.get("asset_class", signal.asset_class or ""))[:20],
+                "instrument_metadata": prior.get("instrument_metadata") if isinstance(prior.get("instrument_metadata"), dict) else None,
+            }
+        )
+        portfolio_state["_closed_position_tombstones"] = closed
+    else:
+        row = positions.get(position_key, {})
+        row.update(
+            {
+                "symbol": symbol,
+                "quantity": qty_after,
+                "avg_entry_price": avg_basis,
+                "current_price": price,
+                "asset_class": "option" if spec is not None else (signal.asset_class or row.get("asset_class") or "").strip().lower(),
+                "broker": broker,
+            }
+        )
+        if spec is not None:
+            row["instrument_metadata"] = spec.to_dict()
+        elif isinstance(getattr(signal, "metadata", None), dict) and isinstance(signal.metadata.get("instrument_metadata"), dict):
+            row["instrument_metadata"] = signal.metadata["instrument_metadata"]
+        positions[position_key] = row
+
+    portfolio_state["positions"] = positions
+    _recompute_portfolio_exposures(portfolio_state)
+    portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
+
+
+def _apply_signal_to_portfolio_state(portfolio_state: dict[str, Any], signal, result=None) -> None:
     """
     Apply intended signal quantities to local state (M3 simulation path).
     Execution-accurate updates should use the M5 fill-based updater.
     """
+    if result is not None and hasattr(result, "ledger_position_qty_after"):
+        _apply_ledger_fill_to_portfolio_state(portfolio_state, signal, result)
+        return
     _apply_intended_signal_to_portfolio_state(portfolio_state, signal)
 
 
@@ -592,25 +711,8 @@ def _apply_intended_signal_to_portfolio_state(portfolio_state: dict[str, Any], s
         row["symbol"] = symbol
         positions[position_key] = row
 
-    symbol_exposure: dict[str, Decimal] = {}
-    asset_class_exposure: dict[str, Decimal] = {}
-    current_gross_exposure = Decimal("0")
-    option_premium_exposure = Decimal("0")
-    for sym, p in positions.items():
-        notional = _position_dict_notional(p)
-        current_gross_exposure += notional
-        symbol_exposure[sym] = symbol_exposure.get(sym, Decimal("0")) + notional
-        asset = str(p.get("asset_class", "")).strip().lower()
-        if asset:
-            asset_class_exposure[asset] = asset_class_exposure.get(asset, Decimal("0")) + notional
-        if asset == "option":
-            option_premium_exposure += notional
-
     portfolio_state["positions"] = positions
-    portfolio_state["symbol_exposure"] = symbol_exposure
-    portfolio_state["asset_class_exposure"] = asset_class_exposure
-    portfolio_state["current_gross_exposure"] = current_gross_exposure
-    portfolio_state["option_premium_exposure"] = option_premium_exposure
+    _recompute_portfolio_exposures(portfolio_state)
     portfolio_state["trades_today"] = int(portfolio_state.get("trades_today", 0)) + 1
 
 

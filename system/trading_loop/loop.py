@@ -1259,7 +1259,7 @@ class TradingLoop:
                             pass
                     post_trade_state.update(self.risk_engine.snapshot_runtime_state())
 
-                _apply_signal_to_portfolio_state(post_trade_state, signal)
+                _apply_signal_to_portfolio_state(post_trade_state, signal, result)
                 await _persist_position_snapshot(session_factory, post_trade_state)
                 await _upsert_daily_pnl(session_factory, post_trade_state)
                 # D115 — anti-churn post-fill cooldown. Stamp every confirmed
@@ -4386,7 +4386,7 @@ class TradingLoop:
                     signal.suggested_price = avg_fill_d
             except Exception:  # noqa: BLE001
                 pass
-        _apply_signal_to_portfolio_state(post_trade_state, signal)
+        _apply_signal_to_portfolio_state(post_trade_state, signal, result)
         await _persist_position_snapshot(session_factory, post_trade_state)
         await _upsert_daily_pnl(session_factory, post_trade_state)
         try:

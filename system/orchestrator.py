@@ -2419,7 +2419,7 @@ class Orchestrator:
                 capital_pct=Decimal(str(self.capital_pct)),
             )
             post_trade_state["fees_today_delta"] = fee_dec
-            _apply_signal_to_portfolio_state(post_trade_state, signal)
+            _apply_signal_to_portfolio_state(post_trade_state, signal, result)
             await _persist_position_snapshot(sf, post_trade_state)
             await _upsert_daily_pnl(sf, post_trade_state)
         except Exception as exc:  # noqa: BLE001

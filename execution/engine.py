@@ -1458,7 +1458,7 @@ class ExecutionEngine:
                 derisk_source = strategy
             order_type = getattr(order, "order_type", None)
             order_type_s = getattr(order_type, "value", order_type)
-            await record_fill(
+            fill_row = await record_fill(
                 session_factory,
                 broker=signal.broker,
                 symbol=str(signal.symbol or ""),
@@ -1487,6 +1487,13 @@ class ExecutionEngine:
                     else None
                 ),
             )
+            if fill_row is not None:
+                try:
+                    setattr(result, "ledger_position_qty_after", fill_row.position_qty_after)
+                    setattr(result, "ledger_avg_cost_basis", fill_row.avg_cost_basis)
+                    setattr(result, "ledger_realised_pnl", fill_row.realised_pnl)
+                except Exception:  # noqa: BLE001
+                    pass
             # D125.1 — update the risk engine's per-UTC-day cumulative-add
             # tracker from the *actual fill* (not at risk approval, which
             # over-counted approved-but-unfilled signals).
