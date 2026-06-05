@@ -308,3 +308,71 @@ def test_position_loss_tier_trims_material_underwater_loser_before_nav_drawdown(
 
 def test_position_loss_tier_disabled_when_config_incomplete():
     assert parse_position_loss_tier({"enabled": True, "trim_pct": "0.25"}) is None
+
+
+def test_dynamic_position_loss_tightens_oversized_loser_and_scales_trim():
+    tier0 = parse_position_loss_tier(
+        {
+            "enabled": True,
+            "min_loss_nav_pct": "0.0005",
+            "min_loss_pct": "0.005",
+            "trim_pct": "0.25",
+            "max_actions": 2,
+        }
+    )
+    assert tier0 is not None
+
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("100"),
+        positions=[
+            _pos("SOL-USD", "kraken", "1000", "100", "99.80", "crypto"),
+        ],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        position_loss_tier=tier0,
+        dynamic_position_loss=True,
+        position_loss_notional_reference_pct=Decimal("0.05"),
+    )
+
+    assert tier is tier0
+    assert idx == -2
+    assert len(actions) == 1
+    assert actions[0].symbol == "SOL-USD"
+    assert actions[0].reduce_quantity == Decimal("1000")
+    assert actions[0].metadata["position_dynamic_loss"] is True
+    assert Decimal(actions[0].metadata["position_dynamic_threshold_pct"]).copy_abs() < Decimal("0.0005")
+
+
+def test_dynamic_position_loss_gives_volatile_position_more_room():
+    tier0 = parse_position_loss_tier(
+        {
+            "enabled": True,
+            "min_loss_nav_pct": "0.0005",
+            "min_loss_pct": "0.005",
+            "trim_pct": "0.25",
+            "max_actions": 2,
+        }
+    )
+    assert tier0 is not None
+    pos = _pos("ETH-USD", "bybit", "100", "100", "99", "crypto")
+    pos["instrument_metadata"] = {"daily_volatility": "0.05"}
+
+    actions, tier, idx = evaluate_intraday_derisk(
+        nav=Decimal("100000"),
+        day_pnl=Decimal("100"),
+        positions=[pos],
+        tiers=_tiers(),
+        cooldown_seconds=60,
+        last_action_ts={},
+        now_ts=1_700_000_000,
+        position_loss_tier=tier0,
+        dynamic_position_loss=True,
+        position_loss_notional_reference_pct=Decimal("0.05"),
+    )
+
+    assert tier is tier0
+    assert idx == -2
+    assert actions == []

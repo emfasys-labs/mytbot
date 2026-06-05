@@ -140,6 +140,75 @@ def _position_unrealised(pos: Mapping[str, Any]) -> Decimal:
     return (current - entry) * qty
 
 
+def _position_notional_nav_pct(pos: Mapping[str, Any], nav: Decimal) -> Decimal:
+    if nav <= 0:
+        return _ZERO
+    try:
+        qty = abs(Decimal(str(pos.get("quantity", "0") or "0")))
+        current = Decimal(str(pos.get("current_price", "0") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return _ZERO
+    if qty <= 0 or current <= 0:
+        return _ZERO
+    return (qty * current) / nav
+
+
+def _position_observed_volatility(pos: Mapping[str, Any]) -> Decimal:
+    meta = pos.get("instrument_metadata") if isinstance(pos.get("instrument_metadata"), Mapping) else {}
+    for source in (pos, meta):
+        for key in ("daily_volatility", "realised_vol", "realized_vol", "atr_pct", "volatility"):
+            v = source.get(key) if isinstance(source, Mapping) else None
+            d = _to_decimal(v, _ZERO)
+            if d > 0:
+                return d
+    return _ZERO
+
+
+def _resolve_dynamic_position_tier(
+    *,
+    base_tier: DeriskTier,
+    pos: Mapping[str, Any],
+    nav: Decimal,
+    upnl: Decimal,
+    portfolio_volatility_scalar: Decimal,
+    notional_reference_pct: Decimal | None,
+) -> DeriskTier:
+    """Resolve a per-position Tier 0 from live position evidence.
+
+    The configured Tier 0 remains the anchor. It is widened for genuinely
+    volatile positions, tightened for oversized/concentrated positions, and
+    the trim fraction grows with breach severity. No fallback thresholds are
+    invented here; if a reference is missing, that dimension simply contributes
+    a neutral scalar.
+    """
+    scalar = portfolio_volatility_scalar if portfolio_volatility_scalar > 0 else Decimal("1")
+    observed_vol = _position_observed_volatility(pos)
+    if observed_vol > 0 and base_tier.min_loss_pct > 0:
+        scalar = max(scalar, observed_vol / base_tier.min_loss_pct)
+
+    threshold_pct = base_tier.threshold_pct * scalar
+    min_loss_pct = base_tier.min_loss_pct * scalar
+
+    notional_pct = _position_notional_nav_pct(pos, nav)
+    if notional_reference_pct is not None and notional_reference_pct > 0 and notional_pct > notional_reference_pct:
+        concentration_scalar = notional_pct / notional_reference_pct
+        threshold_pct = threshold_pct / concentration_scalar
+        min_loss_pct = min_loss_pct / concentration_scalar
+
+    loss_nav_pct = abs(upnl) / nav if nav > 0 else _ZERO
+    breach = loss_nav_pct / abs(threshold_pct) if threshold_pct != 0 else Decimal("1")
+    trim_pct = base_tier.trim_pct * max(Decimal("1"), breach)
+    if trim_pct > Decimal("1"):
+        trim_pct = Decimal("1")
+
+    return DeriskTier(
+        threshold_pct=threshold_pct,
+        trim_pct=trim_pct,
+        max_actions=base_tier.max_actions,
+        min_loss_pct=min_loss_pct,
+    )
+
+
 def evaluate_intraday_derisk(
     *,
     nav: Decimal,
@@ -152,6 +221,8 @@ def evaluate_intraday_derisk(
     qty_decimals: int = 8,
     portfolio_volatility_scalar: Decimal = Decimal("1.0"),
     position_loss_tier: DeriskTier | None = None,
+    dynamic_position_loss: bool = False,
+    position_loss_notional_reference_pct: Decimal | None = None,
 ) -> tuple[list[DeriskAction], Optional[DeriskTier], int]:
     """Decide which positions to trim/close at current intraday drawdown.
 
@@ -193,20 +264,30 @@ def evaluate_intraday_derisk(
         upnl = _position_unrealised(pos)
         if upnl >= 0:
             continue
+        candidate_tier = active_tier
+        if active_idx == -2 and dynamic_position_loss and position_loss_tier is not None:
+            candidate_tier = _resolve_dynamic_position_tier(
+                base_tier=position_loss_tier,
+                pos=pos,
+                nav=nav,
+                upnl=upnl,
+                portfolio_volatility_scalar=portfolio_volatility_scalar,
+                notional_reference_pct=position_loss_notional_reference_pct,
+            )
         loss_pct = _position_loss_pct(pos)
-        if loss_pct < active_tier.min_loss_pct:
+        if loss_pct < candidate_tier.min_loss_pct:
             continue
         if active_idx == -2:
             loss_nav_pct = abs(upnl) / nav if nav > 0 else _ZERO
-            if loss_nav_pct < abs(active_tier.threshold_pct):
+            if loss_nav_pct < abs(candidate_tier.threshold_pct):
                 continue
-        ranked.append((upnl, loss_pct, pos))
+        ranked.append((upnl, loss_pct, pos, candidate_tier))
 
     ranked.sort(key=lambda r: r[0])  # most negative upnl first
 
     tick = Decimal(1).scaleb(-qty_decimals)
     actions: list[DeriskAction] = []
-    for upnl, loss_pct, pos in ranked:
+    for upnl, loss_pct, pos, candidate_tier in ranked:
         if len(actions) >= active_tier.max_actions:
             break
         broker = str(pos.get("broker") or "").strip().lower()
@@ -227,10 +308,10 @@ def evaluate_intraday_derisk(
         side = "sell" if qty > 0 else "buy"
         abs_qty = abs(qty)
         # Floor reduce quantity to a multiple of tick; clamp to abs(qty).
-        if active_tier.trim_pct >= Decimal("0.999"):
+        if candidate_tier.trim_pct >= Decimal("1"):
             reduce_qty = abs_qty
         else:
-            reduce_qty = (abs_qty * active_tier.trim_pct).quantize(tick)
+            reduce_qty = (abs_qty * candidate_tier.trim_pct).quantize(tick)
             if reduce_qty > abs_qty:
                 reduce_qty = abs_qty
         if reduce_qty <= 0:
@@ -246,14 +327,19 @@ def evaluate_intraday_derisk(
                 current_price=current,
                 reason=f"intraday_derisk_tier_{active_idx}",
                 severity_tier_idx=active_idx,
-                tier_threshold_pct=active_tier.threshold_pct,
-                trim_fraction=active_tier.trim_pct,
+                tier_threshold_pct=candidate_tier.threshold_pct,
+                trim_fraction=candidate_tier.trim_pct,
                 metadata={
                     "intraday_derisk": True,
                     "reduce_only": True,
                     "intraday_pnl_pct_of_nav": str(pnl_pct),
                     "position_unrealised_pnl": str(upnl),
                     "position_loss_pct": str(loss_pct),
+                    "position_dynamic_loss": bool(active_idx == -2 and dynamic_position_loss),
+                    "position_dynamic_threshold_pct": str(candidate_tier.threshold_pct),
+                    "position_dynamic_min_loss_pct": str(candidate_tier.min_loss_pct),
+                    "position_notional_nav_pct": str(_position_notional_nav_pct(pos, nav)),
+                    "position_observed_volatility": str(_position_observed_volatility(pos)),
                 },
             )
         )

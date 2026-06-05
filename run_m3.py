@@ -859,10 +859,17 @@ async def _upsert_daily_pnl(session_factory, portfolio_state: dict[str, Any]) ->
         q = await session.execute(select(DailyPnL).where(DailyPnL.date == d).limit(1))
         row = q.scalars().first()
         state_pv = Decimal(str(portfolio_state.get("portfolio_value", "0")))
+        try:
+            state_daily_loss = Decimal(str(portfolio_state.get("daily_loss_accumulated", "0")))
+        except Exception:  # noqa: BLE001
+            state_daily_loss = Decimal("0")
+        realised_loss = -realised_today if realised_today < 0 else Decimal("0")
+        risk_daily_loss = max(state_daily_loss, realised_loss)
+
         breakdown = {
             "risk_consecutive_losses": int(portfolio_state.get("consecutive_losses", 0)),
             "risk_cooldown_until": portfolio_state.get("cooldown_until"),
-            "risk_daily_loss_accumulated": str(portfolio_state.get("daily_loss_accumulated", "0")),
+            "risk_daily_loss_accumulated": str(risk_daily_loss),
             "partial_coverage": (not coverage_full),
         }
         if row is None:

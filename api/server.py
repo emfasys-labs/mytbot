@@ -1992,12 +1992,15 @@ def _nav_status_from_snapshot(snap: Any) -> dict[str, Any]:
 
 
 def _partial_coverage_period_rollup(period_agg: dict[str, Any]) -> dict[str, Any]:
-    """Keep period metadata but avoid full-book P&L on a partial broker NAV."""
+    """Keep historical facts but avoid full-book marks on a partial broker NAV.
+
+    Realised P&L, fees and trade counts come from the ledger. They remain true
+    even when a live broker balance is temporarily outside the dashboard scope.
+    Unrealised marks are point-in-time book state, so those are suppressed when
+    the live NAV denominator is partial.
+    """
     out = dict(period_agg)
-    out["realised"] = "0"
     out["unrealised"] = "0"
-    out["fees"] = "0"
-    out["trades"] = 0
     out["partial_coverage"] = True
     return out
 
@@ -2158,20 +2161,20 @@ async def get_pnl(
 
     return {
         "today": {
-            "realised": _decimal_str(today_net_realised if coverage_full else 0),
+            "realised": _decimal_str(today_net_realised),
             "unrealised": _decimal_str(today_unrealised),
-            "fees": _decimal_str(today_order_fees if coverage_full else 0),
-            "trades": int(today_order_trades if coverage_full else 0),
+            "fees": _decimal_str(today_order_fees),
+            "trades": int(today_order_trades),
             "portfolio_value": _decimal_str(display_value),
             "tradable_capital": _decimal_str(tradable_value),
             "capital_allocation_pct": cap_pct,
             "nav_status": nav_status,
         },
         "all_time": {
-            "realised": _decimal_str(0 if not coverage_full else ytd_net_realised),
+            "realised": _decimal_str(ytd_net_realised),
             "unrealised": _decimal_str(all_time_unrealised),
-            "fees": _decimal_str(0 if not coverage_full else ytd_order_fees),
-            "trades": int(ytd_order_trades or 0) if coverage_full else 0,
+            "fees": _decimal_str(ytd_order_fees),
+            "trades": int(ytd_order_trades or 0),
             "partial_coverage": not coverage_full,
         },
         "week": week_agg,

@@ -36,8 +36,9 @@ class _Q:
 
 
 class _Session:
-    def __init__(self, existing_row=None):
+    def __init__(self, existing_row=None, realised_scalar=Decimal("0")):
         self.existing_row = existing_row
+        self.realised_scalar = realised_scalar
         self.added: list = []
         self.commits = 0
     async def __aenter__(self): return self
@@ -48,14 +49,14 @@ class _Session:
         #   2) SELECT DailyPnL WHERE date = ...
         text = str(stmt)
         if "fills" in text.lower() or "realised_pnl" in text.lower() and "daily_pnl" not in text.lower():
-            return _Q(scalar=Decimal("0"))
+            return _Q(scalar=self.realised_scalar)
         return _Q(row=self.existing_row)
     def add(self, row): self.added.append(row)
     async def commit(self): self.commits += 1
 
 
-def _session_factory(existing_row=None):
-    sess = _Session(existing_row=existing_row)
+def _session_factory(existing_row=None, realised_scalar=Decimal("0")):
+    sess = _Session(existing_row=existing_row, realised_scalar=realised_scalar)
     def _factory(): return sess
     _factory.sess = sess
     return _factory
@@ -189,3 +190,24 @@ async def test_startup_with_unpopulated_report_is_not_partial():
     row = sf.sess.added[0]
     assert Decimal(str(row.portfolio_value)) == Decimal("100000")
     assert row.strategy_breakdown["partial_coverage"] is False
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_accumulated_reconciles_from_realised_ledger():
+    runtime.set_broker_manager(_FakeBM(full=True))
+    sf = _session_factory(existing_row=None, realised_scalar=Decimal("-9107.37"))
+    state = {
+        "portfolio_value": Decimal("1230000"),
+        "trades_today": 34,
+        "consecutive_losses": 0,
+        "cooldown_until": None,
+        "daily_loss_accumulated": "0",
+        "positions": {},
+        "fees_today_delta": Decimal("0"),
+    }
+
+    await _upsert_daily_pnl(sf, state)
+
+    row: DailyPnL = sf.sess.added[0]
+    assert row.realised_pnl == Decimal("-9107.37")
+    assert row.strategy_breakdown["risk_daily_loss_accumulated"] == "9107.37"

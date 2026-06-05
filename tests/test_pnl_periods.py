@@ -12,6 +12,7 @@ from api.pnl_periods import (
     month_to_date_range,
     week_to_date_range,
 )
+from api.server import _partial_coverage_period_rollup
 
 
 class _BoomSession:
@@ -80,3 +81,15 @@ def test_merge_live_today_unrealised_keeps_period_when_live_missing():
         live_today_unrealised=Decimal("0"),
     )
     assert out == Decimal("100")
+
+
+def test_partial_coverage_rollup_keeps_realised_facts():
+    out = _partial_coverage_period_rollup(
+        {"realised": "-9107.37", "unrealised": "-4556.44", "fees": "36.14", "trades": 34}
+    )
+
+    assert out["realised"] == "-9107.37"
+    assert out["fees"] == "36.14"
+    assert out["trades"] == 34
+    assert out["unrealised"] == "0"
+    assert out["partial_coverage"] is True

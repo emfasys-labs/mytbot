@@ -2515,6 +2515,19 @@ class Orchestrator:
         position_loss_tier = parse_position_loss_tier(d_cfg.get("position_loss_tier"))
         if not tiers and position_loss_tier is None:
             return
+        position_dynamic_cfg = (
+            d_cfg.get("position_loss_tier", {}).get("dynamic", {})
+            if isinstance(d_cfg.get("position_loss_tier"), dict)
+            else {}
+        )
+        dynamic_position_loss = bool(position_dynamic_cfg.get("enabled", False))
+        position_loss_notional_reference_pct = None
+        single_name_cfg = cfg.get("single_name_notional", {}) if isinstance(cfg.get("single_name_notional"), dict) else {}
+        try:
+            if bool(single_name_cfg.get("enabled", False)):
+                position_loss_notional_reference_pct = Decimal(str(single_name_cfg.get("max_pct_nav", "0")))
+        except (TypeError, ValueError, InvalidOperation):
+            position_loss_notional_reference_pct = None
         try:
             cooldown_sec = max(5.0, float(d_cfg.get("close_cooldown_sec", 120.0)))
         except (TypeError, ValueError):
@@ -2566,6 +2579,7 @@ class Orchestrator:
                         "current_price": current,
                         "asset_class": row.get("asset_class") or "equity",
                         "unrealised_pnl": upnl,
+                        "instrument_metadata": row.get("instrument_metadata") if isinstance(row.get("instrument_metadata"), dict) else {},
                     }
                 )
             day_pnl = realised_today + unrealised_now
@@ -2589,6 +2603,8 @@ class Orchestrator:
                 now_ts=now_ts,
                 portfolio_volatility_scalar=vol_scalar,
                 position_loss_tier=position_loss_tier,
+                dynamic_position_loss=dynamic_position_loss,
+                position_loss_notional_reference_pct=position_loss_notional_reference_pct,
             )
             if tier is not None:
                 try:
