@@ -2005,6 +2005,27 @@ def _partial_coverage_period_rollup(period_agg: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _resolve_pnl_display_value(
+    *,
+    live_value: Decimal,
+    persisted_floor: Decimal,
+    coverage_full: bool,
+    nav_complete: bool,
+) -> Decimal:
+    """Choose the NAV denominator shown by ``/pnl``.
+
+    During a partial provider scope, ``live_value`` is intentionally the
+    active-provider NAV. Do not run it through the paper-mode low-live-value
+    guard, because that guard compares against whole-book persisted NAV and
+    would reintroduce excluded brokers into the headline.
+    """
+    if nav_complete and not coverage_full and live_value > 0:
+        return live_value
+    from run_m3 import _resolve_portfolio_value_for_state
+
+    return _resolve_portfolio_value_for_state(live_value, persisted_floor)
+
+
 def _configured_paper_nav() -> Decimal:
     """Fallback total equity when no broker balances and no DB snapshot."""
     orch = _get_orchestrator()
@@ -2108,10 +2129,11 @@ async def get_pnl(
     live_value = live_snap.value if live_snap is not None else Decimal(0)
     coverage_full = bool(nav_status.get("coverage_full", nav_status.get("complete", False)))
     configured_nav = _configured_paper_nav()
-    from run_m3 import _resolve_portfolio_value_for_state
-    display_value = _resolve_portfolio_value_for_state(
-        live_value,
-        max(db_value, last_persisted_value, configured_nav)
+    display_value = _resolve_pnl_display_value(
+        live_value=live_value,
+        persisted_floor=max(db_value, last_persisted_value, configured_nav),
+        coverage_full=coverage_full,
+        nav_complete=bool(nav_status.get("complete", False)),
     )
 
     orch = _get_orchestrator()
@@ -2231,8 +2253,8 @@ async def get_dashboard_snapshot(
             position_source = "position_log"
     else:
         position_rows = await _live_broker_positions(500)
-        position_rows = _filter_rows_to_current_nav_brokers(position_rows)
         position_source = "live_broker"
+    position_rows = _filter_rows_to_current_nav_brokers(position_rows)
     gross = Decimal(0)
     net = Decimal(0)
     cash_deployed = Decimal(0)

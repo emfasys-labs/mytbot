@@ -142,6 +142,29 @@ class MeanReversionStrategy(Strategy):
         if not buy_setup and not sell_setup:
             return None
 
+        # D157.2 — trend filter (config-gated, default off). Mean reversion is
+        # run over by trends on intraday bars (catching falling knives → ~32%
+        # win on 1h). When enabled, only fade WITH the longer trend: buy dips
+        # only while price is above the trend MA (healthy pullback in an
+        # uptrend), fade rips only while below it. The backtest is long-only,
+        # so the buy gate is what the edge gate measures; the sell gate keeps
+        # live behaviour symmetric.
+        tf_cfg = cfg.get("trend_filter") or {}
+        if isinstance(tf_cfg, dict) and tf_cfg.get("enabled"):
+            ma_period = int(tf_cfg.get("ma_period", 100))
+            if len(df) >= ma_period:
+                try:
+                    trend_ma = float(df["close"].rolling(ma_period).mean().iloc[-1])
+                except Exception:  # noqa: BLE001
+                    trend_ma = 0.0
+                if trend_ma > 0:
+                    if buy_setup and close < trend_ma:
+                        buy_setup = False
+                    if sell_setup and close > trend_ma:
+                        sell_setup = False
+            if not buy_setup and not sell_setup:
+                return None
+
         side = "buy" if buy_setup else "sell"
         center = (bb_lower + bb_upper) / 2.0
         stretch = abs(close - center) / center if center > 0 else 0.0

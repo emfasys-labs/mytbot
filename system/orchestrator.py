@@ -410,7 +410,7 @@ class Orchestrator:
                     paper_mode=paper_mode,
                     portfolio_value=float(os.getenv("PORTFOLIO_VALUE", "100000")),
                     loop_interval_sec=int(os.getenv("LOOP_INTERVAL_SEC", "120")),
-                    timeframe=os.getenv("TIMEFRAME", "1h"),
+                    timeframe=os.getenv("TIMEFRAME", "1d"),  # D158 Phase 1 — proven edge is daily
                     broker_manager=self._broker_manager,
                     capital_pct=self.capital_pct,
                     pipeline_wake_event=self._pipeline_wake_event,

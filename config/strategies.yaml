@@ -52,6 +52,68 @@ signal_engine:
       trader: 180
       defender: 600
 
+# ── D156 — Portfolio netting orchestrator ─────────────────────────────────
+# Combines every strategy's directional intent for a symbol into ONE
+# conviction-weighted position (no offsetting long+short pairs), sizes by
+# conviction (not equal-weight), manages net exposure deliberately, and
+# protects maturing edge from being force-closed by the rotation layer.
+#
+# GATED OFF by default. When ``enabled: false`` the trading loop keeps its
+# existing per-signal behaviour exactly. Flip to true only after paper
+# validation. When enabled, the loop nets strategy signals through this layer
+# and SUPPRESSES the global-edge rotation/recycle actions (the orchestrator
+# now owns rebalancing). All resulting orders still pass through the
+# RiskEngine and ExecutionEngine unchanged — this never bypasses risk.
+portfolio_orchestrator:
+  enabled: true                       # D158 Phase 1 — nets the proven daily weapons
+  entry_conviction_threshold: 0.15    # min |net conviction| to open a new position
+  flip_conviction_threshold: 0.45     # opposing conviction needed to flip a normal position
+  hard_flip_conviction: 0.75          # opposing conviction needed to flip a YOUNG or PROFITABLE position
+  concentration_exponent: 1.5         # >1 concentrates capital on high-conviction names
+  max_position_pct_of_nav: 0.08       # per-name concentration cap
+  gross_target_pct:                   # gross book size as a fraction of NAV, by mode
+    defender: 0.50
+    trader: 0.90
+    hunter: 1.30                      # risk engine still caps gross — this is intent, not override
+  net_cap_pct_of_gross: 0.60          # |net| <= 60% of gross when two-sided (one-sided left fully directional)
+  rebalance_band_pct_of_nav: 0.01     # don't trade adjustments smaller than 1% NAV (anti-churn)
+  min_hold_sec_before_flip: 1800      # protect positions younger than 30 min from marginal flips
+  close_edge_floor: 0.0               # only close/flip a position whose remaining edge <= this
+  strategy_trust:
+    use_recent_pnl: true              # down-weight strategies bleeding recently (resolved by the loop)
+    min_trust: 0.25
+    max_trust: 1.50
+
+# ── D157 — Strategy edge gate ─────────────────────────────────────────────
+# A strategy gets capital only after proving POSITIVE EXPECTANCY AFTER COSTS
+# in out-of-sample backtest. `scripts/run_edge_gate.py` evaluates each strategy
+# across the universe (using the backtest cost model below) and writes verdicts
+# to `data/state/edge_gate_verdicts.json`. When ``enabled: true`` the trading
+# loop drops candidates from `blocked` strategies and down-weights `reduced`
+# ones (the verdict feeds the D156 orchestrator's trust prior; live P&L is the
+# posterior). Only ever reduces/removes capital — never bypasses risk.
+#
+# GATED OFF by default. ``unproven_policy`` decides how an un-backtested or
+# thin-sample strategy is treated: ``reduce`` (half size — safe cold start) or
+# ``block`` (strict: prove it first). Set the backtest fee/slippage below to
+# realistic LIVE costs so the gate proves edge survives reality.
+#
+# CRITICAL — TIMEFRAME MUST MATCH LIVE: run `scripts/run_edge_gate.py
+# --timeframe <tf>` on the SAME timeframe the live loop trades (incremental
+# pipeline = 1h). A strategy's edge is timeframe-specific: D157 backfill found
+# mean_reversion is PROFITABLE on 1d (PF 2.30) but CATASTROPHIC on 1h
+# (-$347k, PF 0.43). Verdicts generated on the wrong timeframe give
+# dangerously wrong permissions. The canonical registry
+# (data/state/edge_gate_verdicts.json) must be the live-timeframe run.
+edge_gate:
+  enabled: true                       # D158 Phase 1 — enforce daily verdicts
+  min_trades: 30                      # below this sample → unproven_policy
+  block_consistency: 0.45             # < this fraction of profitable OOS windows → blocked
+  allow_consistency: 0.55             # >= this (+ positive expectancy + profit factor) → allowed
+  allow_profit_factor: 1.10
+  reduced_multiplier: 0.50            # capital multiplier for a "reduced" strategy
+  unproven_policy: reduce             # reduce | block
+
 backtest:
   starting_cash: 100000
   fee_bps: 10
@@ -274,7 +336,7 @@ strategies:
     base_target_notional: 20000
 
   volume_flow:
-    enabled: true
+    enabled: false              # D158 Phase 1 — parked: only 7 daily trades (insufficient sample)
     preferred_broker: ibkr
     asset_classes: [equity, crypto, forex]
     volume_lookback: 20
@@ -285,12 +347,12 @@ strategies:
     base_target_notional: 25000
 
   event_driven_news:
-    enabled: true
+    enabled: false             # D158 Phase 1 — parked: not yet edge-validated (news interface)
     shock_threshold: 0.45
     base_target_notional: 25000
 
   pairs_trading:
-    enabled: true
+    enabled: false             # D158 Phase 1 — parked: needs a cross-sectional validation harness
     lookback_bars: 90
     zscore_open: 2.0
     base_target_notional: 15000
@@ -299,8 +361,30 @@ strategies:
       - [XLE, USO]
       - [GLD, TLT]
 
+  # D158 — daily-horizon trend weapons (sniper / shotgun). Built to ride
+  # large moves where the target dwarfs costs, unlike intraday scalps.
+  # Gated OFF until the edge gate proves them; tested via scripts/run_edge_gate.py.
+  trend_breakout:
+    enabled: true               # D158 Phase 1 — proven daily (PF 2.78)
+    preferred_broker: ibkr
+    asset_classes: [equity, crypto, forex, future]
+    entry_lookback: 50          # Donchian channel (bars)
+    atr_lookback: 20
+    atr_min_pct: 0.0
+    min_breakout_atr: 0.5       # breakout must clear the channel by 0.5×ATR
+    base_target_notional: 20000
+
+  trend_following:
+    enabled: true               # D158 Phase 1 — proven daily (PF 1.99, reduced size)
+    preferred_broker: ibkr
+    asset_classes: [equity, crypto, forex, future]
+    fast_period: 20
+    slow_period: 50
+    min_separation_pct: 0.0
+    base_target_notional: 20000
+
   volatility_regime:
-    enabled: true
+    enabled: false             # D158 Phase 1 — parked: no daily edge (PF 0.55, blocked by gate)
     preferred_broker: ibkr
     asset_classes: [equity, crypto, forex, future]
     atr_lookback: 14
@@ -311,7 +395,7 @@ strategies:
     base_target_notional: 25000
 
   regime_rotation:
-    enabled: true
+    enabled: false             # D158 Phase 1 — parked: needs cross-sectional validation
     score_trigger: 0.35
     base_target_notional: 25000
     risk_on_symbols: [SPY, QQQ, XLE, BTC-USD]

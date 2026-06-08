@@ -874,9 +874,22 @@ export function useLiveSystem(): LiveData {
   const positionChanges = useMemo(() => toPositionChanges(positionsRaw), [positionsRaw]);
 
   const nav = useMemo(() => {
+    const portfolio = snapshot?.portfolio && typeof snapshot.portfolio === 'object'
+      ? snapshot.portfolio as Record<string, unknown>
+      : null;
+    const snapshotNav = toNumber(portfolio?.nav, 0);
+    const scope = String(portfolio?.scope ?? portfolio?.dashboard_scope ?? '');
+    if (
+      scope === 'active_providers'
+      && !coverage.full
+      && Number.isFinite(snapshotNav)
+      && snapshotNav > 0
+    ) {
+      return snapshotNav;
+    }
     const v = toNumber(pnl?.today?.portfolio_value, 0);
     return Math.max(0, v);
-  }, [pnl]);
+  }, [pnl, snapshot, coverage.full]);
 
   // Long-term daily equity history (one point per calendar day). Forward-fill
   // away zero/invalid ``portfolio_value`` rows so the sparkline does not dip to 0.

@@ -95,6 +95,8 @@ from strategies.event_driven import EventDrivenNewsStrategy
 from strategies.pairs_trading import PairsTradingStrategy
 from strategies.volatility_regime import VolatilityRegimeStrategy
 from strategies.regime_rotation import RegimeRotationStrategy
+from strategies.trend_breakout import TrendBreakoutStrategy
+from strategies.trend_following import TrendFollowingStrategy
 from system.demand_engine import DemandEngine
 from signals.meta_labeler import filter_candidates as meta_filter_candidates, keep_raw_signal as meta_keep_raw_signal
 from signals.meta_adaptation import compute_dynamic_strategy_bias
@@ -117,7 +119,14 @@ from portfolio.global_edge_coordinator import (
 from system.strategy_candidate_log import persist_rows as persist_strategy_candidate_rows
 from system.strategy_candidate_log import row as strategy_candidate_row
 from portfolio.treasury_manager import TreasuryManager, merge_treasury_into_portfolio_state
-from signals.arb_bridge import process_coordinator_action
+from portfolio.portfolio_orchestrator import (
+    BookPosition,
+    OrchestratorConfig,
+    build_intents_from_candidates,
+    orchestrate,
+)
+from backtest.edge_gate import EdgeGateRegistry, EdgeGateThresholds
+from signals.arb_bridge import CoordinatorAction, process_coordinator_action
 from signals.microstructure.liquidity_tracker import LiquidityTracker
 from strategies.arbitrage.cross_exchange import CrossExchangeArbitrageStrategy
 from strategies.arbitrage.funding_rate import FundingRateArbitrageStrategy
@@ -887,6 +896,8 @@ class TradingLoop:
             pairs_trading = PairsTradingStrategy(strat_cfg.get("pairs_trading", {}))
             volatility_regime = VolatilityRegimeStrategy(strat_cfg.get("volatility_regime", {}))
             regime_rotation = RegimeRotationStrategy(strat_cfg.get("regime_rotation", {}))
+            trend_breakout = TrendBreakoutStrategy(strat_cfg.get("trend_breakout", {}))      # D158
+            trend_following = TrendFollowingStrategy(strat_cfg.get("trend_following", {}))    # D158
             demand_engine = DemandEngine(strat_cfg.get("demand_engine", {}))
             meta_cfg = dict(strat_cfg.get("meta_labeling", {}) or {})
             meta_enabled = bool(meta_cfg.get("enabled", False))
@@ -911,6 +922,8 @@ class TradingLoop:
                 pairs_trading.name: pairs_trading,
                 volatility_regime.name: volatility_regime,
                 regime_rotation.name: regime_rotation,
+                trend_breakout.name: trend_breakout,      # D158 sniper
+                trend_following.name: trend_following,     # D158 shotgun
             }
 
             bus = CommandBus(session_factory)
@@ -1801,6 +1814,8 @@ class TradingLoop:
                                 volatility_regime=volatility_regime,
                                 event_driven=event_driven,
                                 regime_rotation=regime_rotation,
+                                trend_breakout=trend_breakout,
+                                trend_following=trend_following,
                                 ai_result=ai_result,
                                 demand_score=demand_score,
                                 demand_trend=demand_trend,
@@ -2083,6 +2098,8 @@ class TradingLoop:
                                 volatility_regime=volatility_regime,
                                 event_driven=event_driven,
                                 regime_rotation=regime_rotation,
+                                trend_breakout=trend_breakout,
+                                trend_following=trend_following,
                                 ai_result=ai_result,
                                 demand_score=demand_score,
                                 demand_trend=demand_trend,
@@ -2313,6 +2330,13 @@ class TradingLoop:
                                         thesis=thesis,
                                     )
 
+                        # D157 — edge gate: drop candidates from strategies
+                        # that have not proven post-cost expectancy in backtest.
+                        # Only ever removes capital; gated off by default.
+                        batch_candidates = self._apply_edge_gate_filter(
+                            batch_candidates, strategies_cfg, sc_log_rows,
+                        )
+
                         generated = len(batch_candidates)
                         executed = 0
                         zero_allocation = Decimal(str(self.capital_pct)) <= 0
@@ -2338,7 +2362,27 @@ class TradingLoop:
                                 "tradable_capital",
                                 state_equity * Decimal(str(self.capital_pct)),
                             )
-                            if zero_allocation or (self._use_global_edge and not use_legacy):
+                            # D156 — portfolio orchestrator. When enabled it
+                            # owns rebalancing: net strategy candidates into one
+                            # conviction-weighted target per symbol, protect
+                            # maturing edge, and skip the global-edge rotation/
+                            # recycle tick. Gated off by default → zero change.
+                            _orch_cfg = OrchestratorConfig.from_yaml(
+                                strategies_cfg.get("portfolio_orchestrator")
+                            )
+                            if _orch_cfg.enabled and not zero_allocation:
+                                executed = await self._run_orchestrated_tick(
+                                    batch_candidates=batch_candidates,
+                                    portfolio_dict=portfolio_dict,
+                                    tradable=tradable_nav,
+                                    mode_raw=mode_raw,
+                                    total_equity=state_equity,
+                                    session_factory=session_factory,
+                                    orch_cfg=_orch_cfg,
+                                    sc_log_buffer=sc_log_rows,
+                                    strategy_pnl_recent=_strategy_pnl,
+                                )
+                            elif zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
                                     batch_candidates=[] if zero_allocation else batch_candidates,
                                     portfolio_dict=portfolio_dict,
@@ -2800,6 +2844,269 @@ class TradingLoop:
             "fcfg": fcfg,
             "ccfg": ccfg,
         }
+
+    def _load_edge_gate(
+        self, strategies_cfg: dict[str, Any]
+    ) -> tuple[EdgeGateThresholds, "EdgeGateRegistry | None"]:
+        """Load edge-gate thresholds + verdict registry (cached, refreshed by mtime).
+
+        Returns ``(thresholds, registry|None)``. When disabled, registry is
+        None and the caller treats every strategy as allowed.
+        """
+        thr = EdgeGateThresholds.from_yaml(strategies_cfg.get("edge_gate"))
+        if not thr.enabled:
+            return thr, None
+        from backtest.edge_gate import DEFAULT_REGISTRY_PATH
+        eg_cfg = strategies_cfg.get("edge_gate") or {}
+        path = Path(str(eg_cfg.get("state_path") or DEFAULT_REGISTRY_PATH))
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        cached = getattr(self, "_edge_gate_cache", None)
+        if cached is not None and cached[0] == mtime:
+            return thr, cached[1]
+        reg = EdgeGateRegistry(path).load()
+        self._edge_gate_cache = (mtime, reg)
+        return thr, reg
+
+    def _apply_edge_gate_filter(
+        self,
+        batch_candidates: list[Any],
+        strategies_cfg: dict[str, Any],
+        sc_log_buffer: list[dict[str, Any]] | None,
+    ) -> list[Any]:
+        """Drop candidates whose strategy is ``blocked`` by the edge gate.
+
+        Gated off by default (returns the list unchanged). ``reduced`` /
+        ``allowed`` strategies pass through here; their size multiplier is
+        applied later via the orchestrator trust prior. Cross-sectional /
+        news strategies the gate cannot backtest follow ``unproven_policy``.
+        """
+        thr, reg = self._load_edge_gate(strategies_cfg)
+        if reg is None:  # disabled
+            return batch_candidates
+        kept: list[Any] = []
+        blocked_counts: dict[str, int] = {}
+        reduced_counts: dict[str, int] = {}
+        for cand in batch_candidates:
+            strat = str(getattr(cand, "strategy_name", "") or "")
+            if reg.is_blocked(strat, thr):
+                blocked_counts[strat] = blocked_counts.get(strat, 0) + 1
+                if sc_log_buffer is not None:
+                    try:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(getattr(cand, "symbol", "") or ""),
+                                strategy=strat,
+                                side=str(getattr(cand, "side", "") or ""),
+                                confidence=float(getattr(cand, "confidence", 0) or 0),
+                                status="edge_gate_blocked",
+                                reason="strategy not edge-proven (D157)",
+                                loop_iteration=self.iterations,
+                                metadata={},
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._swallow("edge_gate_block_log", exc)
+                continue
+            # Non-blocked: apply the a-priori size multiplier (1.0 for proven,
+            # reduced_multiplier for weak/unproven) by scaling confidence so the
+            # down-weight propagates to EVERY downstream path (sizing + the D156
+            # orchestrator netting), not only the orchestrator.
+            mult = reg.size_multiplier_for(strat, thr)
+            if mult < Decimal("1") and mult > 0:
+                try:
+                    cand.confidence = Decimal(str(cand.confidence)) * mult
+                    cand.adjusted_signal_strength = Decimal(str(cand.adjusted_signal_strength)) * mult
+                    if isinstance(getattr(cand, "metadata", None), dict):
+                        cand.metadata["edge_gate_multiplier"] = float(mult)
+                    reduced_counts[strat] = reduced_counts.get(strat, 0) + 1
+                except Exception as exc:  # noqa: BLE001
+                    self._swallow("edge_gate_reduce_scale", exc)
+            kept.append(cand)
+        if blocked_counts:
+            logger.info("edge_gate | blocked candidates by strategy: {}", blocked_counts)
+        if reduced_counts:
+            logger.info("edge_gate | reduced candidates by strategy: {}", reduced_counts)
+        return kept
+
+    @staticmethod
+    def _orchestrator_strategy_trust(
+        strategy_pnl_recent: dict[str, dict[str, Any]] | None,
+        cfg: OrchestratorConfig,
+    ) -> dict[str, Decimal]:
+        """Resolve per-strategy trust multipliers from recent P&L health.
+
+        A strategy bleeding recently is down-weighted (toward ``min_trust``);
+        a profitable one is boosted (toward ``max_trust``). This is how the
+        orchestrator stops a persistently-losing layer (e.g. the rotation
+        bleed found in D156) from dominating the netted conviction over time.
+        Neutral (1.0) when there is no recent sample.
+        """
+        out: dict[str, Decimal] = {}
+        for name, stats in (strategy_pnl_recent or {}).items():
+            if not isinstance(stats, dict):
+                continue
+            try:
+                net = Decimal(str(stats.get("net_pnl", 0) or 0))
+                fills = int(stats.get("fills", 0) or 0)
+            except Exception:  # noqa: BLE001
+                continue
+            if fills <= 0:
+                continue
+            # Bounded tilt: scale net P&L per fill into a modest multiplier.
+            one = Decimal("1")
+            per_fill = net / Decimal(fills)
+            if per_fill >= 0:
+                trust = one + min(cfg.max_trust - one, per_fill / Decimal("100"))
+            else:
+                trust = one + max(cfg.min_trust - one, per_fill / Decimal("100"))
+            out[str(name)] = max(cfg.min_trust, min(cfg.max_trust, trust))
+        return out
+
+    async def _run_orchestrated_tick(
+        self,
+        *,
+        batch_candidates: list[Any],
+        portfolio_dict: dict[str, Any],
+        tradable: Decimal,
+        mode_raw: str,
+        total_equity: Decimal,
+        session_factory: Any,
+        orch_cfg: OrchestratorConfig,
+        sc_log_buffer: list[dict[str, Any]] | None = None,
+        strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
+    ) -> int:
+        """D156 portfolio-orchestrator path.
+
+        Nets every strategy candidate for a symbol into ONE conviction-weighted
+        target, sizes by conviction, manages net exposure, and protects
+        maturing edge — then routes the resulting minimal order set through the
+        SAME risk + execution path as every other order (``_process_signal_global``).
+        Never bypasses risk. Returns the executed order count.
+
+        When this path runs, the global-edge rotation/recycle tick is skipped
+        (the orchestrator now owns rebalancing).
+        """
+        if self.sig_engine is None or self.risk_engine is None or self.execution_engine is None:
+            return 0
+        # Refresh the book with live broker positions so edge-protection and
+        # netting diff against reality, not a stale snapshot.
+        if self._broker_manager:
+            try:
+                await asyncio.wait_for(
+                    _merge_live_broker_positions_into_portfolio_state(
+                        portfolio_dict, self._broker_manager, paper_mode=self.paper_mode,
+                    ),
+                    timeout=float(os.getenv("BROKER_POSITION_MERGE_TIMEOUT_SEC", "20")),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("orchestrator | broker position merge timeout/error | {}", exc)
+
+        intents = build_intents_from_candidates(batch_candidates)
+        # Build the current book from portfolio_dict positions.
+        book: list[BookPosition] = []
+        for sym, p in (portfolio_dict.get("positions") or {}).items():
+            try:
+                qty = Decimal(str(p.get("quantity", "0") or "0"))
+                if qty == 0:
+                    continue
+                avg = Decimal(str(p.get("avg_entry_price", "0") or "0"))
+                cur = Decimal(str(p.get("current_price", avg) or avg))
+                unreal = (cur - avg) * qty
+                book.append(
+                    BookPosition(
+                        symbol=str(p.get("symbol", sym)),
+                        signed_qty=qty,
+                        avg_price=avg,
+                        current_price=cur,
+                        asset_class=str(p.get("asset_class", "") or ""),
+                        broker=str(p.get("broker", "") or ""),
+                        holding_sec=Decimal(str(p.get("holding_sec", "0") or "0")),
+                        unrealised_pnl=unreal,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+
+        cfg = OrchestratorConfig(
+            enabled=orch_cfg.enabled,
+            entry_conviction_threshold=orch_cfg.entry_conviction_threshold,
+            flip_conviction_threshold=orch_cfg.flip_conviction_threshold,
+            hard_flip_conviction=orch_cfg.hard_flip_conviction,
+            concentration_exponent=orch_cfg.concentration_exponent,
+            max_position_pct_of_nav=orch_cfg.max_position_pct_of_nav,
+            gross_target_pct=orch_cfg.gross_target_pct,
+            net_cap_pct_of_gross=orch_cfg.net_cap_pct_of_gross,
+            rebalance_band_pct_of_nav=orch_cfg.rebalance_band_pct_of_nav,
+            min_hold_sec_before_flip=orch_cfg.min_hold_sec_before_flip,
+            close_edge_floor=orch_cfg.close_edge_floor,
+            strategy_trust=self._orchestrator_strategy_trust(strategy_pnl_recent, orch_cfg),
+            min_trust=orch_cfg.min_trust,
+            max_trust=orch_cfg.max_trust,
+        )
+        result = orchestrate(intents, book, nav=total_equity, mode=mode_raw, config=cfg)
+        logger.info(
+            "orchestrator | intents={} book={} orders={} netted={} conflicts={} protected={} "
+            "flips={} opens={} closes={} reduces={} increases={} suppressed={} net_target={}",
+            result.diagnostics.get("intent_count"), result.diagnostics.get("book_positions"),
+            len(result.orders), result.diagnostics.get("netted_symbols"),
+            result.diagnostics.get("conflicts_resolved"), result.diagnostics.get("protected_positions"),
+            result.diagnostics.get("flips"), result.diagnostics.get("opens"),
+            result.diagnostics.get("closes"), result.diagnostics.get("reduces"),
+            result.diagnostics.get("increases"), result.diagnostics.get("suppressed_rebalances"),
+            result.diagnostics.get("net_target"),
+        )
+
+        executed = 0
+        for od in result.orders:
+            try:
+                is_reduce = bool(od.reduce_only or od.close_only)
+                md: dict[str, Any] = {
+                    "orchestrator": True,
+                    "orchestrator_reason": od.reason,
+                    "net_conviction": str(od.net_conviction),
+                    "contributing_strategies": ",".join(od.contributing[:12]),
+                    "confidence": str(min(Decimal("0.95"), max(Decimal("0.3"), abs(od.net_conviction)))),
+                    "asset_class": od.asset_class or "equity",
+                }
+                if od.broker:
+                    md["broker"] = od.broker
+                if is_reduce:
+                    # trim_symbol path: side encodes the EXISTING position side
+                    # being reduced (sell→reduce a long, buy→reduce a short).
+                    md["side"] = "long" if od.side == "sell" else "short"
+                    md["reduce_only"] = True
+                    if not od.close_only:
+                        md["partial_reduce_only"] = True
+                    kind = "trim_symbol"
+                else:
+                    md["side"] = "long" if od.side == "buy" else "short"
+                    kind = "open_strategy"
+                action = CoordinatorAction(
+                    kind=kind,
+                    symbol=od.symbol,
+                    strategy_name="portfolio_orchestrator",
+                    capital=od.delta_notional,
+                    priority_score=abs(od.net_conviction),
+                    metadata=md,
+                )
+                sig = process_coordinator_action(
+                    action, self.sig_engine, portfolio_value=tradable, news_score=None,
+                )
+                if sig is None:
+                    continue
+                ok = await self._process_signal_global(
+                    sig, session_factory, portfolio_dict, total_equity, tradable,
+                    sc_log_buffer=sc_log_buffer,
+                )
+                if ok:
+                    executed += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("orchestrator | order routing failed for {} | {}", od.symbol, exc)
+                continue
+        return executed
 
     async def _run_global_edge_tick(
         self,

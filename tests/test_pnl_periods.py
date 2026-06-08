@@ -12,7 +12,7 @@ from api.pnl_periods import (
     month_to_date_range,
     week_to_date_range,
 )
-from api.server import _partial_coverage_period_rollup
+from api.server import _partial_coverage_period_rollup, _resolve_pnl_display_value
 
 
 class _BoomSession:
@@ -93,3 +93,29 @@ def test_partial_coverage_rollup_keeps_realised_facts():
     assert out["trades"] == 34
     assert out["unrealised"] == "0"
     assert out["partial_coverage"] is True
+
+
+def test_partial_coverage_pnl_uses_active_provider_nav(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+
+    out = _resolve_pnl_display_value(
+        live_value=Decimal("246325"),
+        persisted_floor=Decimal("1225262"),
+        coverage_full=False,
+        nav_complete=True,
+    )
+
+    assert out == Decimal("246325")
+
+
+def test_full_coverage_pnl_keeps_paper_low_nav_guard(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+
+    out = _resolve_pnl_display_value(
+        live_value=Decimal("246325"),
+        persisted_floor=Decimal("1225262"),
+        coverage_full=True,
+        nav_complete=True,
+    )
+
+    assert out == Decimal("1225262")

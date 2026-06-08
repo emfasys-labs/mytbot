@@ -172,6 +172,8 @@ def collect_raw_signals_for_symbol(
     demand_trend: str,
     demand_confidence: float,
     loop_iteration: int | None,
+    trend_breakout: Any = None,      # D158 sniper (optional for backward compat)
+    trend_following: Any = None,     # D158 shotgun
 ) -> tuple[list[RawSignal], list[dict[str, Any]]]:
     """Build ``raw_candidates`` and pre-regime strategy_candidate_log rows (no_setup / skipped)."""
     sc_rows: list[dict[str, Any]] = []
@@ -254,6 +256,26 @@ def collect_raw_signals_for_symbol(
             )
         else:
             raw_candidates.append(vol_sig)
+
+    # D158 — trend weapons (sniper / shotgun). Direction-agnostic; ride moves.
+    for _tw in (trend_breakout, trend_following):
+        if _tw is None or not getattr(_tw, "enabled", False):
+            continue
+        if not _tw.supports_asset_class(sym_ac):
+            continue
+        _sig = _tw.generate_signal(symbol, df)
+        if _sig is None:
+            sc_rows.append(
+                strategy_candidate_row(
+                    symbol=symbol,
+                    strategy=_tw.name,
+                    status="no_setup",
+                    reason="no_signal",
+                    loop_iteration=loop_iteration,
+                )
+            )
+        else:
+            raw_candidates.append(_sig)
 
     if not event_driven.enabled:
         pass

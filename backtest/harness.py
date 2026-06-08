@@ -53,7 +53,18 @@ def run_backtest_on_features(
     fee_bps: Decimal,
     slippage_bps: Decimal,
     max_hold_bars: int = 20,
+    warmup_bars: int = 0,
 ) -> BacktestResult:
+    """Replay a strategy over ``features`` bar by bar.
+
+    ``warmup_bars`` (default 0) is a context-only prefix: the strategy still
+    *sees* those bars as history at each decision point (so trend filters,
+    long moving averages and other history-dependent logic work), but no
+    trades are opened or counted until the index reaches ``warmup_bars``. This
+    lets walk-forward feed the train window as warmup and measure P&L only in
+    the out-of-sample test region — without which any strategy needing more
+    than ``test_bars`` of history is silently untestable.
+    """
     if features is None or features.empty:
         return BacktestResult(symbol, 0, 0, 0, starting_cash, Decimal("0"), 0.0)
 
@@ -77,7 +88,8 @@ def run_backtest_on_features(
     fee_mult = fee_bps / Decimal("10000")
     slip_mult = slippage_bps / Decimal("10000")
 
-    for i in range(1, len(df)):
+    start_i = max(1, int(warmup_bars))
+    for i in range(start_i, len(df)):
         window = df.iloc[: i + 1]
         latest = window.iloc[-1]
         price = Decimal(str(latest["close"]))
@@ -190,17 +202,21 @@ def run_walk_forward_backtest(
         test_end = train_end + test_bars
         if test_end > n:
             break
-        test_slice = df.iloc[train_end:test_end]
-        if not test_slice.empty:
+        # Pass train+test as one frame so the strategy sees the train window as
+        # warmup *context* (history-dependent logic works), but only the test
+        # region (index >= train_bars within this slice) opens/counts trades.
+        ctx_slice = df.iloc[start:test_end]
+        if len(ctx_slice) > train_bars:
             res = run_backtest_on_features(
                 symbol=symbol,
-                features=test_slice,
+                features=ctx_slice,
                 strategy=strategy,
                 signal_engine=signal_engine,
                 starting_cash=starting_cash,
                 fee_bps=fee_bps,
                 slippage_bps=slippage_bps,
                 max_hold_bars=max_hold_bars,
+                warmup_bars=train_bars,
             )
             results.append(res)
         start += step_bars

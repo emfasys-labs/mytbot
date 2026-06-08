@@ -144,11 +144,15 @@ historical_training_backfill:
   expected_interval_seconds: 3600
   stale_after_hours: 168
 
+# D158 Phase 1 — the live system trades the DAILY horizon (where the proven
+# edge lives). Incremental tops up recent daily bars; strategies read the full
+# backfilled history from the feature store. Revert: interval "1h"/period "5d"
+# + TIMEFRAME=1h.
 incremental:
-  interval: "1h"
-  period: "5d"
-  expected_interval_seconds: 3600
-  stale_after_hours: 72
+  interval: "1d"
+  period: "1mo"
+  expected_interval_seconds: 86400
+  stale_after_hours: 36
 
 loop_interval_seconds: 3600
 
