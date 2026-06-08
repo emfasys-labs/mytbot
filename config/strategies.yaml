@@ -148,7 +148,8 @@ backtest:
   starting_cash: 100000
   fee_bps: 10
   slippage_bps: 5
-  max_hold_bars: 20
+  max_hold_bars: 60          # D158 Phase 3 — daily-appropriate hold (was 20, an
+                             # intraday-era cap that truncated long-horizon trends)
   walk_forward_train_bars: 252
   walk_forward_test_bars: 63
   walk_forward_step_bars: 63
@@ -395,21 +396,21 @@ strategies:
   # large moves where the target dwarfs costs, unlike intraday scalps.
   # Gated OFF until the edge gate proves them; tested via scripts/run_edge_gate.py.
   trend_breakout:
-    enabled: true               # D158 Phase 1 — proven daily (PF 2.78)
-    preferred_broker: ibkr
+    enabled: true               # D158 Phase 3 — MONTHLY sniper: L150 daily breakout,
+    preferred_broker: ibkr      #   the strongest weapon in the arsenal (PF 4.15, 73% win)
     asset_classes: [equity, crypto, forex, future]
-    entry_lookback: 50          # Donchian channel (bars)
+    entry_lookback: 150         # ~monthly-horizon Donchian channel (was 50 swing)
     atr_lookback: 20
     atr_min_pct: 0.0
     min_breakout_atr: 0.5       # breakout must clear the channel by 0.5×ATR
     base_target_notional: 20000
 
   trend_following:
-    enabled: true               # D158 Phase 1 — proven daily (PF 1.99, reduced size)
+    enabled: true               # D158 Phase 3 — MONTHLY trend: MA50/200 (PF 2.46)
     preferred_broker: ibkr
     asset_classes: [equity, crypto, forex, future]
-    fast_period: 20
-    slow_period: 50
+    fast_period: 50             # was 20/50 swing — slowed to a position-trend horizon
+    slow_period: 200
     min_separation_pct: 0.0
     base_target_notional: 20000
 
