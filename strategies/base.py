@@ -33,6 +33,14 @@ class Strategy(ABC):
     def __init__(self, config: dict):
         self.config = config
         self.enabled = config.get("enabled", True)
+        # D158 Phase 3.1 — optional per-instance name override. Lets the same
+        # strategy class run as several distinct weapons at different horizons
+        # (e.g. ``trend_breakout_weekly`` vs ``trend_breakout_monthly``) by
+        # giving each config block its own ``strategy_name``. Absent → the
+        # class default ``name`` (unchanged; backward compatible).
+        _name_override = config.get("strategy_name")
+        if isinstance(_name_override, str) and _name_override.strip():
+            self.name = _name_override.strip()
         # Class-level ``asset_class`` is the *default*. A strategy may declare
         # multiple supported asset classes in YAML via ``asset_classes: [...]``
         # which is the preferred form going forward. We always keep the legacy

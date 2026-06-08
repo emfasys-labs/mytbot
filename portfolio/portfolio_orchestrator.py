@@ -486,7 +486,14 @@ def orchestrate(
                 if opposing and conv_against < flip_bar:
                     diag["protected_positions"] += 1
                     continue
-                if wants_flat and has_edge:
+                # Flat-desire (the weapon went quiet — e.g. a breakout sniper
+                # that only fires on the entry bar): hold the position if it
+                # still has edge OR is younger than the min-hold window, so a
+                # fresh entry is not closed on early noise before its move
+                # develops. (D158 Phase 3.1 — gives live snipers a backtest-
+                # like hold without the whipsaw of an always-on continuation
+                # signal.)
+                if wants_flat and (has_edge or young):
                     diag["protected_positions"] += 1
                     continue
 

@@ -77,7 +77,9 @@ portfolio_orchestrator:
     hunter: 1.30                      # risk engine still caps gross — this is intent, not override
   net_cap_pct_of_gross: 0.60          # |net| <= 60% of gross when two-sided (one-sided left fully directional)
   rebalance_band_pct_of_nav: 0.01     # don't trade adjustments smaller than 1% NAV (anti-churn)
-  min_hold_sec_before_flip: 1800      # protect positions younger than 30 min from marginal flips
+  min_hold_sec_before_flip: 259200    # D158 Phase 3.1 — 3 days. Daily-appropriate hold so
+                                      # fresh entries (esp. monthly snipers) ride through early
+                                      # noise; was 1800s (30 min), an intraday-era value.
   close_edge_floor: 0.0               # only close/flip a position whose remaining edge <= this
   strategy_trust:
     use_recent_pnl: true              # down-weight strategies bleeding recently (resolved by the loop)

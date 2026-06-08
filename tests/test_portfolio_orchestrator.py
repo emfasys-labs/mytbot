@@ -343,3 +343,26 @@ def test_no_temperament_config_is_backward_compatible():
     # The default _cfg() has no temperament config → factor 1.0 everywhere.
     c = _cfg()
     assert c.temperament_factor("trend_breakout", Decimal("0.75")) == Decimal("1")
+
+
+# ── D158 Phase 3.1 — young positions held through early noise on flat-desire ──
+def test_young_losing_position_held_on_flat_desire():
+    # A fresh breakout sniper opened, went slightly negative, and the weapon is
+    # now quiet (flat desire). Within the min-hold window it must be HELD, not
+    # closed on noise — even though it currently has no edge.
+    book = [BookPosition("SNP", Decimal("100"), Decimal("50"), Decimal("49"),
+                         "equity", holding_sec=Decimal("100"), unrealised_pnl=Decimal("-100"))]
+    res = orchestrate([], book, nav=NAV, mode="trader",
+                      config=_cfg(min_hold_sec_before_flip=Decimal("259200")))
+    assert not any(o.symbol == "SNP" for o in res.orders)
+    assert res.diagnostics["protected_positions"] == 1
+
+
+def test_old_losing_position_still_closed_on_flat_desire():
+    # Past the min-hold window, a losing position with no edge IS closed.
+    book = [BookPosition("OLD", Decimal("100"), Decimal("50"), Decimal("49"),
+                         "equity", holding_sec=Decimal("999999"), unrealised_pnl=Decimal("-100"))]
+    res = orchestrate([], book, nav=NAV, mode="trader",
+                      config=_cfg(min_hold_sec_before_flip=Decimal("259200")))
+    old = [o for o in res.orders if o.symbol == "OLD"]
+    assert len(old) == 1 and old[0].close_only is True

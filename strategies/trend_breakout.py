@@ -44,12 +44,19 @@ class TrendBreakoutStrategy(Strategy):
     def _params(self) -> Optional[dict[str, Any]]:
         cfg = self.effective_config()
         try:
+            entry_lookback = int(cfg.get("entry_lookback", 50))
             return {
-                "entry_lookback": int(cfg.get("entry_lookback", 50)),
+                "entry_lookback": entry_lookback,
                 "atr_lookback": int(cfg.get("atr_lookback", 20)),
                 "atr_min_pct": float(cfg.get("atr_min_pct", 0.0)),
                 "min_breakout_atr": float(cfg.get("min_breakout_atr", 0.5)),
                 "base_notional": cfg.get("base_target_notional", "20000"),
+                # D158 Phase 3.1 — continuation/trailing-exit. When on, the
+                # weapon maintains a directional view while the trend is intact
+                # (so the live orchestrator HOLDS the position instead of
+                # closing it on early noise) and flips/exits on a real reversal.
+                # Default off → pure breakout-entry behaviour (unchanged).
+                "hold_with_trend": bool(cfg.get("hold_with_trend", False)),
             }
         except (TypeError, ValueError):
             return None
@@ -82,15 +89,32 @@ class TrendBreakoutStrategy(Strategy):
             buffer = Decimal(str(p["min_breakout_atr"])) * Decimal(str(atr))
             up = Decimal(str(close)) > Decimal(str(chan_high)) + buffer
             dn = Decimal(str(close)) < Decimal(str(chan_low)) - buffer
-            if not (up or dn):
-                return None
 
-            side = "buy" if up else "sell"
-            if up:
-                strength = (close - chan_high) / chan_high if chan_high > 0 else 0.0
+            phase = "breakout"
+            if up or dn:
+                side = "buy" if up else "sell"
+                if up:
+                    strength = (close - chan_high) / chan_high if chan_high > 0 else 0.0
+                else:
+                    strength = (chan_low - close) / chan_low if chan_low > 0 else 0.0
+                confidence = min(0.55 + max(0.0, strength) * 8.0, 0.92)
+            elif p["hold_with_trend"]:
+                # Continuation: hold the directional view while the trend is
+                # intact (price on the trending side of the slow-channel
+                # midpoint). Lower conviction than a fresh breakout, so the
+                # orchestrator keeps a winning position but doesn't size up.
+                mid = (chan_high + chan_low) / 2.0
+                if close > mid:
+                    side, phase = "buy", "continuation"
+                    strength = (close - mid) / mid if mid > 0 else 0.0
+                elif close < mid:
+                    side, phase = "sell", "continuation"
+                    strength = (mid - close) / mid if mid > 0 else 0.0
+                else:
+                    return None
+                confidence = min(0.50 + max(0.0, strength) * 4.0, 0.70)
             else:
-                strength = (chan_low - close) / chan_low if chan_low > 0 else 0.0
-            confidence = min(0.55 + max(0.0, strength) * 8.0, 0.92)
+                return None
 
             target = self._target_notional(p["base_notional"], confidence, atr_pct)
             if target is None:
@@ -104,6 +128,7 @@ class TrendBreakoutStrategy(Strategy):
                 asset_class=self.asset_class,
                 metadata={
                     "weapon_class": "sniper",
+                    "phase": phase,
                     "entry_lookback": lookback,
                     "channel_high": chan_high,
                     "channel_low": chan_low,
