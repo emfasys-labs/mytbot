@@ -148,6 +148,24 @@ class OrchestratorConfig:
     strategy_trust: dict[str, Decimal] = field(default_factory=dict)
     min_trust: Decimal = Decimal("0.25")
     max_trust: Decimal = Decimal("1.50")
+    # ── D158 Phase 2 — heterogeneous hunter army ──────────────────────────
+    # Each weapon has a TEMPERAMENT (sniper / shotgun / knife) — an intrinsic
+    # style independent of the market — and the global MODE (defender/trader/
+    # hunter) is a systemic THREAT throttle that scales the whole army. A
+    # weapon's effective aggression = size_mult × (1 − threat × defensive_cut),
+    # so in calm markets the army is heterogeneous (each weapon by its style)
+    # and in danger everyone retreats together but the eager weapons (knives)
+    # are cut hardest while resilient snipers hold. Empty config → all factors
+    # 1.0 (no change; backward compatible).
+    temperaments: dict[str, dict[str, Decimal]] = field(default_factory=dict)
+    weapon_temperament: dict[str, str] = field(default_factory=dict)
+    mode_threat: dict[str, Decimal] = field(
+        default_factory=lambda: {
+            "hunter": Decimal("0.0"),
+            "trader": Decimal("0.35"),
+            "defender": Decimal("0.75"),
+        }
+    )
 
     @classmethod
     def from_yaml(cls, raw: dict[str, Any] | None) -> "OrchestratorConfig":
@@ -188,6 +206,28 @@ class OrchestratorConfig:
             kwargs["gross_target_pct"] = gross
         if trust:
             kwargs["strategy_trust"] = trust
+        # D158 Phase 2 — temperament + threat config.
+        temps_raw = raw.get("temperaments") or {}
+        if isinstance(temps_raw, dict) and temps_raw:
+            temps: dict[str, dict[str, Decimal]] = {}
+            for tname, tvals in temps_raw.items():
+                if isinstance(tvals, dict):
+                    temps[str(tname).strip().lower()] = {
+                        "size_mult": _dec(tvals.get("size_mult", 1), "1"),
+                        "defensive_cut": _dec(tvals.get("defensive_cut", 0), "0"),
+                    }
+            if temps:
+                kwargs["temperaments"] = temps
+        wt_raw = raw.get("weapon_temperament") or {}
+        if isinstance(wt_raw, dict) and wt_raw:
+            kwargs["weapon_temperament"] = {
+                str(k).strip(): str(v).strip().lower() for k, v in wt_raw.items()
+            }
+        mt_raw = raw.get("mode_threat") or {}
+        if isinstance(mt_raw, dict) and mt_raw:
+            kwargs["mode_threat"] = {
+                str(k).strip().lower(): _dec(v) for k, v in mt_raw.items()
+            }
         return cls(**kwargs)
 
     def trust_for(self, strategy: str) -> Decimal:
@@ -198,6 +238,33 @@ class OrchestratorConfig:
 
     def gross_target_for(self, mode: str) -> Decimal:
         return self.gross_target_pct.get((mode or "trader").strip().lower(), Decimal("0.90"))
+
+    # ── D158 Phase 2 helpers ──────────────────────────────────────────────
+    def threat_for(self, mode: str) -> Decimal:
+        """Systemic threat level [0,1] for the global mode (hunter≈0, defender≈high)."""
+        t = self.mode_threat.get((mode or "trader").strip().lower())
+        if t is None:
+            return Decimal("0.35")
+        return max(D0, min(D1, t))
+
+    def temperament_factor(self, strategy: str, threat: Decimal) -> Decimal:
+        """Per-weapon aggression multiplier = size_mult × (1 − threat × defensive_cut).
+
+        ``size_mult`` is the weapon's intrinsic style (sniper sizes bigger per
+        shot, knife smaller); ``defensive_cut`` is how hard systemic threat
+        throttles it. Returns 1.0 when no temperament is configured for the
+        strategy (backward compatible). Never returns < 0.
+        """
+        tname = self.weapon_temperament.get(strategy)
+        if tname is None:
+            return D1
+        spec = self.temperaments.get(tname)
+        if not spec:
+            return D1
+        size_mult = spec.get("size_mult", D1)
+        defensive_cut = spec.get("defensive_cut", D0)
+        factor = size_mult * (D1 - threat * defensive_cut)
+        return factor if factor > D0 else D0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,11 +341,23 @@ def orchestrate(
         diag["abort"] = "nav<=0"
         return OrchestrationResult([], [], diag)
 
+    # D158 Phase 2 — systemic threat from the global mode, and the per-weapon
+    # temperament factor applied below. Calm (hunter) → threat≈0 → weapons keep
+    # their intrinsic style; danger (defender) → threat high → eager weapons
+    # cut hardest, resilient snipers least.
+    threat = config.threat_for(mode)
+    temperament_applied: dict[str, str] = {}
+
     # ── 1. ALPHA COMBINATION — net intents per symbol ──────────────────────
     combined: dict[str, dict[str, Any]] = {}
     for it in intents:
         sym = it.symbol
-        sc = it.signed_conviction * config.trust_for(it.strategy)
+        temp_factor = config.temperament_factor(it.strategy, threat)
+        if it.strategy in config.weapon_temperament:
+            temperament_applied[it.strategy] = (
+                f"{config.weapon_temperament[it.strategy]}×{temp_factor:.3f}"
+            )
+        sc = it.signed_conviction * config.trust_for(it.strategy) * temp_factor
         slot = combined.setdefault(
             sym,
             {
@@ -461,6 +540,11 @@ def orchestrate(
     diag["gross_target"] = str(gross_t)
     diag["net_target"] = str(net_t)
     diag["gross_budget"] = str(gross_budget)
+    # D158 Phase 2 — surface the army's posture so the operator can SEE the
+    # heterogeneous landscape (global threat + per-weapon effective factor).
+    diag["mode"] = str(mode)
+    diag["threat_level"] = str(threat)
+    diag["temperament_factors"] = temperament_applied
     return OrchestrationResult(orders=orders, targets=list(targets.values()), diagnostics=diag)
 
 

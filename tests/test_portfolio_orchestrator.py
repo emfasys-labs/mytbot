@@ -254,3 +254,92 @@ def test_from_yaml_parses_block():
     assert cfg.entry_conviction_threshold == Decimal("0.2")
     assert cfg.gross_target_for("hunter") == Decimal("1.5")
     assert cfg.net_cap_pct_of_gross == Decimal("0.5")
+
+
+# ── D158 Phase 2 — temperament × threat (heterogeneous army) ─────────────────
+def _temp_cfg(**over):
+    from dataclasses import replace
+    base = _cfg(
+        max_position_pct_of_nav=Decimal("0.90"),
+        temperaments={
+            "sniper": {"size_mult": Decimal("1.30"), "defensive_cut": Decimal("0.30")},
+            "shotgun": {"size_mult": Decimal("1.00"), "defensive_cut": Decimal("0.60")},
+            "knife": {"size_mult": Decimal("0.75"), "defensive_cut": Decimal("1.00")},
+        },
+        weapon_temperament={"trend_breakout": "sniper", "mean_reversion": "knife",
+                            "trend_following": "shotgun"},
+        mode_threat={"hunter": Decimal("0"), "trader": Decimal("0.35"), "defender": Decimal("0.75")},
+    )
+    return replace(base, **over) if over else base
+
+
+def test_threat_for_maps_mode():
+    c = _temp_cfg()
+    assert c.threat_for("hunter") == Decimal("0")
+    assert c.threat_for("defender") == Decimal("0.75")
+    assert c.threat_for("trader") == Decimal("0.35")
+
+
+def test_temperament_factor_calm_market():
+    c = _temp_cfg()
+    threat = c.threat_for("hunter")  # 0
+    # In calm: factor == size_mult (no defensive cut).
+    assert c.temperament_factor("trend_breakout", threat) == Decimal("1.30")   # sniper
+    assert c.temperament_factor("trend_following", threat) == Decimal("1.00")  # shotgun
+    assert c.temperament_factor("mean_reversion", threat) == Decimal("0.75")   # knife
+
+
+def test_temperament_factor_in_danger_cuts_knife_hardest():
+    c = _temp_cfg()
+    threat = c.threat_for("defender")  # 0.75
+    sniper = c.temperament_factor("trend_breakout", threat)    # 1.30×(1-0.75×0.30)=1.30×0.775=1.0075
+    shotgun = c.temperament_factor("trend_following", threat)  # 1.00×(1-0.75×0.60)=1.00×0.55=0.55
+    knife = c.temperament_factor("mean_reversion", threat)     # 0.75×(1-0.75×1.00)=0.75×0.25=0.1875
+    # The army retreats heterogeneously: knife cut hardest, sniper barely touched.
+    assert sniper > shotgun > knife
+    assert knife < Decimal("0.20")
+    assert sniper > Decimal("1.0")
+
+
+def test_unknown_weapon_factor_is_neutral():
+    c = _temp_cfg()
+    assert c.temperament_factor("some_unmapped_strategy", Decimal("0.75")) == Decimal("1")
+
+
+def test_temperament_shifts_book_mix_in_danger():
+    # A sniper and a knife, equal raw conviction. In calm the sniper already
+    # sizes bigger; in danger the gap widens sharply (knife cut hardest).
+    intents = [
+        StrategyIntent("AAA", "buy", Decimal("0.6"), "trend_breakout", "equity"),  # sniper
+        StrategyIntent("BBB", "buy", Decimal("0.6"), "mean_reversion", "equity"),  # knife
+    ]
+    calm = orchestrate(intents, [], nav=NAV, mode="hunter", config=_temp_cfg())
+    danger = orchestrate(intents, [], nav=NAV, mode="defender", config=_temp_cfg())
+    calm_by = {t.symbol: t.target_notional for t in calm.targets}
+    danger_by = {t.symbol: t.target_notional for t in danger.targets}
+    # Calm: both fire, sniper already sizes bigger than knife.
+    assert calm_by["AAA"] > calm_by["BBB"] > 0
+    # Danger: the knife is throttled so hard its net conviction falls below the
+    # entry bar — it drops out entirely, while the resilient sniper stays.
+    assert danger_by.get("AAA", Decimal("0")) > 0
+    assert danger_by.get("BBB", Decimal("0")) == 0
+    assert danger.diagnostics["threat_level"] == "0.75"
+    assert "trend_breakout" in danger.diagnostics["temperament_factors"]
+
+
+def test_from_yaml_parses_temperaments():
+    cfg = OrchestratorConfig.from_yaml({
+        "enabled": True,
+        "temperaments": {"sniper": {"size_mult": 1.3, "defensive_cut": 0.3}},
+        "weapon_temperament": {"trend_breakout": "sniper"},
+        "mode_threat": {"hunter": 0.0, "defender": 0.8},
+    })
+    assert cfg.weapon_temperament["trend_breakout"] == "sniper"
+    assert cfg.temperaments["sniper"]["size_mult"] == Decimal("1.3")
+    assert cfg.threat_for("defender") == Decimal("0.8")
+
+
+def test_no_temperament_config_is_backward_compatible():
+    # The default _cfg() has no temperament config → factor 1.0 everywhere.
+    c = _cfg()
+    assert c.temperament_factor("trend_breakout", Decimal("0.75")) == Decimal("1")

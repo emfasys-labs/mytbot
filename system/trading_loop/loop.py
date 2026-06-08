@@ -3030,21 +3030,14 @@ class TradingLoop:
             except Exception:  # noqa: BLE001
                 continue
 
-        cfg = OrchestratorConfig(
-            enabled=orch_cfg.enabled,
-            entry_conviction_threshold=orch_cfg.entry_conviction_threshold,
-            flip_conviction_threshold=orch_cfg.flip_conviction_threshold,
-            hard_flip_conviction=orch_cfg.hard_flip_conviction,
-            concentration_exponent=orch_cfg.concentration_exponent,
-            max_position_pct_of_nav=orch_cfg.max_position_pct_of_nav,
-            gross_target_pct=orch_cfg.gross_target_pct,
-            net_cap_pct_of_gross=orch_cfg.net_cap_pct_of_gross,
-            rebalance_band_pct_of_nav=orch_cfg.rebalance_band_pct_of_nav,
-            min_hold_sec_before_flip=orch_cfg.min_hold_sec_before_flip,
-            close_edge_floor=orch_cfg.close_edge_floor,
+        # Inject the live per-strategy trust (edge-gate prior × recent P&L)
+        # while preserving every other config field — including the D158
+        # Phase 2 temperament/threat blocks. ``replace`` keeps this robust as
+        # new config fields are added.
+        from dataclasses import replace as _dc_replace
+        cfg = _dc_replace(
+            orch_cfg,
             strategy_trust=self._orchestrator_strategy_trust(strategy_pnl_recent, orch_cfg),
-            min_trust=orch_cfg.min_trust,
-            max_trust=orch_cfg.max_trust,
         )
         result = orchestrate(intents, book, nav=total_equity, mode=mode_raw, config=cfg)
         logger.info(

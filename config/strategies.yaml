@@ -84,6 +84,36 @@ portfolio_orchestrator:
     min_trust: 0.25
     max_trust: 1.50
 
+  # ── D158 Phase 2 — heterogeneous hunter army ────────────────────────────
+  # Two independent axes (see docs/DECISIONS.md D158 Phase 2):
+  #   * TEMPERAMENT (per weapon, intrinsic): a weapon's natural style.
+  #     ``size_mult`` = how big it sizes per shot; ``defensive_cut`` = how
+  #     hard systemic threat throttles it.
+  #   * THREAT (global, from the defender/trader/hunter mode): the systemic
+  #     danger level that scales the WHOLE army together.
+  # Effective per-weapon factor = size_mult × (1 − threat × defensive_cut).
+  # Calm (hunter, threat 0) → each weapon keeps its style; danger (defender,
+  # threat 0.75) → eager knives cut hardest, resilient snipers least.
+  temperaments:
+    sniper:                           # patient, rare, big shots — most resilient in danger
+      size_mult: 1.30
+      defensive_cut: 0.30
+    shotgun:                          # steady, medium — the baseline
+      size_mult: 1.00
+      defensive_cut: 0.60
+    knife:                            # eager, frequent, small — cut first/hardest in danger
+      size_mult: 0.75
+      defensive_cut: 1.00
+  weapon_temperament:                 # map each weapon to a temperament
+    trend_breakout: sniper
+    trend_following: shotgun
+    momentum_breakout: shotgun
+    mean_reversion: knife
+  mode_threat:                        # global mode → systemic threat level [0,1]
+    hunter: 0.0
+    trader: 0.35
+    defender: 0.75
+
 # ── D157 — Strategy edge gate ─────────────────────────────────────────────
 # A strategy gets capital only after proving POSITIVE EXPECTANCY AFTER COSTS
 # in out-of-sample backtest. `scripts/run_edge_gate.py` evaluates each strategy
