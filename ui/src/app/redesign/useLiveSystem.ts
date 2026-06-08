@@ -873,6 +873,41 @@ export function useLiveSystem(): LiveData {
   // ────── derived views ──────
   const positionChanges = useMemo(() => toPositionChanges(positionsRaw), [positionsRaw]);
 
+  // Coverage is derived BEFORE nav because the active-provider NAV branch below
+  // reads ``coverage.full``. Declaring it here keeps it out of the temporal
+  // dead zone — a ``const`` referenced before its declaration throws
+  // "Cannot access 'coverage' before initialization" at render time.
+  const coverage = useMemo<Coverage>(() => {
+    const mapped = mapCoverage(coverageRaw);
+    if (mapped) return mapped;
+    // Old backend without coverage — infer from brokersRaw so the UI still
+    // renders correctly rather than defaulting to "full" (which would hide
+    // partial-NAV errors on a mixed-version deployment).
+    const configured: string[] = [];
+    const included: string[] = [];
+    const excluded: Coverage['excluded'] = [];
+    for (const [name, b] of Object.entries(brokersRaw)) {
+      if (!b.configured) continue;
+      configured.push(name);
+      if (b.connected && b.balance_ready !== false) {
+        included.push(name);
+      } else {
+        excluded.push({
+          name,
+          connected: !!b.connected,
+          balance_ready: !!b.balance_ready,
+          reason: (typeof b.error === 'string' && b.error.trim()) || 'not ready',
+        });
+      }
+    }
+    return {
+      full: configured.length > 0 && excluded.length === 0,
+      configured,
+      included,
+      excluded,
+    };
+  }, [coverageRaw, brokersRaw]);
+
   const nav = useMemo(() => {
     const portfolio = snapshot?.portfolio && typeof snapshot.portfolio === 'object'
       ? snapshot.portfolio as Record<string, unknown>
@@ -998,39 +1033,9 @@ export function useLiveSystem(): LiveData {
     () => mapPnlRollups(pnl, nav, equitySeries),
     [pnl, nav, equitySeries],
   );
-  // Derive coverage before brokers so mapBrokers can mark excluded wallets
-  // for tooltip consumers (e.g. the NAV card footnote).
-  const coverage = useMemo<Coverage>(() => {
-    const mapped = mapCoverage(coverageRaw);
-    if (mapped) return mapped;
-    // Old backend without coverage — infer from brokersRaw so the UI still
-    // renders correctly rather than defaulting to "full" (which would hide
-    // partial-NAV errors on a mixed-version deployment).
-    const configured: string[] = [];
-    const included: string[] = [];
-    const excluded: Coverage['excluded'] = [];
-    for (const [name, b] of Object.entries(brokersRaw)) {
-      if (!b.configured) continue;
-      configured.push(name);
-      if (b.connected && b.balance_ready !== false) {
-        included.push(name);
-      } else {
-        excluded.push({
-          name,
-          connected: !!b.connected,
-          balance_ready: !!b.balance_ready,
-          reason: (typeof b.error === 'string' && b.error.trim()) || 'not ready',
-        });
-      }
-    }
-    return {
-      full: configured.length > 0 && excluded.length === 0,
-      configured,
-      included,
-      excluded,
-    };
-  }, [coverageRaw, brokersRaw]);
-
+  // (``coverage`` is declared earlier — before ``nav`` — to avoid a
+  // temporal-dead-zone reference. ``brokers`` consumes it for excluded-wallet
+  // tooltips, e.g. the NAV card footnote.)
   const brokers = useMemo(() => {
     const excludedSet = new Set(coverage.excluded.map((e) => e.name));
     const orchestratorIdle = backendState === 'off' || backendState === 'stopping';
