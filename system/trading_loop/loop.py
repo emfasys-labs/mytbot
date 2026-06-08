@@ -2381,6 +2381,7 @@ class TradingLoop:
                                     orch_cfg=_orch_cfg,
                                     sc_log_buffer=sc_log_rows,
                                     strategy_pnl_recent=_strategy_pnl,
+                                    resolve_price=_resolve_price_for_symbol,
                                 )
                             elif zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
@@ -2977,6 +2978,7 @@ class TradingLoop:
         orch_cfg: OrchestratorConfig,
         sc_log_buffer: list[dict[str, Any]] | None = None,
         strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
+        resolve_price: Any = None,
     ) -> int:
         """D156 portfolio-orchestrator path.
 
@@ -3052,11 +3054,29 @@ class TradingLoop:
             result.diagnostics.get("net_target"),
         )
 
+        # Price map for quantity sizing: the signal engine converts the
+        # orchestrator's target NOTIONAL into a share quantity via
+        # ``quantity = notional / price``. Without a price the engine falls
+        # back to a wrong default, producing wildly oversized orders (e.g. a
+        # GLD order sized against $1.60 instead of $398 → 20× NAV, then
+        # rejected by the execution pre-check). Use the live book price where
+        # we have it, else resolve the latest close.
+        book_px = {p.symbol: p.current_price for p in book if p.current_price > 0}
         executed = 0
         for od in result.orders:
             try:
+                px = book_px.get(od.symbol)
+                if (px is None or px <= 0) and resolve_price is not None:
+                    try:
+                        px = await resolve_price(od.symbol)
+                    except Exception:  # noqa: BLE001
+                        px = None
+                if px is None or px <= 0:
+                    logger.debug("orchestrator | no price for {} — skipping order", od.symbol)
+                    continue
                 is_reduce = bool(od.reduce_only or od.close_only)
                 md: dict[str, Any] = {
+                    "close": str(px),
                     "orchestrator": True,
                     "orchestrator_reason": od.reason,
                     "net_conviction": str(od.net_conviction),
