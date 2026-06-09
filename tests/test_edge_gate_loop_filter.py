@@ -102,3 +102,57 @@ def test_unknown_strategy_block_policy_dropped(tmp_path):
     cands = [_cand("brand_new_strategy", "0.8")]
     out = loop._apply_edge_gate_filter(cands, _cfg(path, unproven="block"), None)
     assert out == []   # unknown + block policy → dropped
+
+
+# ── D161 — per-side enforcement ──────────────────────────────────────────────
+def _cand_side(strategy: str, side: str, conf: str = "0.8") -> SignalCandidate:
+    return SignalCandidate(
+        symbol=f"SYM_{strategy}_{side}",
+        asset_class="equity",
+        side=side,
+        timestamp=datetime.now(timezone.utc),
+        raw_signal_strength=Decimal("1"),
+        adjusted_signal_strength=Decimal("1"),
+        confidence=Decimal(conf),
+        strategy_name=strategy,
+    )
+
+
+def _write_per_side_registry(tmp_path):
+    reg = EdgeGateRegistry(tmp_path / "verdicts.json")
+    # mean_reversion: long proven, short toxic (the real D161 finding).
+    reg.set_verdict(EdgeVerdict("mean_reversion", VERDICT_ALLOWED, Decimal("1"), True, "long ok"))
+    reg.set_verdict(EdgeVerdict(EdgeGateRegistry.short_key("mean_reversion"),
+                                VERDICT_BLOCKED, Decimal("0"), False, "short toxic"))
+    # trend_breakout: both sides proven.
+    reg.set_verdict(EdgeVerdict("trend_breakout", VERDICT_ALLOWED, Decimal("1"), True, "ok"))
+    reg.set_verdict(EdgeVerdict(EdgeGateRegistry.short_key("trend_breakout"),
+                                VERDICT_ALLOWED, Decimal("1"), True, "ok"))
+    reg.save()
+    return tmp_path / "verdicts.json"
+
+
+def test_short_blocked_strategy_keeps_longs_drops_shorts(tmp_path):
+    path = _write_per_side_registry(tmp_path)
+    loop = _loop_stub()
+    cands = [
+        _cand_side("mean_reversion", "long"),    # long proven → kept
+        _cand_side("mean_reversion", "short"),   # short toxic → dropped
+        _cand_side("trend_breakout", "short"),   # short proven → kept
+    ]
+    out = loop._apply_edge_gate_filter(cands, _cfg(path), None)
+    kept = {(c.strategy_name, c.side) for c in out}
+    assert ("mean_reversion", "long") in kept
+    assert ("mean_reversion", "short") not in kept
+    assert ("trend_breakout", "short") in kept
+
+
+def test_unproven_short_side_reduced_not_dropped(tmp_path):
+    # momentum has only a long verdict in this registry; its short side is
+    # unproven → reduce policy halves confidence instead of dropping.
+    path = _write_per_side_registry(tmp_path)
+    loop = _loop_stub()
+    cands = [_cand_side("momentum_breakout", "short", "0.8")]
+    out = loop._apply_edge_gate_filter(cands, _cfg(path, unproven="reduce"), None)
+    assert len(out) == 1
+    assert out[0].confidence == Decimal("0.4")

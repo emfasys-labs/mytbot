@@ -184,3 +184,55 @@ def test_thresholds_from_yaml():
 def test_thresholds_from_yaml_bad_policy_defaults_reduce():
     t = EdgeGateThresholds.from_yaml({"unproven_policy": "garbage"})
     assert t.unproven_policy == "reduce"
+
+
+# ── D161 — per-side verdicts ─────────────────────────────────────────────────
+def test_registry_per_side_verdicts(tmp_path):
+    reg = EdgeGateRegistry(tmp_path / "v.json")
+    reg.set_verdict(EdgeVerdict("mean_reversion", VERDICT_ALLOWED, Decimal("1"), True, "long ok"))
+    reg.set_verdict(EdgeVerdict(EdgeGateRegistry.short_key("mean_reversion"),
+                                VERDICT_BLOCKED, Decimal("0"), False, "short toxic"))
+    reg.save()
+    reg2 = EdgeGateRegistry(tmp_path / "v.json").load()
+    # Long side allowed, short side blocked — same strategy.
+    assert reg2.is_blocked("mean_reversion", _thr(), side="long") is False
+    assert reg2.is_blocked("mean_reversion", _thr(), side="short") is True
+    assert reg2.is_blocked("mean_reversion", _thr(), side="sell") is True   # alias
+    assert reg2.size_multiplier_for("mean_reversion", _thr(), side="short") == Decimal("0")
+    assert reg2.size_multiplier_for("mean_reversion", _thr(), side="long") == Decimal("1")
+
+
+def test_missing_short_verdict_follows_unproven_policy():
+    reg = EdgeGateRegistry("/nonexistent/v.json").load()
+    reg.set_verdict(EdgeVerdict("trend_breakout", VERDICT_ALLOWED, Decimal("1"), True, "ok"))
+    # No #short verdict → unproven policy decides the short side.
+    assert reg.is_blocked("trend_breakout", _thr(unproven_policy="reduce"), side="short") is False
+    assert reg.size_multiplier_for("trend_breakout", _thr(unproven_policy="reduce"), side="short") == Decimal("0.50")
+    assert reg.is_blocked("trend_breakout", _thr(unproven_policy="block"), side="short") is True
+
+
+def test_default_side_is_long_backward_compat():
+    reg = EdgeGateRegistry("/nonexistent/v.json").load()
+    reg.set_verdict(EdgeVerdict("momentum_breakout", VERDICT_BLOCKED, Decimal("0"), False, "no"))
+    # 2-arg call signature (pre-D161 readers) still resolves the long verdict.
+    assert reg.is_blocked("momentum_breakout", _thr()) is True
+
+
+def test_insufficient_data_with_negative_expectancy_is_blocked():
+    # D161 — 25 trades at clearly negative expectancy is adverse evidence,
+    # not a cold start: no capital even under the reduce policy.
+    m = StrategyEdgeMetrics(strategy="trend_breakout#short", windows=10,
+                            profitable_windows=3, total_trades=25,
+                            total_net_pnl=Decimal("-26288"),
+                            gross_profit=Decimal("4000"), gross_loss=Decimal("30288"))
+    v = decide_verdict(m, _thr(unproven_policy="reduce"))
+    assert v.verdict == VERDICT_INSUFFICIENT
+    assert v.allow_new_capital is False
+    assert v.size_multiplier == Decimal("0")
+
+
+def test_zero_trades_keeps_cold_start_reduce():
+    m = StrategyEdgeMetrics(strategy="brand_new", windows=0, total_trades=0)
+    v = decide_verdict(m, _thr(unproven_policy="reduce"))
+    assert v.allow_new_capital is True
+    assert v.size_multiplier == Decimal("0.50")

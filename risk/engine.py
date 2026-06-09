@@ -942,18 +942,11 @@ class RiskEngine:
             return (True, "drawdown_limit")
         base_max_drawdown_pct = self._provider.get_decimal("max_drawdown_pct", fallback=Decimal("0"))
         
-        market_state_score = Decimal("1.0")
-        if isinstance(portfolio, dict):
-            pmeta = portfolio.get("metadata", {})
-            if isinstance(pmeta, dict) and "market_state_score" in pmeta:
-                try:
-                    market_state_score = Decimal(str(pmeta["market_state_score"]))
-                except (TypeError, ValueError, InvalidOperation):
-                    pass
-        
-        max_drawdown_pct = base_max_drawdown_pct * max(Decimal("0.1"), min(Decimal("1.0"), market_state_score))
         drawdown = (self._high_watermark - portfolio_value) / self._high_watermark
-        return (drawdown <= max_drawdown_pct, "drawdown_limit")
+        if isinstance(getattr(signal, "metadata", None), dict):
+            signal.metadata["risk_drawdown_pct"] = str(drawdown)
+            signal.metadata["risk_drawdown_limit_pct"] = str(base_max_drawdown_pct)
+        return (drawdown <= base_max_drawdown_pct, "drawdown_limit")
 
     def _check_max_loss_per_trade_pct(self, signal, portfolio) -> tuple[bool, str]:
         """Pre-trade loss-budget gate.

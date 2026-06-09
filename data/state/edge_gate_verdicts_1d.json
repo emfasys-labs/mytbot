@@ -1,28 +1,47 @@
 {
-  "updated_at": "2026-06-08T09:58:24.447301+00:00",
+  "updated_at": "2026-06-09T22:55:34.501411+00:00",
   "verdicts": {
     "mean_reversion": {
       "allow_new_capital": true,
-      "computed_at": "2026-06-08T09:57:52.666696+00:00",
+      "computed_at": "2026-06-09T22:54:15.337369+00:00",
       "metrics": {
-        "avg_win_rate": 0.6338,
-        "consistency": "0.6588235294117647058823529412",
-        "expectancy_per_trade": "254.0317286343815305894825718",
-        "profit_factor": "1.936876067228456582943604678",
-        "profitable_windows": 112,
+        "avg_win_rate": 0.6394,
+        "consistency": "0.6609195402298850574712643678",
+        "expectancy_per_trade": "251.6412211856420774688845159",
+        "profit_factor": "1.926217473389139902791064635",
+        "profitable_windows": 115,
         "symbols_evaluated": 23,
-        "total_net_pnl": "57157.13894273584438263357865",
-        "total_trades": 225,
-        "windows": 170
+        "total_net_pnl": "57122.55720914075158543678510",
+        "total_trades": 227,
+        "windows": 174
       },
-      "reason": "expectancy/trade=254.0317286343815305894825718 consistency=0.6588235294117647058823529412 profit_factor=1.936876067228456582943604678",
+      "reason": "expectancy/trade=251.6412211856420774688845159 consistency=0.6609195402298850574712643678 profit_factor=1.926217473389139902791064635",
       "size_multiplier": "1",
       "strategy": "mean_reversion",
       "verdict": "allowed"
     },
+    "mean_reversion#short": {
+      "allow_new_capital": false,
+      "computed_at": "2026-06-09T22:54:24.320794+00:00",
+      "metrics": {
+        "avg_win_rate": 0.431,
+        "consistency": "0.4187192118226600985221674877",
+        "expectancy_per_trade": "-450.5976712229632024929249312",
+        "profit_factor": "0.3649514039107618399075787676",
+        "profitable_windows": 85,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "-124364.9572575378438880472810",
+        "total_trades": 276,
+        "windows": 203
+      },
+      "reason": "expectancy/trade=-450.5976712229632024929249312 consistency=0.4187192118226600985221674877 (block<0.45)",
+      "size_multiplier": "0",
+      "strategy": "mean_reversion#short",
+      "verdict": "blocked"
+    },
     "momentum_breakout": {
       "allow_new_capital": true,
-      "computed_at": "2026-06-08T09:57:44.123777+00:00",
+      "computed_at": "2026-06-09T22:53:51.124642+00:00",
       "metrics": {
         "avg_win_rate": 0.6038,
         "consistency": "0.6037735849056603773584905660",
@@ -39,47 +58,104 @@
       "strategy": "momentum_breakout",
       "verdict": "allowed"
     },
+    "momentum_breakout#short": {
+      "allow_new_capital": false,
+      "computed_at": "2026-06-09T22:54:06.430983+00:00",
+      "metrics": {
+        "avg_win_rate": 0.2791,
+        "consistency": "0.2790697674418604651162790698",
+        "expectancy_per_trade": "-790.3142261088692748159663884",
+        "profit_factor": "0.3721647836445210338419940243",
+        "profitable_windows": 12,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "-33983.51172268137881708655470",
+        "total_trades": 43,
+        "windows": 43
+      },
+      "reason": "expectancy/trade=-790.3142261088692748159663884 consistency=0.2790697674418604651162790698 (block<0.45)",
+      "size_multiplier": "0",
+      "strategy": "momentum_breakout#short",
+      "verdict": "blocked"
+    },
     "trend_breakout": {
       "allow_new_capital": true,
-      "computed_at": "2026-06-08T09:58:22.613078+00:00",
+      "computed_at": "2026-06-09T22:55:22.125697+00:00",
       "metrics": {
-        "avg_win_rate": 0.7292,
-        "consistency": "0.7291666666666666666666666667",
-        "expectancy_per_trade": "829.3094566455023566854033594",
-        "profit_factor": "4.017750065457117794493484221",
-        "profitable_windows": 70,
+        "avg_win_rate": 0.7347,
+        "consistency": "0.7346938775510204081632653061",
+        "expectancy_per_trade": "837.4543199915437137683543112",
+        "profit_factor": "4.110875425414172647701039209",
+        "profitable_windows": 72,
         "symbols_evaluated": 23,
-        "total_net_pnl": "79613.70783796822624179872250",
-        "total_trades": 96,
-        "windows": 96
+        "total_net_pnl": "82070.52335917128394929872250",
+        "total_trades": 98,
+        "windows": 98
       },
-      "reason": "expectancy/trade=829.3094566455023566854033594 consistency=0.7291666666666666666666666667 profit_factor=4.017750065457117794493484221",
+      "reason": "expectancy/trade=837.4543199915437137683543112 consistency=0.7346938775510204081632653061 profit_factor=4.110875425414172647701039209",
       "size_multiplier": "1",
       "strategy": "trend_breakout",
       "verdict": "allowed"
     },
+    "trend_breakout#short": {
+      "allow_new_capital": false,
+      "computed_at": "2026-06-09T22:55:30.542051+00:00",
+      "metrics": {
+        "avg_win_rate": 0.32,
+        "consistency": "0.32",
+        "expectancy_per_trade": "-1051.531516453303811797737182",
+        "profit_factor": "0.3379028409493839457055395391",
+        "profitable_windows": 8,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "-26288.28791133259529494342955",
+        "total_trades": 25,
+        "windows": 25
+      },
+      "reason": "only 25 trades (<30) AND negative expectancy -1051.531516453303811797737182 \u2014 adverse evidence, blocked",
+      "size_multiplier": "0",
+      "strategy": "trend_breakout#short",
+      "verdict": "insufficient_data"
+    },
     "trend_following": {
       "allow_new_capital": true,
-      "computed_at": "2026-06-08T09:58:24.446970+00:00",
+      "computed_at": "2026-06-09T22:55:32.507226+00:00",
       "metrics": {
-        "avg_win_rate": 0.5113,
-        "consistency": "0.6158192090395480225988700565",
-        "expectancy_per_trade": "318.1694409674849064572517380",
-        "profit_factor": "1.979638014932961197985654384",
-        "profitable_windows": 109,
+        "avg_win_rate": 0.5055,
+        "consistency": "0.6174863387978142076502732240",
+        "expectancy_per_trade": "303.6165721069882464924725170",
+        "profit_factor": "1.878643479736394848356245486",
+        "profitable_windows": 113,
         "symbols_evaluated": 23,
-        "total_net_pnl": "94496.32396734301721780376620",
-        "total_trades": 297,
-        "windows": 177
+        "total_net_pnl": "93817.52078105936816617400775",
+        "total_trades": 309,
+        "windows": 183
       },
-      "reason": "expectancy/trade=318.1694409674849064572517380 consistency=0.6158192090395480225988700565 profit_factor=1.979638014932961197985654384",
+      "reason": "expectancy/trade=303.6165721069882464924725170 consistency=0.6174863387978142076502732240 profit_factor=1.878643479736394848356245486",
       "size_multiplier": "1",
       "strategy": "trend_following",
       "verdict": "allowed"
     },
+    "trend_following#short": {
+      "allow_new_capital": false,
+      "computed_at": "2026-06-09T22:55:34.501061+00:00",
+      "metrics": {
+        "avg_win_rate": 0.3354,
+        "consistency": "0.3780487804878048780487804878",
+        "expectancy_per_trade": "-384.7976664139083492635160435",
+        "profit_factor": "0.5862891088041075148466797835",
+        "profitable_windows": 31,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "-44636.52930401336851456786105",
+        "total_trades": 116,
+        "windows": 82
+      },
+      "reason": "expectancy/trade=-384.7976664139083492635160435 consistency=0.3780487804878048780487804878 (block<0.45)",
+      "size_multiplier": "0",
+      "strategy": "trend_following#short",
+      "verdict": "blocked"
+    },
     "volatility_regime": {
       "allow_new_capital": false,
-      "computed_at": "2026-06-08T09:58:15.154593+00:00",
+      "computed_at": "2026-06-09T22:54:58.765920+00:00",
       "metrics": {
         "avg_win_rate": 0.2733,
         "consistency": "0.2692307692307692307692307692",
@@ -96,9 +172,28 @@
       "strategy": "volatility_regime",
       "verdict": "blocked"
     },
+    "volatility_regime#short": {
+      "allow_new_capital": false,
+      "computed_at": "2026-06-09T22:55:13.877738+00:00",
+      "metrics": {
+        "avg_win_rate": 0.3722,
+        "consistency": "0.3913043478260869565217391304",
+        "expectancy_per_trade": "39.01358948800305606122858012",
+        "profit_factor": "2.556952699743169624991025785",
+        "profitable_windows": 9,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "3238.12792750425365308197215",
+        "total_trades": 83,
+        "windows": 23
+      },
+      "reason": "expectancy/trade=39.01358948800305606122858012 consistency=0.3913043478260869565217391304 (block<0.45)",
+      "size_multiplier": "0",
+      "strategy": "volatility_regime#short",
+      "verdict": "blocked"
+    },
     "volume_flow": {
       "allow_new_capital": true,
-      "computed_at": "2026-06-08T09:58:01.413266+00:00",
+      "computed_at": "2026-06-09T22:54:33.813384+00:00",
       "metrics": {
         "avg_win_rate": 0.2,
         "consistency": "0.2",
@@ -113,6 +208,25 @@
       "reason": "only 7 trades (<30); unproven_policy=reduce",
       "size_multiplier": "0.5",
       "strategy": "volume_flow",
+      "verdict": "insufficient_data"
+    },
+    "volume_flow#short": {
+      "allow_new_capital": true,
+      "computed_at": "2026-06-09T22:54:43.271271+00:00",
+      "metrics": {
+        "avg_win_rate": 0.5833,
+        "consistency": "0.6666666666666666666666666667",
+        "expectancy_per_trade": "1013.38739583137979429067000",
+        "profit_factor": "5.896518324147528104344897587",
+        "profitable_windows": 4,
+        "symbols_evaluated": 23,
+        "total_net_pnl": "7093.71177081965856003469000",
+        "total_trades": 7,
+        "windows": 6
+      },
+      "reason": "only 7 trades (<30); unproven_policy=reduce",
+      "size_multiplier": "0.5",
+      "strategy": "volume_flow#short",
       "verdict": "insufficient_data"
     }
   }

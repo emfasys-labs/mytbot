@@ -77,8 +77,21 @@ def test_five_short_usd_pairs_become_one_bet():
     o = out[0]
     assert o.symbol == "EURUSD"         # strongest member (0.40)
     assert o.side == "buy"              # buy EURUSD = short USD (the net theme)
-    # combined conviction = 0.30+0.40+0.25+0.30+0.35 = 1.60, capped to 1.5
-    assert o.conviction == Decimal("1.5")
+    # Same-strategy correlated evidence is max conviction + a small breadth
+    # bonus, not five independent confirmations.
+    assert o.conviction == Decimal("0.50")
+
+
+def test_multi_weapon_cluster_confirmation_can_lift_conviction():
+    intents = [
+        StrategyIntent("EURUSD", "buy", Decimal("0.40"), "mean_reversion", "forex"),
+        StrategyIntent("USDJPY", "sell", Decimal("0.50"), "trend_breakout", "forex"),
+    ]
+    out, n = consolidate_clusters(intents, _cfg())
+    assert n == 1
+    assert len(out) == 1
+    # Independent strategies agreeing: 0.40 + 0.50 + 0.25 diversity bonus.
+    assert out[0].conviction == Decimal("1.15")
 
 
 def test_opposing_usd_signals_net_out():

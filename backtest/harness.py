@@ -24,6 +24,8 @@ class BacktestResult:
     final_equity: Decimal
     net_pnl: Decimal
     win_rate: float
+    long_trades: int = 0
+    short_trades: int = 0
 
 
 @dataclass
@@ -54,6 +56,8 @@ def run_backtest_on_features(
     slippage_bps: Decimal,
     max_hold_bars: int = 20,
     warmup_bars: int = 0,
+    allow_shorts: bool = False,
+    allow_longs: bool = True,
 ) -> BacktestResult:
     """Replay a strategy over ``features`` bar by bar.
 
@@ -64,6 +68,15 @@ def run_backtest_on_features(
     lets walk-forward feed the train window as warmup and measure P&L only in
     the out-of-sample test region — without which any strategy needing more
     than ``test_bars`` of history is silently untestable.
+
+    ``allow_shorts`` / ``allow_longs`` select the entry sides replayed, so the
+    edge gate can certify each side independently (D161): long-only (legacy
+    default), short-only (``allow_shorts=True, allow_longs=False``), or both.
+    Short entries are margin-guarded: the short notional may not exceed
+    current equity, mirroring the long path's ``total_cost <= cash`` bound —
+    without this, a losing high-frequency short sequence compounds without
+    limit (cash has no natural floor on the short side) and produces
+    meaningless multi-billion-dollar losses.
     """
     if features is None or features.empty:
         return BacktestResult(symbol, 0, 0, 0, starting_cash, Decimal("0"), 0.0)
@@ -80,10 +93,13 @@ def run_backtest_on_features(
     cash = Decimal(starting_cash)
     position_qty = Decimal("0")
     entry_cost = Decimal("0")
+    entry_credit = Decimal("0")
     bars_held = 0
     trades = 0
     wins = 0
     losses = 0
+    long_trades = 0
+    short_trades = 0
 
     fee_mult = fee_bps / Decimal("10000")
     slip_mult = slippage_bps / Decimal("10000")
@@ -100,23 +116,38 @@ def run_backtest_on_features(
             else None
         )
 
-        if position_qty > 0:
+        if position_qty != 0:
             bars_held += 1
 
+        opposing_signal = (
+            (position_qty > 0 and signal is not None and signal.side == "sell")
+            or (position_qty < 0 and signal is not None and signal.side == "buy")
+        )
         should_exit = (
-            position_qty > 0
+            position_qty != 0
             and (
-                (signal is not None and signal.side == "sell")
+                opposing_signal
                 or (max_hold_bars > 0 and bars_held >= max_hold_bars)
             )
         )
         if should_exit:
-            exec_px = price * (Decimal("1") - slip_mult)
-            gross = exec_px * position_qty
-            fee = gross * fee_mult
-            proceeds = gross - fee
-            cash += proceeds
-            pnl = proceeds - entry_cost
+            if position_qty > 0:
+                exec_px = price * (Decimal("1") - slip_mult)
+                gross = exec_px * position_qty
+                fee = gross * fee_mult
+                proceeds = gross - fee
+                cash += proceeds
+                pnl = proceeds - entry_cost
+                long_trades += 1
+            else:
+                cover_qty = abs(position_qty)
+                exec_px = price * (Decimal("1") + slip_mult)
+                gross = exec_px * cover_qty
+                fee = gross * fee_mult
+                total_cover = gross + fee
+                cash -= total_cover
+                pnl = entry_credit - total_cover
+                short_trades += 1
             trades += 1
             if pnl >= 0:
                 wins += 1
@@ -124,9 +155,10 @@ def run_backtest_on_features(
                 losses += 1
             position_qty = Decimal("0")
             entry_cost = Decimal("0")
+            entry_credit = Decimal("0")
             bars_held = 0
 
-        if position_qty == 0 and signal is not None and signal.side == "buy":
+        if allow_longs and position_qty == 0 and signal is not None and signal.side == "buy":
             qty = signal.suggested_quantity
             if qty <= 0:
                 continue
@@ -139,14 +171,42 @@ def run_backtest_on_features(
                 position_qty = qty
                 entry_cost = total_cost
                 bars_held = 0
+        elif allow_shorts and position_qty == 0 and signal is not None and signal.side == "sell":
+            qty = signal.suggested_quantity
+            if qty <= 0:
+                continue
+            exec_px = price * (Decimal("1") - slip_mult)
+            gross = exec_px * qty
+            fee = gross * fee_mult
+            # Margin guard — short notional may not exceed current equity
+            # (cash, since flat here). Mirrors the long path's
+            # ``total_cost <= cash`` bound and prevents the unbounded
+            # negative-cash compounding spiral on losing short sequences.
+            if cash <= 0 or gross > cash:
+                continue
+            proceeds = gross - fee
+            cash += proceeds
+            position_qty = -qty
+            entry_credit = proceeds
+            bars_held = 0
 
-    if position_qty > 0:
+    if position_qty != 0:
         final_px = Decimal(str(df.iloc[-1]["close"]))
-        gross = final_px * position_qty
-        fee = gross * fee_mult
-        proceeds = gross - fee
-        cash += proceeds
-        pnl = proceeds - entry_cost
+        if position_qty > 0:
+            gross = final_px * position_qty
+            fee = gross * fee_mult
+            proceeds = gross - fee
+            cash += proceeds
+            pnl = proceeds - entry_cost
+            long_trades += 1
+        else:
+            cover_qty = abs(position_qty)
+            gross = final_px * cover_qty
+            fee = gross * fee_mult
+            total_cover = gross + fee
+            cash -= total_cover
+            pnl = entry_credit - total_cover
+            short_trades += 1
         trades += 1
         if pnl >= 0:
             wins += 1
@@ -167,6 +227,8 @@ def run_backtest_on_features(
         final_equity=cash,
         net_pnl=net,
         win_rate=wr,
+        long_trades=long_trades,
+        short_trades=short_trades,
     )
 
 
@@ -183,6 +245,8 @@ def run_walk_forward_backtest(
     test_bars: int,
     step_bars: int,
     max_hold_bars: int = 20,
+    allow_shorts: bool = False,
+    allow_longs: bool = True,
 ) -> WalkForwardResult:
     """
     Walk-forward validation by evaluating repeated rolling test windows.
@@ -217,6 +281,8 @@ def run_walk_forward_backtest(
                 slippage_bps=slippage_bps,
                 max_hold_bars=max_hold_bars,
                 warmup_bars=train_bars,
+                allow_shorts=allow_shorts,
+                allow_longs=allow_longs,
             )
             results.append(res)
         start += step_bars
@@ -250,6 +316,8 @@ def run_purged_cv_backtest(
     n_test_splits: int,
     embargo_bars: int,
     max_hold_bars: int = 20,
+    allow_shorts: bool = False,
+    allow_longs: bool = True,
 ) -> PurgedCvResult:
     if features is None or features.empty:
         return PurgedCvResult(symbol=symbol, folds=0, fold_results=[])
@@ -277,7 +345,8 @@ def run_purged_cv_backtest(
                 fee_bps=fee_bps,
                 slippage_bps=slippage_bps,
                 max_hold_bars=max_hold_bars,
+                allow_shorts=allow_shorts,
+                allow_longs=allow_longs,
             )
         )
     return PurgedCvResult(symbol=symbol, folds=len(out), fold_results=out)
-

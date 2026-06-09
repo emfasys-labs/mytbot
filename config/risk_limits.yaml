@@ -113,11 +113,11 @@ profit_harvest:
   # Operator-set floors / fallbacks (used when volatility cannot be measured
   # and as a lower bound under the dynamic resolver).
   base:
-    min_profit_pct: "0.002"
-    min_profit_nav_pct: "0.00025"
-    trim_fraction: "0.50"
-    full_close_profit_pct: "0.035"
-    trailing_giveback_pct: "0.25"
+    min_profit_pct: "0.08"
+    min_profit_nav_pct: "0.0025"
+    trim_fraction: "0.25"
+    full_close_profit_pct: "0.30"
+    trailing_giveback_pct: "0.45"
     # Trailing-lock fires even after the position rolls back through zero,
     # provided the prior peak was at least this fraction of NAV (defends
     # against locking on noise on tiny positions).
@@ -127,30 +127,30 @@ profit_harvest:
     fallback_vol: "0.015"        # Used when no feature snapshot is available
     vol_low: "0.005"             # ≤ this is "calm"
     vol_high: "0.05"             # ≥ this is "wild"
-    min_profit_k: "0.20"         # Hunter needs to bank small intraday paper edges
-    min_profit_floor: "0.001"
-    min_profit_ceil: "0.05"
+    min_profit_k: "4.0"          # Daily-horizon winners need room to compound
+    min_profit_floor: "0.03"
+    min_profit_ceil: "0.20"
     full_close_k: "4.0"          # Full-close trigger ≈ 4x daily vol
-    full_close_floor: "0.012"
-    full_close_ceil: "0.20"
-    giveback_vol_low: "0.25"     # In calm regimes, lock with 25% giveback
-    giveback_vol_high: "0.55"    # In wild regimes, allow 55% giveback
+    full_close_floor: "0.10"
+    full_close_ceil: "0.50"
+    giveback_vol_low: "0.40"     # In calm regimes, lock with 40% giveback
+    giveback_vol_high: "0.70"    # In wild regimes, allow 70% giveback
 
   # Phase 5: profit-harvest mode_bias collapsed to the hunter values.
   # All three keys map to the same numbers — readers that look up
   # ``mode_bias.get(mode)`` get the canonical (hunter) bias regardless.
   mode_bias:
     hunter:
-      threshold_mult: "0.50"     # Bank quicker — small intraday peaks
-      giveback_mult: "0.50"      # Protect peaks harder
-      trim_fraction_mult: "1.00" # Bank enough to offset fees
+      threshold_mult: "1.00"     # Daily-horizon book: do not scalp trend winners
+      giveback_mult: "1.00"
+      trim_fraction_mult: "1.00"
     trader:
-      threshold_mult: "0.50"
-      giveback_mult: "0.50"
+      threshold_mult: "1.00"
+      giveback_mult: "1.00"
       trim_fraction_mult: "1.00"
     defender:
-      threshold_mult: "0.50"
-      giveback_mult: "0.50"
+      threshold_mult: "1.00"
+      giveback_mult: "1.00"
       trim_fraction_mult: "1.00"
 
   bounds:
@@ -262,8 +262,8 @@ liquidity_check:
     max_spread_pct: 0.006         # allow wider extended-hours paper rehearsal spreads
     allow_zero_visible_size: true # treat valid bid/ask with zero size as unknown, not no-liquidity
 # Synthetic paper fills (ExecutionEngine)
-paper_fee_bps: 0.5           # Blended liquid-paper fee bps; visible without swamping edge tests
-paper_slippage_bps: 0.5      # One-way liquid-paper slippage bps (BUY higher, SELL lower)
+paper_fee_bps: 7.5           # Match 15 bps round-trip gate cost for honest paper soak
+paper_slippage_bps: 7.5      # One-way liquid-paper slippage bps (BUY higher, SELL lower)
 paper_partial_fill_rate: 0.0 # Probability [0.0–1.0] that a paper fill is partial; 0 = always full
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
@@ -393,41 +393,41 @@ stale_price_gate:
 # All actions are reduce-only and still pass through the normal
 # SignalEngine + RiskEngine + ExecutionEngine path. The risk engine
 # retains unconditional veto. Cooldown prevents thrashing the same name.
-  intraday_derisk:
-    enabled: true
-    monitor_interval_sec: 30
-    close_cooldown_sec: 120
-    # Aggregate tiers react to currently-at-risk open-book loss, not merely
-    # losses already realised earlier in the day. When true, a bad realised
-    # day can still keep the system cautious, but it will not keep chopping
-    # the current book if open positions are net profitable.
-    require_open_book_loss_for_aggregate_actions: true
+intraday_derisk:
+  enabled: true
+  monitor_interval_sec: 30
+  close_cooldown_sec: 120
+  # Aggregate tiers react to currently-at-risk open-book loss, not merely
+  # losses already realised earlier in the day. When true, a bad realised
+  # day can still keep the system cautious, but it will not keep chopping
+  # the current book if open positions are net profitable.
+  require_open_book_loss_for_aggregate_actions: true
   # Tier 0 — per-position underwater governor. This fires before the aggregate
   # NAV tiers when an individual holding is already a material drag. It is
   # still reduce-only and still goes through RiskEngine + ExecutionEngine.
   position_loss_tier:
     enabled: true
-    min_loss_nav_pct: 0.0005    # position unrealised loss >= 0.05% NAV
-    min_loss_pct: 0.005         # and position is losing >= 0.5% vs entry
+    min_loss_nav_pct: 0.0020    # daily-horizon position loss >= 0.20% NAV
+    min_loss_pct: 0.020         # and position is losing >= 2.0% vs entry
     trim_pct: 0.25              # floor trim; dynamic resolver may increase it per position
     max_actions: 2
     dynamic:
       enabled: true             # widen for volatile names, tighten for oversized ones
   open_lock:
     enabled: true
-    trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -1.00% tier
+    trigger_tier_idx: 1          # tiers are most-severe-first; 1 is the -3.50% tier
     cooldown_sec: 900            # no fresh opens for 15 minutes after a filled tier-1+ derisk
-    recover_hysteresis_pct: 0.0015
+    recover_hysteresis_pct: 0.0030
   tiers:
-    - threshold_pct: -0.0050    # -0.50% intraday day P&L
+    - threshold_pct: -0.0200    # -2.00% daily-horizon open-book/day P&L
       trim_pct: 0.20            # close 20% of the worst losers
       max_actions: 2
-      min_loss_pct: 0.005       # only trim positions losing > 0.5%
-    - threshold_pct: -0.0100    # -1.00% intraday
+      min_loss_pct: 0.020       # only trim positions losing > 2.0%
+    - threshold_pct: -0.0350    # -3.50% daily-horizon
       trim_pct: 0.50
       max_actions: 4
-      min_loss_pct: 0.003
-    - threshold_pct: -0.0150    # -1.50% intraday
+      min_loss_pct: 0.015
+    - threshold_pct: -0.0500    # -5.00% daily-horizon
       trim_pct: 1.00            # full close
       max_actions: 6
       min_loss_pct: 0.000

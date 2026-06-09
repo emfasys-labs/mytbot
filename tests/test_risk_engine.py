@@ -188,6 +188,26 @@ def test_rejects_on_drawdown_limit() -> None:
     assert decision.checks_failed == ["drawdown_limit"]
 
 
+def test_drawdown_limit_is_fixed_operator_contract_not_regime_scaled() -> None:
+    cfg = _risk_cfg()
+    cfg["max_drawdown_pct"] = 0.20
+    engine = RiskEngine(cfg)
+    engine.update_high_watermark(Decimal("100000"))
+    sig = _signal(qty="1", price="100", metadata={})
+    portfolio = {
+        "portfolio_value": Decimal("85000"),  # 15% drawdown: inside fixed 20% breaker
+        "high_watermark_value": Decimal("100000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+        "metadata": {"market_state_score": 0.30},
+    }
+    decision = engine.evaluate(sig, portfolio)
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert Decimal(sig.metadata["risk_drawdown_limit_pct"]) == Decimal("0.20")
+
+
 def test_rejects_on_asset_class_limit_crypto() -> None:
     engine = RiskEngine(_risk_cfg())
     sig = _signal(qty="5", price="1000")

@@ -213,38 +213,48 @@ async def _amain(args: argparse.Namespace) -> int:
             return None
         return tr, te, te
 
+    # D161 — per-side certification. Edge is side-specific (mean_reversion's
+    # long side is proven; its short side measured PF 0.66), so each strategy
+    # is replayed twice: long-only (canonical ``name`` key, back-compat) and
+    # short-only (``name#short``). The loop blocks sell-side ENTRIES from
+    # strategies whose short side is blocked/unproven.
+    sides = [("long", ""), ("short", EdgeGateRegistry.SHORT_SUFFIX)]
     for name, strat in to_eval.items():
-        all_windows: list[Any] = []
-        syms_used = 0
-        # Each per-symbol strategy gets its own SignalEngine (accumulator off
-        # for a clean, deterministic backtest of the strategy's own edge).
-        se = SignalEngine(se_cfg, accumulator=None)
-        for sym, df in features.items():
-            win = _fit_windows(len(df))
-            if win is None:
-                continue
-            tr, te, st = win
-            try:
-                wf = run_walk_forward_backtest(
-                    symbol=sym, features=df, strategy=strat, signal_engine=se,
-                    starting_cash=starting_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
-                    train_bars=tr, test_bars=te, step_bars=st,
-                    max_hold_bars=max_hold_bars,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ! {name} on {sym} failed: {exc}")
-                continue
-            if wf.window_results:
-                all_windows.extend(wf.window_results)
-                syms_used += 1
+        for side, suffix in sides:
+            all_windows: list[Any] = []
+            syms_used = 0
+            # Each run gets its own SignalEngine (accumulator off for a clean,
+            # deterministic backtest of the strategy's own edge).
+            se = SignalEngine(se_cfg, accumulator=None)
+            for sym, df in features.items():
+                win = _fit_windows(len(df))
+                if win is None:
+                    continue
+                tr, te, st = win
+                try:
+                    wf = run_walk_forward_backtest(
+                        symbol=sym, features=df, strategy=strat, signal_engine=se,
+                        starting_cash=starting_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
+                        train_bars=tr, test_bars=te, step_bars=st,
+                        max_hold_bars=max_hold_bars,
+                        allow_shorts=(side == "short"),
+                        allow_longs=(side == "long"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ! {name} ({side}) on {sym} failed: {exc}")
+                    continue
+                if wf.window_results:
+                    all_windows.extend(wf.window_results)
+                    syms_used += 1
 
-        metrics = aggregate_walk_forward(name, all_windows, symbols_evaluated=syms_used)
-        verdict = decide_verdict(metrics, thresholds)
-        registry.set_verdict(verdict)
-        print(f"{name:<22}{verdict.verdict:<16}{str(verdict.size_multiplier):>6}"
-              f"{metrics.total_trades:>9}{float(metrics.total_net_pnl):>14.2f}"
-              f"{float(metrics.expectancy_per_trade):>12.4f}{float(metrics.consistency):>9.2f}"
-              f"{float(metrics.profit_factor):>8.2f}{metrics.avg_win_rate*100:>7.1f}%")
+            key = f"{name}{suffix}"
+            metrics = aggregate_walk_forward(key, all_windows, symbols_evaluated=syms_used)
+            verdict = decide_verdict(metrics, thresholds)
+            registry.set_verdict(verdict)
+            print(f"{key:<28}{verdict.verdict:<16}{str(verdict.size_multiplier):>6}"
+                  f"{metrics.total_trades:>9}{float(metrics.total_net_pnl):>14.2f}"
+                  f"{float(metrics.expectancy_per_trade):>12.4f}{float(metrics.consistency):>9.2f}"
+                  f"{float(metrics.profit_factor):>8.2f}{metrics.avg_win_rate*100:>7.1f}%")
 
     print("-" * 104)
     if args.dry_run:
@@ -269,6 +279,8 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated strategy names to evaluate (subset)")
     ap.add_argument("--min-bars", type=int, default=40,
                     help="minimum bars/symbol to attempt an adaptive walk-forward split")
+    # (D161: both sides are always evaluated now — long verdicts under the
+    # canonical strategy key, short verdicts under ``<strategy>#short``.)
     ap.add_argument("--dry-run", action="store_true", help="print table; do not write registry")
     return asyncio.run(_amain(ap.parse_args()))
 

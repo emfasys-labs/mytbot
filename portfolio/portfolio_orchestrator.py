@@ -150,6 +150,8 @@ class OrchestratorConfig:
     # (the per-name and cluster CAPS stay removed — D159).
     cluster_consolidation: bool = False
     cluster_conviction_cap: Decimal = Decimal("1.5")  # ceiling on summed theme conviction
+    cluster_same_strategy_bonus: Decimal = Decimal("0.10")
+    cluster_multi_strategy_bonus: Decimal = Decimal("0.25")
     # A position is "still has edge" (→ protected from a marginal flip/close)
     # when its expected remaining edge (or unrealised P&L proxy) exceeds this.
     close_edge_floor: Decimal = D0
@@ -210,6 +212,8 @@ class OrchestratorConfig:
             "min_trust",
             "max_trust",
             "cluster_conviction_cap",
+            "cluster_same_strategy_bonus",
+            "cluster_multi_strategy_bonus",
         ):
             if raw.get(key) is not None:
                 kwargs[key] = _dec(raw.get(key))
@@ -323,7 +327,10 @@ def consolidate_clusters(
     Forex pairs sharing a USD direction, equity-index ETFs sharing beta, and
     crypto pairs sharing crypto-beta are recognised as ONE theme. For each
     multi-member theme this nets the signed conviction and emits a single
-    StrategyIntent on the strongest member, sized by the COMBINED conviction.
+    StrategyIntent on the strongest member. Correlated signals from one weapon
+    are treated as one piece of evidence (max conviction + a small breadth
+    bonus); larger cluster conviction is reserved for genuinely diverse
+    weapon confirmation.
     Non-clustered symbols (and single-member clusters) pass through unchanged.
 
     Returns ``(new_intents, clusters_consolidated)``.
@@ -343,8 +350,25 @@ def consolidate_clusters(
         if len(members) <= 1:
             out.append(members[0][0])
             continue
-        # Net signed conviction in the cluster's reference direction.
-        net = sum((sign * _dec(it.conviction) for it, sign in members), D0)
+        evidence_by_strategy: dict[str, dict[str, Decimal]] = {}
+        for it, sign in members:
+            signed = Decimal(sign) * _dec(it.conviction)
+            slot = evidence_by_strategy.setdefault(it.strategy, {"pos": D0, "neg": D0})
+            if signed > 0:
+                slot["pos"] = max(slot["pos"], signed)
+            elif signed < 0:
+                slot["neg"] = min(slot["neg"], signed)
+
+        by_strategy: dict[str, Decimal] = {
+            strategy: vals["pos"] + vals["neg"]
+            for strategy, vals in evidence_by_strategy.items()
+            if vals["pos"] + vals["neg"] != 0
+        }
+
+        # Net independent strategy evidence in the cluster's reference
+        # direction. Multiple correlated symbols from the same strategy do not
+        # become multiple confirmations.
+        net = sum(by_strategy.values(), D0)
         if net == 0:
             consolidated += 1  # signals cancel → express nothing for this theme
             continue
@@ -353,8 +377,22 @@ def consolidate_clusters(
         net_dir = 1 if net > 0 else -1
         base = theme_sign_if_bought(expr_it.symbol, expr_it.asset_class)
         side = "buy" if (base == net_dir) else "sell"
+        aligned_strategies = [
+            strat for strat, val in by_strategy.items()
+            if (val > 0 and net > 0) or (val < 0 and net < 0)
+        ]
+        aligned_members = [
+            it for it, sign in members
+            if (Decimal(sign) * _dec(it.conviction) > 0 and net > 0)
+            or (Decimal(sign) * _dec(it.conviction) < 0 and net < 0)
+        ]
+        breadth_bonus = D0
+        if len(aligned_strategies) > 1:
+            breadth_bonus = config.cluster_multi_strategy_bonus * Decimal(len(aligned_strategies) - 1)
+        elif len(aligned_members) > 1:
+            breadth_bonus = config.cluster_same_strategy_bonus
         cap = config.cluster_conviction_cap if config.cluster_conviction_cap > 0 else Decimal("1.5")
-        conviction = min(abs(net), cap)
+        conviction = min(abs(net) + breadth_bonus, cap)
         out.append(
             StrategyIntent(
                 symbol=expr_it.symbol,

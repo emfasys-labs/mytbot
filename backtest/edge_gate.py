@@ -196,6 +196,15 @@ def decide_verdict(
         if thresholds.unproven_policy == "block":
             return _mk(VERDICT_INSUFFICIENT, Decimal("0"), False,
                        f"only {metrics.total_trades} trades (<{thresholds.min_trades}); unproven_policy=block")
+        # D161 — a thin sample with NEGATIVE measured expectancy is not
+        # "unproven", it is adverse evidence: never give it capital under the
+        # reduce policy (e.g. trend_breakout shorts: 25 trades, PF 0.34 —
+        # half-sizing that is just a slower bleed). Zero-trade strategies keep
+        # the normal cold-start reduce treatment.
+        if metrics.total_trades > 0 and metrics.expectancy_per_trade < 0:
+            return _mk(VERDICT_INSUFFICIENT, Decimal("0"), False,
+                       f"only {metrics.total_trades} trades (<{thresholds.min_trades}) "
+                       f"AND negative expectancy {metrics.expectancy_per_trade} — adverse evidence, blocked")
         return _mk(VERDICT_INSUFFICIENT, thresholds.reduced_multiplier, True,
                    f"only {metrics.total_trades} trades (<{thresholds.min_trades}); unproven_policy=reduce")
 
@@ -310,25 +319,42 @@ class EdgeGateRegistry:
         self._verdicts[verdict.strategy] = verdict
 
     # ---- enforcement reads ----------------------------------------------
-    def verdict_for(self, strategy: str) -> EdgeVerdict | None:
-        return self._verdicts.get(strategy)
+    # D161 — per-side verdicts. Edge is side-specific (mean-reversion's long
+    # side is proven; its short side measured PF 0.66). The canonical
+    # ``strategy`` key remains the LONG-side verdict (back-compat with every
+    # existing reader); the short side lives under ``strategy#short``.
+    SHORT_SUFFIX = "#short"
+
+    @classmethod
+    def short_key(cls, strategy: str) -> str:
+        return f"{strategy}{cls.SHORT_SUFFIX}"
+
+    @staticmethod
+    def _resolve_key(strategy: str, side: str) -> str:
+        s = (side or "long").strip().lower()
+        if s in ("short", "sell", "s"):
+            return f"{strategy}{EdgeGateRegistry.SHORT_SUFFIX}"
+        return strategy
+
+    def verdict_for(self, strategy: str, side: str = "long") -> EdgeVerdict | None:
+        return self._verdicts.get(self._resolve_key(strategy, side))
 
     def all_verdicts(self) -> dict[str, EdgeVerdict]:
         return dict(self._verdicts)
 
-    def is_blocked(self, strategy: str, thresholds: EdgeGateThresholds) -> bool:
-        """True iff a strategy must NOT receive fresh capital.
+    def is_blocked(self, strategy: str, thresholds: EdgeGateThresholds, side: str = "long") -> bool:
+        """True iff a strategy must NOT receive fresh capital on this entry side.
 
-        Unknown strategy (no verdict yet) follows ``unproven_policy``.
+        Unknown strategy/side (no verdict yet) follows ``unproven_policy``.
         """
-        v = self._verdicts.get(strategy)
+        v = self._verdicts.get(self._resolve_key(strategy, side))
         if v is None:
             return thresholds.unproven_policy == "block"
         return not v.allow_new_capital
 
-    def size_multiplier_for(self, strategy: str, thresholds: EdgeGateThresholds) -> Decimal:
-        """A-priori capital multiplier for a strategy (1.0 if proven, 0 if blocked)."""
-        v = self._verdicts.get(strategy)
+    def size_multiplier_for(self, strategy: str, thresholds: EdgeGateThresholds, side: str = "long") -> Decimal:
+        """A-priori capital multiplier for a strategy side (1.0 proven, 0 blocked)."""
+        v = self._verdicts.get(self._resolve_key(strategy, side))
         if v is None:
             return Decimal("0") if thresholds.unproven_policy == "block" else thresholds.reduced_multiplier
         return v.size_multiplier

@@ -2879,6 +2879,13 @@ class TradingLoop:
     ) -> list[Any]:
         """Drop candidates whose strategy is ``blocked`` by the edge gate.
 
+        D161 — verdicts are PER SIDE: a candidate's entry side (long/short)
+        selects which verdict applies, because edge is side-specific
+        (mean_reversion's long side is proven, its short side measured
+        PF 0.66). Sell-side ENTRIES from a short-blocked strategy are dropped;
+        closes/reduce-only orders never pass through this filter (they are
+        generated downstream by the orchestrator from book state).
+
         Gated off by default (returns the list unchanged). ``reduced`` /
         ``allowed`` strategies pass through here; their size multiplier is
         applied later via the orchestrator trust prior. Cross-sectional /
@@ -2892,8 +2899,11 @@ class TradingLoop:
         reduced_counts: dict[str, int] = {}
         for cand in batch_candidates:
             strat = str(getattr(cand, "strategy_name", "") or "")
-            if reg.is_blocked(strat, thr):
-                blocked_counts[strat] = blocked_counts.get(strat, 0) + 1
+            cand_side = str(getattr(cand, "side", "") or "long").strip().lower()
+            side = "short" if cand_side in ("short", "sell", "s") else "long"
+            if reg.is_blocked(strat, thr, side=side):
+                key = f"{strat}:{side}"
+                blocked_counts[key] = blocked_counts.get(key, 0) + 1
                 if sc_log_buffer is not None:
                     try:
                         sc_log_buffer.append(
@@ -2903,9 +2913,9 @@ class TradingLoop:
                                 side=str(getattr(cand, "side", "") or ""),
                                 confidence=float(getattr(cand, "confidence", 0) or 0),
                                 status="edge_gate_blocked",
-                                reason="strategy not edge-proven (D157)",
+                                reason=f"{side} side not edge-proven (D157/D161)",
                                 loop_iteration=self.iterations,
-                                metadata={},
+                                metadata={"side": side},
                             )
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -2915,7 +2925,7 @@ class TradingLoop:
             # reduced_multiplier for weak/unproven) by scaling confidence so the
             # down-weight propagates to EVERY downstream path (sizing + the D156
             # orchestrator netting), not only the orchestrator.
-            mult = reg.size_multiplier_for(strat, thr)
+            mult = reg.size_multiplier_for(strat, thr, side=side)
             if mult < Decimal("1") and mult > 0:
                 try:
                     cand.confidence = Decimal(str(cand.confidence)) * mult

@@ -101,9 +101,9 @@ shed:
 capital_recycle:
   enabled: true
   # Unrealised return at/above which a winner is partially harvested.
-  take_profit_pct: "0.02"
+  take_profit_pct: "0.08"
   # Fraction of the winning position trimmed (rest is left to run).
-  take_profit_trim_fraction: "0.50"
+  take_profit_trim_fraction: "0.25"
   # Live held-edge at/below which a position is treated as dead weight and
   # closed reduce-only (matches the held-edge proxy floor in
   # global_edge_coordinator.held_positions_from_portfolio).
