@@ -202,7 +202,7 @@ catalyst_news_score_min: 0.15   # |news_score| threshold for "news confirms"
 
 # ── Theme deduplication ────────────────────────────────────────────────────────
 # One idea = one expression. If we already hold this symbol in this direction, reject.
-theme_uniqueness_check: true
+theme_uniqueness_check: false   # D159 — allow correlated/same-theme concentration (predator mandate)
 
 # ── Asset class limits ────────────────────────────────────────────────────────
 max_crypto_pct: 1.00            # Legacy only when enforce_static_exposure_caps=true
@@ -318,7 +318,7 @@ correlation_scaling:
 # Reduce-only / close signals are never blocked here.
 fx_cluster:
   enabled: true
-  max_usd_directional_exposure_pct: 0.15   # |signed USD notional| <= 15% of NAV
+  max_usd_directional_exposure_pct: 1.00   # D159 — full forex concentration allowed (was 0.15)
 
 # ── D115 — Broad-market equity index cluster cap ─────────────────────────
 # SPY long + QQQ short + IWM short look like three independent equity
@@ -329,7 +329,7 @@ fx_cluster:
 # fx_cluster: reduce-only never blocked, neutralising legs always allowed.
 equity_index_cluster:
   enabled: true
-  max_net_exposure_pct: 0.20    # |signed cluster notional| <= 20% of NAV
+  max_net_exposure_pct: 1.00    # D159 — full equity-index concentration allowed (was 0.20)
 
 # ── D131 — Crypto cluster cap ────────────────────────────────────────────
 # BTC long on kraken + ETH long on binance + SOL long on bybit look like
@@ -342,7 +342,7 @@ equity_index_cluster:
 # exposure always pass.
 crypto_cluster:
   enabled: true
-  max_net_exposure_pct: 0.10    # |signed crypto notional| <= 10% of NAV
+  max_net_exposure_pct: 1.00    # D159 — full crypto concentration allowed, e.g. 100% BTC (was 0.10)
 
 # ── D115 — Paper-mode stale-price gate ───────────────────────────────────
 # An opening signal whose ``suggested_price`` was generated several minutes
