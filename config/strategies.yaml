@@ -78,6 +78,12 @@ portfolio_orchestrator:
     trader: 1.10
     hunter: 1.50                      # hunt hard when calm
   net_cap_pct_of_gross: 1.00          # fully directional — back up the truck in one direction
+  # D160 — cluster-aware construction: recognise correlated same-direction
+  # signals (5 short-USD forex pairs, equity-index ETFs, crypto-beta) as ONE
+  # theme and express it as a single BIG position in the strongest member
+  # instead of fragmenting. Awareness, not a cap — concentration stays uncapped.
+  cluster_consolidation: true
+  cluster_conviction_cap: 1.5
   rebalance_band_pct_of_nav: 0.01     # don't trade adjustments smaller than 1% NAV (anti-churn)
   min_hold_sec_before_flip: 259200    # D158 Phase 3.1 — 3 days. Daily-appropriate hold so
                                       # fresh entries (esp. monthly snipers) ride through early

@@ -53,6 +53,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable
 
+from portfolio.cluster_map import theme_for, theme_sign_if_bought
+
 D0 = Decimal("0")
 D1 = Decimal("1")
 
@@ -140,6 +142,14 @@ class OrchestratorConfig:
     net_cap_pct_of_gross: Decimal = Decimal("0.60")
     rebalance_band_pct_of_nav: Decimal = Decimal("0.01")
     min_hold_sec_before_flip: Decimal = Decimal("1800")
+    # D160 — cluster-aware construction. When true, correlated same-direction
+    # signals (forex by USD direction, equity-index by beta, crypto by
+    # crypto-beta) are recognised as ONE theme and expressed as a single big
+    # position in the strongest member, instead of fragmenting capital +
+    # conviction across many near-identical names. This is awareness, NOT a cap
+    # (the per-name and cluster CAPS stay removed — D159).
+    cluster_consolidation: bool = False
+    cluster_conviction_cap: Decimal = Decimal("1.5")  # ceiling on summed theme conviction
     # A position is "still has edge" (→ protected from a marginal flip/close)
     # when its expected remaining edge (or unrealised P&L proxy) exceeds this.
     close_edge_floor: Decimal = D0
@@ -199,9 +209,12 @@ class OrchestratorConfig:
             "close_edge_floor",
             "min_trust",
             "max_trust",
+            "cluster_conviction_cap",
         ):
             if raw.get(key) is not None:
                 kwargs[key] = _dec(raw.get(key))
+        if raw.get("cluster_consolidation") is not None:
+            kwargs["cluster_consolidation"] = bool(raw.get("cluster_consolidation"))
         if gross is not None:
             kwargs["gross_target_pct"] = gross
         if trust:
@@ -302,6 +315,61 @@ class OrchestrationResult:
     diagnostics: dict[str, Any]
 
 
+def consolidate_clusters(
+    intents: list[StrategyIntent], config: OrchestratorConfig
+) -> tuple[list[StrategyIntent], int]:
+    """Collapse correlated same-theme signals into one big bet (D160).
+
+    Forex pairs sharing a USD direction, equity-index ETFs sharing beta, and
+    crypto pairs sharing crypto-beta are recognised as ONE theme. For each
+    multi-member theme this nets the signed conviction and emits a single
+    StrategyIntent on the strongest member, sized by the COMBINED conviction.
+    Non-clustered symbols (and single-member clusters) pass through unchanged.
+
+    Returns ``(new_intents, clusters_consolidated)``.
+    """
+    grouped: dict[str, list[tuple[StrategyIntent, int]]] = {}
+    passthrough: list[StrategyIntent] = []
+    for it in intents:
+        cluster, sign = theme_for(it.symbol, it.asset_class, it.side)
+        if cluster is None or sign == 0:
+            passthrough.append(it)
+        else:
+            grouped.setdefault(cluster, []).append((it, sign))
+
+    out: list[StrategyIntent] = list(passthrough)
+    consolidated = 0
+    for cluster, members in grouped.items():
+        if len(members) <= 1:
+            out.append(members[0][0])
+            continue
+        # Net signed conviction in the cluster's reference direction.
+        net = sum((sign * _dec(it.conviction) for it, sign in members), D0)
+        if net == 0:
+            consolidated += 1  # signals cancel → express nothing for this theme
+            continue
+        # Express via the single strongest member (most conviction).
+        expr_it, _ = max(members, key=lambda m: _dec(m[0].conviction))
+        net_dir = 1 if net > 0 else -1
+        base = theme_sign_if_bought(expr_it.symbol, expr_it.asset_class)
+        side = "buy" if (base == net_dir) else "sell"
+        cap = config.cluster_conviction_cap if config.cluster_conviction_cap > 0 else Decimal("1.5")
+        conviction = min(abs(net), cap)
+        out.append(
+            StrategyIntent(
+                symbol=expr_it.symbol,
+                side=side,
+                conviction=conviction,
+                strategy=expr_it.strategy,  # keep trust/temperament resolvable
+                asset_class=expr_it.asset_class,
+                broker=expr_it.broker,
+                cluster=cluster,
+            )
+        )
+        consolidated += 1
+    return out, consolidated
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,11 +388,20 @@ def orchestrate(
     """
     nav = _dec(nav)
     intents = list(intents)
+    raw_intent_count = len(intents)
+    # D160 — cluster-aware construction: collapse correlated same-direction
+    # signals (e.g. 5 short-USD forex pairs) into ONE big bet on the strongest
+    # member, before per-symbol netting. Awareness, not a cap.
+    clusters_consolidated = 0
+    if config.cluster_consolidation:
+        intents, clusters_consolidated = consolidate_clusters(intents, config)
     book_list = list(book)
     book_by_sym = {p.symbol: p for p in book_list}
 
     diag: dict[str, Any] = {
         "intent_count": len(intents),
+        "raw_intent_count": raw_intent_count,
+        "clusters_consolidated": clusters_consolidated,
         "book_positions": len(book_list),
         "netted_symbols": 0,
         "conflicts_resolved": 0,
