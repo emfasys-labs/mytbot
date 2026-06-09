@@ -23,7 +23,11 @@ max_gross_exposure_pct: 1.00    # Legacy/fallback only when enforce_static_expos
 # signals are exempt. Arbitrage/options are evaluated by their own gates.
 single_name_notional:
   enabled: true
-  max_pct_nav: 0.05             # No single symbol > 5% of NAV in any new open
+  # D159 — predator mandate: NO restrictive per-name cap. Conviction decides
+  # size (the portfolio orchestrator sizes dynamically up to 100% of NAV on a
+  # fully-confirmed signal). This 1.00 ceiling is a SANITY guard only — it
+  # blocks a sizing BUG from creating a >100%-of-NAV order, not a real bet.
+  max_pct_nav: 1.00             # up to 100% of NAV in one name (was 0.05)
 
 # ── D125 fix #5 — Per-UTC-day cumulative-add cap per symbol ──────────────────
 # Complements the single-name cap. Bounds the cumulative net-add notional
@@ -31,7 +35,7 @@ single_name_notional:
 # (incremented at signal approval, not at fill) and resets at UTC midnight.
 intraday_symbol_adds:
   enabled: true
-  max_pct_nav: 0.10             # No more than 10% NAV of net adds to any symbol per UTC day
+  max_pct_nav: 1.00             # D159 — allow full intraday rotation into one name (was 0.10)
 
 # ── D127 P2 — Connect Hub connector certification gate ───────────────────────
 # Only Certified-tier brokers (config/connectors.yaml :: certification:
@@ -74,8 +78,10 @@ mode_overrides:
     max_crypto_pct: 1.00
 
 # ── Loss limits ───────────────────────────────────────────────────────────────
-max_daily_loss_pct: 0.02        # Stop trading if daily loss > 2% of portfolio
-max_drawdown_pct: 0.10          # Stop trading if drawdown from HWM > 10%
+max_daily_loss_pct: 0.05        # D159 — wider daily tolerance for an aggressive book (was 0.02)
+max_drawdown_pct: 0.20          # D159 — THE survival breaker: de-risk/halt if book drawdown
+                                # from HWM > 20% (was 0.10). This is the one whole-portfolio
+                                # floor that keeps an unleashed, no-per-name-cap book alive.
 max_loss_per_trade_pct: 0.01    # Max 1% loss per individual trade
 
 # ── Profit harvesting ────────────────────────────────────────────────────────
@@ -160,7 +166,9 @@ cooldown_minutes: 60            # Wait 60 minutes before trading again
 # ── Signal quality ────────────────────────────────────────────────────────────
 # No trade count limits — the system is incapable of placing a weak trade, not restricted
 # from placing many.  Quality gates determine what gets through.
-min_signal_confidence: 0.50     # Minimum confidence score to proceed (0.0-1.0)
+min_signal_confidence: 0.30     # D159 — gate SIZE, not pass/fail. The orchestrator floors order
+                                # confidence at 0.30, so this no longer blocks opportunities; weak
+                                # signals still act but conviction-sizing keeps them small.
 
 # ── Quality gate (composite score) ────────────────────────────────────────────
 # TradeQualityScore = weighted blend of confidence + news factor + volume z-score.

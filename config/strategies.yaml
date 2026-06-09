@@ -66,16 +66,18 @@ signal_engine:
 # RiskEngine and ExecutionEngine unchanged — this never bypasses risk.
 portfolio_orchestrator:
   enabled: true                       # D158 Phase 1 — nets the proven daily weapons
-  entry_conviction_threshold: 0.15    # min |net conviction| to open a new position
-  flip_conviction_threshold: 0.45     # opposing conviction needed to flip a normal position
-  hard_flip_conviction: 0.75          # opposing conviction needed to flip a YOUNG or PROFITABLE position
-  concentration_exponent: 1.5         # >1 concentrates capital on high-conviction names
-  max_position_pct_of_nav: 0.08       # per-name concentration cap
-  gross_target_pct:                   # gross book size as a fraction of NAV, by mode
-    defender: 0.50
-    trader: 0.90
-    hunter: 1.30                      # risk engine still caps gross — this is intent, not override
-  net_cap_pct_of_gross: 0.60          # |net| <= 60% of gross when two-sided (one-sided left fully directional)
+  # ── D159 — PREDATOR mandate (aggressive, fill-the-capital, no per-name caps) ──
+  entry_conviction_threshold: 0.08    # open proactively — act on most opportunities (was 0.15);
+                                      # weak conviction → small size, strong → big (size, not pass/fail)
+  flip_conviction_threshold: 0.40     # rotate more readily out of stale into fresh edge
+  hard_flip_conviction: 0.70
+  concentration_exponent: 2.5         # winner-take-all: pile capital into the highest-conviction names
+  max_position_pct_of_nav: 1.00       # NO per-name cap — a fully-confirmed signal can take 100% of NAV
+  gross_target_pct:                   # aggressive deployment — FILL the allocated capital
+    defender: 0.70                    # even cautious mode stays meaningfully deployed
+    trader: 1.10
+    hunter: 1.50                      # hunt hard when calm
+  net_cap_pct_of_gross: 1.00          # fully directional — back up the truck in one direction
   rebalance_band_pct_of_nav: 0.01     # don't trade adjustments smaller than 1% NAV (anti-churn)
   min_hold_sec_before_flip: 259200    # D158 Phase 3.1 — 3 days. Daily-appropriate hold so
                                       # fresh entries (esp. monthly snipers) ride through early
