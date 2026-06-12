@@ -683,7 +683,26 @@ class ExecutionEngine:
             signal.broker, "PAPER" if self.paper_mode else "LIVE",
         )
 
-        if not await self._passes_execution_limits(broker, order, broker_name=str(signal.broker or "").strip().lower()):
+        # D162 — reduce-only RISK EXITS bypass the quality pre-check. The
+        # spread/liquidity/order-book gates exist to stop bad ENTRIES; applying
+        # them to forced exits means stop-losses fail exactly when markets are
+        # stressed (wide spread accompanies the very move that triggered the
+        # stop). Observed live: 36 risk-APPROVED stop-loss closes on a bleeding
+        # GLD leg silently skipped by this gate while the loss compounded. A
+        # forced exit accepts a bad price over holding a bleeding position.
+        _exit_md = getattr(signal, "metadata", None)
+        _exit_md = _exit_md if isinstance(_exit_md, dict) else {}
+        _is_risk_exit = bool(
+            getattr(signal, "reduce_only", False)
+            or _exit_md.get("reduce_only")
+            or _exit_md.get("close_only")
+        )
+        if _is_risk_exit:
+            logger.info(
+                "Execution pre-check bypassed (reduce-only risk exit) | %s %s broker=%s",
+                signal.symbol, signal.side, signal.broker,
+            )
+        elif not await self._passes_execution_limits(broker, order, broker_name=str(signal.broker or "").strip().lower()):
             self.last_skip_metadata = {
                 "signal_id": str(getattr(signal, "signal_id", "") or ""),
                 "symbol": str(getattr(signal, "symbol", "") or ""),

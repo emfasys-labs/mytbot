@@ -83,6 +83,21 @@ max_drawdown_pct: 0.20          # D159 — THE survival breaker: de-risk/halt if
                                 # from HWM > 20% (was 0.10). This is the one whole-portfolio
                                 # floor that keeps an unleashed, no-per-name-cap book alive.
 max_loss_per_trade_pct: 0.01    # Max 1% loss per individual trade
+position_stop_loss_pct: 0.06    # D162 — explicit per-position stop vs entry (was code-default
+                                # 0.08): a falling knife has a defined max cost. Scaled down by
+                                # regime/vol multiplier in the stop-loss monitor.
+
+# ── D162 — Aggregate unrealised-loss de-risk (daily-horizon budget) ──────────
+# Force reduce-only closes of the worst losers when the AGGREGATE unrealised
+# loss breaches NAV × this fraction. The old env default (0.75% NAV) was
+# intraday-era: on a 100%+ gross daily book it fired on routine noise and
+# force-flattened positions the orchestrator immediately re-bought (−$5k
+# churn observed). After any aggregate-derisk flatten the risk engine's
+# open_lock blocks fresh opens for ``open_lock_sec`` so the orchestrator
+# cannot instantly undo the de-risk; reduce-only exits are never blocked.
+aggregate_derisk:
+  max_unrealised_loss_nav_pct: 0.03
+  open_lock_sec: 900
 
 # ── Profit harvesting ────────────────────────────────────────────────────────
 # Post-open profit banking. Runtime emits reduce-only closes through the normal

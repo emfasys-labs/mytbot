@@ -65,8 +65,8 @@ def test_aggregate_sum() -> None:
 def test_budget_scales_with_nav_and_vol(monkeypatch) -> None:
     monkeypatch.delenv("AGG_UNREALISED_DERISK_NAV_PCT", raising=False)
     nav = Decimal("1000000")
-    # default 0.75% of NAV, no vol → 7500
-    assert derisk_budget(nav) == Decimal("7500.000")
+    # D162 default 3% of NAV (daily horizon; was 0.75% intraday-era), no vol → 30000
+    assert derisk_budget(nav) == Decimal("30000.00")
     assert derisk_budget(Decimal("0")) == Decimal("0")
     monkeypatch.setenv("AGG_UNREALISED_DERISK_NAV_PCT", "0.01")
     assert derisk_budget(nav) == Decimal("10000.00")
@@ -74,6 +74,16 @@ def test_budget_scales_with_nav_and_vol(monkeypatch) -> None:
     assert derisk_budget(nav, realised_vol=0.04) == Decimal("20000.0000")
     # calm vol 0.002 → 0.1x but clamped to VOL_MIN (0.6) → 6000
     assert derisk_budget(nav, realised_vol=0.002) == Decimal("6000.0000")
+
+
+def test_budget_explicit_base_pct_overrides_env(monkeypatch) -> None:
+    # D162 — YAML value (passed by the orchestrator) wins over the env.
+    monkeypatch.setenv("AGG_UNREALISED_DERISK_NAV_PCT", "0.0075")
+    nav = Decimal("1000000")
+    assert derisk_budget(nav, base_pct=Decimal("0.03")) == Decimal("30000.00")
+    assert derisk_budget(nav, base_pct=0.05) == Decimal("50000.00")
+    # Invalid/zero explicit value falls back to env.
+    assert derisk_budget(nav, base_pct=0) == Decimal("7500.000")
 
 
 # ── selection policy ────────────────────────────────────────────────────

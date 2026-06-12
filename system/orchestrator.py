@@ -1946,13 +1946,26 @@ class Orchestrator:
                         )
                     )
 
-            chosen = select_derisk_closes(pls, nav)
+            # D162 — budget from YAML (daily-horizon), not the intraday-era
+            # env default. ``aggregate_derisk.max_unrealised_loss_nav_pct``
+            # in config/risk_limits.yaml; env AGG_UNREALISED_DERISK_NAV_PCT
+            # still overrides when the YAML key is absent.
+            agg_cfg = {}
+            try:
+                raw_cfg = getattr(risk_engine, "config", {}) or {}
+                agg_cfg = raw_cfg.get("aggregate_derisk") or {}
+                if not isinstance(agg_cfg, dict):
+                    agg_cfg = {}
+            except Exception:  # noqa: BLE001
+                agg_cfg = {}
+            budget_pct = agg_cfg.get("max_unrealised_loss_nav_pct")
+            chosen = select_derisk_closes(pls, nav, base_pct=budget_pct)
             if not chosen:
                 return
             logger.warning(
                 "orchestrator | aggregate de-risk | unrealised=%s budget=-%s — closing %d worst loser(s)",
                 str(aggregate_unrealised(pls)),
-                str(derisk_budget(nav)),
+                str(derisk_budget(nav, base_pct=budget_pct)),
                 len(chosen),
             )
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -2034,6 +2047,21 @@ class Orchestrator:
                 # cannot also fire a close/trim on this symbol inside the
                 # cooldown window.
                 self._derisk_inflight_ts[inflight_key] = now_ts
+                # D162 — a forced de-risk flatten must also lock fresh opens,
+                # otherwise the orchestrator (whose conviction is unchanged)
+                # re-buys the same position minutes later and the round-trip
+                # cost is burned for nothing (observed: AUDUSD flattened −$5k
+                # at 23:01, re-bought 23:04). Same lock the intraday-derisk
+                # tiers use; reduce-only exits remain unaffected by it.
+                try:
+                    lock_sec = float(agg_cfg.get("open_lock_sec", 900) or 900)
+                    if lock_sec > 0 and hasattr(risk_engine, "activate_open_lock"):
+                        risk_engine.activate_open_lock(
+                            seconds=lock_sec,
+                            reason=f"aggregate_derisk:{p.symbol}",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("orchestrator | agg de-risk open_lock failed: {}", exc)
                 await self._persist_fill_to_portfolio_state(
                     sf=sf, signal=signal, result=result, fallback_nav=nav,
                 )

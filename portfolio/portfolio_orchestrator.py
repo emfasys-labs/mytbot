@@ -152,6 +152,14 @@ class OrchestratorConfig:
     cluster_conviction_cap: Decimal = Decimal("1.5")  # ceiling on summed theme conviction
     cluster_same_strategy_bonus: Decimal = Decimal("0.10")
     cluster_multi_strategy_bonus: Decimal = Decimal("0.25")
+    # D162 — never average down. The backtest that certified every weapon
+    # holds ONE entry per signal; live, mean-reversion's conviction RISES as
+    # price falls (deeper oversold = stronger signal), so without this guard
+    # the orchestrator sizes UP into a falling position (observed: GLD topped
+    # up to ~69% NAV through a −3.8% slide). Increases are only allowed while
+    # the position is at or above water; underwater positions may be held,
+    # reduced, closed or flipped — never added to.
+    no_average_down: bool = True
     # A position is "still has edge" (→ protected from a marginal flip/close)
     # when its expected remaining edge (or unrealised P&L proxy) exceeds this.
     close_edge_floor: Decimal = D0
@@ -219,6 +227,8 @@ class OrchestratorConfig:
                 kwargs[key] = _dec(raw.get(key))
         if raw.get("cluster_consolidation") is not None:
             kwargs["cluster_consolidation"] = bool(raw.get("cluster_consolidation"))
+        if raw.get("no_average_down") is not None:
+            kwargs["no_average_down"] = bool(raw.get("no_average_down"))
         if gross is not None:
             kwargs["gross_target_pct"] = gross
         if trust:
@@ -637,6 +647,19 @@ def orchestrate(
         if not close_only and abs(delta_signed) < band:
             if pos is not None:
                 diag["suppressed_rebalances"] += 1
+            continue
+
+        # D162 — never average down: an INCREASE of an underwater position is
+        # suppressed (mean-reversion's conviction rises as price falls, so
+        # without this the book sizes up into the loss — the GLD slide).
+        is_increase = (cur_dir != 0 and des_dir == cur_dir and abs(desired) > abs(cur_notional))
+        if (
+            config.no_average_down
+            and is_increase
+            and pos is not None
+            and pos.unrealised_pnl < 0
+        ):
+            diag["averaging_down_blocked"] = diag.get("averaging_down_blocked", 0) + 1
             continue
 
         is_reduction = (cur_dir != 0 and des_dir == cur_dir and abs(desired) < abs(cur_notional)) or close_only

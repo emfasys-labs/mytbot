@@ -74,11 +74,21 @@ def aggregate_unrealised(positions: list[PositionLoss]) -> Decimal:
     return sum((p.unrealised for p in positions), Decimal("0"))
 
 
-def derisk_budget(nav: Decimal, *, realised_vol: float | None = None) -> Decimal:
+def derisk_budget(
+    nav: Decimal,
+    *,
+    realised_vol: float | None = None,
+    base_pct: Decimal | float | None = None,
+) -> Decimal:
     """Max tolerated *aggregate* unrealised loss before forced de-risk.
 
     ``budget = NAV × base_pct × vol_scale``
-      * ``base_pct``  — AGG_UNREALISED_DERISK_NAV_PCT (default 0.0075).
+      * ``base_pct``  — explicit value (YAML ``aggregate_derisk.
+        max_unrealised_loss_nav_pct``, passed by the orchestrator) or the
+        AGG_UNREALISED_DERISK_NAV_PCT env (default **0.03**). D162: the old
+        0.0075 default was intraday-era — on a daily-horizon book at 100%+
+        gross it fired on routine noise and force-flattened positions the
+        orchestrator immediately re-opened (−$5k churn round-trip observed).
       * ``vol_scale`` — 1.0 at the reference vol; scales linearly with
         recent realised vol within [min,max] so a volatile tape gets more
         room (avoid knee-jerk liquidation on noise) and a calm tape is
@@ -86,7 +96,15 @@ def derisk_budget(nav: Decimal, *, realised_vol: float | None = None) -> Decimal
     """
     if nav <= 0:
         return Decimal("0")
-    base_pct = Decimal(str(max(0.0, _f("AGG_UNREALISED_DERISK_NAV_PCT", 0.0075))))
+    if base_pct is not None:
+        try:
+            base_pct = Decimal(str(base_pct))
+        except (InvalidOperation, TypeError, ValueError):
+            base_pct = None
+        if base_pct is not None and base_pct <= 0:
+            base_pct = None
+    if base_pct is None:
+        base_pct = Decimal(str(max(0.0, _f("AGG_UNREALISED_DERISK_NAV_PCT", 0.03))))
     scale = Decimal("1")
     if realised_vol is not None and realised_vol > 0:
         ref = max(1e-6, _f("AGG_UNREALISED_DERISK_REF_VOL", 0.02))
@@ -103,6 +121,7 @@ def select_derisk_closes(
     *,
     realised_vol: float | None = None,
     max_actions: int | None = None,
+    base_pct: Decimal | float | None = None,
 ) -> list[PositionLoss]:
     """Worst-loss positions to close (reduce-only) until projected
     aggregate unrealised loss is back within budget.
@@ -113,7 +132,7 @@ def select_derisk_closes(
     """
     if not derisk_enabled() or nav <= 0 or not positions:
         return []
-    budget = derisk_budget(nav, realised_vol=realised_vol)
+    budget = derisk_budget(nav, realised_vol=realised_vol, base_pct=base_pct)
     if budget <= 0:
         return []
     total = aggregate_unrealised(positions)
