@@ -57,7 +57,7 @@ cp -r brokers/_template brokers/newexchange
 **New PC or full reinstall:** use the end-to-end checklist in **[`docs/NEW_MACHINE_SETUP.md`](docs/NEW_MACHINE_SETUP.md)** (Python, Docker, Ollama + local LLM models, FinBERT cache, UI build, `.env`, migrations). Optional: `scripts/setup_new_machine.ps1` (Windows) or `scripts/setup_new_machine.sh` (macOS/Linux) for venv + `pip install` only.
 
 ```bash
-git clone https://github.com/kvcom/mytbot.git
+git clone https://github.com/emfasys-labs/mytbot.git
 cd mytbot
 python -m venv .venv
 # Windows: .\.venv\Scripts\activate

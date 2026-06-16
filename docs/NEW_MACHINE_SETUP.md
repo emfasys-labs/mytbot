@@ -38,7 +38,7 @@ Use this checklist when moving **mytbot** to a brand-new PC or reinstalling from
 From an empty folder (or copy your repo tree here):
 
 ```bash
-git clone https://github.com/kvcom/mytbot.git
+git clone https://github.com/emfasys-labs/mytbot.git
 cd mytbot
 ```
 

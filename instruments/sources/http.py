@@ -29,7 +29,7 @@ from loguru import logger
 from instruments.sources.base import SourceFetchError
 
 
-DEFAULT_USER_AGENT = "mytbot/instrument-registry (+https://github.com/kvcom/mytbot)"
+DEFAULT_USER_AGENT = "mytbot/instrument-registry (+https://github.com/emfasys-labs/mytbot)"
 DEFAULT_TIMEOUT_SEC = 30.0
 DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50 MB cap; iShares CSVs are <2 MB
 DEFAULT_RETRIES = 3

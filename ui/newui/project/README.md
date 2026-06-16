@@ -3,7 +3,7 @@
 **myTbot** is an open-source autonomous multi-asset trading system under AGPL v3: equities, bonds, ETFs, forex, and crypto. It is published by Emfasys Labs, a division of Emfasys Ltd, and built as a single-operator control surface with transparent decision intelligence and risk governance. It is not investment advice, portfolio management, brokerage, custody, a managed trading service, a signal-selling service or a promise of performance.
 
 **Sources used:**
-- GitHub repo: https://github.com/kvcom/mytbot (private — `kvcom/mytbot`)
+- GitHub repo: https://github.com/emfasys-labs/mytbot (official — `emfasys-labs/mytbot`)
   - `ui/` — React (Vite + TypeScript + Tailwind) production dashboard
   - `dashboard/` — Legacy React dashboard (milestone M7)
   - `ui/src/styles/theme.css` — Tailwind CSS variable definitions
