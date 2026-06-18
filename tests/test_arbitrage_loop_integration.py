@@ -93,7 +93,16 @@ def test_allocator_selected_open_does_not_run_meta_label_twice(monkeypatch) -> N
         "news_confidence_weight": 0.15,
     }
     sig_engine = SignalEngine(se_cfg)
-    monkeypatch.setattr(sig_engine, "_apply_trained_meta_label", lambda *a, **k: False)
+    # D169 — the meta-labeller is now always SCORED (so shadow + the
+    # scoreboard see every signal) but only ENFORCES a drop when
+    # ``enforce=True``; allocator-selected opens are called with
+    # ``enforce=False`` and must NOT be dropped. The stub mirrors the real
+    # method's contract: drop only when enforced.
+    monkeypatch.setattr(
+        sig_engine,
+        "_apply_trained_meta_label",
+        lambda *a, **k: not k.get("enforce", True),
+    )
     action = CoordinatorAction(
         kind="open_strategy",
         symbol="BA",

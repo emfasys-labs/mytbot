@@ -90,8 +90,20 @@ class SignalEngine:
         # the YAML config; the runtime hook itself enforces the
         # registry/approval gates and falls back safely if no model is
         # registered.
+        #
+        # D169 (Phase 4) — SHADOW mode. ``trained_meta_labeler_shadow`` runs
+        # the labeller for measurement only: every signal is scored and the
+        # would-keep/would-drop decision is stamped on the metadata (so
+        # ``scripts/report_brain_shadow.py`` can grade it against the live
+        # fills scoreboard), but the signal is NEVER dropped on it. This is
+        # how the D163-shadowed brain is re-admitted: prove edge against the
+        # scoreboard FIRST, then flip ``use_trained_meta_labeler`` on.
+        # ``enforce`` (hard drop) and ``shadow`` (measure only) are distinct;
+        # enforce takes precedence if both are set.
+        self._trained_meta_enforce = bool(self.config.get("use_trained_meta_labeler", False))
+        self._trained_meta_shadow = bool(self.config.get("trained_meta_labeler_shadow", False))
         self._trained_meta_cfg: Optional["TrainedMetaLabelerConfig"] = None
-        if bool(self.config.get("use_trained_meta_labeler", False)):
+        if self._trained_meta_enforce or self._trained_meta_shadow:
             from signals.trained_meta_labeler import TrainedMetaLabelerConfig
 
             try:
@@ -135,6 +147,7 @@ class SignalEngine:
         news_score: Optional[float],
         net: Optional[NetSignal],
         md: dict,
+        enforce: bool = True,
     ) -> bool:
         """
         Wave 2 — score the candidate through the trained meta-labeller.
@@ -143,6 +156,14 @@ class SignalEngine:
         disabled / passing through), ``False`` if it must be skipped.
         Either way, decision metadata is attached to ``md`` so the
         dashboard funnel can render the reason.
+
+        ``enforce`` (D169) controls whether a below-threshold decision is
+        ACTED on. When ``enforce=False`` the candidate is always kept
+        (returns ``True``) but the decision is still scored and stamped on
+        ``md`` — this is SHADOW measurement (and also how operator-close /
+        allocator-selected signals get scored for the scoreboard without
+        being filtered out). ``md["meta_label_shadow"]`` records which mode
+        produced the row.
         """
         cfg = self._trained_meta_cfg
         if cfg is None:
@@ -217,6 +238,7 @@ class SignalEngine:
         md["meta_label_threshold"] = float(decision.threshold)
         md["meta_label_reason"] = decision.reason
         md["meta_label_kept"] = bool(decision.kept)
+        md["meta_label_shadow"] = not bool(enforce)
         if decision.model_name:
             md["meta_label_model_name"] = decision.model_name
         if decision.model_version:
@@ -224,6 +246,9 @@ class SignalEngine:
         if decision.feature_hash:
             md["meta_label_feature_hash"] = decision.feature_hash
 
+        # Shadow (or operator/allocator-exempt): measure only, never drop.
+        if not enforce:
+            return True
         return bool(decision.kept)
 
     @staticmethod
@@ -589,12 +614,20 @@ class SignalEngine:
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
-        if not (is_operator_close or is_allocator_selected) and not self._apply_trained_meta_label(
+        # D169 — always SCORE (so shadow measurement + the scoreboard see
+        # every signal, incl. allocator-selected/operator-close), but only
+        # ENFORCE a drop on a non-exempt signal when the labeller is in
+        # hard-enforce mode.
+        _enforce_meta = self._trained_meta_enforce and not (
+            is_operator_close or is_allocator_selected
+        )
+        if not self._apply_trained_meta_label(
             raw,
             adjusted_confidence=adjusted_confidence,
             news_score=news_score,
             net=net,
             md=md,
+            enforce=_enforce_meta,
         ):
             logger.info(
                 "Signal SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s",
@@ -799,6 +832,7 @@ class SignalEngine:
             news_score=news_score,
             net=net,
             md=md,
+            enforce=self._trained_meta_enforce,
         ):
             logger.info(
                 "SignalCandidate SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s",

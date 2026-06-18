@@ -74,6 +74,64 @@ def should_defer_profit_harvest_for_redeployment(
     return cash_deployed < (target_cash - tolerance)
 
 
+def should_suppress_harvest_for_horizon(
+    *,
+    decision: "ProfitHarvestDecision",
+    age_sec: Decimal | None,
+    min_hold_sec: Decimal,
+    nav: Decimal,
+    min_material_profit_nav_pct: Decimal = Decimal("0.0010"),
+) -> tuple[bool, str]:
+    """D168 — anti-churn guard for the profit-harvest monitor.
+
+    The D163 scoreboard proved the realised loss lived in the *management*
+    layers cutting daily-horizon theses on intraday noise. D166 gave the
+    stop-loss / derisk monitors a horizon-aware min-hold gate, but the
+    profit-harvest monitor was left ungated — and a live soak (2026-06-18)
+    caught it churning: ``trailing_profit_lock`` fired on a position that
+    ticked up ~0.05% of NAV then retraced, **closing it at a LOSS 32 min
+    after open** (XLE −$138). ``evaluate_profit_harvest`` deliberately lets
+    a trailing lock fire *into the red* to protect a real round-trip
+    (+$3K→−$4K), but on a YOUNG daily-horizon position that same behaviour
+    is pure churn tax.
+
+    This guard suppresses ONLY a trailing-lock close that would realise a
+    loss / immaterial gain on a position younger than ``min_hold_sec``.
+    Everything that genuinely banks edge is always allowed:
+
+      * ``full_take_profit`` / ``partial_take_profit`` (profit_abs > 0 above
+        a real threshold) — banking a winner, never suppressed.
+      * a ``trailing_profit_lock`` that still locks in a *materially positive*
+        profit (>= ``min_material_profit_nav_pct`` of NAV) — a real winner
+        being protected, never suppressed.
+      * any harvest once the position has matured past ``min_hold_sec``.
+
+    Returns ``(suppress, reason)``. ``suppress=False`` means "let the harvest
+    proceed" (the pre-D168 behaviour for everything except young loss-locks).
+    Missing age (``None``) is treated as "unknown" → never suppress (no
+    evidence to gate on, mirrors the D166 protective gate).
+    """
+    if not decision.should_reduce:
+        return (False, "no_reduce")
+    # Only the trailing-lock path can fire into the red; the take-profit
+    # paths are positive-profit by construction.
+    if decision.reason != "trailing_profit_lock":
+        return (False, "not_trailing_lock")
+    # A trailing lock that still banks a materially positive profit is a real
+    # winner being protected — never churn.
+    material = (
+        min_material_profit_nav_pct <= 0
+        or (nav > 0 and decision.profit_pct_of_nav >= min_material_profit_nav_pct)
+    )
+    if decision.profit_absolute > 0 and material:
+        return (False, "locks_material_profit")
+    if age_sec is None:
+        return (False, "age_unknown")
+    if min_hold_sec > 0 and age_sec < min_hold_sec:
+        return (True, "young_loss_lock")
+    return (False, "matured")
+
+
 def _to_decimal(value: Any, default: Decimal) -> Decimal:
     if value is None or value == "":
         return default

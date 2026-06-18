@@ -156,3 +156,58 @@ def test_unproven_short_side_reduced_not_dropped(tmp_path):
     out = loop._apply_edge_gate_filter(cands, _cfg(path, unproven="reduce"), None)
     assert len(out) == 1
     assert out[0].confidence == Decimal("0.4")
+
+
+# ── D167.1 — raw-level pre-anti-churn edge-gate drop ─────────────────────────
+from types import SimpleNamespace  # noqa: E402
+
+
+def _raw(strategy: str, side: str, *, symbol: str = "USDJPY=X", conf: float = 0.9):
+    return SimpleNamespace(
+        strategy=strategy, side=side, symbol=symbol, confidence=conf, metadata={}
+    )
+
+
+def test_raw_prefilter_disabled_is_noop(tmp_path):
+    loop = _loop_stub()
+    raws = [_raw("trend_breakout", "buy"), _raw("mean_reversion", "sell")]
+    out = loop._filter_edge_gate_blocked_raws(
+        raws, {"edge_gate": {"enabled": False}}, symbol="USDJPY=X", sc_log_buffer=None
+    )
+    assert out is raws
+
+
+def test_raw_prefilter_drops_blocked_short_keeps_proven_long(tmp_path):
+    """The core fix: a toxic (blocked) short is removed BEFORE anti-churn can
+    record it, so it cannot tombstone the proven long on the same symbol."""
+    path = _write_per_side_registry(tmp_path)
+    loop = _loop_stub()
+    rows: list = []
+    raws = [
+        _raw("trend_breakout", "buy"),     # proven long → kept
+        _raw("mean_reversion", "sell"),    # toxic short → dropped pre-anti-churn
+    ]
+    out = loop._filter_edge_gate_blocked_raws(
+        raws, _cfg(path), symbol="USDJPY=X", sc_log_buffer=rows
+    )
+    kept = {(r.strategy, r.side) for r in out}
+    assert ("trend_breakout", "buy") in kept
+    assert ("mean_reversion", "sell") not in kept
+    # The drop is recorded for the funnel with the pre-anti-churn marker.
+    assert any(
+        r.get("status") == "edge_gate_blocked"
+        and (r.get("metadata_") or {}).get("stage") == "pre_anti_churn"
+        for r in rows
+    )
+
+
+def test_raw_prefilter_keeps_unproven_reduce_policy_side(tmp_path):
+    # momentum short is unproven; reduce policy must NOT drop it at the raw
+    # stage (its scaling happens later in _apply_edge_gate_filter).
+    path = _write_per_side_registry(tmp_path)
+    loop = _loop_stub()
+    raws = [_raw("momentum_breakout", "sell")]
+    out = loop._filter_edge_gate_blocked_raws(
+        raws, _cfg(path, unproven="reduce"), symbol="AAPL", sc_log_buffer=None
+    )
+    assert len(out) == 1

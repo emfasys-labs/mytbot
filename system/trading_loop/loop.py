@@ -1846,6 +1846,15 @@ class TradingLoop:
                                 loop_iteration=self.iterations,
                             )
 
+                            # D167.1 — drop edge-gate-BLOCKED sides BEFORE the
+                            # anti-churn gate records them (see batch path).
+                            raw_candidates = self._filter_edge_gate_blocked_raws(
+                                raw_candidates,
+                                strategies_cfg,
+                                symbol=symbol,
+                                sc_log_buffer=sc_log_rows_legacy,
+                            )
+
                             pre_meta_r = list(raw_candidates)
                             if meta_enabled and raw_candidates:
                                 meta_cfg_eff = dict(meta_cfg)
@@ -2128,6 +2137,16 @@ class TradingLoop:
                                 deployment_pressure=_ctx_deploy_pressure,
                                 sc_rows=sc_log_rows,
                                 loop_iteration=self.iterations,
+                            )
+
+                            # D167.1 — drop edge-gate-BLOCKED sides BEFORE the
+                            # anti-churn gate records them, so a doomed short
+                            # cannot tombstone a proven long on the same symbol.
+                            raw_candidates = self._filter_edge_gate_blocked_raws(
+                                raw_candidates,
+                                strategies_cfg,
+                                symbol=symbol,
+                                sc_log_buffer=sc_log_rows,
                             )
 
                             for raw in raw_candidates:
@@ -2887,6 +2906,58 @@ class TradingLoop:
         reg = EdgeGateRegistry(path).load()
         self._edge_gate_cache = (mtime, reg)
         return thr, reg
+
+    def _filter_edge_gate_blocked_raws(
+        self,
+        raw_candidates: list[Any],
+        strategies_cfg: dict[str, Any],
+        *,
+        symbol: str,
+        sc_log_buffer: list[dict[str, Any]] | None,
+    ) -> list[Any]:
+        """D167.1 — drop edge-gate-BLOCKED (strategy, side) RAW candidates BEFORE
+        the signal engine's anti-churn gate records them.
+
+        Why this must happen pre-anti-churn (the bug it fixes): anti-churn's
+        cross-strategy contradiction tombstones a symbol the moment it sees a
+        long and a short on it. A short side the edge gate has BLOCKED (no
+        proven edge / negative expectancy, e.g. mean_reversion#short PF<1 from
+        D161) can never trade — yet if it reaches anti-churn first it poisons a
+        PROVEN long on the same symbol (observed live: mean_reversion short
+        USDJPY tombstoning trend_breakout long USDJPY, PF 4.11, 100% dropped).
+        Removing dead-on-arrival sides here keeps the contradiction analysis to
+        live, tradeable candidates only. ``reduced``/``allowed`` sides pass
+        through unchanged (their confidence scaling still happens later in
+        :meth:`_apply_edge_gate_filter`). Gated off → returns the list unchanged.
+        """
+        thr, reg = self._load_edge_gate(strategies_cfg)
+        if reg is None:  # disabled
+            return raw_candidates
+        kept: list[Any] = []
+        for raw in raw_candidates:
+            strat = str(getattr(raw, "strategy", "") or "")
+            raw_side = str(getattr(raw, "side", "") or "long").strip().lower()
+            side = "short" if raw_side in ("short", "sell", "s") else "long"
+            if reg.is_blocked(strat, thr, side=side):
+                if sc_log_buffer is not None:
+                    try:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=symbol,
+                                strategy=strat,
+                                side=str(getattr(raw, "side", "") or "") or None,
+                                confidence=float(getattr(raw, "confidence", 0) or 0),
+                                status="edge_gate_blocked",
+                                reason=f"{side} side not edge-proven; dropped pre-anti-churn (D167.1)",
+                                loop_iteration=self.iterations,
+                                metadata={"side": side, "stage": "pre_anti_churn"},
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._swallow("edge_gate_raw_block_log", exc)
+                continue
+            kept.append(raw)
+        return kept
 
     def _apply_edge_gate_filter(
         self,

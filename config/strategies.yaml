@@ -19,6 +19,14 @@ signal_engine:
   # signals/meta_labeler.py remains the live filter. Re-admit the trained
   # model later via shadow evidence (Phase 4), not by default.
   use_trained_meta_labeler: false
+  # D169 (Phase 4) — SHADOW the trained meta-labeller: score every signal and
+  # stamp the would-keep/would-drop decision on the metadata, but NEVER drop a
+  # signal on it. `scripts/report_brain_shadow.py` grades those shadow
+  # decisions against the live fills scoreboard; only after it shows a
+  # RE-ADMIT verdict should `use_trained_meta_labeler` be flipped on.
+  # Requires `config/meta_labeler.yaml::trained_meta_labeler.enabled: true`
+  # so the model actually scores (shadow = score-but-don't-act).
+  trained_meta_labeler_shadow: true
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true

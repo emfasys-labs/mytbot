@@ -30,7 +30,7 @@ from brokers.registry import get_broker
 from control.runtime import get_risk_engine, set_execution_engine
 from brokers.base import AssetClass, Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
-from core.instruments import parse_option_contract_from_metadata
+from core.instruments import futures_multiplier, parse_option_contract_from_metadata
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
 from execution.arbitrage_executor import ArbitrageExecutor
@@ -2195,6 +2195,34 @@ class ExecutionEngine:
                 and str(getattr(signal, "asset_class", "") or "").strip().lower() in {"equity", "etf", "bond", "future", "option"}
             ):
                 qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+
+        # D167.2 — futures must trade in WHOLE contracts. Internally the
+        # quantity is notional-consistent units (contracts * multiplier). The
+        # signal engine already rounds this at sizing time, BUT a downstream
+        # notional clamp (risk single-name room, crypto venue room) recomputes
+        # qty = clamped_notional / price in RAW units, which silently leaves a
+        # fractional-contract size (observed live: CL=F 313 units after a risk
+        # clamp = 0.313 of a 1000-bbl contract). This is the last chokepoint
+        # before fill/submission, so enforce it here for every clamp site at
+        # once: round opening orders DOWN to a whole multiple of the multiplier
+        # and skip sub-contract opens (qty -> 0 → caught by the qty<=0 guard).
+        # Reduce-only closes pass through unchanged so an existing fractional
+        # residual can still be flattened.
+        if not is_reduce_only:
+            try:
+                fmult = futures_multiplier(order.symbol)
+            except Exception:  # noqa: BLE001
+                fmult = None
+            if fmult is not None and fmult > 0:
+                contracts = (qty / fmult).to_integral_value(rounding=ROUND_DOWN)
+                whole_qty = contracts * fmult
+                if whole_qty != qty:
+                    logger.info(
+                        "EXEC futures whole-contract round | %s qty=%s -> %s "
+                        "(mult=%s contracts=%s)",
+                        order.symbol, qty, whole_qty, fmult, contracts,
+                    )
+                qty = whole_qty
 
         return replace(order, quantity=qty, limit_price=price)
 

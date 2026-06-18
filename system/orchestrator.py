@@ -2285,6 +2285,11 @@ class Orchestrator:
             if not positions:
                 self._profit_harvest_peak_pnl.clear()
                 return
+            # D168 — horizon-aware harvest anti-churn gate + position ages.
+            ph_pe_cfg = self._protective_exit_config(risk_engine)
+            ph_position_ages = (
+                await self._fills_age_seconds_by_symbol(sf) if ph_pe_cfg.enabled else {}
+            )
             defer_harvest_for_redeploy = False
             try:
                 runtime = risk_engine.snapshot_runtime_state()
@@ -2454,6 +2459,33 @@ class Orchestrator:
                 )
                 if not decision.should_reduce:
                     continue
+                # D168 — suppress a trailing-lock close that would realise a
+                # loss / immaterial gain on a position younger than the D166
+                # min-hold (pure intraday churn on a daily-horizon thesis).
+                # Genuine winners (take-profit, or a lock banking material
+                # profit) are always allowed; safety stop-loss/derisk paths
+                # are separate and unaffected.
+                if ph_pe_cfg.enabled:
+                    from risk.profit_harvest import should_suppress_harvest_for_horizon
+
+                    suppress_h, why_h = should_suppress_harvest_for_horizon(
+                        decision=decision,
+                        age_sec=ph_position_ages.get(f"{broker}:{sym}"),
+                        min_hold_sec=ph_pe_cfg.min_hold_sec,
+                        nav=nav,
+                    )
+                    if suppress_h:
+                        logger.info(
+                            "orchestrator | profit-harvest SUPPRESSED (%s) | broker=%s symbol=%s "
+                            "reason=%s profit_abs=%s age=%s",
+                            why_h,
+                            broker,
+                            sym,
+                            decision.reason,
+                            decision.profit_absolute,
+                            ph_position_ages.get(f"{broker}:{sym}"),
+                        )
+                        continue
                 if defer_harvest_for_redeploy:
                     continue
 
