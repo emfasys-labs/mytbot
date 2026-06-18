@@ -468,6 +468,26 @@ intraday_derisk:
     - SPXL
     - SPXS
 
+# D166 (Phase 2) — horizon-aware anti-churn for the protective-exit monitors.
+# The proven army trades a DAILY horizon; the stop-loss + intraday-derisk
+# background monitors were cutting fresh theses on intraday noise (the whole
+# -$49k bleed). This gate suppresses a SOFT protective cut while a position is
+# younger than ``min_hold_sec`` — but a catastrophic loss, a structural ATR
+# stop, and the most-severe aggregate survival tier ALWAYS fire (not a risk
+# bypass; the portfolio survives first). Set ``enabled: false`` to restore the
+# exact pre-D166 protective behaviour.
+protective_exit_min_hold:
+  enabled: true
+  min_hold_sec: 259200                 # 3 days — matches the orchestrator's
+                                       # D158 min_hold_sec_before_flip so all
+                                       # exit layers share one horizon.
+  catastrophic_loss_pct_nav: 0.04      # always cut a single position losing
+                                       # >= 4% of NAV (20% adverse move on a
+                                       # full 20%-NAV position) even if young.
+  catastrophic_loss_pct_position: 0.30 # or down >= 30% of its own cost basis.
+  always_allow_structural_stop: true   # ATR structural stop = thesis invalidated.
+  always_allow_most_severe_aggregate_tier: true  # -5% NAV tier always fires.
+
 minimum_order_sizes_gbp:
   crypto: 10
   equity: 50

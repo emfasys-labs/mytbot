@@ -2981,9 +2981,20 @@ class TradingLoop:
         Combined = clamp(prior x posterior_tilt, min_trust, max_trust). With no
         edge prior the prior defaults to neutral 1.0 (pure posterior behaviour,
         backward compatible). Neutral (1.0) when neither signal has a sample.
+
+        D166 (Phase 2) — the scoreboard gates size increases:
+          * The posterior is only trusted once a weapon has at least
+            ``cfg.min_live_closes_for_posterior`` live CLOSES — one noisy fill
+            cannot flip trust (below the floor → prior only).
+          * Once enough live closes exist AND live net P&L is negative, trust
+            is capped at neutral (1.0): live evidence overrides an optimistic
+            backtest prior, so a proven-live LOSER is never AMPLIFIED above
+            neutral (it can still trade; the edge gate / risk layer own
+            blocking — this layer only governs amplification).
         """
         one = Decimal("1")
         edge_prior = edge_prior or {}
+        min_closes = int(getattr(cfg, "min_live_closes_for_posterior", 0) or 0)
         names = set(edge_prior) | {
             str(n) for n in (strategy_pnl_recent or {})
         }
@@ -2991,21 +3002,27 @@ class TradingLoop:
         for name in names:
             base = edge_prior.get(name, one)
             tilt = one
+            live_net = Decimal("0")
+            live_closes = 0
             stats = (strategy_pnl_recent or {}).get(name)
             if isinstance(stats, dict):
                 try:
-                    net = Decimal(str(stats.get("net_pnl", 0) or 0))
-                    fills = int(stats.get("fills", 0) or 0)
+                    live_net = Decimal(str(stats.get("net_pnl", 0) or 0))
+                    live_closes = int(stats.get("fills", 0) or 0)
                 except Exception:  # noqa: BLE001
-                    net, fills = Decimal("0"), 0
-                if fills > 0:
+                    live_net, live_closes = Decimal("0"), 0
+                # Only trust the posterior with enough live evidence.
+                if live_closes >= max(1, min_closes):
                     # Bounded tilt: scale net P&L per fill into a modest factor.
-                    per_fill = net / Decimal(fills)
+                    per_fill = live_net / Decimal(live_closes)
                     if per_fill >= 0:
                         tilt = one + min(cfg.max_trust - one, per_fill / Decimal("100"))
                     else:
                         tilt = one + max(cfg.min_trust - one, per_fill / Decimal("100"))
             combined = base * tilt
+            # Scoreboard cap: a weapon proven to LOSE live is never amplified.
+            if min_closes > 0 and live_closes >= min_closes and live_net < 0 and combined > one:
+                combined = one
             out[name] = max(cfg.min_trust, min(cfg.max_trust, combined))
         return out
 

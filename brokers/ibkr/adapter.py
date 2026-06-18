@@ -19,16 +19,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, AsyncIterator, Optional, Set
 
 from ib_insync import (
     IB,
+    ContFuture,
     Contract,
     Crypto,
     Forex,
+    Future,
     LimitOrder,
     MarketOrder,
     Option,
@@ -43,7 +46,7 @@ from loguru import logger
 
 from brokers.ibkr.qualification import IBKRQualificationCache, IBKRQualificationRecord, utc_now_iso
 from brokers.ibkr.universe import ibkr_supported_symbol_seed
-from core.instruments import OptionContractSpec
+from core.instruments import OptionContractSpec, futures_spec_for
 from brokers.base import (
     AssetClass,
     Balance,
@@ -234,6 +237,10 @@ class IBKRAdapter(BrokerAdapter):
 
     broker_name = "ibkr"
 
+    # Front-month futures contract cache TTL (D165). Refresh resolution at least
+    # this often even without a rollover trigger, so the front month never drifts.
+    _FUTURES_FRONT_TTL_SEC: float = 6 * 60 * 60
+
     _BAR_SIZE: dict[str, str] = {
         "1m": "1 min",
         "5m": "5 mins",
@@ -276,6 +283,9 @@ class IBKRAdapter(BrokerAdapter):
         self._last_ib_order_snapshot_monotonic: float = -1e9
         self._ib_order_snap_lock = asyncio.Lock()
         self._qualification_cache = IBKRQualificationCache()
+        # Front-month futures contract cache (D165): root -> (Future, resolved_at, expiry).
+        # ContFuture resolves to the live front month; orders need the concrete Future.
+        self._futures_front_cache: dict[str, tuple[Future, float, str]] = {}
         # Single-flight gate for reqAccountSummary: IB Gateway enforces a per-session
         # cap on concurrent account-summary subscriptions and rejects parallel calls
         # with Error 322. Serialising probes here keeps cancelAccountSummary in lock-step
@@ -320,11 +330,20 @@ class IBKRAdapter(BrokerAdapter):
         return accounts[0] if accounts else ""
 
     def _symbol_to_contract(self, symbol: str) -> Contract:
-        """Map a canonical symbol string to an ib_insync Contract."""
+        """Map a canonical symbol string to an ib_insync Contract.
+
+        Futures roots (``CL``/``CL=F``, ``ES`` ...) become a :class:`ContFuture`
+        which IB resolves to the current front month — valid for market data /
+        streaming. The ORDER path additionally resolves it to a concrete,
+        tradeable front-month :class:`Future` via :meth:`_resolve_front_future`.
+        """
         s = symbol.strip().upper()
         crypto_base = _canonical_paxos_crypto_base(s)
         if crypto_base is not None:
             return Crypto(crypto_base, "PAXOS", "USD")
+        fut_spec = futures_spec_for(s)
+        if fut_spec is not None:
+            return ContFuture(fut_spec.root, fut_spec.exchange, currency=fut_spec.currency)
         if "." in s:
             parts = [p.strip().upper() for p in s.split(".") if p.strip()]
             if len(parts) == 2 and all(len(p) == 3 and p.isalpha() for p in parts):
@@ -336,6 +355,65 @@ class IBKRAdapter(BrokerAdapter):
         if len(s) == 6 and s.isalpha():
             return Forex(s[:3] + s[3:])
         return Stock(s, "SMART", "USD")
+
+    async def _resolve_front_future(self, symbol: str) -> Future | None:
+        """Resolve a futures root to its concrete, tradeable front-month contract.
+
+        Orders on a :class:`ContFuture` are rejected by IB, so we qualify the
+        continuous contract to learn the front-month ``conId`` and then build /
+        qualify a concrete :class:`Future`. Results are cached per root and
+        refreshed on a TTL or when the contract nears expiry (rollover).
+        """
+        spec = futures_spec_for(symbol)
+        if spec is None or self._ib is None:
+            return None
+        root = spec.root
+        now = time.time()
+        cached = self._futures_front_cache.get(root)
+        if cached is not None:
+            fut, resolved_at, expiry_yyyymmdd = cached
+            stale = (now - resolved_at) > self._FUTURES_FRONT_TTL_SEC
+            rolling = self._futures_near_expiry(expiry_yyyymmdd)
+            if not stale and not rolling:
+                return fut
+        try:
+            contfut = ContFuture(spec.root, spec.exchange, currency=spec.currency)
+            await self._ib.qualifyContractsAsync(contfut)
+            con_id = int(getattr(contfut, "conId", 0) or 0)
+            if not con_id:
+                return None
+            fut = Future(conId=con_id, exchange=spec.exchange)
+            qualified = await self._ib.qualifyContractsAsync(fut)
+            if not qualified or not int(getattr(fut, "conId", 0) or 0):
+                return None
+            expiry = str(getattr(fut, "lastTradeDateOrContractMonth", "") or "")
+            self._futures_front_cache[root] = (fut, now, expiry)
+            logger.info(
+                "IBKR futures resolved | {} -> front {} (conId={}, exch={}, mult={})",
+                symbol,
+                expiry or "?",
+                con_id,
+                spec.exchange,
+                getattr(fut, "multiplier", "") or spec.multiplier,
+            )
+            return fut
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("IBKR futures resolve failed for {}: {}", symbol, exc)
+            return None
+
+    @staticmethod
+    def _futures_near_expiry(expiry_yyyymmdd: str, *, roll_days: int = 5) -> bool:
+        """True when a futures contract is within *roll_days* of expiry."""
+        raw = (expiry_yyyymmdd or "").strip()
+        if len(raw) == 6 and raw.isdigit():
+            raw = raw + "01"  # YYYYMM → first of month (conservative)
+        if len(raw) != 8 or not raw.isdigit():
+            return False
+        try:
+            exp = datetime.strptime(raw, "%Y%m%d").date()
+        except ValueError:
+            return False
+        return (exp - datetime.now(timezone.utc).date()).days <= roll_days
 
     def build_option_contract(self, spec: OptionContractSpec) -> Option:
         """Build an unqualified ib_insync Option from a structured spec."""
@@ -491,6 +569,33 @@ class IBKRAdapter(BrokerAdapter):
                 order.symbol,
             )
             return None
+        # Futures: resolve the continuous root to the concrete, tradeable
+        # front-month contract (orders on a ContFuture are rejected by IB).
+        if futures_spec_for(order.symbol) is not None:
+            fut = await self._resolve_front_future(order.symbol)
+            if fut is None:
+                rec = self._qualification_record_from_contract(
+                    symbol=order.symbol,
+                    asset_class="future",
+                    broker_symbol=order.symbol.strip().upper(),
+                    contract=self._symbol_to_contract(order.symbol),
+                    status="failed",
+                    error="IBKR could not resolve front-month futures contract",
+                )
+                self._qualification_cache.upsert(rec)
+                logger.warning(
+                    "place_order | IBKR | futures front-month unresolved | symbol={}",
+                    order.symbol,
+                )
+                return None
+            rec = self._qualification_record_from_contract(
+                symbol=order.symbol,
+                asset_class="future",
+                broker_symbol=order.symbol.strip().upper(),
+                contract=fut,
+            )
+            self._qualification_cache.upsert(rec)
+            return fut
         contract = self._order_to_contract(order)
         if self._ib is None or not self._ib.isConnected():
             return None
@@ -531,7 +636,35 @@ class IBKRAdapter(BrokerAdapter):
             if len(cur) >= 6:
                 return f"{cur[:3]}/{cur[3:]}"
             return cur
+        if st in ("FUT", "CONTFUT"):
+            # Map back to the canonical continuous form (CL=F) so the internal
+            # ledger/reconciliation key matches the pipeline symbol (D165).
+            root = (contract.symbol or "").strip().upper()
+            return f"{root}=F" if root else ""
         return contract.symbol or ""
+
+    def _contract_multiplier(self, contract: Contract) -> Decimal:
+        """Contract point value for FUT (units per contract), else ``Decimal(1)``.
+
+        Prefers the IBKR-qualified ``contract.multiplier`` (authoritative) and
+        falls back to the static spec table keyed by root.
+        """
+        st = (contract.secType or "").upper()
+        if st not in ("FUT", "CONTFUT"):
+            return Decimal("1")
+        raw = getattr(contract, "multiplier", None)
+        try:
+            if raw not in (None, ""):
+                m = Decimal(str(raw))
+                if m > 0:
+                    return m
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        # Fallback: a FUT contract's ``symbol`` is the bare root (``CL``);
+        # rebuild the canonical ``ROOT=F`` form for the (=F-required) lookup.
+        root = (contract.symbol or "").strip().upper()
+        spec = futures_spec_for(f"{root}=F") if root else None
+        return spec.multiplier if spec is not None else Decimal("1")
 
     def _option_metadata_from_contract(self, contract: Contract) -> dict[str, Any]:
         mult_raw = getattr(contract, "multiplier", None) or 100
@@ -653,8 +786,12 @@ class IBKRAdapter(BrokerAdapter):
     def _trade_to_order_result(self, trade: Trade) -> OrderResult:
         sym = self._contract_symbol_key(trade.contract)
         side = OrderSide.BUY if trade.order.action == "BUY" else OrderSide.SELL
-        qty = _d(trade.order.totalQuantity)
-        filled = self._effective_filled_qty(trade)
+        # D165 — futures: IB quantities are in CONTRACTS; convert back to the
+        # internal notional-consistent units (contracts * multiplier) so the
+        # ledger keeps ``notional = qty * price`` true.
+        mult = self._contract_multiplier(trade.contract)
+        qty = _d(trade.order.totalQuantity) * mult
+        filled = self._effective_filled_qty(trade) * mult
         avg = trade.orderStatus.avgFillPrice
         avg_d = _d(avg) if avg and avg > 0 else None
         return OrderResult(
@@ -771,6 +908,28 @@ class IBKRAdapter(BrokerAdapter):
                     whole,
                 )
                 order.quantity = whole
+        # D165 — futures: internal quantity is in notional-consistent units
+        # (contracts * multiplier). IB expects whole CONTRACTS, so convert here
+        # at the broker boundary: contracts = units / multiplier.
+        if isinstance(contract, (Future, ContFuture)):
+            mult = self._contract_multiplier(contract)
+            if mult > 0:
+                units = Decimal(str(order.quantity))
+                contracts = (units / mult).to_integral_value(rounding=ROUND_DOWN)
+                if contracts < 1:
+                    raise ValueError(
+                        f"futures order below one contract: symbol={order.symbol} "
+                        f"units={units} multiplier={mult}"
+                    )
+                logger.info(
+                    "place_order | IBKR | futures units->contracts | "
+                    "symbol={} units={} multiplier={} contracts={}",
+                    order.symbol,
+                    units,
+                    mult,
+                    contracts,
+                )
+                order.quantity = contracts
         return self._build_ib_order(order)
 
     async def _build_paxos_crypto_ib_order(
@@ -1324,6 +1483,20 @@ class IBKRAdapter(BrokerAdapter):
                     unreal = Decimal(0)
                     avg_px = _d(p.avgCost)
                 st = (p.contract.secType or "").upper()
+                # D165 — futures: IB reports ``position`` in contracts and
+                # ``averageCost`` as the PER-CONTRACT cost (price * multiplier).
+                # Normalise to the internal convention: quantity in units
+                # (contracts * multiplier) and per-unit prices, so
+                # ``notional = qty * price`` stays correct. ``unrealizedPNL`` is
+                # already a dollar figure and is left untouched.
+                if st in ("FUT", "CONTFUT"):
+                    mult = self._contract_multiplier(p.contract)
+                    if mult > 0:
+                        if avg_px and avg_px > 0:
+                            avg_px = avg_px / mult
+                        if pi is None and mpx and mpx > 0:
+                            mpx = mpx / mult
+                        qty = qty * mult
                 inst_meta: Optional[dict[str, Any]] = None
                 if st == "OPT":
                     inst_meta = self._option_metadata_from_contract(p.contract)
@@ -1798,6 +1971,14 @@ class IBKRAdapter(BrokerAdapter):
         rows = min(depth, 5)
         contract = self._symbol_to_contract(symbol)
 
+        # D165 — IBKR reports futures order-book depth in CONTRACTS, while the
+        # rest of the system reasons in notional-consistent internal units
+        # (size already implies ``contracts * multiplier``). Convert depth sizes
+        # at this boundary so liquidity / slippage checks compare like-for-like
+        # against ``order.quantity`` (also notional-consistent).
+        _fut_spec = futures_spec_for(symbol)
+        _size_mult = _fut_spec.multiplier if _fut_spec is not None else Decimal("1")
+
         def _order_book_source() -> str:
             raw = os.getenv("IBKR_ORDER_BOOK_SOURCE", "auto").strip().lower()
             if raw in {"depth", "dom", "market_depth"}:
@@ -1844,8 +2025,8 @@ class IBKRAdapter(BrokerAdapter):
             return OrderBook(
                 symbol=symbol,
                 timestamp=_iso_now(),
-                bids=[(_d(bid), bid_size)],
-                asks=[(_d(ask), ask_size)],
+                bids=[(_d(bid), bid_size * _size_mult)],
+                asks=[(_d(ask), ask_size * _size_mult)],
             )
 
         try:
@@ -1856,10 +2037,10 @@ class IBKRAdapter(BrokerAdapter):
             await asyncio.sleep(1.5)
             t = self._ib.ticker(contract)
             bids = [
-                (_d(x.price), _d(x.size)) for x in list(t.domBids)[:rows]
+                (_d(x.price), _d(x.size) * _size_mult) for x in list(t.domBids)[:rows]
             ]
             asks = [
-                (_d(x.price), _d(x.size)) for x in list(t.domAsks)[:rows]
+                (_d(x.price), _d(x.size) * _size_mult) for x in list(t.domAsks)[:rows]
             ]
             self._ib.cancelMktDepth(contract)
             if not bids or not asks:
@@ -1985,6 +2166,8 @@ class IBKRAdapter(BrokerAdapter):
         s = symbol.strip().upper()
         if _canonical_paxos_crypto_base(s) is not None:
             return AssetClass.CRYPTO
+        if futures_spec_for(s) is not None:
+            return AssetClass.FUTURE
         if len(s) == 6 and s.isalpha():
             return AssetClass.FOREX
         return AssetClass.EQUITY

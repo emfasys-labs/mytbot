@@ -23,6 +23,7 @@ import math
 from typing import Optional
 
 from brokers.permissions import get_permissions
+from core.instruments import futures_spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,23 @@ class SmartOrderRouter:
 
         sym_u = (symbol or "").strip().upper()
         md = metadata if isinstance(metadata, dict) else {}
+
+        # Exchange-traded (CME/CBOT/COMEX/NYMEX/...) futures carry the yfinance
+        # ``=F`` suffix (``CL=F``, ``ES=F``) and can ONLY be traded on IBKR.
+        # They must NEVER fall through to a crypto venue: Bybit's ``future``
+        # permission covers crypto *perpetuals*, a completely different
+        # instrument. If IBKR is not permitted/available for the future, skip
+        # the order rather than mis-route it onto the wrong exchange. (D165)
+        if futures_spec_for(symbol) is not None:
+            if "ibkr" in permitted:
+                return "ibkr"
+            logger.warning(
+                "Exchange future %s not routable: IBKR not permitted/available "
+                "(crypto venues are NOT valid for CME-style futures) | permitted=%s",
+                symbol,
+                permitted,
+            )
+            return None
 
         def _rank_key(b: str) -> tuple[Decimal, Decimal]:
             if hasattr(self.permissions, "get_taker_fee_bps"):

@@ -70,8 +70,12 @@ def test_broker_symbol_strips_forex_suffix():
     assert broker_symbol_for("GBPUSD=X", "ibkr") == "GBPUSD"
 
 
-def test_broker_symbol_strips_futures_suffix():
-    assert broker_symbol_for("ES=F", "ibkr") == "ES"
+def test_broker_symbol_keeps_futures_suffix():
+    # D165 — the ``=F`` continuous suffix is PRESERVED to the broker so the
+    # IBKR adapter can resolve it to a front-month Future (and so it stays
+    # unambiguous vs. equity tickers sharing a root, e.g. CL=Colgate).
+    assert broker_symbol_for("ES=F", "ibkr") == "ES=F"
+    assert broker_symbol_for("CL=F", "ibkr") == "CL=F"
 
 
 def test_broker_symbol_passthrough_for_equity_and_crypto():

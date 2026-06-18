@@ -98,8 +98,13 @@ def broker_symbol_for(symbol: str, broker: str) -> str:
     if not s or not b:
         return s
 
-    if s.endswith("=X") or s.endswith("=F"):
+    # Forex: strip the yfinance ``=X`` suffix (``EURUSD=X`` → ``EURUSD``).
+    if s.endswith("=X"):
         s = s[:-2]
+    # Futures: KEEP the ``=F`` continuous suffix (``CL=F``). The IBKR adapter
+    # resolves it to the front-month contract; the suffix is what makes the
+    # symbol unambiguous vs. equity tickers that share a root (CL=Colgate),
+    # and is the canonical pipeline/ledger key (D165).
 
     # Alpaca crypto uses ``BASE/QUOTE`` slashes, not dashes.
     # Only rewrite when the symbol clearly looks like a crypto pair

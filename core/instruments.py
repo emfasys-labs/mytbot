@@ -115,3 +115,113 @@ def option_premium_notional(
 ) -> Decimal:
     """Premium dollars for *qty* contracts (long pay / short receive magnitude)."""
     return abs(qty) * abs(premium_per_contract) * Decimal(int(multiplier))
+
+
+# ---------------------------------------------------------------------------
+# Futures contract specifications (D165)
+# ---------------------------------------------------------------------------
+# These are exchange-defined INSTRUMENT FACTS, not tunable strategy parameters:
+# one CL contract is 1,000 barrels, one ES point is $50, etc. They are physical
+# constants of the contract (exactly like the option ``multiplier=100`` above),
+# so they live here as instrument definitions rather than in any config knob.
+# The IBKR-qualified contract carries its own ``multiplier`` which is treated as
+# the authoritative source at order time; this table is the pre-trade source
+# used for sizing (notional → whole contracts) before the broker is contacted.
+
+
+@dataclass(frozen=True)
+class FuturesContractSpec:
+    """Static definition of a continuous-future root.
+
+    ``root`` is the IBKR/exchange symbol (``CL``, ``ES``, ...). ``multiplier``
+    is the contract point value / size; ``exchange`` is the IB routing
+    destination; ``currency`` the contract currency.
+    """
+
+    root: str
+    exchange: str
+    multiplier: Decimal
+    currency: str = "USD"
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "instrument_type": "future",
+            "root": self.root,
+            "exchange": self.exchange,
+            "multiplier": str(self.multiplier),
+            "currency": self.currency,
+            "description": self.description,
+        }
+
+
+# Root → spec. Multipliers/exchanges are standard CME/CBOT/NYMEX/COMEX/ICE-US
+# contract specs. Mirrors ``instruments/sources/static_futures.py::FUTURES_ROOTS``.
+FUTURES_CONTRACT_SPECS: dict[str, FuturesContractSpec] = {
+    # Equity index
+    "ES": FuturesContractSpec("ES", "CME", Decimal("50"), description="E-mini S&P 500"),
+    "NQ": FuturesContractSpec("NQ", "CME", Decimal("20"), description="E-mini Nasdaq 100"),
+    "YM": FuturesContractSpec("YM", "CBOT", Decimal("5"), description="E-mini Dow Jones"),
+    "RTY": FuturesContractSpec("RTY", "CME", Decimal("50"), description="E-mini Russell 2000"),
+    # Energy
+    "CL": FuturesContractSpec("CL", "NYMEX", Decimal("1000"), description="WTI Crude Oil"),
+    "BZ": FuturesContractSpec("BZ", "NYMEX", Decimal("1000"), description="Brent Crude"),
+    "NG": FuturesContractSpec("NG", "NYMEX", Decimal("10000"), description="Henry Hub Natural Gas"),
+    # Metals
+    "GC": FuturesContractSpec("GC", "COMEX", Decimal("100"), description="Gold"),
+    "SI": FuturesContractSpec("SI", "COMEX", Decimal("5000"), description="Silver"),
+    "HG": FuturesContractSpec("HG", "COMEX", Decimal("25000"), description="Copper"),
+    "PL": FuturesContractSpec("PL", "NYMEX", Decimal("50"), description="Platinum"),
+    "PA": FuturesContractSpec("PA", "NYMEX", Decimal("100"), description="Palladium"),
+    # Rates
+    "ZN": FuturesContractSpec("ZN", "CBOT", Decimal("1000"), description="10y US Treasury Note"),
+    "ZB": FuturesContractSpec("ZB", "CBOT", Decimal("1000"), description="30y US Treasury Bond"),
+    "ZF": FuturesContractSpec("ZF", "CBOT", Decimal("1000"), description="5y US Treasury Note"),
+    "ZT": FuturesContractSpec("ZT", "CBOT", Decimal("2000"), description="2y US Treasury Note"),
+    # Agriculture
+    "ZC": FuturesContractSpec("ZC", "CBOT", Decimal("50"), description="Corn"),
+    "ZS": FuturesContractSpec("ZS", "CBOT", Decimal("50"), description="Soybeans"),
+    "ZW": FuturesContractSpec("ZW", "CBOT", Decimal("50"), description="Wheat"),
+    "KC": FuturesContractSpec("KC", "NYBOT", Decimal("37500"), description="Coffee"),
+    "SB": FuturesContractSpec("SB", "NYBOT", Decimal("112000"), description="Sugar #11"),
+    "CC": FuturesContractSpec("CC", "NYBOT", Decimal("10"), description="Cocoa"),
+    "CT": FuturesContractSpec("CT", "NYBOT", Decimal("500"), description="Cotton #2"),
+}
+
+
+def futures_root(symbol: str) -> Optional[str]:
+    """Extract the contract root from the yfinance continuous-futures form.
+
+    REQUIRES the ``=F`` suffix (``CL=F`` → ``CL``). The bare root form is
+    intentionally NOT matched because many roots collide with real equity
+    tickers (``CL`` = Colgate-Palmolive, ``ES`` = Eversource, ``GC``/``SI``/
+    ``PA``/``PL``/``HG``/``CC``/``CT`` …). Treating those as futures would
+    mis-size the equity by the contract multiplier. The canonical pipeline
+    symbol for a future is always ``ROOT=F``; that suffix is preserved all the
+    way to the IBKR adapter (see ``broker_symbol_for``) so the contract is
+    unambiguous. Case-insensitive.
+    """
+    if not symbol:
+        return None
+    s = str(symbol).strip().upper()
+    if not s.endswith("=F"):
+        return None
+    root = s[:-2].strip()
+    return root if root in FUTURES_CONTRACT_SPECS else None
+
+
+def futures_spec_for(symbol: str) -> Optional[FuturesContractSpec]:
+    """Return the :class:`FuturesContractSpec` for *symbol* or ``None``."""
+    root = futures_root(symbol)
+    return FUTURES_CONTRACT_SPECS.get(root) if root else None
+
+
+def futures_multiplier(symbol: str) -> Optional[Decimal]:
+    """Return the contract multiplier for a futures *symbol*, else ``None``.
+
+    Used by sizing so a futures order quantity is expressed in whole contracts:
+    ``contracts = notional / (price * multiplier)``. Returns ``None`` for
+    non-futures symbols so callers fall back to the 1:1 (share) convention.
+    """
+    spec = futures_spec_for(symbol)
+    return spec.multiplier if spec is not None else None

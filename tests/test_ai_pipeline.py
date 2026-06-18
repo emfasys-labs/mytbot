@@ -122,6 +122,8 @@ def test_ai_yaml_regime_gates_lists_core_signal_strategies() -> None:
     required = {
         "momentum_breakout",
         "mean_reversion",
+        "trend_breakout",
+        "trend_following",
         "volume_flow",
         "event_driven_news",
         "pairs_trading",

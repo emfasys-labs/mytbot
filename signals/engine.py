@@ -13,12 +13,13 @@ Flow:
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Optional, Union, cast
 import uuid
 from datetime import datetime, timezone
 import logging
 
+from core.instruments import futures_multiplier
 from core.models_runtime import AssetClass, Side, SignalCandidate
 
 from signals.accumulator import NetSignal, raw_signal_to_input_signal
@@ -553,9 +554,38 @@ class SignalEngine:
                         last_price=last_price,
                     )
 
-        min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
-        if suggested_quantity < min_qty:
-            suggested_quantity = min_qty
+        # D165 — futures size in WHOLE contracts. Internal quantity stays in
+        # notional-consistent units (contracts * multiplier) so downstream
+        # ``notional = qty * price`` accounting (risk caps, exposure, cash
+        # factor) is correct; the IBKR adapter converts units <-> contracts at
+        # the broker boundary.
+        fut_mult = futures_multiplier(raw.symbol)
+        if fut_mult is not None and fut_mult > 0:
+            if last_price is None or last_price <= 0 or suggested_quantity <= 0:
+                logger.info(
+                    "Signal DROPPED futures_no_price | %s | price=%s qty=%s",
+                    raw.symbol,
+                    last_price,
+                    suggested_quantity,
+                )
+                return None
+            contracts = (suggested_quantity / fut_mult).to_integral_value(rounding=ROUND_DOWN)
+            if contracts < 1:
+                logger.info(
+                    "Signal DROPPED futures_sub_contract | %s | budget < 1 contract "
+                    "(units=%s mult=%s price=%s notional_per_contract=%s)",
+                    raw.symbol,
+                    suggested_quantity,
+                    fut_mult,
+                    last_price,
+                    (fut_mult * last_price).quantize(Decimal("0.01")),
+                )
+                return None
+            suggested_quantity = contracts * fut_mult
+        else:
+            min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
+            if suggested_quantity < min_qty:
+                suggested_quantity = min_qty
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
@@ -670,9 +700,19 @@ class SignalEngine:
                 last_price=last_price,
             )
 
-        min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
-        if suggested_quantity < min_qty:
-            suggested_quantity = min_qty
+        # D165 — futures size in whole contracts (notional-consistent units).
+        fut_mult = futures_multiplier(raw.symbol)
+        if fut_mult is not None and fut_mult > 0:
+            if last_price is None or last_price <= 0 or suggested_quantity <= 0:
+                return None
+            contracts = (suggested_quantity / fut_mult).to_integral_value(rounding=ROUND_DOWN)
+            if contracts < 1:
+                return None
+            suggested_quantity = contracts * fut_mult
+        else:
+            min_qty = Decimal(str(self.config.get("min_quantity", "0.0001")))
+            if suggested_quantity < min_qty:
+                suggested_quantity = min_qty
 
         risk_notional = md.get("risk_notional_override")
         if risk_notional is None and last_price and last_price > 0:

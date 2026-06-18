@@ -1648,6 +1648,10 @@ class Orchestrator:
             # adapter.get_positions() (IBKR paper reports entry price when
             # marketPrice is missing → fabricated $0 loss → never cut).
             rows_by_broker = await self._latest_open_position_rows_by_broker(sf)
+            # D166 — horizon-aware anti-churn gate + position ages.
+            pe_cfg = self._protective_exit_config(risk_engine)
+            position_ages = await self._fills_age_seconds_by_symbol(sf) if pe_cfg.enabled else {}
+            from risk.protective_exit_gate import should_suppress_protective_exit
             for broker_name, adapter in self._broker_manager.adapters.items():
                 bname = str(broker_name or "").strip().lower()
                 if not bname:
@@ -1707,6 +1711,28 @@ class Orchestrator:
                     )
                     if not decision.should_close:
                         continue
+
+                    # D166 — don't cut a fresh daily-horizon thesis on a soft
+                    # position-% stop; a catastrophic NAV/position loss or a
+                    # structural ATR stop still fires (portfolio survives first).
+                    if pe_cfg.enabled:
+                        pos_notional = abs(qty) * entry
+                        loss_pct_position = (
+                            decision.loss_absolute / pos_notional if pos_notional > 0 else Decimal("0")
+                        )
+                        suppress, why = should_suppress_protective_exit(
+                            config=pe_cfg,
+                            age_sec=position_ages.get(f"{bname}:{sym}"),
+                            loss_pct_nav=decision.loss_pct,
+                            loss_pct_position=loss_pct_position,
+                            structural_breach=decision.structural_stop_breached,
+                        )
+                        if suppress:
+                            logger.info(
+                                "stop-loss | held (anti-churn:{}) | {} {} age={}s | {}",
+                                why, bname, sym, position_ages.get(f"{bname}:{sym}"), decision.reason,
+                            )
+                            continue
 
                     side = "sell" if qty > 0 else "buy"
                     asset_class_raw = getattr(pos, "asset_class", "equity")
@@ -1847,6 +1873,75 @@ class Orchestrator:
             logger.debug("orchestrator | latest-open-positions query failed: {}", exc)
         return out
 
+    async def _fills_age_seconds_by_symbol(self, sf) -> dict[str, "Decimal"]:
+        """D166 — age (seconds) of each currently-open position's streak.
+
+        Returns ``{f"{broker}:{symbol}": age_sec}`` computed from the clean
+        ``fills`` ledger (the open streak starts after the position was last
+        flat). Used by the protective-exit anti-churn gate so the stop-loss /
+        intraday-derisk / aggregate-derisk monitors don't cut a fresh
+        daily-horizon thesis on intraday noise. Best-effort: any failure
+        returns ``{}`` (gate then treats every age as unknown → never
+        suppresses → pre-D166 behaviour).
+        """
+        out: dict[str, Decimal] = {}
+        try:
+            from sqlalchemy import select
+            from storage.models import FillLog
+            from risk.protective_exit_gate import position_age_seconds_from_fills
+
+            # Generous recent slice; if a streak is older than this window the
+            # oldest seen fill becomes the assumed start → age underestimated →
+            # conservative (less suppression). Clean post-reset ledger is small.
+            try:
+                limit = int(os.getenv("PROTECTIVE_EXIT_FILLS_SCAN_LIMIT", "8000"))
+            except (TypeError, ValueError):
+                limit = 8000
+            async with sf() as session:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(
+                                FillLog.broker,
+                                FillLog.symbol,
+                                FillLog.timestamp,
+                                FillLog.position_qty_after,
+                            )
+                            .order_by(FillLog.timestamp.desc())
+                            .limit(limit)
+                        )
+                    ).all()
+                )
+            grouped: dict[str, list] = {}
+            for broker, symbol, ts, qty_after in rows:
+                b = str(broker or "").strip().lower()
+                s = str(symbol or "").strip().upper()
+                if not b or not s:
+                    continue
+                grouped.setdefault(f"{b}:{s}", []).append(
+                    {"timestamp": ts, "position_qty_after": qty_after}
+                )
+            now = datetime.now(timezone.utc)
+            for key, fills in grouped.items():
+                age = position_age_seconds_from_fills(fills, now=now)
+                if age is not None:
+                    out[key] = age
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | fills-age query failed: {}", exc)
+        return out
+
+    def _protective_exit_config(self, risk_engine):
+        """Parse the D166 anti-churn gate config from the risk engine config."""
+        try:
+            from risk.protective_exit_gate import parse_protective_exit_config
+
+            raw = (getattr(risk_engine, "config", {}) or {}).get("protective_exit_min_hold")
+            return parse_protective_exit_config(raw)
+        except Exception:  # noqa: BLE001
+            from risk.protective_exit_gate import ProtectiveExitConfig
+
+            return ProtectiveExitConfig(enabled=False)
+
     async def _run_aggregate_derisk_tick(self) -> None:
         """Force reduce-only de-risk when the AGGREGATE unrealised loss
         breaches a dynamic NAV/volatility budget.
@@ -1962,6 +2057,10 @@ class Orchestrator:
             chosen = select_derisk_closes(pls, nav, base_pct=budget_pct)
             if not chosen:
                 return
+
+            # D166 — horizon-aware anti-churn gate + position ages.
+            pe_cfg = self._protective_exit_config(risk_engine)
+            position_ages = await self._fills_age_seconds_by_symbol(sf) if pe_cfg.enabled else {}
             logger.warning(
                 "orchestrator | aggregate de-risk | unrealised=%s budget=-%s — closing %d worst loser(s)",
                 str(aggregate_unrealised(pls)),
@@ -1995,6 +2094,28 @@ class Orchestrator:
                         p.broker, p.symbol,
                     )
                     continue
+                # D166 — let a fresh daily-horizon thesis mature; a catastrophic
+                # single-position loss still closes (the 20% drawdown breaker
+                # remains the ultimate portfolio survival floor).
+                if pe_cfg.enabled:
+                    from risk.protective_exit_gate import should_suppress_protective_exit
+                    _pos_notional = abs(p.quantity) * p.avg_entry_price
+                    _loss_abs = -p.unrealised if p.unrealised < 0 else Decimal("0")
+                    _loss_nav = (_loss_abs / Decimal(str(nav))) if nav else Decimal("0")
+                    _loss_pos = (_loss_abs / _pos_notional) if _pos_notional > 0 else Decimal("0")
+                    suppress, why = should_suppress_protective_exit(
+                        config=pe_cfg,
+                        age_sec=position_ages.get(f"{p.broker}:{p.symbol}"),
+                        loss_pct_nav=_loss_nav,
+                        loss_pct_position=_loss_pos,
+                        structural_breach=False,
+                    )
+                    if suppress:
+                        logger.info(
+                            "orchestrator | agg de-risk held (anti-churn:{}) | {} {} age={}s",
+                            why, p.broker, p.symbol, position_ages.get(f"{p.broker}:{p.symbol}"),
+                        )
+                        continue
                 side = "sell" if p.quantity > 0 else "buy"
                 signal = RiskSignal(
                     signal_id=f"aggderisk-{p.symbol}-{int(now_ts)}",
@@ -2674,6 +2795,10 @@ class Orchestrator:
             day_pnl = realised_today + unrealised_now
             now_ts = datetime.now(timezone.utc).timestamp()
 
+            # D166 — horizon-aware anti-churn gate + position ages.
+            pe_cfg = self._protective_exit_config(risk_engine)
+            position_ages = await self._fills_age_seconds_by_symbol(sf) if pe_cfg.enabled else {}
+
             vol_scalar = Decimal("1.0")
             pmeta = portfolio_state.get("metadata")
             if isinstance(pmeta, dict) and "market_volatility_scalar" in pmeta:
@@ -2747,6 +2872,33 @@ class Orchestrator:
                         action.broker, action.symbol,
                     )
                     continue
+                # D166 — let a fresh daily-horizon thesis mature. The most-severe
+                # aggregate survival tier (tier_idx 0) and catastrophic single-
+                # position losses still fire; the per-position tier (-2) and the
+                # milder aggregate tiers are gated by min-hold.
+                if pe_cfg.enabled:
+                    from risk.protective_exit_gate import (
+                        _to_decimal as _ped,
+                        should_suppress_protective_exit,
+                    )
+                    _upnl_abs = abs(_ped(action.metadata.get("position_unrealised_pnl"), Decimal("0")))
+                    _loss_nav = (_upnl_abs / Decimal(str(nav))) if nav else Decimal("0")
+                    _loss_pos = _ped(action.metadata.get("position_loss_pct"), Decimal("0"))
+                    suppress, why = should_suppress_protective_exit(
+                        config=pe_cfg,
+                        age_sec=position_ages.get(f"{action.broker}:{action.symbol}"),
+                        loss_pct_nav=_loss_nav,
+                        loss_pct_position=_loss_pos,
+                        structural_breach=False,
+                        is_most_severe_aggregate_tier=(tier_idx == 0),
+                    )
+                    if suppress:
+                        logger.info(
+                            "orchestrator | intraday-derisk held (anti-churn:{}) | {} {} age={}s tier={}",
+                            why, action.broker, action.symbol,
+                            position_ages.get(f"{action.broker}:{action.symbol}"), tier_idx,
+                        )
+                        continue
                 signal = RiskSignal(
                     signal_id=f"intraday_derisk-{action.symbol}-{int(now_ts)}",
                     symbol=action.symbol,

@@ -33,6 +33,8 @@ pipeline:
   default_signal_strategies: &default_signal_strategies
     - momentum_breakout
     - mean_reversion
+    - trend_breakout        # D167 Phase 3 - proven daily sniper (PF 4.11); was omitted since D158 -> 100% regime-gated
+    - trend_following       # D167 Phase 3 - proven daily trend (PF 1.88); was omitted since D158
     - volume_flow
     - event_driven_news
     - pairs_trading

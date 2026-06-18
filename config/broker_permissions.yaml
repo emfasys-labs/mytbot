@@ -29,8 +29,8 @@ ibkr:
     reason: Pending IBKR approval
     restored_after: null
   future:
-    enabled: false
-    reason: Pending IBKR approval
+    enabled: true
+    reason: null
     restored_after: null
   crypto:
     enabled: true

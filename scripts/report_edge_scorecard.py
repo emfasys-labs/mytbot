@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 
 VERDICTS_PATH = Path("data/state/edge_gate_verdicts.json")
+STRATEGIES_CONFIG_PATH = Path("config/strategies.yaml")
 
 
 def _f(x) -> float:
@@ -59,6 +60,59 @@ def _f(x) -> float:
         return float(x)
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def backtest_cost_bps() -> dict:
+    """Read the edge-gate / backtest cost assumption from config.
+
+    The walk-forward harness charges ``fee_bps + slippage_bps`` on EACH side
+    (entry and exit), so a round-trip costs ``2 * (fee_bps + slippage_bps)``.
+    That is the cost the ``allowed`` verdicts were proven against. Returns the
+    per-side and round-trip assumption in bps. Falls back to the documented
+    defaults (10 + 5 = 15/side, 30 round-trip) when config is unreadable.
+    """
+    fee, slip = 10.0, 5.0
+    try:
+        import yaml  # type: ignore
+
+        raw = yaml.safe_load(STRATEGIES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        bt = raw.get("backtest") or {}
+        fee = _f(bt.get("fee_bps", fee))
+        slip = _f(bt.get("slippage_bps", slip))
+    except Exception:  # noqa: BLE001
+        pass
+    per_side = fee + slip
+    return {"fee_bps": fee, "slippage_bps": slip, "per_side_bps": per_side, "round_trip_bps": per_side * 2.0}
+
+
+def cost_reconciliation(row: dict, bt_cost: dict) -> dict:
+    """Compare a strategy's LIVE round-trip cost vs the backtest assumption.
+
+    ``fee_drag`` is fees / traded notional summed over ALL fills, i.e. the
+    average per-fill fee rate; a round trip is two fills, so live round-trip
+    fee ≈ ``2 * fee_drag``. Slippage is the average |slippage| per fill, also
+    doubled for a round trip. ``BACKTEST_TOO_KIND`` means an ``allowed``
+    verdict was proven against costs cheaper than reality is charging — the
+    edge may not survive live, so don't trust the harness until investigated.
+    """
+    live_fee_bps = row.get("fee_drag", 0.0) * 1e4
+    avg_slip = row.get("avg_slippage_bps")
+    live_slip_bps = abs(avg_slip) if avg_slip is not None else 0.0
+    live_round_trip_bps = 2.0 * (live_fee_bps + live_slip_bps)
+    bt_round_trip = bt_cost.get("round_trip_bps", 30.0)
+    if row.get("live_closes", 0) <= 0:
+        flag = "no_live_data"
+    elif live_round_trip_bps > bt_round_trip * 1.05:  # 5% tolerance band
+        flag = "BACKTEST_TOO_KIND"
+    else:
+        flag = "OK"
+    return {
+        "live_fee_bps": live_fee_bps,
+        "live_slip_bps": live_slip_bps,
+        "live_round_trip_bps": live_round_trip_bps,
+        "backtest_round_trip_bps": bt_round_trip,
+        "cost_flag": flag,
+    }
 
 
 def load_verdicts() -> dict:
@@ -157,6 +211,7 @@ async def collect_live(since_hours: float | None) -> dict:
 
 def build_report(verdicts: dict, live: dict) -> dict:
     strategies = sorted(set(verdicts) | {k for k in live if not k.startswith("_")})
+    bt_cost = backtest_cost_bps()
     rows = []
     for name in strategies:
         bt = (verdicts.get(name) or {}).get("long") or {}
@@ -198,6 +253,7 @@ def build_report(verdicts: dict, live: dict) -> dict:
                 "avg_slippage_bps": avg_slip,
             }
         )
+        rows[-1].update(cost_reconciliation(rows[-1], bt_cost))
     totals = {
         "realised_gross": sum(r["realised_gross"] for r in rows),
         "fees_all": sum(r["fees_all"] for r in rows),
@@ -206,7 +262,7 @@ def build_report(verdicts: dict, live: dict) -> dict:
         "live_closes": sum(r["live_closes"] for r in rows),
     }
     totals["fee_drag"] = (totals["fees_all"] / totals["notional_all"]) if totals["notional_all"] else 0.0
-    return {"rows": rows, "totals": totals}
+    return {"rows": rows, "totals": totals, "backtest_cost": bt_cost}
 
 
 def print_report(report: dict, verdicts_age: str) -> None:
@@ -254,6 +310,41 @@ def print_report(report: dict, verdicts_age: str) -> None:
         f"{'TOTAL':<20}{t['realised_gross']:>16,.2f}{t['fees_all']:>12,.2f}"
         f"{t['net']:>14,.2f}{t['notional_all']:>16,.0f}{t['fee_drag']*1e4:>9.1f}b"
     )
+
+    bt_cost = report.get("backtest_cost", {})
+    print("\n" + "=" * 116)
+    print(
+        "COST-MODEL RECONCILIATION - is live round-trip cost <= the cost the edge gate proved against?"
+    )
+    print(
+        f"  backtest assumption: {bt_cost.get('fee_bps', 0):.1f} fee + {bt_cost.get('slippage_bps', 0):.1f} slip "
+        f"= {bt_cost.get('per_side_bps', 0):.1f} bps/side -> {bt_cost.get('round_trip_bps', 0):.1f} bps round-trip"
+    )
+    print("=" * 116)
+    print(
+        f"{'strategy':<20}{'live_fee_bps':>14}{'live_slip_bps':>15}"
+        f"{'live_rt_bps':>13}{'bt_rt_bps':>11}{'verdict':>20}"
+    )
+    print("-" * 116)
+    any_too_kind = False
+    for r in rows:
+        if r.get("cost_flag", "no_live_data") == "no_live_data":
+            continue
+        if r.get("cost_flag") == "BACKTEST_TOO_KIND":
+            any_too_kind = True
+        print(
+            f"{r['strategy']:<20}{r.get('live_fee_bps', 0):>13.1f}b{r.get('live_slip_bps', 0):>14.1f}b"
+            f"{r.get('live_round_trip_bps', 0):>12.1f}b{r.get('backtest_round_trip_bps', 0):>10.1f}b"
+            f"{r.get('cost_flag', '-'):>20}"
+        )
+    if not any(r.get("cost_flag", "no_live_data") != "no_live_data" for r in rows):
+        print("  (no live closes yet - reconciliation populates as the soak runs)")
+    elif any_too_kind:
+        print(
+            "\n  ! BACKTEST_TOO_KIND: live cost exceeds the harness assumption. An 'allowed' verdict\n"
+            "    may NOT survive live - raise backtest fee_bps/slippage_bps to live levels and re-run\n"
+            "    the edge gate before trusting (or sizing up) the affected weapon."
+        )
 
     print("\n" + "=" * 116)
     print("CHURN - daily-horizon army should rarely round-trip intraday (<1d)")

@@ -135,3 +135,62 @@ async def test_get_order_book_can_force_depth_then_fallback(monkeypatch) -> None
     assert fake.cancel_mkt_depth_count == 1
     assert fake.req_mkt_data_count == 1
     assert fake.market_data_types == [3]
+
+
+class _FakeFutTicker:
+    last = 74.05
+    close = None
+    bid = 74.05
+    ask = 74.12
+    bidSize = 3
+    askSize = 3
+    domBids: list = []
+    domAsks: list = []
+
+
+class _FakeFutIB(_FakeIB):
+    def ticker(self, _contract):  # noqa: D401 - mirrors ib_insync
+        return _FakeFutTicker()
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_scales_futures_depth_by_multiplier(monkeypatch) -> None:
+    """D165 — IBKR reports futures depth in contracts; the adapter must scale
+    sizes to notional-consistent internal units (contracts * multiplier) so
+    liquidity/slippage checks compare against ``order.quantity`` correctly."""
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_ORDER_BOOK_SOURCE", raising=False)
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    adapter._ib = _FakeFutIB()
+
+    ob = await adapter.get_order_book("CL=F")
+
+    # CL multiplier is 1000 → 3 contracts becomes 3000 internal units per side.
+    assert ob.bids == [(Decimal("74.05"), Decimal("3000"))]
+    assert ob.asks == [(Decimal("74.12"), Decimal("3000"))]
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_does_not_scale_equity(monkeypatch) -> None:
+    """Non-futures must be untouched (multiplier 1)."""
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_ORDER_BOOK_SOURCE", raising=False)
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    adapter._ib = _FakeFutIB()
+
+    ob = await adapter.get_order_book("AAPL")
+
+    assert ob.bids == [(Decimal("74.05"), Decimal("3"))]
+    assert ob.asks == [(Decimal("74.12"), Decimal("3"))]

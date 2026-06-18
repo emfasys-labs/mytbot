@@ -113,6 +113,13 @@ portfolio_orchestrator:
     use_recent_pnl: true              # down-weight strategies bleeding recently (resolved by the loop)
     min_trust: 0.25
     max_trust: 1.50
+  # D166 (Phase 2) — the scoreboard gates size increases. The live-P&L
+  # posterior is only trusted once a weapon has >= this many live CLOSES (one
+  # noisy fill can't flip trust); below it, trust = the backtest prior only.
+  # Once enough live closes exist AND the weapon is net-negative live, its
+  # trust is capped at neutral (1.0) regardless of an optimistic backtest
+  # prior — never amplify a proven-live loser.
+  min_live_closes_for_posterior: 8
 
   # ── D158 Phase 2 — heterogeneous hunter army ────────────────────────────
   # Two independent axes (see docs/DECISIONS.md D158 Phase 2):

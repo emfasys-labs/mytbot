@@ -175,6 +175,13 @@ class OrchestratorConfig:
     strategy_trust: dict[str, Decimal] = field(default_factory=dict)
     min_trust: Decimal = Decimal("0.25")
     max_trust: Decimal = Decimal("1.50")
+    # D166 (Phase 2) — scoreboard gates size increases. The live P&L posterior
+    # is only trusted once a weapon has at least this many live CLOSES (one
+    # noisy fill must not flip trust). Below it, trust = the backtest prior
+    # only. Once enough live closes exist AND the weapon is net-negative, its
+    # trust is capped at neutral (1.0) regardless of an optimistic backtest
+    # prior — never amplify a proven-live loser.
+    min_live_closes_for_posterior: int = 8
     # ── D158 Phase 2 — heterogeneous hunter army ──────────────────────────
     # Each weapon has a TEMPERAMENT (sniper / shotgun / knife) — an intrinsic
     # style independent of the market — and the global MODE (defender/trader/
@@ -233,6 +240,11 @@ class OrchestratorConfig:
         ):
             if raw.get(key) is not None:
                 kwargs[key] = _dec(raw.get(key))
+        if raw.get("min_live_closes_for_posterior") is not None:
+            try:
+                kwargs["min_live_closes_for_posterior"] = int(raw.get("min_live_closes_for_posterior"))
+            except (TypeError, ValueError):
+                pass
         if raw.get("cluster_consolidation") is not None:
             kwargs["cluster_consolidation"] = bool(raw.get("cluster_consolidation"))
         if raw.get("no_average_down") is not None:
