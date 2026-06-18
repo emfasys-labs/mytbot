@@ -12,7 +12,13 @@ signal_engine:
   # gated by `enabled: false` in that file, so flipping this to true is
   # a no-op until BOTH gates are flipped AND a registered+approved
   # model exists. See docs/MODEL_GOVERNANCE.md.
-  use_trained_meta_labeler: true
+  #
+  # D163 Phase 1 — SHADOWED OFF. The trained meta-labeler is an unproven
+  # brain layer; the clean-core soak runs on the edge gate + orchestrator
+  # (the proven controls) only. The heuristic meta-labeler in
+  # signals/meta_labeler.py remains the live filter. Re-admit the trained
+  # model later via shadow evidence (Phase 4), not by default.
+  use_trained_meta_labeler: false
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true
@@ -66,18 +72,32 @@ signal_engine:
 # RiskEngine and ExecutionEngine unchanged — this never bypasses risk.
 portfolio_orchestrator:
   enabled: true                       # D158 Phase 1 — nets the proven daily weapons
-  # ── D159 — PREDATOR mandate (aggressive, fill-the-capital, no per-name caps) ──
-  entry_conviction_threshold: 0.08    # open proactively — act on most opportunities (was 0.15);
-                                      # weak conviction → small size, strong → big (size, not pass/fail)
-  flip_conviction_threshold: 0.40     # rotate more readily out of stale into fresh edge
+  # ── D163 Phase 1 — KELLY-RATIONAL sizing (replaces the D159 predator mandate) ──
+  # The scoreboard (scripts/report_edge_scorecard.py) showed the predator
+  # settings did not help: the proven daily weapons never round-tripped and
+  # the entire realised loss came from the de-risk machinery cleaning up
+  # oversized, low-conviction, intraday-churned opens (median hold ~8h, 75%
+  # intraday). Profit comes from sizing PROVEN edge correctly, not from
+  # leverage on noise. These values diversify, cap per-name, and run gross
+  # <= 1.0 (no leverage) so a modest real edge compounds instead of being
+  # amplified both ways into the drawdown breaker.
+  entry_conviction_threshold: 0.15    # only act on real conviction — don't open marginal noise
+                                      # that the de-risk layer then has to clean up at a loss
+  flip_conviction_threshold: 0.45     # require clearer evidence before rotating out of held edge
   hard_flip_conviction: 0.70
-  concentration_exponent: 2.5         # winner-take-all: pile capital into the highest-conviction names
-  max_position_pct_of_nav: 1.00       # NO per-name cap — a fully-confirmed signal can take 100% of NAV
-  gross_target_pct:                   # aggressive deployment — FILL the allocated capital
-    defender: 0.70                    # even cautious mode stays meaningfully deployed
-    trader: 1.10
-    hunter: 1.50                      # hunt hard when calm
-  net_cap_pct_of_gross: 1.00          # fully directional — back up the truck in one direction
+  concentration_exponent: 1.5         # tilt toward conviction but DIVERSIFY (no winner-take-all)
+  # D163 — per-name cap is now a SIGNAL-DERIVED operating point, not a flat
+  # constant: the orchestrator sizes each name at gross/(number of firing
+  # edges) and clamps it into [min_position_pct_of_nav, max_position_pct_of_nav].
+  # So the book diversifies when many proven edges fire and concentrates when
+  # few do — these two values are only the safety RAILS.
+  max_position_pct_of_nav: 0.20       # safety CEILING: never > 20% NAV in one name
+  min_position_pct_of_nav: 0.02       # safety FLOOR: a funded name is never dust
+  gross_target_pct:                   # deploy fully but UNLEVERED — gross <= 1.0x NAV
+    defender: 0.50
+    trader: 0.75
+    hunter: 1.00                      # hunt hard when calm, but never on margin
+  net_cap_pct_of_gross: 0.70          # allow directional conviction without a 100% one-way book
   # D160 — cluster-aware construction: recognise correlated same-direction
   # signals (5 short-USD forex pairs, equity-index ETFs, crypto-beta) as ONE
   # theme and express it as a single BIG position in the strongest member

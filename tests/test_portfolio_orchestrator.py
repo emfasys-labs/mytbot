@@ -366,3 +366,63 @@ def test_old_losing_position_still_closed_on_flat_desire():
                       config=_cfg(min_hold_sec_before_flip=Decimal("259200")))
     old = [o for o in res.orders if o.symbol == "OLD"]
     assert len(old) == 1 and old[0].close_only is True
+
+
+# ── D163 — dynamic per-name cap from live opportunity breadth ─────────────────
+def test_per_name_cap_concentrates_when_few_edges():
+    # One lone strong edge → operating per-name cap pinned to the safety
+    # ceiling (concentrate into the available edge).
+    intents = [StrategyIntent("AAA", "buy", Decimal("0.9"), "trend_breakout", "equity")]
+    res = orchestrate(intents, [], nav=NAV, mode="trader",
+                      config=_cfg(max_position_pct_of_nav=Decimal("0.20")))
+    assert res.diagnostics["firing_breadth"] == 1
+    # gross/breadth = 0.90/1 → clamped to ceiling 0.20.
+    assert res.diagnostics["per_name_frac"] == "0.20"
+    aaa = [t for t in res.targets if t.symbol == "AAA"][0]
+    assert aaa.target_notional == NAV * Decimal("0.20")
+
+
+def test_per_name_cap_diversifies_when_many_edges():
+    # Twelve equal independent edges → operating per-name cap shrinks well
+    # below the ceiling (diversify), derived purely from breadth.
+    intents = [
+        StrategyIntent(f"S{i}", "buy", Decimal("0.5"), "trend_breakout", "equity")
+        for i in range(12)
+    ]
+    res = orchestrate(intents, [], nav=NAV, mode="trader",
+                      config=_cfg(max_position_pct_of_nav=Decimal("0.20")))
+    assert res.diagnostics["firing_breadth"] == 12
+    # gross 0.90 / 12 = 0.075 < ceiling 0.20 → dynamic, not the flat cap.
+    assert res.diagnostics["per_name_frac"] == "0.075"
+
+
+def test_per_name_cap_respects_safety_floor():
+    # Many tiny edges would drive gross/breadth below the floor; the floor
+    # bound holds (per-name never collapses to dust).
+    intents = [
+        StrategyIntent(f"S{i}", "buy", Decimal("0.4"), "trend_breakout", "equity")
+        for i in range(40)
+    ]
+    res = orchestrate(intents, [], nav=NAV, mode="trader",
+                      config=_cfg(max_position_pct_of_nav=Decimal("0.20"),
+                                  min_position_pct_of_nav=Decimal("0.03")))
+    assert res.diagnostics["firing_breadth"] == 40
+    # 0.90/40 = 0.0225 < floor 0.03 → clamped up to the floor.
+    assert res.diagnostics["per_name_frac"] == "0.03"
+
+
+def test_edge_kelly_trust_tilts_book_toward_strongest_weapon():
+    # Two equal-conviction signals from different weapons; injecting an
+    # edge-Kelly trust prior routes more notional to the trusted weapon.
+    intents = [
+        StrategyIntent("AAA", "buy", Decimal("0.6"), "trend_breakout", "equity"),
+        StrategyIntent("BBB", "buy", Decimal("0.6"), "mean_reversion", "equity"),
+    ]
+    # Ceiling high enough that the per-name cap does not flatten the tilt.
+    cfg = _cfg(
+        max_position_pct_of_nav=Decimal("0.60"),
+        strategy_trust={"trend_breakout": Decimal("1.5"), "mean_reversion": Decimal("1.0")},
+    )
+    res = orchestrate(intents, [], nav=NAV, mode="trader", config=cfg)
+    by = {t.symbol: t.target_notional for t in res.targets}
+    assert by["AAA"] > by["BBB"] > 0

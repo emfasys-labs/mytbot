@@ -227,6 +227,32 @@ def decide_verdict(
                f"positive but weak: expectancy/trade={exp} consistency={cons} profit_factor={pf}")
 
 
+def kelly_fraction(win_rate: Any, profit_factor: Any) -> Decimal:
+    """Edge-proportional Kelly fraction from a weapon's PROVEN stats.
+
+    Derived (no magic constants) purely from the two numbers the edge gate
+    already measures. With win rate ``W`` and profit factor ``PF``, the payoff
+    ratio is ``R = avg_win/avg_loss = PF·(1−W)/W`` and the classic Kelly stake
+    is ``f* = W − (1−W)/R``. Substituting collapses to a clean closed form:
+
+        f* = W · (PF − 1) / PF
+
+    so a weapon with a higher win rate AND a higher profit factor earns a
+    larger stake — exactly "capital flows to proven edge." Clamped to [0, 1];
+    a non-positive edge returns 0. This is the *raw* per-weapon edge; the
+    caller applies a fractional-Kelly safety scalar and normalises across the
+    book (see :meth:`EdgeGateRegistry.edge_kelly_trust`).
+    """
+    w = _dec(win_rate)
+    pf = _dec(profit_factor)
+    if w <= 0 or pf <= 1:
+        return Decimal("0")
+    f = w * (pf - Decimal("1")) / pf
+    if f < 0:
+        return Decimal("0")
+    return f if f < Decimal("1") else Decimal("1")
+
+
 def aggregate_walk_forward(
     strategy: str,
     window_results: Iterable[Any],
@@ -358,3 +384,61 @@ class EdgeGateRegistry:
         if v is None:
             return Decimal("0") if thresholds.unproven_policy == "block" else thresholds.reduced_multiplier
         return v.size_multiplier
+
+    def edge_kelly_trust(
+        self,
+        *,
+        neutral: Decimal,
+        max_trust: Decimal,
+        min_trust: Decimal,
+        side: str = "long",
+    ) -> dict[str, Decimal]:
+        """Per-weapon a-priori trust from PROVEN edge (Kelly), normalised to the book.
+
+        For every certified verdict this computes the raw Kelly edge
+        (:func:`kelly_fraction` over the verdict's measured win-rate +
+        profit-factor) and maps it onto a trust multiplier so capital flows in
+        proportion to proven edge:
+
+          * the strongest proven weapon -> ``max_trust``;
+          * weaker proven weapons -> linearly between ``neutral`` and
+            ``max_trust`` by their Kelly ratio (every proven weapon stays at
+            least ``neutral`` — we never starve a profitable edge, only tilt
+            toward the best);
+          * a weapon with no fresh-capital permission (blocked / adverse) ->
+            ``min_trust`` (belt-and-suspenders; its candidates are already
+            dropped upstream).
+
+        ``neutral`` / ``max_trust`` / ``min_trust`` are the orchestrator's
+        trust BOUNDS (safety rails), not operating points — the operating
+        value is derived here from live verdict metrics. Returns ``{}`` when
+        no proven edge exists (caller falls back to neutral trust). Only ever
+        re-weights between weapons; the total gross is budgeted separately, so
+        this cannot inflate deployment.
+        """
+        kelly: dict[str, Decimal] = {}
+        denied: list[str] = []
+        for key, v in self._verdicts.items():
+            # Only consider the requested side; canonical key = long.
+            is_short = key.endswith(self.SHORT_SUFFIX)
+            want_short = (side or "long").strip().lower() in ("short", "sell", "s")
+            if is_short != want_short:
+                continue
+            name = key[: -len(self.SHORT_SUFFIX)] if is_short else key
+            if not v.allow_new_capital:
+                denied.append(name)
+                continue
+            m = v.metrics or {}
+            f = kelly_fraction(m.get("avg_win_rate", 0), m.get("profit_factor", 0))
+            if f > 0:
+                kelly[name] = f
+
+        out: dict[str, Decimal] = {}
+        max_f = max(kelly.values()) if kelly else Decimal("0")
+        if max_f > 0:
+            span = max_trust - neutral
+            for name, f in kelly.items():
+                out[name] = neutral + span * (f / max_f)
+        for name in denied:
+            out.setdefault(name, min_trust)
+        return out

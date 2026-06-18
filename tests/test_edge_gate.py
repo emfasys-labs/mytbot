@@ -236,3 +236,53 @@ def test_zero_trades_keeps_cold_start_reduce():
     v = decide_verdict(m, _thr(unproven_policy="reduce"))
     assert v.allow_new_capital is True
     assert v.size_multiplier == Decimal("0.50")
+
+
+# ── D163 — edge-proportional Kelly trust ─────────────────────────────────────
+def test_kelly_fraction_closed_form():
+    from backtest.edge_gate import kelly_fraction
+
+    # f* = W·(PF−1)/PF. trend_breakout-like: W .73, PF 4.0 → .73·.75 = .5475
+    assert kelly_fraction(0.73, Decimal("4.0")) == Decimal("0.73") * Decimal("3.0") / Decimal("4.0")
+    # Stronger edge beats weaker edge.
+    strong = kelly_fraction(0.73, Decimal("4.0"))
+    weak = kelly_fraction(0.64, Decimal("1.9"))
+    assert strong > weak
+    # No edge (PF<=1 or W<=0) → 0; clamped to [0,1].
+    assert kelly_fraction(0.6, Decimal("1.0")) == Decimal("0")
+    assert kelly_fraction(0.0, Decimal("3.0")) == Decimal("0")
+    assert kelly_fraction(0.99, Decimal("999")) <= Decimal("1")
+
+
+def _verdict_with_stats(name, verdict, allow, win_rate, pf):
+    return EdgeVerdict(
+        strategy=name, verdict=verdict, size_multiplier=Decimal("1") if allow else Decimal("0"),
+        allow_new_capital=allow, reason="t",
+        metrics={"avg_win_rate": win_rate, "profit_factor": str(pf)},
+    )
+
+
+def test_edge_kelly_trust_routes_capital_to_strongest_edge():
+    reg = EdgeGateRegistry("/nonexistent/v.json").load()
+    reg.set_verdict(_verdict_with_stats("trend_breakout", VERDICT_ALLOWED, True, 0.73, Decimal("4.0")))
+    reg.set_verdict(_verdict_with_stats("mean_reversion", VERDICT_ALLOWED, True, 0.64, Decimal("1.9")))
+    reg.set_verdict(_verdict_with_stats("toxic_short", VERDICT_BLOCKED, False, 0.30, Decimal("0.4")))
+    trust = reg.edge_kelly_trust(
+        neutral=Decimal("1"), max_trust=Decimal("1.5"), min_trust=Decimal("0.25"),
+    )
+    # Strongest proven edge pinned to the ceiling; weaker proven between
+    # neutral and ceiling; every proven weapon stays >= neutral.
+    assert trust["trend_breakout"] == Decimal("1.5")
+    assert Decimal("1") < trust["mean_reversion"] < Decimal("1.5")
+    # Denied (blocked) weapon floored.
+    assert trust["toxic_short"] == Decimal("0.25")
+
+
+def test_edge_kelly_trust_empty_when_nothing_proven():
+    reg = EdgeGateRegistry("/nonexistent/v.json").load()
+    reg.set_verdict(_verdict_with_stats("a", VERDICT_BLOCKED, False, 0.3, Decimal("0.5")))
+    trust = reg.edge_kelly_trust(
+        neutral=Decimal("1"), max_trust=Decimal("1.5"), min_trust=Decimal("0.25"),
+    )
+    # No positive edge → only the floored denied weapon, no proven mapping.
+    assert trust == {"a": Decimal("0.25")}

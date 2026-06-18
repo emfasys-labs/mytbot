@@ -131,7 +131,14 @@ class OrchestratorConfig:
     flip_conviction_threshold: Decimal = Decimal("0.45")
     hard_flip_conviction: Decimal = Decimal("0.75")
     concentration_exponent: Decimal = Decimal("1.5")
+    # D163 — the per-name cap is the safety CEILING (max concentration in one
+    # name); the operating cap is derived per-tick from live opportunity
+    # breadth (``gross / number_of_firing_edges``, clamped to
+    # [min_position_pct_of_nav, max_position_pct_of_nav]). So with many proven
+    # edges the book diversifies, with few it concentrates — never a flat
+    # constant, always bounded by these rails.
     max_position_pct_of_nav: Decimal = Decimal("0.08")
+    min_position_pct_of_nav: Decimal = Decimal("0.02")
     gross_target_pct: dict[str, Decimal] = field(
         default_factory=lambda: {
             "defender": Decimal("0.50"),
@@ -213,6 +220,7 @@ class OrchestratorConfig:
             "hard_flip_conviction",
             "concentration_exponent",
             "max_position_pct_of_nav",
+            "min_position_pct_of_nav",
             "net_cap_pct_of_gross",
             "rebalance_band_pct_of_nav",
             "min_hold_sec_before_flip",
@@ -533,8 +541,26 @@ def orchestrate(
         raw_w[sym] = (mag ** exp) if mag > 0 else D0
     total_w = sum(raw_w.values())
 
-    gross_budget = nav * config.gross_target_for(mode)
-    per_name_cap = nav * config.max_position_pct_of_nav
+    gross_frac = config.gross_target_for(mode)
+    gross_budget = nav * gross_frac
+    # D163 — dynamic per-name cap from live opportunity breadth. The operating
+    # cap is ``gross / number_of_firing_edges`` (so the more independent proven
+    # edges fire, the more the book diversifies; the fewer, the more it
+    # concentrates into the available edge), clamped to the configured safety
+    # rails. This replaces the flat ``max_position_pct_of_nav`` operating point
+    # with a signal-derived one bounded by that ceiling and the floor.
+    firing_breadth = sum(1 for net in candidates.values() if abs(net) >= entry_thr)
+    breadth_div = Decimal(firing_breadth) if firing_breadth > 0 else D1
+    floor_frac = config.min_position_pct_of_nav
+    ceil_frac = config.max_position_pct_of_nav
+    if floor_frac > ceil_frac:
+        floor_frac = ceil_frac
+    per_name_frac = gross_frac / breadth_div
+    if per_name_frac > ceil_frac:
+        per_name_frac = ceil_frac
+    elif per_name_frac < floor_frac:
+        per_name_frac = floor_frac
+    per_name_cap = nav * per_name_frac
 
     targets: dict[str, TargetPosition] = {}
     for sym, net in candidates.items():
@@ -685,6 +711,12 @@ def orchestrate(
     diag["gross_target"] = str(gross_t)
     diag["net_target"] = str(net_t)
     diag["gross_budget"] = str(gross_budget)
+    # D163 — signal-derived sizing surface (so the dynamic per-name cap and the
+    # edge-Kelly trust are auditable, not hidden constants).
+    diag["firing_breadth"] = firing_breadth
+    diag["per_name_frac"] = str(per_name_frac)
+    diag["per_name_cap"] = str(per_name_cap)
+    diag["strategy_trust"] = {k: str(v) for k, v in config.strategy_trust.items()}
     # D158 Phase 2 — surface the army's posture so the operator can SEE the
     # heterogeneous landscape (global threat + per-weapon effective factor).
     diag["mode"] = str(mode)

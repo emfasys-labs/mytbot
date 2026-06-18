@@ -2371,6 +2371,22 @@ class TradingLoop:
                                 strategies_cfg.get("portfolio_orchestrator")
                             )
                             if _orch_cfg.enabled and not zero_allocation:
+                                # D163 — a-priori edge-Kelly trust: route capital
+                                # toward weapons with the strongest PROVEN edge,
+                                # derived from the edge-gate verdicts (dynamic,
+                                # signal-driven). Empty when the gate is off or
+                                # nothing is proven → neutral trust.
+                                _edge_kelly: dict[str, Decimal] = {}
+                                try:
+                                    _eg_thr, _eg_reg = self._load_edge_gate(strategies_cfg)
+                                    if _eg_reg is not None:
+                                        _edge_kelly = _eg_reg.edge_kelly_trust(
+                                            neutral=Decimal("1"),
+                                            max_trust=_orch_cfg.max_trust,
+                                            min_trust=_orch_cfg.min_trust,
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    self._swallow("edge_kelly_trust", exc)
                                 executed = await self._run_orchestrated_tick(
                                     batch_candidates=batch_candidates,
                                     portfolio_dict=portfolio_dict,
@@ -2382,6 +2398,7 @@ class TradingLoop:
                                     sc_log_buffer=sc_log_rows,
                                     strategy_pnl_recent=_strategy_pnl,
                                     resolve_price=_resolve_price_for_symbol,
+                                    edge_kelly_trust=_edge_kelly,
                                 )
                             elif zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
@@ -2946,34 +2963,50 @@ class TradingLoop:
     def _orchestrator_strategy_trust(
         strategy_pnl_recent: dict[str, dict[str, Any]] | None,
         cfg: OrchestratorConfig,
+        edge_prior: dict[str, Decimal] | None = None,
     ) -> dict[str, Decimal]:
-        """Resolve per-strategy trust multipliers from recent P&L health.
+        """Resolve per-strategy trust = a-priori PROVEN edge x posterior live P&L.
 
-        A strategy bleeding recently is down-weighted (toward ``min_trust``);
-        a profitable one is boosted (toward ``max_trust``). This is how the
-        orchestrator stops a persistently-losing layer (e.g. the rotation
-        bleed found in D156) from dominating the netted conviction over time.
-        Neutral (1.0) when there is no recent sample.
+        Two signals compose into one capital-routing weight (D163):
+
+          * ``edge_prior`` — the a-priori edge-gate Kelly trust (capital flows
+            to the weapon with the strongest *proven* post-cost edge). This is
+            the operating point; the orchestrator's ``min_trust``/``max_trust``
+            are only the safety bounds it is normalised into.
+          * ``strategy_pnl_recent`` — the posterior: a strategy bleeding
+            recently is tilted down, a profitable one up. This stops a
+            persistently-losing layer (the D156 rotation bleed) from
+            dominating even if its backtest looked fine.
+
+        Combined = clamp(prior x posterior_tilt, min_trust, max_trust). With no
+        edge prior the prior defaults to neutral 1.0 (pure posterior behaviour,
+        backward compatible). Neutral (1.0) when neither signal has a sample.
         """
+        one = Decimal("1")
+        edge_prior = edge_prior or {}
+        names = set(edge_prior) | {
+            str(n) for n in (strategy_pnl_recent or {})
+        }
         out: dict[str, Decimal] = {}
-        for name, stats in (strategy_pnl_recent or {}).items():
-            if not isinstance(stats, dict):
-                continue
-            try:
-                net = Decimal(str(stats.get("net_pnl", 0) or 0))
-                fills = int(stats.get("fills", 0) or 0)
-            except Exception:  # noqa: BLE001
-                continue
-            if fills <= 0:
-                continue
-            # Bounded tilt: scale net P&L per fill into a modest multiplier.
-            one = Decimal("1")
-            per_fill = net / Decimal(fills)
-            if per_fill >= 0:
-                trust = one + min(cfg.max_trust - one, per_fill / Decimal("100"))
-            else:
-                trust = one + max(cfg.min_trust - one, per_fill / Decimal("100"))
-            out[str(name)] = max(cfg.min_trust, min(cfg.max_trust, trust))
+        for name in names:
+            base = edge_prior.get(name, one)
+            tilt = one
+            stats = (strategy_pnl_recent or {}).get(name)
+            if isinstance(stats, dict):
+                try:
+                    net = Decimal(str(stats.get("net_pnl", 0) or 0))
+                    fills = int(stats.get("fills", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    net, fills = Decimal("0"), 0
+                if fills > 0:
+                    # Bounded tilt: scale net P&L per fill into a modest factor.
+                    per_fill = net / Decimal(fills)
+                    if per_fill >= 0:
+                        tilt = one + min(cfg.max_trust - one, per_fill / Decimal("100"))
+                    else:
+                        tilt = one + max(cfg.min_trust - one, per_fill / Decimal("100"))
+            combined = base * tilt
+            out[name] = max(cfg.min_trust, min(cfg.max_trust, combined))
         return out
 
     async def _run_orchestrated_tick(
@@ -2989,6 +3022,7 @@ class TradingLoop:
         sc_log_buffer: list[dict[str, Any]] | None = None,
         strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
         resolve_price: Any = None,
+        edge_kelly_trust: dict[str, Decimal] | None = None,
     ) -> int:
         """D156 portfolio-orchestrator path.
 
@@ -3049,7 +3083,9 @@ class TradingLoop:
         from dataclasses import replace as _dc_replace
         cfg = _dc_replace(
             orch_cfg,
-            strategy_trust=self._orchestrator_strategy_trust(strategy_pnl_recent, orch_cfg),
+            strategy_trust=self._orchestrator_strategy_trust(
+                strategy_pnl_recent, orch_cfg, edge_prior=edge_kelly_trust,
+            ),
         )
         result = orchestrate(intents, book, nav=total_equity, mode=mode_raw, config=cfg)
         logger.info(

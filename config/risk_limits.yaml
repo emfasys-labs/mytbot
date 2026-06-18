@@ -23,11 +23,12 @@ max_gross_exposure_pct: 1.00    # Legacy/fallback only when enforce_static_expos
 # signals are exempt. Arbitrage/options are evaluated by their own gates.
 single_name_notional:
   enabled: true
-  # D159 — predator mandate: NO restrictive per-name cap. Conviction decides
-  # size (the portfolio orchestrator sizes dynamically up to 100% of NAV on a
-  # fully-confirmed signal). This 1.00 ceiling is a SANITY guard only — it
-  # blocks a sizing BUG from creating a >100%-of-NAV order, not a real bet.
-  max_pct_nav: 1.00             # up to 100% of NAV in one name (was 0.05)
+  # D163 Phase 1 — real per-name diversification cap. The D159 predator
+  # mandate removed this (1.00 = up to 100% NAV in one name); the scoreboard
+  # showed that just amplified losses on unproven, intraday-churned opens.
+  # A disciplined book never bets the farm on one name: <= 20% NAV per
+  # symbol. Reduce-only exits are exempt. (Was 1.00 under D159; 0.05 pre-D159.)
+  max_pct_nav: 0.20
 
 # ── D125 fix #5 — Per-UTC-day cumulative-add cap per symbol ──────────────────
 # Complements the single-name cap. Bounds the cumulative net-add notional
@@ -35,7 +36,8 @@ single_name_notional:
 # (incremented at signal approval, not at fill) and resets at UTC midnight.
 intraday_symbol_adds:
   enabled: true
-  max_pct_nav: 1.00             # D159 — allow full intraday rotation into one name (was 0.10)
+  max_pct_nav: 0.20             # D163 Phase 1 — cumulative same-day adds per name capped to the
+                                # 20% single-name cap (was 1.00 under D159, 0.10 pre-D159)
 
 # ── D127 P2 — Connect Hub connector certification gate ───────────────────────
 # Only Certified-tier brokers (config/connectors.yaml :: certification:
@@ -181,9 +183,10 @@ cooldown_minutes: 60            # Wait 60 minutes before trading again
 # ── Signal quality ────────────────────────────────────────────────────────────
 # No trade count limits — the system is incapable of placing a weak trade, not restricted
 # from placing many.  Quality gates determine what gets through.
-min_signal_confidence: 0.30     # D159 — gate SIZE, not pass/fail. The orchestrator floors order
-                                # confidence at 0.30, so this no longer blocks opportunities; weak
-                                # signals still act but conviction-sizing keeps them small.
+min_signal_confidence: 0.45     # D163 Phase 1 — only commit capital to genuine conviction. The
+                                # D159 floor (0.30) let weak signals open positions that the
+                                # de-risk machinery then closed at a loss. 0.45 keeps marginal
+                                # noise out while conviction-sizing still scales the survivors.
 
 # ── Quality gate (composite score) ────────────────────────────────────────────
 # TradeQualityScore = weighted blend of confidence + news factor + volume z-score.
@@ -333,7 +336,10 @@ correlation_scaling:
 # Reduce-only / close signals are never blocked here.
 fx_cluster:
   enabled: true
-  max_usd_directional_exposure_pct: 1.00   # D159 — full forex concentration allowed (was 0.15)
+  max_usd_directional_exposure_pct: 0.25   # D163 Phase 1 — one USD-direction bet capped at 25% NAV.
+                                           # D160 consolidation already merges the correlated pairs
+                                           # into ONE position; this caps how big that one theme gets
+                                           # (was 1.00 under D159 — the forex book that bled; 0.15 pre-D159).
 
 # ── D115 — Broad-market equity index cluster cap ─────────────────────────
 # SPY long + QQQ short + IWM short look like three independent equity
@@ -344,7 +350,8 @@ fx_cluster:
 # fx_cluster: reduce-only never blocked, neutralising legs always allowed.
 equity_index_cluster:
   enabled: true
-  max_net_exposure_pct: 1.00    # D159 — full equity-index concentration allowed (was 0.20)
+  max_net_exposure_pct: 0.30    # D163 Phase 1 — broad-market equity-index beta capped at 30% NAV
+                                # (was 1.00 under D159, 0.20 pre-D159)
 
 # ── D131 — Crypto cluster cap ────────────────────────────────────────────
 # BTC long on kraken + ETH long on binance + SOL long on bybit look like
@@ -357,7 +364,8 @@ equity_index_cluster:
 # exposure always pass.
 crypto_cluster:
   enabled: true
-  max_net_exposure_pct: 1.00    # D159 — full crypto concentration allowed, e.g. 100% BTC (was 0.10)
+  max_net_exposure_pct: 0.25    # D163 Phase 1 — aggregate crypto-beta capped at 25% NAV
+                                # (was 1.00 under D159, 0.10 pre-D159)
 
 # ── D115 — Paper-mode stale-price gate ───────────────────────────────────
 # An opening signal whose ``suggested_price`` was generated several minutes
