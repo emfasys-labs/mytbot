@@ -196,6 +196,7 @@ class UniverseBuilder:
 
         # D118 — pick the actual candidate set for scoring.
         priority_used = False
+        active_pins: list[str] = []
         if priority_scores:
             budget = (
                 int(target_budget)
@@ -206,6 +207,7 @@ class UniverseBuilder:
             # an anchor that no broker exposes does not become a phantom row.
             candidate_set = set(candidates)
             pin = [a for a in (anchors or []) if a in candidate_set]
+            active_pins = list(dict.fromkeys(pin))
             selected = top_n_by_priority(
                 priority_scores,
                 budget=budget,
@@ -275,7 +277,14 @@ class UniverseBuilder:
         # contract for timeouts.
         score_map = {s: v for s, v in scored_list}
 
-        ordered_syms = [s for s, _ in sorted(scored_list, key=lambda x: x[1], reverse=True)]
+        scored_symbol_set = {s for s, _ in scored_list}
+        pinned_scored = [s for s in active_pins if s in scored_symbol_set]
+        pinned_set = set(pinned_scored)
+        ordered_syms = pinned_scored + [
+            s
+            for s, _ in sorted(scored_list, key=lambda x: x[1], reverse=True)
+            if s not in pinned_set
+        ]
         top = ordered_syms[:total_cap]
         rest = ordered_syms[total_cap:]
         core = top[:core_max]

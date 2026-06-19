@@ -147,6 +147,46 @@ def test_priority_anchors_pinned_into_budget(tmp_path, fake_brokers):
     assert "MSFT" not in tiers.scores
 
 
+def test_priority_anchors_pinned_into_active_tiers_after_liquidity_sort(tmp_path):
+    """Pinned anchors that score poorly on liquidity must not fall to light."""
+    brokers = _FakeBrokerManager(
+        {
+            "ibkr": ["SPY", "AAPL", "MSFT"],
+            "kraken": ["BTC-USD", "ETH-USD"],
+        }
+    )
+    priority = {
+        "AAPL": _bd("AAPL", 0.95),
+        "MSFT": _bd("MSFT", 0.90),
+        "BTC-USD": _bd("BTC-USD", 0.85),
+        "ETH-USD": _bd("ETH-USD", 0.80),
+        "SPY": _bd("SPY", 0.01),
+    }
+    builder = UniverseBuilder(
+        max_symbols=3,
+        ranking={
+            "enabled": True,
+            "core_max": 1,
+            "scan_max": 2,
+            "max_candidates_to_score": 5,
+            "yf_concurrency": 4,
+            "tiers_path": str(tmp_path / "tiers.json"),
+        },
+    )
+
+    tiers = asyncio.run(
+        builder.build_tiered_universe(
+            brokers,
+            priority_scores=priority,
+            target_budget=5,
+            anchors=["SPY"],
+        )
+    )
+
+    assert "SPY" in set(tiers.core) | set(tiers.scan)
+    assert "SPY" not in tiers.light
+
+
 # ---------------------------------------------------------------------------
 # 2. Empty priority dict -> falls back to legacy stratified sampler
 # ---------------------------------------------------------------------------
