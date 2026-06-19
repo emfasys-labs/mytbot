@@ -160,6 +160,27 @@ def _is_bad_price(v: object) -> bool:
     return False
 
 
+def _first_good_price(*values: object) -> Decimal | None:
+    """Return the first positive, finite price from an IBKR ticker-like object."""
+    for value in values:
+        if _is_bad_price(value):
+            continue
+        try:
+            price = _d(value)
+        except Exception:  # noqa: BLE001
+            continue
+        if price > 0:
+            return price
+    return None
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
 def _is_disconnect_exc(exc: BaseException) -> bool:
     """True if *exc* is an IBKR socket/connection drop (expected at maintenance).
 
@@ -1614,6 +1635,14 @@ class IBKRAdapter(BrokerAdapter):
                 symbol,
             )
             return Decimal(0)
+        # In IBKR paper sessions, API snapshot quotes are frequently denied by
+        # account market-data packaging (10197/10167) even when trading and
+        # delayed Gateway display data are otherwise fine. Do not make routine
+        # marking/dashboard paths depend on those snapshots by default. Paper
+        # fills can still use signal/metadata prices, and order-book prechecks
+        # have their own explicit paper fallback.
+        if self.paper_mode and not _env_truthy("IBKR_PAPER_LAST_PRICE_SNAPSHOT", False):
+            return Decimal(0)
         # Circuit breaker: if the socket recently dropped, skip probing the dead
         # connection entirely until the cooldown elapses (prevents the per-symbol
         # disconnect traceback storm seen during IBKR's nightly maintenance).
@@ -1627,16 +1656,25 @@ class IBKRAdapter(BrokerAdapter):
             self._ib.reqMktData(contract, "", True, False)
             await asyncio.sleep(1.2)
             t = self._ib.ticker(contract)
-            last = t.last or t.close
-            if last is None or (isinstance(last, float) and last != last):
-                if t.bid and t.ask:
-                    last = (t.bid + t.ask) / 2.0
-                else:
-                    logger.warning("get_last_price | IBKR | no price | symbol={}", symbol)
-                    return Decimal(0)
+            bid = getattr(t, "bid", None)
+            ask = getattr(t, "ask", None)
+            mid = None
+            if not _is_bad_price(bid) and not _is_bad_price(ask):
+                mid = (_d(bid) + _d(ask)) / Decimal("2")
+            market_price_fn = getattr(t, "marketPrice", None)
+            market_price = market_price_fn() if callable(market_price_fn) else None
+            last = _first_good_price(
+                getattr(t, "last", None),
+                getattr(t, "close", None),
+                market_price,
+                mid,
+            )
+            if last is None:
+                logger.warning("get_last_price | IBKR | no price | symbol={}", symbol)
+                return Decimal(0)
             # Healthy read → reset the disconnect breaker.
             self._md_disconnect_logged = False
-            return _d(last)
+            return last
         except Exception as exc:  # noqa: BLE001
             if _is_disconnect_exc(exc):
                 # Expected, transient socket drop. Trip the cooldown, log ONCE
@@ -2002,6 +2040,66 @@ class IBKRAdapter(BrokerAdapter):
                 return False
             return True
 
+        def _paper_synthetic_quote_from_ticker(t: object | None) -> OrderBook | None:
+            if t is None:
+                return None
+            if not (self.paper_mode and _env_truthy("IBKR_PAPER_QUOTE_FALLBACK", True)):
+                return None
+            bid = getattr(t, "bid", None)
+            ask = getattr(t, "ask", None)
+            mid = None
+            if not _is_bad_price(bid) and not _is_bad_price(ask):
+                mid = (_d(bid) + _d(ask)) / Decimal("2")
+            market_price_fn = getattr(t, "marketPrice", None)
+            try:
+                market_price = market_price_fn() if callable(market_price_fn) else None
+            except Exception:  # noqa: BLE001
+                market_price = None
+            reference_price = _first_good_price(
+                getattr(t, "last", None),
+                getattr(t, "close", None),
+                market_price,
+                mid,
+            )
+            if reference_price is None:
+                return None
+            try:
+                spread_bps = max(
+                    Decimal("1"),
+                    Decimal(str(os.getenv("IBKR_PAPER_SYNTHETIC_SPREAD_BPS", "25"))),
+                )
+            except Exception:  # noqa: BLE001
+                spread_bps = Decimal("25")
+            half_spread = reference_price * spread_bps / Decimal("20000")
+            bid_px = max(Decimal("0.00000001"), reference_price - half_spread)
+            ask_px = reference_price + half_spread
+            sec_type = (getattr(contract, "secType", "") or "").upper()
+            if sec_type == "CASH":
+                size = Decimal("1000000")
+            elif _fut_spec is not None:
+                size = _size_mult
+            else:
+                try:
+                    size = max(
+                        Decimal("1"),
+                        Decimal(str(os.getenv("IBKR_PAPER_SYNTHETIC_SIZE", "1000"))),
+                    )
+                except Exception:  # noqa: BLE001
+                    size = Decimal("1000")
+            logger.debug(
+                "get_order_book | IBKR | synthetic paper quote fallback | "
+                "symbol={} | reference_price={} | spread_bps={}",
+                symbol,
+                reference_price,
+                spread_bps,
+            )
+            return OrderBook(
+                symbol=symbol,
+                timestamp=_iso_now(),
+                bids=[(bid_px, size)],
+                asks=[(ask_px, size)],
+            )
+
         async def _top_of_book_fallback() -> OrderBook:
             self._apply_market_data_type()
             self._ib.reqMktData(contract, "", True, False)
@@ -2012,6 +2110,9 @@ class IBKRAdapter(BrokerAdapter):
             bid = getattr(t, "bid", None)
             ask = getattr(t, "ask", None)
             if _is_bad_price(bid) or _is_bad_price(ask):
+                synthetic = _paper_synthetic_quote_from_ticker(t)
+                if synthetic is not None:
+                    return synthetic
                 return OrderBook(symbol=symbol, timestamp=_iso_now(), bids=[], asks=[])
             bid_size = _d(getattr(t, "bidSize", None) or 0)
             ask_size = _d(getattr(t, "askSize", None) or 0)

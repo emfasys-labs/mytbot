@@ -63,13 +63,16 @@ class _AccountType400Error(Exception):
 def _install_stub(
     monkeypatch: pytest.MonkeyPatch,
     wallet_results: dict[str, object | Exception],
-) -> None:
+) -> tuple[_StubHTTP, dict]:
     stub = _StubHTTP(wallet_results=wallet_results)
+    factory_kwargs: dict = {}
 
     def _factory(*_a, **_kw) -> _StubHTTP:  # noqa: ANN001 — free form kwargs
+        factory_kwargs.update(_kw)
         return stub
 
     monkeypatch.setattr("brokers.bybit.adapter.HTTP", _factory)
+    return stub, factory_kwargs
 
 
 @pytest.mark.asyncio
@@ -90,6 +93,23 @@ async def test_connect_does_not_probe_wallet_account_types(
     # wallet_account_type is resolved lazily on first get_balance().
     assert adapter._wallet_account_type is None
     assert adapter._wallet_unavailable is False
+
+
+@pytest.mark.asyncio
+async def test_connect_passes_configurable_recv_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BYBIT_RECV_WINDOW_MS", "15000")
+    _stub, factory_kwargs = _install_stub(
+        monkeypatch,
+        wallet_results={"UNIFIED": {"retCode": 0, "result": {"list": []}}},
+    )
+    adapter = BybitAdapter(api_key="k", api_secret="s", paper_mode=True)
+
+    ok = await adapter.connect()
+
+    assert ok is True
+    assert factory_kwargs["recv_window"] == 15000
 
 
 @pytest.mark.asyncio

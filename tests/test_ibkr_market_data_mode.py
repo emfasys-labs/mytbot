@@ -53,6 +53,22 @@ class _FakeIB:
         self.cancel_mkt_depth_count += 1
 
 
+class _FakeQuoteDeniedTicker:
+    last = 100.0
+    close = None
+    bid = float("nan")
+    ask = float("nan")
+    bidSize = None
+    askSize = None
+    domBids: list = []
+    domAsks: list = []
+
+
+class _FakeQuoteDeniedIB(_FakeIB):
+    def ticker(self, _contract):  # noqa: D401 - mirrors ib_insync
+        return _FakeQuoteDeniedTicker()
+
+
 def test_ibkr_market_data_type_defaults(monkeypatch) -> None:
     monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
 
@@ -69,8 +85,25 @@ def test_ibkr_market_data_type_env_override(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_last_price_applies_delayed_mode_and_does_not_cancel_snapshot(monkeypatch) -> None:
+async def test_get_last_price_skips_snapshot_by_default_in_paper_mode(monkeypatch) -> None:
     monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_PAPER_LAST_PRICE_SNAPSHOT", raising=False)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    fake = _FakeIB()
+    adapter._ib = fake
+
+    px = await adapter.get_last_price("AAPL")
+
+    assert px == Decimal("0")
+    assert fake.market_data_types == []
+    assert fake.req_mkt_data_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_last_price_applies_delayed_mode_when_paper_snapshot_enabled(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.setenv("IBKR_PAPER_LAST_PRICE_SNAPSHOT", "1")
 
     async def _fast_sleep(_seconds: float) -> None:
         return None
@@ -111,6 +144,51 @@ async def test_get_order_book_uses_top_of_book_in_paper_mode(monkeypatch) -> Non
     assert fake.cancel_mkt_depth_count == 0
     assert fake.req_mkt_data_count == 1
     assert fake.market_data_types == [3]
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_synthesizes_paper_quote_when_ibkr_denies_bid_ask(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_ORDER_BOOK_SOURCE", raising=False)
+    monkeypatch.delenv("IBKR_PAPER_QUOTE_FALLBACK", raising=False)
+    monkeypatch.delenv("IBKR_PAPER_SYNTHETIC_SPREAD_BPS", raising=False)
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    fake = _FakeQuoteDeniedIB()
+    adapter._ib = fake
+
+    ob = await adapter.get_order_book("AAPL")
+
+    assert ob.bids == [(Decimal("99.875"), Decimal("1000"))]
+    assert ob.asks == [(Decimal("100.125"), Decimal("1000"))]
+    assert fake.req_mkt_depth_count == 0
+    assert fake.req_mkt_data_count == 1
+    assert fake.market_data_types == [3]
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_can_disable_paper_synthetic_quote(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_MARKET_DATA_TYPE", raising=False)
+    monkeypatch.delenv("IBKR_ORDER_BOOK_SOURCE", raising=False)
+    monkeypatch.setenv("IBKR_PAPER_QUOTE_FALLBACK", "0")
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("brokers.ibkr.adapter.asyncio.sleep", _fast_sleep)
+
+    adapter = IBKRAdapter(paper_mode=True)
+    adapter._ib = _FakeQuoteDeniedIB()
+
+    ob = await adapter.get_order_book("AAPL")
+
+    assert ob.bids == []
+    assert ob.asks == []
 
 
 @pytest.mark.asyncio

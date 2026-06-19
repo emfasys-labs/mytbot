@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from ai.news_classifier import NewsScore
-from ai.pipeline import AIPipeline
+from ai.pipeline import AIPipeline, _db_text
 
 
 class _FakeClassifier:
@@ -109,6 +109,10 @@ def test_allowed_strategy_names_from_regime_config():
     )
     assert p.allowed_strategy_names("tightening") == {"mean_reversion"}
     assert p.allowed_strategy_names("neutral") is None
+
+
+def test_ai_output_db_text_clamps_provider_source() -> None:
+    assert _db_text("local_reasoning(gemini-2.5-flash-preview)", 32) == "local_reasoning(gemini-2.5-flash"
 
 
 def test_ai_yaml_regime_gates_lists_core_signal_strategies() -> None:
@@ -273,6 +277,41 @@ def test_news_score_for_symbol_helper():
     assert news_score_for_symbol(ai_result, "spy") == -0.1
     assert news_score_for_symbol(ai_result, "QQQ") is None
     assert news_score_for_symbol(None, "SPY") is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_news_wraps_yaml_news_block_for_ingest(monkeypatch):
+    calls = []
+
+    async def _fake_ingest_news(_session_factory, cfg):  # noqa: ANN001
+        calls.append(cfg)
+
+    class _Result:
+        def scalar_one(self):  # noqa: D401
+            return datetime.now(timezone.utc)
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001
+            return None
+
+        async def execute(self, *_args, **_kwargs):  # noqa: ANN001
+            return _Result()
+
+    def _session_factory():
+        return _Session()
+
+    monkeypatch.setenv("NEWS_API_KEY", "k")
+    monkeypatch.setattr("data.pipeline.ingest_news", _fake_ingest_news)
+
+    p = AIPipeline({}, classifier=_FakeClassifier())
+    await p._refresh_news_if_stale(_session_factory, force=True)
+
+    assert calls
+    assert calls[0]["news"]["enabled"] is True
+    assert "query" in calls[0]["news"]
 
 
 @pytest.mark.asyncio

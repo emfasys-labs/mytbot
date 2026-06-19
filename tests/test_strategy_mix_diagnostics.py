@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
-from system.strategy_candidate_log import _blocker_hint, compute_lifecycle_label
+from system.strategy_candidate_log import _blocker_hint, _json_safe, compute_lifecycle_label
 
 
 def test_lifecycle_idle_when_no_rows() -> None:
@@ -33,6 +35,24 @@ def test_blocker_hint_prefers_risk_then_exec_then_no_setup() -> None:
         [],
     )
     assert h2 and "No setup" in h2
+
+
+def test_json_safe_replaces_non_finite_numbers() -> None:
+    cleaned = _json_safe(
+        {
+            "ok": 1.25,
+            "bad_float": float("nan"),
+            "bad_decimal": Decimal("Infinity"),
+            "nested": [Decimal("1.5"), float("-inf")],
+        }
+    )
+
+    assert cleaned == {
+        "ok": 1.25,
+        "bad_float": None,
+        "bad_decimal": None,
+        "nested": [1.5, None],
+    }
 
 
 def test_lifecycle_trading_when_executed() -> None:

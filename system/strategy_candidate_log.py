@@ -10,6 +10,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from math import isfinite
 from typing import Any
 
 from loguru import logger
@@ -62,6 +63,21 @@ def _d(v: Any) -> Decimal | None:
         return None
 
 
+def _json_safe(v: Any) -> Any:
+    """Return a PostgreSQL JSON-safe value, replacing non-finite numbers."""
+    if v is None or isinstance(v, (str, bool, int)):
+        return v
+    if isinstance(v, float):
+        return v if isfinite(v) else None
+    if isinstance(v, Decimal):
+        return float(v) if v.is_finite() else None
+    if isinstance(v, dict):
+        return {str(k): _json_safe(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [_json_safe(item) for item in v]
+    return str(v)
+
+
 async def persist_rows(
     session_factory: async_sessionmaker[AsyncSession],
     rows: list[dict[str, Any]],
@@ -89,7 +105,7 @@ async def persist_rows(
                 status=str(r.get("status", "unknown"))[:40],
                 reason=(str(r["reason"])[:20000] if r.get("reason") else None),
                 winner_strategy=(str(r["winner_strategy"])[:50] if r.get("winner_strategy") else None),
-                metadata_=r.get("metadata_") or r.get("metadata"),
+                metadata_=_json_safe(r.get("metadata_") or r.get("metadata")),
             )
             session.add(rec)
         try:

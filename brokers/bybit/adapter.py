@@ -10,6 +10,7 @@ Docs: https://bybit-exchange.github.io/docs/v5/intro
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -162,10 +163,15 @@ class BybitAdapter(BrokerAdapter):
             self._rest_gap = AsyncRestGap(float(rest_iv))
         else:
             self._rest_gap = AsyncRestGap.from_env("BYBIT", default_seconds=0.05)
+        try:
+            self._recv_window_ms = max(5000, int(os.getenv("BYBIT_RECV_WINDOW_MS", "10000")))
+        except (TypeError, ValueError):
+            self._recv_window_ms = 10000
         self._lock = asyncio.Lock()
         self._connected = False
         self._private_ok = False
         self._client: HTTP | None = None
+        self._timestamp_offset_ms: int = 0
         self._order_symbol: dict[str, str] = {}
         self._wallet_account_type: str | None = None
         self._wallet_unavailable: bool = False
@@ -226,7 +232,21 @@ class BybitAdapter(BrokerAdapter):
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
             await self._rest_gap.wait()
-            return await asyncio.to_thread(fn)
+            if not self._timestamp_offset_ms:
+                return await asyncio.to_thread(fn)
+
+            import pybit._helpers as pybit_helpers
+
+            original_generate_timestamp = pybit_helpers.generate_timestamp
+
+            def _offset_timestamp() -> int:
+                return int(original_generate_timestamp()) + self._timestamp_offset_ms
+
+            pybit_helpers.generate_timestamp = _offset_timestamp
+            try:
+                return await asyncio.to_thread(fn)
+            finally:
+                pybit_helpers.generate_timestamp = original_generate_timestamp
 
     def _require_private(self) -> None:
         if not self._private_ok or self._client is None:
@@ -243,9 +263,28 @@ class BybitAdapter(BrokerAdapter):
                 timeout=10,
                 max_retries=1,
                 retry_delay=1,
+                recv_window=self._recv_window_ms,
             )
             # Public — always available.
-            await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
+            server_time = await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
+            try:
+                result = (server_time.get("result", {}) or {}) if isinstance(server_time, dict) else {}
+                raw_ms = result.get("timeNano") or result.get("timeSecond")
+                server_ms = int(raw_ms)
+                if "timeNano" in result:
+                    server_ms = server_ms // 1_000_000
+                else:
+                    server_ms = server_ms * 1000
+                local_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                self._timestamp_offset_ms = server_ms - local_ms
+                if abs(self._timestamp_offset_ms) > 500:
+                    logger.warning(
+                        "connect | Bybit | timestamp skew detected | offset_ms={} | signing private requests with server-time offset",
+                        self._timestamp_offset_ms,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._timestamp_offset_ms = 0
+                logger.debug("connect | Bybit | server-time offset unavailable | {}", exc)
 
             if self.api_key and self.api_secret:
                 # Validate credentials with a cheap authenticated endpoint that works on

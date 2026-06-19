@@ -14,6 +14,11 @@ from data.news_quality import is_analyst_research_roundup, is_displayable_news_i
 from storage.models import AIOutputLog, MacroObservation, NewsHeadline
 
 
+def _db_text(value: object, limit: int) -> str:
+    text = str(value or "").strip()
+    return text[:limit]
+
+
 @dataclass
 class AIPipelineResult:
     news_scores: dict[str, float]
@@ -104,11 +109,11 @@ class AIPipeline:
                         context_type="news",
                         score=Decimal(str(score)),
                         confidence=Decimal(str(d.get("confidence", 0.0))),
-                        event_type=str(d.get("event_type", "other")),
+                        event_type=_db_text(d.get("event_type", "other"), 32) or "other",
                         decay_hours=int(d.get("decay_hours", 24)),
                         rationale=str(d.get("rationale", ""))[:4000],
                         payload=d,
-                        source=str(d.get("provider", "local")),
+                        source=_db_text(d.get("provider", "local"), 32) or "local",
                         latency_ms=int(d.get("latency_ms", 0)) or None,
                         cost_estimate_gbp=Decimal(str(d.get("cost_estimate_gbp", 0))) or None,
                     )
@@ -188,7 +193,7 @@ class AIPipeline:
             news_cfg["enabled"] = True
             reason = "startup flush" if force else "stale"
             logger.info("ai.pipeline | news {} | fetching from NewsAPI", reason)
-            await ingest_news(session_factory, news_cfg)
+            await ingest_news(session_factory, {"news": news_cfg})
             # Detect delayed feeds (e.g. provider plan returns ~24h-old content)
             # so operators can see why news influence may be muted.
             async with session_factory() as session:
