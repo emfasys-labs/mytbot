@@ -1455,6 +1455,10 @@ class ExecutionEngine:
     async def _persist_result(
         self, session_factory, order: Order, result: OrderResult, signal: Signal
     ) -> None:
+        try:
+            setattr(result, "execution_broker", str(getattr(signal, "broker", "") or "").strip().lower())
+        except Exception:  # noqa: BLE001
+            pass
         # Telegram notification for fills is emitted regardless of persistence,
         # so a missing session_factory (unit test / degraded mode) still surfaces
         # the trade to the operator.

@@ -163,6 +163,7 @@ class RiskEngine:
             self._check_theme_uniqueness,
             self._check_catalyst_present,
             self._check_trade_quality_score,
+            self._check_crypto_momentum_entry_quality,
         ]
 
         # D015/global-edge allocation may rank and size candidates, but it is
@@ -1914,6 +1915,90 @@ class RiskEngine:
             )
         return (passed, "trade_quality")
 
+    def _check_crypto_momentum_entry_quality(self, signal, portfolio) -> tuple[bool, str]:
+        """Hard gate for crypto momentum entries with shadow-model red flags.
+
+        D175: ASR-USD / ATM-USD showed a failure mode where a single
+        momentum-breakout source, zero news, shadow meta-label DROP, and
+        broken/high-risk microstructure were still allowed through because the
+        warnings were advisory. Keep this gate narrow: opening crypto longs
+        sourced from momentum/orchestrator only.
+        """
+        cfg = self.config.get("crypto_momentum_entry_quality") or {}
+        if not bool(cfg.get("enabled", True)):
+            return (True, "crypto_momentum_entry_quality")
+        if self._is_reduce_only_signal(signal):
+            return (True, "crypto_momentum_entry_quality")
+        asset_class = str(getattr(signal, "asset_class", "") or "").strip().lower()
+        if asset_class != "crypto":
+            return (True, "crypto_momentum_entry_quality")
+        side = str(getattr(signal, "side", "") or "").strip().lower()
+        if side != "buy":
+            return (True, "crypto_momentum_entry_quality")
+        meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        coordinator_kind = str(meta.get("coordinator_kind", "")).strip().lower()
+        if coordinator_kind != "open_strategy" and not bool(meta.get("orchestrator")):
+            return (True, "crypto_momentum_entry_quality")
+        contributing = str(meta.get("contributing_strategies") or getattr(signal, "strategy", "") or "").lower()
+        if "momentum" not in contributing and "breakout" not in contributing:
+            return (True, "crypto_momentum_entry_quality")
+
+        reasons: list[str] = []
+
+        if bool(cfg.get("block_meta_label_drop", True)):
+            if bool(meta.get("meta_label_shadow")) and meta.get("meta_label_kept") is False:
+                reasons.append("meta_label_drop")
+
+        if bool(cfg.get("block_bad_microstructure", True)):
+            label = str(meta.get("microstructure_shadow_label", "") or "").strip().lower()
+            raw_reasons = str(meta.get("microstructure_shadow_reasons", "") or "").lower()
+            shadow_reason = str(meta.get("microstructure_shadow_reason", "") or "").lower()
+            shadow_error = str(meta.get("microstructure_shadow_error", "") or "").lower()
+            bad_labels = {str(x).lower() for x in cfg.get("bad_microstructure_labels", ["high_risk"])}
+            bad_reasons = {str(x).lower() for x in cfg.get(
+                "bad_microstructure_reasons",
+                ["malformed_book", "missing_spread", "unknown_asset_pair", "fetch_or_score_failed"],
+            )}
+            if label in bad_labels:
+                reasons.append(f"microstructure_{label}")
+            if any(r in raw_reasons for r in bad_reasons):
+                reasons.append("microstructure_bad_reason")
+            if "unknown asset pair" in shadow_error or "unknown_asset_pair" in shadow_error:
+                reasons.append("microstructure_unknown_pair")
+            if "fetch_or_score_failed" in shadow_reason and bool(cfg.get("block_microstructure_fetch_failure", True)):
+                reasons.append("microstructure_fetch_failed")
+
+        if bool(cfg.get("require_second_source_confirmation", True)):
+            news_abs = abs(self._float_from_any(meta.get("ai_news_score", getattr(signal, "news_score", 0.0)), 0.0))
+            trend_ok = self._boolish(meta.get("trend_confirms") or meta.get("trend_following_confirms"))
+            forecast_ok = self._float_from_any(meta.get("forecast_expected_return"), 0.0) > 0
+            trained_keep = bool(meta.get("meta_label_kept") is True and not bool(meta.get("meta_label_shadow")))
+            if news_abs < self._float_cfg(cfg, "min_news_abs", 0.15) and not (trend_ok or forecast_ok or trained_keep):
+                reasons.append("single_source_no_confirmation")
+
+        if bool(cfg.get("block_overextended", True)):
+            rsi = self._float_from_any(meta.get("rsi_14"), 0.0)
+            bbp = self._float_from_any(
+                meta.get("bbp_20_2") or meta.get("BBP_20_2.0_2.0") or meta.get("bbp"),
+                0.0,
+            )
+            if rsi >= self._float_cfg(cfg, "max_rsi_14", 82.0) and bbp >= self._float_cfg(cfg, "max_bbp", 1.20):
+                reasons.append("overextended")
+
+        if not reasons and bool(cfg.get("stamp_structural_stop_metadata", True)):
+            if "stop_loss_atr" not in meta:
+                meta["stop_loss_atr"] = str(cfg.get("structural_stop_atr_mult", "1.5"))
+            if "atr_pct" not in meta and meta.get("garch_vol_1d") is not None:
+                meta["atr_pct"] = str(meta.get("garch_vol_1d"))
+
+        if reasons:
+            try:
+                meta["crypto_momentum_entry_quality_reasons"] = sorted(set(reasons))
+            except Exception:  # noqa: BLE001
+                pass
+            return (False, "crypto_momentum_entry_quality")
+        return (True, "crypto_momentum_entry_quality")
+
     def _dynamic_quality_threshold(
         self,
         *,
@@ -1972,6 +2057,21 @@ class RiskEngine:
             return float(cfg.get(key, default))
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _float_from_any(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _boolish(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "y", "pass", "passed"}
 
     def _recent_win_rate(self, portfolio: dict, signal: Signal | None = None) -> float | None:
         candidates: list[Any] = []

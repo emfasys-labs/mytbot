@@ -194,6 +194,26 @@ min_signal_confidence: 0.45     # D163 Phase 1 — only commit capital to genuin
 # rejected here regardless of how many trades ran today.
 min_trade_quality_score: 0.30   # Minimum composite quality score (0 = disabled)
 
+crypto_momentum_entry_quality:
+  enabled: true
+  block_meta_label_drop: true
+  block_bad_microstructure: true
+  block_microstructure_fetch_failure: true
+  require_second_source_confirmation: true
+  block_overextended: true
+  stamp_structural_stop_metadata: true
+  structural_stop_atr_mult: "1.5"
+  min_news_abs: 0.15
+  max_rsi_14: 82.0
+  max_bbp: 1.20
+  bad_microstructure_labels:
+    - high_risk
+  bad_microstructure_reasons:
+    - malformed_book
+    - missing_spread
+    - unknown_asset_pair
+    - fetch_or_score_failed
+
 dynamic_quality_thresholds:
   enabled: true
   confidence:

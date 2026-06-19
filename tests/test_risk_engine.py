@@ -142,6 +142,118 @@ def test_rejects_on_minimum_order_size() -> None:
     assert decision.checks_failed == ["minimum_order_size"]
 
 
+def _crypto_quality_cfg() -> dict:
+    cfg = _risk_cfg()
+    cfg.update(
+        {
+            "enforce_static_exposure_caps": False,
+            "enforce_static_order_caps": False,
+            "min_signal_confidence": 0.45,
+            "min_trade_quality_score": 0.30,
+            "theme_uniqueness_check": False,
+            "require_catalyst": False,
+            "crypto_momentum_entry_quality": {"enabled": True},
+        }
+    )
+    return cfg
+
+
+def _crypto_portfolio() -> dict:
+    return {
+        "portfolio_value": Decimal("1000000"),
+        "tradable_capital": Decimal("1000000"),
+        "daily_realized_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "symbol_exposure": {},
+        "asset_class_exposure": {},
+    }
+
+
+def test_crypto_momentum_rejects_shadow_meta_label_drop() -> None:
+    engine = RiskEngine(_crypto_quality_cfg())
+    sig = _signal(
+        symbol="ASR-USD",
+        asset_class="crypto",
+        qty="40000",
+        price="1.25",
+        metadata={
+            "coordinator_kind": "open_strategy",
+            "contributing_strategies": "momentum_breakout",
+            "risk_notional_override": "50000",
+            "ai_news_score": 0.0,
+            "meta_label_shadow": True,
+            "meta_label_kept": False,
+            "meta_label_probability": 0.1344,
+            "meta_label_threshold": 0.228,
+        },
+    )
+
+    decision = engine.evaluate(sig, _crypto_portfolio())
+
+    assert decision.verdict == RiskVerdict.REJECTED
+    assert decision.checks_failed == ["crypto_momentum_entry_quality"]
+    assert "meta_label_drop" in sig.metadata["crypto_momentum_entry_quality_reasons"]
+
+
+def test_crypto_momentum_rejects_bad_microstructure_and_overextension() -> None:
+    engine = RiskEngine(_crypto_quality_cfg())
+    sig = _signal(
+        symbol="ATM-USD",
+        asset_class="crypto",
+        qty="30000",
+        price="1.66",
+        metadata={
+            "coordinator_kind": "open_strategy",
+            "contributing_strategies": "momentum_breakout",
+            "risk_notional_override": "50000",
+            "ai_news_score": 0.0,
+            "meta_label_shadow": True,
+            "meta_label_kept": True,
+            "microstructure_shadow_label": "high_risk",
+            "microstructure_shadow_reasons": "missing_spread,malformed_book",
+            "rsi_14": 85.6,
+            "BBP_20_2.0_2.0": 1.35,
+        },
+    )
+
+    decision = engine.evaluate(sig, _crypto_portfolio())
+
+    assert decision.verdict == RiskVerdict.REJECTED
+    reasons = set(sig.metadata["crypto_momentum_entry_quality_reasons"])
+    assert "microstructure_high_risk" in reasons
+    assert "microstructure_bad_reason" in reasons
+    assert "overextended" in reasons
+
+
+def test_crypto_momentum_allows_confirmed_clean_entry() -> None:
+    engine = RiskEngine(_crypto_quality_cfg())
+    sig = _signal(
+        symbol="BTC-USD",
+        asset_class="crypto",
+        qty="1",
+        price="50000",
+        metadata={
+            "coordinator_kind": "open_strategy",
+            "contributing_strategies": "momentum_breakout",
+            "risk_notional_override": "50000",
+            "ai_news_score": 0.3,
+            "meta_label_shadow": True,
+            "meta_label_kept": True,
+            "microstructure_shadow_label": "normal",
+            "rsi_14": 65.0,
+            "BBP_20_2.0_2.0": 0.9,
+            "garch_vol_1d": 0.05,
+        },
+    )
+
+    decision = engine.evaluate(sig, _crypto_portfolio())
+
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert "crypto_momentum_entry_quality" in decision.checks_passed
+    assert sig.metadata["stop_loss_atr"] == "1.5"
+    assert sig.metadata["atr_pct"] == "0.05"
+
+
 def test_rejects_on_max_exposure_limit() -> None:
     engine = RiskEngine(_risk_cfg())
     sig = _signal(qty="5", price="1000")  # 5k

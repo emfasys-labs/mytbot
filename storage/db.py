@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from brokers.base import Order, OrderResult, Tick
+from brokers.base import Order, OrderResult, OrderStatus, Tick
 from storage.models import Base, OrderLog, PriceHistory
 
 # FastAPI lifespan binds the primary engine/factory; the trading loop reuses them
@@ -251,6 +251,22 @@ async def persist_order_log(
         oid = f"m1-{uuid.uuid4()}"
     ts = tick_timestamp_to_datetime(result.timestamp)
     im = getattr(order, "instrument_metadata", None)
+    status_value = result.status.value
+    filled_quantity = result.filled_quantity
+    avg_fill_price = result.avg_fill_price
+    fee = result.fee
+    if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) and (
+        filled_quantity is None or Decimal(str(filled_quantity or "0")) <= 0
+    ):
+        status_value = OrderStatus.REJECTED.value
+        filled_quantity = Decimal("0")
+        avg_fill_price = None
+        fee = Decimal("0")
+        if isinstance(im, dict):
+            im = dict(im)
+        else:
+            im = {}
+        im["zero_quantity_fill_suppressed"] = True
     row = OrderLog(
         id=oid[:256],
         broker_order_id=(result.broker_order_id or None)[:64] if result.broker_order_id else None,
@@ -262,10 +278,10 @@ async def persist_order_log(
         quantity=order.quantity,
         limit_price=order.limit_price,
         broker=broker[:20],
-        status=result.status.value[:20],
-        filled_quantity=result.filled_quantity,
-        avg_fill_price=result.avg_fill_price,
-        fee=result.fee,
+        status=status_value[:20],
+        filled_quantity=filled_quantity,
+        avg_fill_price=avg_fill_price,
+        fee=fee,
         paper_mode=paper_mode,
         instrument_metadata=im if isinstance(im, dict) else None,
     )

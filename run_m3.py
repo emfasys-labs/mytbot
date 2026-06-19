@@ -533,7 +533,12 @@ def _apply_ledger_fill_to_portfolio_state(portfolio_state: dict[str, Any], signa
     meta = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
     spec = parse_option_contract_from_metadata(meta)
     symbol = spec.position_key() if spec is not None else str(signal.symbol or "")
-    broker = str(getattr(signal, "broker", "") or "").strip()[:20]
+    broker = str(
+        getattr(result, "execution_broker", "")
+        or getattr(result, "broker", "")
+        or getattr(signal, "broker", "")
+        or ""
+    ).strip()[:20]
     broker_l = broker.lower()
     price = Decimal("0")
     avg_fill = getattr(result, "avg_fill_price", None)
@@ -606,6 +611,8 @@ def _apply_ledger_fill_to_portfolio_state(portfolio_state: dict[str, Any], signa
             row["instrument_metadata"] = spec.to_dict()
         elif isinstance(getattr(signal, "metadata", None), dict) and isinstance(signal.metadata.get("instrument_metadata"), dict):
             row["instrument_metadata"] = signal.metadata["instrument_metadata"]
+        elif isinstance(getattr(signal, "metadata", None), dict):
+            row["instrument_metadata"] = dict(signal.metadata)
         positions[position_key] = row
 
     portfolio_state["positions"] = positions
