@@ -92,21 +92,52 @@ providers:
     max_text_length: 512
 
   local_reasoning:
+    # D170 — the "reasoning" layer now runs on Gemini 2.5 Flash (free tier) via
+    # its OpenAI-compatible endpoint. Rationale: the local gpt-oss:20b model took
+    # ~60-100s/call on this hardware and timed out at its 20s production limit, so
+    # it contributed almost nothing live (validated by
+    # scripts/compare_ai_providers.py). Gemini 2.5 Flash: ~3s/call, 100% JSON,
+    # ~93-100% directional accuracy on the benchmark — a strict upgrade that also
+    # frees the GPU so the bot can run on a small cloud VM. AI still only scores
+    # /explains, never trades. Still escalation-gated; on failure/rate-limit the
+    # chain falls back to rules/FinBERT and the Anthropic premium fallback.
+    #
+    # To REVERT to fully-local reasoning, restore the commented Ollama block
+    # below (provider: ollama / base_url localhost:11434 / model gpt-oss:20b).
     enabled: true
-    provider: ollama
-    base_url: http://localhost:11434
-    model_name: gpt-oss:20b         # primary local reasoning model
-    fallback_model: null            # no weaker local checker; escalate externally on real conflicts
+    provider: openai                 # OpenAI-compatible client (any /v1 endpoint)
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model_name: gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY      # read from .env; no secret stored in config
+    fallback_model: null
     temperature: 0.1
-    max_tokens: 900
-    timeout_seconds: 20            # fail fast; rules/FinBERT remain primary and premium resolves true conflicts
-    failure_cooldown_seconds: 120   # after a timeout, skip local calls for a cooldown window
-    gpu_concurrency: 1              # 20B model is heavy; avoid parallel local calls starving the trading loop
+    max_tokens: 2048                 # 2.5 is a thinking model: leave room for reasoning + JSON
+    timeout_seconds: 30              # remote API; generous vs the old 20s local fail-fast
+    failure_cooldown_seconds: 120    # after a timeout/rate-limit, skip for a cooldown window
+    gpu_concurrency: 2               # remote calls; modest to respect free-tier rate limits
     use_json_mode: true
     ensemble:
       enabled: false                # rules/FinBERT/local conflicts escalate to premium fallback instead
       hard_disagree_threshold: 0.4  # sentiment distance for soft → hard disagree
       confidence_boost: 0.15        # bonus confidence when both models agree
+  # ── REVERT-TO-LOCAL (D170) ── uncomment this block (and comment the Gemini one
+  #    above) to run reasoning fully offline on Ollama again:
+  # local_reasoning:
+  #   enabled: true
+  #   provider: ollama
+  #   base_url: http://localhost:11434
+  #   model_name: gpt-oss:20b
+  #   fallback_model: null
+  #   temperature: 0.1
+  #   max_tokens: 900
+  #   timeout_seconds: 20
+  #   failure_cooldown_seconds: 120
+  #   gpu_concurrency: 1
+  #   use_json_mode: true
+  #   ensemble:
+  #     enabled: false
+  #     hard_disagree_threshold: 0.4
+  #     confidence_boost: 0.15
 
   premium_fallback:
     enabled: true           # paid escalation enabled; still gated by necessity policy

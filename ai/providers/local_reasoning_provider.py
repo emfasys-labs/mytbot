@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
@@ -65,11 +66,34 @@ class LocalReasoningProvider(AIProvider):
         self._available = False
         self._active_model: str | None = None
 
+        # API key for hosted OpenAI-compatible endpoints (Gemini, Groq,
+        # OpenRouter, ...). Local Ollama needs none, so this stays empty there
+        # and the Authorization header is simply omitted (unchanged behaviour).
+        # Resolution order: explicit config `api_key`, then the env var named by
+        # config `api_key_env`, then the generic `LOCAL_REASONING_API_KEY`.
+        api_key_env = str(cfg.get("api_key_env", "") or "").strip()
+        resolved_key = str(cfg.get("api_key", "") or "").strip()
+        if not resolved_key and api_key_env:
+            resolved_key = str(os.getenv(api_key_env, "") or "").strip()
+        if not resolved_key:
+            resolved_key = str(os.getenv("LOCAL_REASONING_API_KEY", "") or "").strip()
+        self._api_key = resolved_key
+
         is_openai_compat = "/v1" in self._base_url
         if is_openai_compat:
             self._api_style = "openai"
         else:
             self._api_style = "ollama"
+
+        # Hosted gateways (with an API key) name/list models inconsistently
+        # (e.g. Gemini lists `models/gemini-2.0-flash`), so the Ollama-style
+        # installed-set membership check does not apply: trust the configured
+        # model once the endpoint is reachable.
+        self._trust_configured_model = self._api_style == "openai" and bool(self._api_key)
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Authorization header for hosted endpoints; empty for keyless Ollama."""
+        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     @property
     def name(self) -> str:
@@ -81,10 +105,24 @@ class LocalReasoningProvider(AIProvider):
                 if self._api_style == "ollama":
                     resp = await client.get(f"{self._base_url}/api/tags")
                 else:
-                    resp = await client.get(f"{self._base_url}/models")
+                    resp = await client.get(
+                        f"{self._base_url}/models", headers=self._auth_headers()
+                    )
                 if resp.status_code != 200:
                     logger.warning("local_reasoning | endpoint returned {} — disabled", resp.status_code)
                     return False
+
+            # Hosted gateway with a key: don't gate on the listed-model set
+            # (their `/models` ids rarely match the configured name verbatim).
+            if self._trust_configured_model:
+                self._active_model = self._model
+                self._available = True
+                self._disabled_until = 0.0
+                logger.info(
+                    "local_reasoning | hosted model active | model={} url={} style=openai",
+                    self._model, self._base_url,
+                )
+                return True
 
             installed = self._parse_installed_models(resp)
             candidates = [self._model]
@@ -313,7 +351,9 @@ class LocalReasoningProvider(AIProvider):
                 }
                 if self._use_json_mode:
                     payload["format"] = "json"
-                resp = await client.post(f"{self._base_url}/api/chat", json=payload)
+                resp = await client.post(
+                    f"{self._base_url}/api/chat", json=payload, headers=self._auth_headers()
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 return str(data.get("message", {}).get("content", ""))
@@ -329,7 +369,9 @@ class LocalReasoningProvider(AIProvider):
                 }
                 if self._use_json_mode:
                     payload["response_format"] = {"type": "json_object"}
-                resp = await client.post(f"{self._base_url}/chat/completions", json=payload)
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions", json=payload, headers=self._auth_headers()
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 return str(data["choices"][0]["message"]["content"])
