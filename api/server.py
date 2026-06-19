@@ -39,7 +39,7 @@ from api.pnl_periods import (
 )
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
-from data.news_quality import is_displayable_news_item
+from data.news_quality import is_analyst_research_roundup, is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
 from system.deployment import (
     STAGES as DEPLOYMENT_STAGES,
@@ -185,6 +185,13 @@ def _candidate_news_rows_for_signal(symbol: str, rows: list[Any]) -> list[Any]:
     allowed.add(sym_u)
     out: list[Any] = []
     for row in rows:
+        headline = _news_row_headline_text(row)
+        payload = getattr(row, "payload", None)
+        description = ""
+        if isinstance(payload, dict):
+            description = str(payload.get("description") or payload.get("body") or "")
+        if is_analyst_research_roundup(headline, description):
+            continue
         explicit = _explicit_tickers_in_news_row(row)
         if explicit and not (explicit & allowed):
             continue
@@ -205,6 +212,13 @@ def _news_row_matches_logged_symbol(row: Any) -> bool:
 
 
 def _is_market_wide_news_row(row: Any) -> bool:
+    headline = _news_row_headline_text(row)
+    payload = getattr(row, "payload", None)
+    description = ""
+    if isinstance(payload, dict):
+        description = str(payload.get("description") or payload.get("body") or "")
+    if is_analyst_research_roundup(headline, description):
+        return False
     explicit = _explicit_tickers_in_news_row(row)
     if explicit and not explicit.issubset(_BROAD_MARKET_TICKERS):
         return False
@@ -1812,14 +1826,11 @@ async def get_intelligence_signals(
                     )
                     ai_rows = list(ai_q.scalars().all())
                     by_sym: dict[str, list[Any]] = {}
-                    market_rows: list[Any] = []
                     for r in ai_rows:
                         sym = (getattr(r, "symbol", None) or "").strip().upper()
                         if not sym:
                             continue
                         by_sym.setdefault(sym, []).append(r)
-                        if _is_market_wide_news_row(r):
-                            market_rows.append(r)
                     for s in sigs:
                         sig_sym = _canonical_symbol_for_news_lookup((s.symbol or "").strip())
                         if not sig_sym:
@@ -1841,10 +1852,9 @@ async def get_intelligence_signals(
                                 d["match_mode"] = "alias"
                             attribution_by_signal[s.id] = alias_attr
                             continue
-                        market_attr = _signal_news_attribution(s, market_rows, max_items=2)
-                        for d in market_attr:
-                            d["match_mode"] = "market"
-                        attribution_by_signal[s.id] = market_attr
+                        # Do not paste one macro headline onto every symbol — that made
+                        # the Signals screen show identical news for unrelated names.
+                        attribution_by_signal[s.id] = []
 
     # Dashboard: one row per (symbol, strategy, side) — keep the newest only. The runner may log
     # the same idea every few minutes; showing six identical lines is correct historically but noisy.

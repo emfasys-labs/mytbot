@@ -18,6 +18,7 @@ from loguru import logger
 
 from ai.providers.base import AIProvider
 from ai.schemas import ProviderResult
+from data.news_quality import is_analyst_research_roundup
 
 # ── Ticker extraction ───────────────────────────────────────────────────────
 
@@ -204,6 +205,8 @@ class RulesProvider(AIProvider):
         return sorted(found)
 
     def _classify_event(self, lower_text: str) -> str:
+        if is_analyst_research_roundup(lower_text):
+            return "company"
         scores: dict[str, int] = {}
         for event_type, keywords in self._keyword_map.items():
             hits = sum(1 for kw in keywords if kw in lower_text)

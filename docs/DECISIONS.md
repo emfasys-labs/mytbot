@@ -28,6 +28,31 @@
 
 ---
 
+## D171 — News signal quality: wire orchestrator news scores + tier-1 source selection
+**Date:** 2026-06-19
+**Decision:** A live news audit found feeders + AI were healthy (`news_feed_stale=false`, four ingest sources, Gemini active) but **news felt weak on signals** because (1) the primary `portfolio_orchestrator` path passed `news_score=None` into `process_coordinator_action`, so orchestrated signals never received point-in-time news veto/weight or visible `news_score` in `/intelligence/signals`; (2) the per-cycle scoring budget was dominated by aggregator publishers (TradingKey, Stock Titan, AD HOC NEWS) over tier-1 wire (Reuters, Bloomberg, CNBC); (3) many cycles scored headlines but returned `0 non-zero` symbol matches (headline→ticker gap, especially forex/futures suffix forms).
+
+**Fix (two reversible pieces, no strategy enablement).**
+1. **Orchestrator + global-edge wiring:** `system/trading_loop/loop.py` now passes the loop's `ai_result.news_scores[symbol]` into every `process_coordinator_action` call on the orchestrator tick, global-edge execution batch, and global-edge preflight — via `_news_score_for_symbol()`. Opens get news overlay/veto + metadata; reduce-only trims remain exempt (existing `reduce_only` path).
+2. **Publisher-tier selection:** `data/news_quality.py::select_news_rows_for_scoring()` + `config/ai.yaml::pipeline.news_source_selection` (`tier1_min_items: 20`, `tier3_max_per_source: 2`). `AIPipeline._select_rows_for_scoring()` now fills the budget from tier-1 wire first, then default sources, capping tier-3 aggregators per source per cycle. Also expanded forex/futures alias matching in `_score_news()` so provider tags like `GBPUSD=X` / `CL=F` match monitored yfinance symbols.
+
+**Status:** Implemented. Tests: `tests/test_news_extraction_and_quality.py` (+2), `tests/test_ai_pipeline.py` (+3). **Requires `python run.py` restart** to take effect on the live loop. Fully reversible (`news_source_selection` block removal restores round-robin; news wiring is a one-line revert per call site). Next: soak and compare `/intelligence/signals` news_score population + non-zero AI pipeline counts; consider Marketaux volume + `event_driven_news` only after edge proof.
+
+---
+
+## D171.1 — Stop pasting one macro headline on every signal (Signals UI duplicate news)
+**Date:** 2026-06-19
+**Decision:** After D171, the Signals screen still showed the **same headline and −0.35 / macro score on every row** (e.g. the Benzinga analyst-roundup *"Here Are Thursday's Best Wall Street Analyst Research Calls…"* on GBPUSD, BYDDY, CL=F, etc.). Root cause was **not** broken feeders or AI — `/intelligence/signals` attribution in `api/server.py` fell back to **market-wide** `NewsLog` rows when a signal had no symbol-specific news, so one mis-tagged macro row blanketed the whole book. That roundup is not market-moving macro (rules layer now classifies it as `company` via `is_analyst_research_roundup()` in `data/news_quality.py`).
+
+**Fix (three pieces, UI + scoring hygiene).**
+1. **Attribution:** removed the market-wide fallback in `_signal_news_attribution()` — signals without a direct symbol match show **no** news row instead of a shared macro headline. Analyst roundups are excluded from `_is_market_wide_news_row()`.
+2. **Scoring selection:** `AIPipeline._select_rows_for_scoring()` drops analyst roundups so they no longer consume the per-cycle budget or produce spurious macro scores.
+3. **Helper extraction:** `ai/news_scores.py::news_score_for_symbol()` (used by the orchestrator path from D171) keeps tests import-light.
+
+**Status:** Implemented. Tests: `tests/test_api_signal_news_attribution.py`, `tests/test_news_extraction_and_quality.py`, `tests/test_ai_pipeline.py` (45 passed). **Requires `python run.py` restart** for live `/intelligence/signals`. Fully reversible.
+
+---
+
 ## D169 — Phase 4: re-admit the shadowed brain (trained meta-labeller) in SHADOW, graded against the scoreboard
 **Date:** 2026-06-18
 **Decision:** Phase 1 (D163) shadowed the one clearly-unproven active brain layer — the trained meta-labeller (`signal_engine.use_trained_meta_labeler: false`) — and deferred its re-admission to Phase 4 "measured against the scoreboard." This entry re-admits it the right way: **evidence-first, in shadow**, never by flipping it live blind.

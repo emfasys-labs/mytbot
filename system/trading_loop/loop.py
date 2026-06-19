@@ -150,6 +150,7 @@ from system.trading_loop.helpers import (
     is_futures_symbol,
     load_yaml,
 )
+from ai.news_scores import news_score_for_symbol as _news_score_for_symbol
 
 
 _DIRECTIONAL_SIDES = {"long", "short", "buy", "sell"}
@@ -2418,6 +2419,7 @@ class TradingLoop:
                                     strategy_pnl_recent=_strategy_pnl,
                                     resolve_price=_resolve_price_for_symbol,
                                     edge_kelly_trust=_edge_kelly,
+                                    ai_result=ai_result,
                                 )
                             elif zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
@@ -2440,6 +2442,7 @@ class TradingLoop:
                                     strat_cfg=strat_cfg,
                                     sc_log_buffer=sc_log_rows,
                                     strategy_pnl_recent=_strategy_pnl,
+                                    ai_result=ai_result,
                                 )
                                 if ge_dash_ok:
                                     dashboard_snapshot_published = True
@@ -3111,6 +3114,7 @@ class TradingLoop:
         strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
         resolve_price: Any = None,
         edge_kelly_trust: dict[str, Decimal] | None = None,
+        ai_result: Any | None = None,
     ) -> int:
         """D156 portfolio-orchestrator path.
 
@@ -3240,7 +3244,10 @@ class TradingLoop:
                     metadata=md,
                 )
                 sig = process_coordinator_action(
-                    action, self.sig_engine, portfolio_value=tradable, news_score=None,
+                    action,
+                    self.sig_engine,
+                    portfolio_value=tradable,
+                    news_score=_news_score_for_symbol(ai_result, od.symbol),
                 )
                 if sig is None:
                     continue
@@ -3277,6 +3284,7 @@ class TradingLoop:
         strat_cfg: dict[str, Any],
         sc_log_buffer: list[dict[str, Any]] | None = None,
         strategy_pnl_recent: dict[str, dict[str, Any]] | None = None,
+        ai_result: Any | None = None,
     ) -> tuple[int, bool]:
         """Global edge coordinator path: treasury, arb scans, ranked actions → risk → execution.
 
@@ -3913,6 +3921,7 @@ class TradingLoop:
             session_factory=session_factory,
             portfolio_dict=portfolio_dict,
             portfolio_value=tradable,
+            ai_result=ai_result,
         )
         if buf is not None and preflight_rows:
             buf.extend(preflight_rows)
@@ -4046,7 +4055,7 @@ class TradingLoop:
                 action,
                 self.sig_engine,
                 portfolio_value=tradable,
-                news_score=None,
+                news_score=_news_score_for_symbol(ai_result, action.symbol),
             )
             if sig is None:
                 if sc_log_buffer is not None:
@@ -4324,6 +4333,7 @@ class TradingLoop:
         session_factory: Any,
         portfolio_dict: dict[str, Any],
         portfolio_value: Decimal,
+        ai_result: Any | None = None,
     ) -> tuple[list[Any], list[dict[str, Any]]]:
         """Filter allocator actions using final-stage risk/cost gates.
 
@@ -4344,7 +4354,7 @@ class TradingLoop:
                     action,
                     self.sig_engine,
                     portfolio_value=portfolio_value,
-                    news_score=None,
+                    news_score=_news_score_for_symbol(ai_result, str(getattr(action, "symbol", "") or "")),
                 )
             except Exception as exc:  # noqa: BLE001
                 sig = None

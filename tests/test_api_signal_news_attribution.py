@@ -18,6 +18,7 @@ from api.server import (
     _signal_news_attribution,
     _signal_news_impact_source,
 )
+from data.news_quality import is_analyst_research_roundup
 
 
 def test_signal_news_attribution_picks_nearest_nonzero_rows() -> None:
@@ -125,6 +126,51 @@ def test_market_wide_news_filter_excludes_single_name_earnings() -> None:
 def test_market_wide_news_filter_excludes_single_name_even_if_event_is_broad() -> None:
     row = SimpleNamespace(event_type="macro", payload={"headline": "Teacher fund reduces $PODD stock position"})
     assert not _is_market_wide_news_row(row)
+
+
+def test_market_wide_news_filter_excludes_analyst_roundup() -> None:
+    headline = (
+        "Here Are Thursday's Best Wall Street Analyst Research Calls: "
+        "Albemarle, American Express, CME Group, and More"
+    )
+    row = SimpleNamespace(event_type="macro", payload={"headline": headline})
+    assert not _is_market_wide_news_row(row)
+
+
+def test_is_analyst_research_roundup_detects_wall_street_list() -> None:
+    assert is_analyst_research_roundup(
+        "Here Are Thursday's Best Wall Street Analyst Research Calls: Albemarle, American Express"
+    )
+
+
+def test_rules_classifies_analyst_roundup_as_company() -> None:
+    from ai.providers.rules_provider import RulesProvider
+
+    import asyncio
+
+    r = asyncio.run(
+        RulesProvider().score_headline(
+            "Here Are Thursday's Best Wall Street Analyst Research Calls: Albemarle, American Express",
+            None,
+            "Yahoo Finance",
+            "2026-06-18T12:00:00Z",
+        )
+    )
+    assert r.event_type == "company"
+
+
+def test_direct_candidates_reject_analyst_roundup_even_when_logged_on_symbol() -> None:
+    roundup = SimpleNamespace(
+        event_type="macro",
+        payload={
+            "headline": (
+                "Here Are Thursday's Best Wall Street Analyst Research Calls: "
+                "Albemarle, American Express, CME Group, and More"
+            )
+        },
+    )
+    rows = _candidate_news_rows_for_signal("USO", [roundup])
+    assert rows == []
 
 
 def test_direct_candidates_reject_explicit_different_ticker() -> None:

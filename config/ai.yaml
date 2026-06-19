@@ -18,6 +18,10 @@ pipeline:
   news_max_age_hours: 6
   news_limit: 200
   max_news_items_per_cycle: 40
+  # Publisher-tier selection for the per-cycle scoring budget (see data/news_quality.py).
+  news_source_selection:
+    tier1_min_items: 20           # prefer Reuters/Bloomberg/CNBC-style wire before fillers
+    tier3_max_per_source: 2       # cap TradingKey/Stock Titan-style aggregators per cycle
   cycle_timeout_seconds: 300      # GPU: 45s is plenty; CPU: LLM ensemble needs up to 180s
   cache_ttl_seconds: 300
   macro_series:

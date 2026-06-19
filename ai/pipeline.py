@@ -10,7 +10,7 @@ from loguru import logger
 from sqlalchemy import select, func
 
 from ai.news_classifier import NewsClassifier, NewsItem, NewsScore
-from data.news_quality import is_displayable_news_item
+from data.news_quality import is_analyst_research_roundup, is_displayable_news_item, select_news_rows_for_scoring
 from storage.models import AIOutputLog, MacroObservation, NewsHeadline
 
 
@@ -38,6 +38,9 @@ class AIPipeline:
         self.news_max_age_hours = int(cfg.get("news_max_age_hours", 6))
         self.news_limit = int(cfg.get("news_limit", 200))
         self.max_news_items_per_cycle = max(1, int(cfg.get("max_news_items_per_cycle", 40)))
+        _src_sel = cfg.get("news_source_selection") or {}
+        self.news_tier1_min_items = max(0, int(_src_sel.get("tier1_min_items", 20)))
+        self.news_tier3_max_per_source = max(1, int(_src_sel.get("tier3_max_per_source", 2)))
         self.regime_strategy_gates = cfg.get("regime_strategy_gates", {})
         self.anomaly_cfg = cfg.get("anomaly_detection", {})
         self.cache_ttl_seconds = max(0, int(cfg.get("cache_ttl_seconds", 300)))
@@ -307,31 +310,28 @@ class AIPipeline:
 
     def _select_rows_for_scoring(self, rows: list[NewsHeadline]) -> list[NewsHeadline]:
         """
-        Pick up to max_news_items_per_cycle rows with source-aware balancing.
-        Prevents one high-volume provider from starving others out of scoring.
+        Pick up to max_news_items_per_cycle rows with publisher-tier priority.
+
+        Tier-1 wire sources fill the budget first; noisy aggregators are capped
+        per source so they cannot crowd out Reuters/Bloomberg/CNBC-style items.
         """
         rows = [row for row in rows if is_displayable_news_item(row)]
+        rows = [
+            row
+            for row in rows
+            if not is_analyst_research_roundup(
+                getattr(row, "title", None),
+                getattr(row, "description", None),
+            )
+        ]
         if not rows:
             return []
-        by_source: dict[str, list[NewsHeadline]] = {}
-        for row in rows:
-            src = (getattr(row, "source_name", None) or "unknown").strip().lower()
-            by_source.setdefault(src, []).append(row)
-        selected: list[NewsHeadline] = []
-        source_keys = sorted(by_source.keys())
-        while len(selected) < self.max_news_items_per_cycle and source_keys:
-            next_keys: list[str] = []
-            for src in source_keys:
-                bucket = by_source.get(src) or []
-                if not bucket:
-                    continue
-                selected.append(bucket.pop(0))
-                if bucket:
-                    next_keys.append(src)
-                if len(selected) >= self.max_news_items_per_cycle:
-                    break
-            source_keys = next_keys
-        return selected
+        return select_news_rows_for_scoring(
+            rows,
+            max_items=self.max_news_items_per_cycle,
+            tier1_min_items=self.news_tier1_min_items,
+            tier3_max_per_source=self.news_tier3_max_per_source,
+        )
 
     async def _score_news(
         self,
@@ -400,19 +400,26 @@ class AIPipeline:
         }
 
         def _alias_symbols(symbol: str) -> tuple[str, ...]:
-            s = (symbol or "").strip().upper()
+            original = (symbol or "").strip().upper()
+            s = original
             if s.endswith("=X"):
                 s = s[:-2]
             if s.endswith("=F"):
                 s = s[:-2]
+            aliases: set[str] = {original, s}
             if s in _SYMBOL_ALIAS_MAP:
-                return _SYMBOL_ALIAS_MAP[s]
-            if s.endswith("-USD") and len(s) > 4:
+                aliases.update(_SYMBOL_ALIAS_MAP[s])
+            elif s.endswith("-USD") and len(s) > 4:
                 base = s[:-4]
-                return (s, base) if base else (s,)
-            if s.endswith("USD") and len(s) == 6:
-                return (s, s[:3], "USD")
-            return (s,)
+                aliases.update((s, base) if base else (s,))
+            elif s.endswith("USD") and len(s) == 6:
+                aliases.update((s, s[:3], "USD"))
+            # Match provider tags that include yfinance-style suffixes.
+            if not original.endswith("=F"):
+                aliases.add(f"{s}=F")
+            if not original.endswith("=X") and s.endswith("USD") and len(s) == 6:
+                aliases.add(f"{s}=X")
+            return tuple(sorted(aliases))
 
         def _score_symbol(symbol: str) -> None:
             aliases = _alias_symbols(symbol)

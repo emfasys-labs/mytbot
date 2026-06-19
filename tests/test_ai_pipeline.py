@@ -183,25 +183,6 @@ async def test_rules_provider_still_maps_nasdaq_100_to_qqq():
 
 
 @pytest.mark.asyncio
-async def test_score_news_balances_rows_across_sources():
-    clf = _FakeClassifier()
-    p = AIPipeline({"max_news_items_per_cycle": 3}, classifier=clf)
-    now = datetime.now(timezone.utc)
-    rows = [
-        SimpleNamespace(title="n1", source_name="newsapi", published_at=now, description="d"),
-        SimpleNamespace(title="n2", source_name="newsapi", published_at=now, description="d"),
-        SimpleNamespace(title="n3", source_name="newsapi", published_at=now, description="d"),
-        SimpleNamespace(title="av1", source_name="alphavantage", published_at=now, description="d"),
-        SimpleNamespace(title="fh1", source_name="finnhub", published_at=now, description="d"),
-    ]
-    await p._score_news(symbols=["SPY"], rows=rows)
-    used_sources = {str(i.source).lower() for i in clf.last_items}
-    assert "newsapi" in used_sources
-    assert "alphavantage" in used_sources
-    assert "finnhub" in used_sources
-
-
-@pytest.mark.asyncio
 async def test_score_news_skips_low_signal_institutional_filing_rows():
     clf = _FakeClassifier()
     p = AIPipeline({"max_news_items_per_cycle": 3}, classifier=clf)
@@ -224,6 +205,74 @@ async def test_score_news_skips_low_signal_institutional_filing_rows():
     ]
     await p._score_news(symbols=["SPY"], rows=rows)
     assert [i.headline for i in clf.last_items] == ["Fed signals rate path shift after inflation surprise"]
+
+
+@pytest.mark.asyncio
+async def test_score_news_prefers_tier1_publishers_in_budget():
+    clf = _FakeClassifier()
+    p = AIPipeline(
+        {
+            "max_news_items_per_cycle": 3,
+            "news_source_selection": {"tier1_min_items": 2, "tier3_max_per_source": 1},
+        },
+        classifier=clf,
+    )
+    now = datetime.now(timezone.utc)
+    rows = [
+        SimpleNamespace(title="agg1", source_name="TradingKey", published_at=now, description="d"),
+        SimpleNamespace(title="agg2", source_name="TradingKey", published_at=now, description="d"),
+        SimpleNamespace(title="wire1", source_name="Reuters", published_at=now, description="d"),
+        SimpleNamespace(title="wire2", source_name="Bloomberg", published_at=now, description="d"),
+        SimpleNamespace(title="mid1", source_name="Yahoo Finance", published_at=now, description="d"),
+    ]
+    await p._score_news(symbols=["SPY"], rows=rows)
+    headlines = [i.headline for i in clf.last_items]
+    assert "wire1" in headlines
+    assert "wire2" in headlines
+    assert sum(h.startswith("agg") for h in headlines) <= 1
+
+
+@pytest.mark.asyncio
+async def test_score_news_matches_forex_continuous_suffix_aliases():
+    class _FxClassifier:
+        async def score_batch(self, items):  # noqa: ANN001
+            _ = items
+            now = datetime.now(timezone.utc).isoformat()
+            return [
+                NewsScore(
+                    headline="dollar slips",
+                    sentiment=-0.4,
+                    confidence=0.8,
+                    affected_symbols=["GBPUSD=X"],
+                    event_type="macro",
+                    directional_bias="bearish",
+                    rationale="fx move",
+                    scored_at=now,
+                    decay_hours=24,
+                )
+            ]
+
+    p = AIPipeline({}, classifier=_FxClassifier())
+    rows = [
+        SimpleNamespace(
+            title="Cable weakens",
+            source_name="Reuters",
+            published_at=datetime.now(timezone.utc),
+            description="d",
+        )
+    ]
+    scores, _details, _anomalies = await p._score_news(symbols=["GBPUSD=X"], rows=rows)
+    assert scores["GBPUSD=X"] < 0
+
+
+def test_news_score_for_symbol_helper():
+    from ai.news_scores import news_score_for_symbol
+
+    ai_result = SimpleNamespace(news_scores={"CL=F": 0.25, "SPY": -0.1})
+    assert news_score_for_symbol(ai_result, "CL=F") == 0.25
+    assert news_score_for_symbol(ai_result, "spy") == -0.1
+    assert news_score_for_symbol(ai_result, "QQQ") is None
+    assert news_score_for_symbol(None, "SPY") is None
 
 
 @pytest.mark.asyncio

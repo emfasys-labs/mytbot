@@ -9,8 +9,11 @@ See data/news_quality.py and ai/providers/rules_provider.py.
 from __future__ import annotations
 
 from data.news_quality import (
+    is_analyst_research_roundup,
     is_displayable_news_item,
     is_low_signal_institutional_filing,
+    news_source_tier,
+    select_news_rows_for_scoring,
 )
 
 
@@ -105,3 +108,50 @@ def test_is_displayable_news_item_filters_filings():
         _FakeRow("Teacher Retirement System acquires shares of XYZ")
     )
     assert is_displayable_news_item(_FakeRow("Apple reports record Q1 revenue"))
+
+
+def test_is_analyst_research_roundup():
+    assert is_analyst_research_roundup("Best Wall Street Analyst Research Calls: Albemarle")
+    assert not is_analyst_research_roundup("Fed cuts rates at September meeting")
+
+
+def test_news_source_tier_classifies_wire_and_aggregators():
+    assert news_source_tier("Reuters") == 1
+    assert news_source_tier("Bloomberg.com") == 1
+    assert news_source_tier("TradingKey") == 3
+    assert news_source_tier("Stock Titan") == 3
+    assert news_source_tier("Yahoo Finance") == 2
+
+
+def test_select_news_rows_for_scoring_prefers_tier1_and_caps_aggregators():
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    class _Row:
+        def __init__(self, title: str, source: str):
+            self.title = title
+            self.source_name = source
+            self.published_at = now
+            self.description = "d"
+
+    rows = [
+        _Row("agg1", "TradingKey"),
+        _Row("agg2", "TradingKey"),
+        _Row("agg3", "TradingKey"),
+        _Row("agg4", "Stock Titan"),
+        _Row("wire1", "Reuters"),
+        _Row("wire2", "Bloomberg"),
+        _Row("mid1", "Yahoo Finance"),
+    ]
+    picked = select_news_rows_for_scoring(
+        rows,
+        max_items=4,
+        tier1_min_items=2,
+        tier3_max_per_source=1,
+    )
+    titles = [r.title for r in picked]
+    assert "wire1" in titles
+    assert "wire2" in titles
+    assert titles.count("agg1") + titles.count("agg2") + titles.count("agg3") <= 1
+    assert titles.count("agg4") <= 1
