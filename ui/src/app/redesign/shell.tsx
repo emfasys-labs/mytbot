@@ -23,15 +23,16 @@ import {
 } from './tokens';
 import type { DeploymentStage, TradingMode } from '../lib/api';
 
-const MODE_LABEL: Record<TradingMode, string> = {
-  defender: 'risk profile: defender',
-  trader: 'risk profile: trader',
-  hunter: 'risk profile: hunter',
+const MODE_WORD: Record<TradingMode, string> = {
+  defender: 'defender',
+  trader: 'trader',
+  hunter: 'hunter',
 };
 
 /** Accent per classifier output (read-only indicator). */
 function modeAccent(mode: TradingMode, fallback: string): string {
   if (mode === 'hunter') return fallback;
+  if (mode === 'trader') return ACCENTS.amber.main;
   if (mode === 'defender') return TOKENS.danger;
   return TOKENS.ink2;
 }
@@ -189,7 +190,24 @@ export function TopBar({
         <span style={{ color: TOKENS.ink4 }}>·</span>
         <span>{deploymentLabel}</span>
         <span style={{ color: TOKENS.ink4 }}>·</span>
-        <span title="Automatic market-state mode" style={{ color: modeColor }}>{MODE_LABEL[mode]}</span>
+        <span
+          title="Automatic market-state mode"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: modeColor,
+              boxShadow: `0 0 8px ${modeColor}88`,
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ color: TOKENS.ink3 }}>risk profile:</span>
+          <span style={{ color: modeColor, fontWeight: 500 }}>{MODE_WORD[mode]}</span>
+        </span>
         <span style={{ color: TOKENS.ink4 }}>·</span>
         <span>loop #{loopIteration || 0}</span>
       </div>
