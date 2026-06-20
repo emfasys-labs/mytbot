@@ -33,8 +33,8 @@ const STAGE_COLORS: Record<string, string> = {
 const STAGE_LABELS: Record<string, string> = {
   unique_normalized: 'unique normalized',
   priority_ranked: 'priority ranked',
-  scored: 'scored',
-  watching: 'watching',
+  scored: 'scored this cycle',
+  watching: 'watching now',
   promoted: 'promoted now',
   active_reps: 'active reps',
   source: 'broker listings',
@@ -46,8 +46,8 @@ const STAGE_LABELS: Record<string, string> = {
 const STAGE_DESC: Record<string, string> = {
   unique_normalized: 'Every unique normalized symbol from connected brokers + registry.',
   priority_ranked: 'Legacy stage — same pass as scored.',
-  scored: 'Priority top-N picked and yfinance liquidity-scored this cycle (budget N in subtitle).',
-  watching: 'Core + scan watchlist; anomaly boosts (promoted now) are a subset overlay, not a separate filter.',
+  scored: 'Priority top-N selected from the unique universe and yfinance liquidity-scored in the latest cycle.',
+  watching: 'Current core + scan watchlist; this is persisted operating state, not a strict downstream count from the latest scored cycle.',
   promoted: 'Temporary conviction boost from scan/light (filter instruments tab only).',
   active_reps: 'Correlation representatives under engine attention.',
   source: 'Raw broker listings plus curated broker seeds.',
@@ -218,39 +218,6 @@ export function UniverseScreen({
   const stream = data?.stream ?? [];
   const clusters = data?.clusters ?? [];
 
-  const heroLine = useMemo(() => {
-    // D118 headline — always read the new stage ids; legacy ids are
-    // fallbacks only when an old API payload is still in cache.
-    const unique =
-      funnel.find((f) => f.stage === 'unique_normalized') ??
-      funnel.find((f) => f.stage === 'source');
-    const scored =
-      funnel.find((f) => f.stage === 'scored') ??
-      funnel.find((f) => f.stage === 'eligible');
-    const watch = funnel.find((f) => f.stage === 'watching');
-    const promotedN = promotedNowCount(funnel, data?.promotions);
-    const act =
-      funnel.find((f) => f.stage === 'active_reps') ??
-      funnel.find((f) => f.stage === 'active');
-    const meta = (unique as { meta?: { broker_listings?: number } } | undefined)?.meta;
-    const brokerListings =
-      meta?.broker_listings ??
-      data?.coverage?.broker_listing_count ??
-      0;
-    const uniqueCount = unique?.count ?? data?.coverage?.unique_normalized_count ?? 0;
-    const scoredMeta = (scored as { meta?: { budget_attempted?: number; target_budget?: number } } | undefined)?.meta;
-    const budgetN = scoredMeta?.budget_attempted ?? scoredMeta?.target_budget;
-    return [
-      `${fmtNum(brokerListings)} listings → ${fmtNum(uniqueCount)} unique`,
-      budgetN != null && budgetN !== scored?.count
-        ? `${fmtNum(scored?.count ?? 0)} scored (budget ${fmtNum(budgetN)})`
-        : `${fmtNum(scored?.count ?? 0)} scored`,
-      `${fmtNum(watch?.count ?? 0)} watching`,
-      promotedN > 0 ? `${fmtNum(promotedN)} promoted now` : null,
-      `${fmtNum(act?.count ?? 0)} active reps`,
-    ].filter(Boolean).join(' · ');
-  }, [funnel, data?.coverage?.broker_listing_count, data?.coverage?.unique_normalized_count, data?.promotions]);
-
   const onJumpTo = (t: UniTab, stage?: string | null) => {
     setTab(t);
     setStageFilter(stage ?? null);
@@ -399,7 +366,6 @@ export function UniverseScreen({
             {tab === 'overview' && (
               <OverviewTab
                 accentColor={accentColor}
-                heroLine={heroLine}
                 funnel={funnel}
                 stream={stream}
                 symbols={symbols}
@@ -453,10 +419,9 @@ export function UniverseScreen({
 }
 
 function OverviewTab({
-  accentColor, heroLine, funnel, stream, symbols, clusters, data, onSelect, onJumpTo,
+  accentColor, funnel, stream, symbols, clusters, data, onSelect, onJumpTo,
 }: {
   accentColor: string;
-  heroLine: string;
   funnel: IntelligenceUniverseResponse['funnel'];
   stream: IntelligenceUniverseResponse['stream'];
   symbols: UniverseSymbolRow[];
@@ -465,8 +430,30 @@ function OverviewTab({
   onSelect: (s: string) => void;
   onJumpTo: (t: UniTab, stage?: string | null) => void;
 }) {
-  const total = funnel[0]?.count ?? 1;
+  const uniqueStage = funnel.find((f) => f.stage === 'unique_normalized') ?? funnel.find((f) => f.stage === 'source');
+  const scoredStage = funnel.find((f) => f.stage === 'scored') ?? funnel.find((f) => f.stage === 'eligible');
+  const watchStage = funnel.find((f) => f.stage === 'watching');
+  const activeStage = funnel.find((f) => f.stage === 'active_reps') ?? funnel.find((f) => f.stage === 'active');
+  const uniqueMeta = (uniqueStage as { meta?: Record<string, unknown> } | undefined)?.meta;
+  const scoredMeta = (scoredStage as { meta?: Record<string, unknown> } | undefined)?.meta;
+  const rawListings = brokerListingsMeta(uniqueMeta) ?? data?.coverage?.broker_listing_count ?? 0;
+  const uniqueCount = uniqueStage?.count ?? data?.coverage?.unique_normalized_count ?? 0;
+  const scoredCount = scoredStage?.count ?? data?.coverage?.scored_candidate_count ?? 0;
+  const watchingCount = watchStage?.count ?? data?.coverage?.watched_count ?? symbols.length;
+  const activeCount = activeStage?.count ?? clusters.length;
+  const budgetN = Number(scoredMeta?.budget_attempted ?? scoredMeta?.target_budget ?? data?.priority_rule?.budget?.target_budget ?? scoredCount);
+  const binding = String(scoredMeta?.binding_constraint ?? data?.priority_rule?.budget?.binding_constraint ?? 'adaptive');
+  const watchCap = data?.coverage?.caps?.watching ?? data?.adaptive?.resolved?.watching ?? 0;
+  const coreCap = data?.coverage?.caps?.core ?? data?.adaptive?.resolved?.core ?? 0;
+  const scanCap = data?.coverage?.caps?.scan ?? data?.adaptive?.resolved?.scan ?? 0;
+  const candidateCap = data?.coverage?.caps?.candidates ?? data?.adaptive?.resolved?.candidates ?? 0;
   const promotedN = promotedNowCount(funnel, data?.promotions);
+  // Decompose the live watchlist into "ranked this rebuild" vs "held from
+  // prior cycles (anti-churn grace)". The cap is the per-rebuild target, so
+  // anything above it is sticky memory, not an impossible downstream count.
+  const heldCount = watchCap > 0 ? Math.max(0, watchingCount - watchCap) : 0;
+  const rankedCount = Math.max(0, watchingCount - heldCount);
+  const overTarget = watchCap > 0 && watchingCount > watchCap * 1.5;
   const banned = funnel.find((f) => f.stage === 'banned');
   const state = buildState(data);
   const statusColor =
@@ -480,7 +467,7 @@ function OverviewTab({
       <Card style={{ padding: 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 18, flexWrap: 'wrap', gap: 12 }}>
           <div>
-            <Label accent={TOKENS.ink3}>discovery funnel · live</Label>
+            <Label accent={TOKENS.ink3}>universe · live</Label>
             <h2 style={{
               margin: '6px 0 0',
               fontFamily: TOKENS.sans,
@@ -490,10 +477,15 @@ function OverviewTab({
               lineHeight: 1.25,
               color: TOKENS.ink0,
             }}>
-              {heroLine}
+              <span style={{ color: STAGE_COLORS.watching, fontWeight: 400 }}>{fmtNum(watchingCount)}</span>
+              {' on the watchlist'}
+              <span style={{ color: TOKENS.ink3 }}>{' · '}</span>
+              <span style={{ color: STAGE_COLORS.active_reps, fontWeight: 400 }}>{fmtNum(activeCount)}</span>
+              {' in trading focus'}
             </h2>
             <div style={{ marginTop: 6, fontFamily: TOKENS.sans, fontSize: 13, color: TOKENS.ink2, maxWidth: 560, lineHeight: 1.5 }}>
-              Non-redundant representatives and cold-scan members. Correlation clusters: {clusters.length}.
+              Scored {fmtNum(scoredCount)} of {fmtNum(uniqueCount)} unique instruments this refresh.
+              {' '}{clusters.length} correlation clusters.
               {data?.fallback && ` (${data.fallback})`}
             </div>
             {data?.coverage && (
@@ -654,95 +646,29 @@ function OverviewTab({
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, overflowX: 'auto', paddingBottom: 8 }}>
-          {displayFunnelStages(funnel).map((f, i, arr) => {
-            const c = STAGE_COLORS[f.stage] ?? accentColor;
-            const pct = Math.max(0.04, f.count / total);
-            const w = Math.max(80, 100 * Math.sqrt(pct));
-            const next = arr[i + 1];
-            const drop = next && f.count > next.count ? f.count - next.count : 0;
-            const stageMeta = (f as { meta?: Record<string, unknown> }).meta;
-            const listingCount = brokerListingsMeta(stageMeta);
-            return (
-              <div key={f.stage} style={{ display: 'flex', alignItems: 'stretch' }}>
-                <button
-                  type="button"
-                  onClick={() => onJumpTo('instruments', instrumentFilterForFunnelStage(f.stage))}
-                  style={{
-                    flex: `1 1 ${w}%`,
-                    minWidth: 130,
-                    padding: '16px 14px',
-                    background: `linear-gradient(165deg, ${c}28 0%, ${c}10 45%, transparent 100%)`,
-                    border: `1px solid ${c}55`,
-                    borderLeft: `3px solid ${c}`,
-                    borderTop: `2px solid ${c}`,
-                    borderRadius: 10,
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    boxShadow: `0 4px 24px ${c}18`,
-                  }}
-                >
-                  <Label accent={c}>{stageLabel(f.stage)}</Label>
-                  <div style={{
-                    fontFamily: TOKENS.sans,
-                    fontSize: 28,
-                    fontWeight: 300,
-                    color: TOKENS.ink0,
-                    marginTop: 6,
-                  }}>
-                    {fmtNum(f.count)}
-                  </div>
-                  <div style={{ fontFamily: TOKENS.sans, fontSize: 11, color: TOKENS.ink3, marginTop: 4, minHeight: 36, lineHeight: 1.35 }}>
-                    {f.stage === 'unique_normalized' && listingCount != null && (
-                      <span style={{ display: 'block', color: TOKENS.ink2 }}>
-                        dedup from {fmtNum(listingCount)} listings
-                      </span>
-                    )}
-                    {f.stage === 'scored' && stageMeta && (
-                      <span style={{ display: 'block', color: c }}>
-                        budget {fmtNum(Number(stageMeta.budget_attempted ?? stageMeta.target_budget ?? f.count))}
-                        {stageMeta.binding_constraint != null
-                          ? ` · ${String(stageMeta.binding_constraint)}`
-                          : ''}
-                        {stageMeta.score_failures != null && Number(stageMeta.score_failures) > 0
-                          ? ` · ${fmtNum(Number(stageMeta.score_failures))} timeouts`
-                          : ''}
-                      </span>
-                    )}
-                    {f.stage === 'watching' && (
-                      <span style={{ display: 'block', color: promotedN > 0 ? STAGE_COLORS.promoted : TOKENS.ink3 }}>
-                        {promotedN > 0
-                          ? `${fmtNum(promotedN)} promoted now (anomaly boost)`
-                          : 'no anomaly boosts this cycle'}
-                      </span>
-                    )}
-                    <span>{(STAGE_DESC[f.stage] ?? '').split('.')[0]}.</span>
-                  </div>
-                </button>
-                {next && (
-                  <div style={{
-                    flex: '0 0 40px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                  >
-                    <svg width={32} height={32} style={{ overflow: 'visible' }}>
-                      <line
-                        x1={0} y1={16} x2={32} y2={16}
-                        stroke={drop > 0 ? TOKENS.caution : c}
-                        strokeWidth={1.5}
-                        strokeDasharray="2 4"
-                        style={{ animation: 'uni-flow 2s linear infinite' }}
-                      />
-                      <polygon points="32,16 26,12 26,20" fill={drop > 0 ? TOKENS.caution : c} />
-                    </svg>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.1fr)', gap: 16, alignItems: 'stretch' }}>
+          <RefreshFunnelPanel
+            rawListings={rawListings}
+            uniqueCount={uniqueCount}
+            scoredCount={scoredCount}
+            budgetN={Number.isFinite(budgetN) ? budgetN : scoredCount}
+            binding={binding}
+            candidateCap={candidateCap}
+            onJumpTo={onJumpTo}
+          />
+          <WatchlistPanel
+            watchingCount={watchingCount}
+            rankedCount={rankedCount}
+            heldCount={heldCount}
+            watchCap={watchCap}
+            coreCap={coreCap}
+            scanCap={scanCap}
+            promotedN={promotedN}
+            activeCount={activeCount}
+            clusterCount={clusters.length}
+            overTarget={overTarget}
+            onJumpTo={onJumpTo}
+          />
         </div>
 
         {banned && (
@@ -819,6 +745,205 @@ function OverviewTab({
   );
 }
 
+// "Last refresh" — the part that genuinely IS a funnel and resets every
+// pipeline cycle. Cool blue/grey so it reads as transient, not live state.
+function RefreshFunnelPanel({
+  rawListings,
+  uniqueCount,
+  scoredCount,
+  budgetN,
+  binding,
+  candidateCap,
+  onJumpTo,
+}: {
+  rawListings: number;
+  uniqueCount: number;
+  scoredCount: number;
+  budgetN: number;
+  binding: string;
+  candidateCap: number;
+  onJumpTo: (t: UniTab, stage?: string | null) => void;
+}) {
+  const steps: Array<{
+    label: string;
+    meaning: string;
+    value: number;
+    color: string;
+    onClick: () => void;
+  }> = [
+    {
+      label: 'all broker symbols',
+      meaning: 'Every row the connected brokers + registry list.',
+      value: rawListings,
+      color: STAGE_COLORS.source,
+      onClick: () => onJumpTo('coverage'),
+    },
+    {
+      label: 'unique instruments',
+      meaning: 'Same ticker on two venues counts once.',
+      value: uniqueCount,
+      color: STAGE_COLORS.unique_normalized,
+      onClick: () => onJumpTo('coverage'),
+    },
+    {
+      label: 'scored just now',
+      meaning: 'Top names liquidity-scored this rebuild (time-limited).',
+      value: scoredCount,
+      color: STAGE_COLORS.scored,
+      onClick: () => onJumpTo('instruments', 'all'),
+    },
+  ];
+  return (
+    <div style={{ padding: 16, borderRadius: 10, border: `1px solid ${TOKENS.line}`, background: TOKENS.bg1, display: 'flex', flexDirection: 'column' }}>
+      <Label accent={STAGE_COLORS.scored}>last refresh · this cycle only</Label>
+      <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column' }}>
+        {steps.map((s, i) => (
+          <div key={s.label}>
+            <button
+              type="button"
+              onClick={s.onClick}
+              title={s.meaning}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '11px 13px',
+                borderRadius: 8,
+                border: `1px solid ${s.color}44`,
+                borderLeft: `3px solid ${s.color}`,
+                background: `linear-gradient(165deg, ${s.color}12, ${TOKENS.bg2} 75%)`,
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: s.color, textTransform: 'uppercase' }}>{s.label}</div>
+                <div style={{ marginTop: 3, fontFamily: TOKENS.sans, fontSize: 10.5, color: TOKENS.ink3, lineHeight: 1.35 }}>{s.meaning}</div>
+              </div>
+              <div style={{ fontFamily: TOKENS.sans, fontSize: 24, fontWeight: 300, color: TOKENS.ink0, whiteSpace: 'nowrap' }}>{fmtNum(s.value)}</div>
+            </button>
+            {i < steps.length - 1 && (
+              <div style={{ display: 'flex', justifyContent: 'center', color: TOKENS.ink4, fontSize: 12, lineHeight: 1, padding: '3px 0' }}>↓</div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.6 }}>
+        Only the top {fmtNum(budgetN)} of {fmtNum(uniqueCount)} were scored this cycle (budget limit · {binding}). Candidate cap {fmtNum(candidateCap)}.
+      </div>
+    </div>
+  );
+}
+
+// "Live watchlist" — sticky operating state, not a funnel step. One hero
+// number decomposed into ranked-this-rebuild + held-from-memory, with
+// boosted / trading-focus shown as layers ON the watchlist, not stages
+// after it. Teal/purple/yellow so it reads as live, distinct from refresh.
+function WatchlistPanel({
+  watchingCount,
+  rankedCount,
+  heldCount,
+  watchCap,
+  coreCap,
+  scanCap,
+  promotedN,
+  activeCount,
+  clusterCount,
+  overTarget,
+  onJumpTo,
+}: {
+  watchingCount: number;
+  rankedCount: number;
+  heldCount: number;
+  watchCap: number;
+  coreCap: number;
+  scanCap: number;
+  promotedN: number;
+  activeCount: number;
+  clusterCount: number;
+  overTarget: boolean;
+  onJumpTo: (t: UniTab, stage?: string | null) => void;
+}) {
+  const total = Math.max(1, watchingCount);
+  const rankedPct = (rankedCount / total) * 100;
+  const heldPct = (heldCount / total) * 100;
+  const rankedColor = STAGE_COLORS.watching;
+  const heldColor = STAGE_COLORS.active_reps;
+  return (
+    <button
+      type="button"
+      onClick={() => onJumpTo('instruments', 'watching')}
+      style={{
+        padding: 16,
+        borderRadius: 10,
+        border: `1px solid ${rankedColor}44`,
+        background: `linear-gradient(150deg, ${rankedColor}12, ${TOKENS.bg1} 65%)`,
+        display: 'flex',
+        flexDirection: 'column',
+        textAlign: 'left',
+        cursor: 'pointer',
+        color: TOKENS.ink1,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, width: '100%' }}>
+        <div>
+          <Label accent={rankedColor}>live watchlist · what we track now</Label>
+          <div style={{ marginTop: 4, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            names we keep price + features for, and may trade
+          </div>
+        </div>
+        <div style={{ fontFamily: TOKENS.sans, fontSize: 40, fontWeight: 300, lineHeight: 1, color: TOKENS.ink0 }}>{fmtNum(watchingCount)}</div>
+      </div>
+
+      {/* ranked + held decomposition — explains why total can exceed the cap */}
+      <div style={{ marginTop: 14, display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', background: TOKENS.bg3 }}>
+        <div style={{ width: `${rankedPct}%`, background: rankedColor, opacity: 0.8 }} title={`${fmtNum(rankedCount)} ranked this rebuild`} />
+        {heldCount > 0 && (
+          <div style={{ width: `${heldPct}%`, background: heldColor, opacity: 0.5 }} title={`${fmtNum(heldCount)} held from prior cycles (grace)`} />
+        )}
+      </div>
+      <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: '4px 14px', fontFamily: TOKENS.mono, fontSize: 10.5, color: TOKENS.ink2 }}>
+        <span title="Newly ranked into the watchlist this rebuild (core + scan).">
+          <span style={{ color: rankedColor }}>●</span>{' '}{fmtNum(rankedCount)} ranked
+          {watchCap > 0 && <span style={{ color: TOKENS.ink3 }}>{` (core ${fmtNum(coreCap)} + scan ${fmtNum(scanCap)})`}</span>}
+        </span>
+        {heldCount > 0 && (
+          <span title="Fell out of the top-ranked set but kept a few cycles so the list does not flicker.">
+            <span style={{ color: heldColor }}>●</span>{' '}{fmtNum(heldCount)} held (grace)
+          </span>
+        )}
+      </div>
+
+      {/* layers ON the watchlist — not downstream funnel stages */}
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`, display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <span
+          onClick={(e) => { e.stopPropagation(); onJumpTo('instruments', 'promoted'); }}
+          title="Short-term 'pay extra attention' flag on a subset of the watchlist."
+          style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink2 }}
+        >
+          <span style={{ color: STAGE_COLORS.promoted, fontSize: 16, fontWeight: 400 }}>{fmtNum(promotedN)}</span>{' boosted'}
+        </span>
+        <span
+          onClick={(e) => { e.stopPropagation(); onJumpTo('instruments', 'active_reps'); }}
+          title="One name per correlated group — the distinct bets strategies actually lean on."
+          style={{ fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink2 }}
+        >
+          <span style={{ color: STAGE_COLORS.active_reps, fontSize: 16, fontWeight: 400 }}>{fmtNum(activeCount)}</span>{' in trading focus'}
+          <span style={{ color: TOKENS.ink3 }}>{` · ${fmtNum(clusterCount)} clusters`}</span>
+        </span>
+      </div>
+
+      {overTarget && (
+        <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.caution, lineHeight: 1.5 }}>
+          Watchlist is {(watchingCount / Math.max(1, watchCap)).toFixed(1)}× the {fmtNum(watchCap)} per-rebuild target — large rotation recently.
+        </div>
+      )}
+    </button>
+  );
+}
+
 function CompositionSummary({ symbols, accentColor }: { symbols: UniverseSymbolRow[]; accentColor: string }) {
   const byClass: Record<string, number> = {};
   symbols.filter((s) => s.stage !== 'banned').forEach((s) => {
@@ -863,15 +988,19 @@ function FunnelTab({
   const stages = displayFunnelStages(funnel);
   const total = stages[0]?.count || 1;
   const promotedN = promotedNowCount(funnel, promotions);
+  const scoredN = stages.find((f) => f.stage === 'scored')?.count ?? 0;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <PriorityRuleCard accentColor={accentColor} rule={priorityRule ?? null} />
 
       <Card style={{ padding: 24 }}>
-        <Label accent={TOKENS.ink3}>funnel · 4-stage selection</Label>
+        <Label accent={TOKENS.ink3}>selection model · stateful</Label>
         <h2 style={{ margin: '8px 0 0', fontFamily: TOKENS.sans, fontSize: 22, fontWeight: 300, color: TOKENS.ink0 }}>
-          {fmtNum(stages[0]?.count ?? 0)} → {fmtNum(stages[stages.length - 1]?.count ?? 0)} pipeline
+          Latest scoring pass and current watchlist
         </h2>
+        <div style={{ marginTop: 6, maxWidth: 720, fontFamily: TOKENS.sans, fontSize: 12, color: TOKENS.ink3, lineHeight: 1.45 }}>
+          Scored is the latest budgeted cycle. Watching is retained core + scan state, so it can be higher than the latest scored count without implying new symbols appeared from nowhere.
+        </div>
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
           {stages.map((f, i) => {
             const c = STAGE_COLORS[f.stage] ?? accentColor;
@@ -930,6 +1059,9 @@ function FunnelTab({
                           {promotedN > 0
                             ? `${fmtNum(promotedN)} promoted now (overlay)`
                             : 'no anomaly boosts this cycle'}
+                          {f.count > scoredN && scoredN > 0
+                            ? ` · retained state exceeds latest scored by ${fmtNum(f.count - scoredN)}`
+                            : ''}
                         </div>
                       )}
                     </div>
@@ -1293,10 +1425,11 @@ function UniverseSummaryPanel({
     return () => clearInterval(t);
   }, []);
   const active = useMemo(() => symbols.filter((s) => rowStage(s) === 'active_reps'), [symbols]);
-  const watching = symbols.length;
-  const activeCount = active.length;
-  const avgConviction = activeCount > 0
-    ? active.reduce((acc, s) => acc + (Number(s.conviction) || 0), 0) / activeCount
+  const watching = funnel.find((f) => f.stage === 'watching')?.count ?? symbols.length;
+  const activeCount = funnel.find((f) => f.stage === 'active_reps')?.count ?? active.length;
+  const activeRowsCount = active.length;
+  const avgConviction = activeRowsCount > 0
+    ? active.reduce((acc, s) => acc + (Number(s.conviction) || 0), 0) / activeRowsCount
     : 0;
   const representedMembers = clusters.reduce((acc, c) => acc + (Number(c.member_count) || 0), 0);
   const largestCluster = clusters.slice().sort((a, b) => b.member_count - a.member_count)[0];
