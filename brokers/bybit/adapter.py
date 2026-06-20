@@ -164,9 +164,9 @@ class BybitAdapter(BrokerAdapter):
         else:
             self._rest_gap = AsyncRestGap.from_env("BYBIT", default_seconds=0.05)
         try:
-            self._recv_window_ms = max(5000, int(os.getenv("BYBIT_RECV_WINDOW_MS", "10000")))
+            self._recv_window_ms = max(5000, int(os.getenv("BYBIT_RECV_WINDOW_MS", "20000")))
         except (TypeError, ValueError):
-            self._recv_window_ms = 10000
+            self._recv_window_ms = 20000
         self._lock = asyncio.Lock()
         self._connected = False
         self._private_ok = False
@@ -204,6 +204,47 @@ class BybitAdapter(BrokerAdapter):
         s = str(exc).lower()
         return "errcode: 400" in s and "accounttype" in s
 
+    @staticmethod
+    def _is_timestamp_window_error(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return (
+            "errcode: 10002" in s
+            or "req_timestamp" in s
+            or "server timestamp" in s
+            or "recv_window" in s
+        )
+
+    @staticmethod
+    def _server_ms_from_response(server_time: dict[str, Any]) -> int:
+        result = (server_time.get("result", {}) or {}) if isinstance(server_time, dict) else {}
+        raw_ms = result.get("timeNano") or result.get("timeSecond")
+        server_ms = int(raw_ms)
+        if "timeNano" in result:
+            return server_ms // 1_000_000
+        return server_ms * 1000
+
+    async def _refresh_timestamp_offset_locked(self) -> bool:
+        if self._client is None:
+            return False
+        try:
+            await self._rest_gap.wait()
+            server_time = await asyncio.to_thread(self._client.get_server_time)
+            server_ms = self._server_ms_from_response(server_time)
+            local_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            old_offset = self._timestamp_offset_ms
+            self._timestamp_offset_ms = server_ms - local_ms
+            if abs(self._timestamp_offset_ms) > 500 or old_offset != self._timestamp_offset_ms:
+                logger.warning(
+                    "Bybit | refreshed server-time offset | old_offset_ms={} new_offset_ms={} recv_window_ms={}",
+                    old_offset,
+                    self._timestamp_offset_ms,
+                    self._recv_window_ms,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bybit | server-time offset refresh failed | {}", exc)
+            return False
+
     async def _detect_wallet_account_type(self) -> str | None:
         """
         Probe wallet account types with a single attempt each (no SDK retry storm).
@@ -229,24 +270,39 @@ class BybitAdapter(BrokerAdapter):
                 continue
         return None
 
+    async def _run_sync_once_locked(self, fn: Callable[[], T]) -> T:
+        await self._rest_gap.wait()
+        if not self._timestamp_offset_ms:
+            return await asyncio.to_thread(fn)
+
+        import pybit._helpers as pybit_helpers
+
+        original_generate_timestamp = pybit_helpers.generate_timestamp
+
+        def _offset_timestamp() -> int:
+            return int(original_generate_timestamp()) + self._timestamp_offset_ms
+
+        pybit_helpers.generate_timestamp = _offset_timestamp
+        try:
+            return await asyncio.to_thread(fn)
+        finally:
+            pybit_helpers.generate_timestamp = original_generate_timestamp
+
     async def _run_sync(self, fn: Callable[[], T]) -> T:
         async with self._lock:
-            await self._rest_gap.wait()
-            if not self._timestamp_offset_ms:
-                return await asyncio.to_thread(fn)
-
-            import pybit._helpers as pybit_helpers
-
-            original_generate_timestamp = pybit_helpers.generate_timestamp
-
-            def _offset_timestamp() -> int:
-                return int(original_generate_timestamp()) + self._timestamp_offset_ms
-
-            pybit_helpers.generate_timestamp = _offset_timestamp
             try:
-                return await asyncio.to_thread(fn)
-            finally:
-                pybit_helpers.generate_timestamp = original_generate_timestamp
+                return await self._run_sync_once_locked(fn)
+            except Exception as exc:  # noqa: BLE001
+                if not self._is_timestamp_window_error(exc):
+                    raise
+                logger.warning(
+                    "Bybit | timestamp window rejected request; refreshing server-time offset and retrying once | error={}",
+                    exc,
+                )
+                refreshed = await self._refresh_timestamp_offset_locked()
+                if not refreshed:
+                    raise
+                return await self._run_sync_once_locked(fn)
 
     def _require_private(self) -> None:
         if not self._private_ok or self._client is None:
@@ -265,26 +321,12 @@ class BybitAdapter(BrokerAdapter):
                 retry_delay=1,
                 recv_window=self._recv_window_ms,
             )
-            # Public — always available.
-            server_time = await self._run_sync(lambda: self._client.get_server_time())  # type: ignore[union-attr]
-            try:
-                result = (server_time.get("result", {}) or {}) if isinstance(server_time, dict) else {}
-                raw_ms = result.get("timeNano") or result.get("timeSecond")
-                server_ms = int(raw_ms)
-                if "timeNano" in result:
-                    server_ms = server_ms // 1_000_000
-                else:
-                    server_ms = server_ms * 1000
-                local_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                self._timestamp_offset_ms = server_ms - local_ms
-                if abs(self._timestamp_offset_ms) > 500:
-                    logger.warning(
-                        "connect | Bybit | timestamp skew detected | offset_ms={} | signing private requests with server-time offset",
-                        self._timestamp_offset_ms,
-                    )
-            except Exception as exc:  # noqa: BLE001
+            # Public — always available. Sample server time at startup and
+            # re-sample later if Bybit returns ErrCode 10002.
+            async with self._lock:
+                refreshed = await self._refresh_timestamp_offset_locked()
+            if not refreshed:
                 self._timestamp_offset_ms = 0
-                logger.debug("connect | Bybit | server-time offset unavailable | {}", exc)
 
             if self.api_key and self.api_secret:
                 # Validate credentials with a cheap authenticated endpoint that works on

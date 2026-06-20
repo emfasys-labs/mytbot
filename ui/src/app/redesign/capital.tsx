@@ -22,11 +22,9 @@
  *     a flatten request and emits reduce-only close intents through the
  *     normal risk/execution path.
  *
- * The landmark line is gauged against **capital at work** = filled
- * position notional + reserved notional of still-open orders. That's
- * what the backend's ``cap_slider`` gates (``deploy = NAV × ge ×
- * cap_slider`` in ``portfolio/allocation_engine.py``), so the slider
- * reports the same % as the Book screen's "Capital at work" card.
+ * The landmark line is gauged against gross active exposure. Cash/margin
+ * deployed remains visible as a separate accounting number, but the slider
+ * itself answers the operator question: how much of NAV is exposed?
  *
  * Wiring
  * ──────
@@ -123,10 +121,13 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
   const interactive = systemState !== 'off';
   const nav = live.nav;
   const ceilingPct = live.capitalPct;
-  // Gauge the slider against the backend-scoped capital-at-work number when
-  // available. During partial provider coverage this keeps the denominator
-  // and numerator in the same active-provider universe.
-  const { deployed: deployedValue, pending: pendingValue, working: workingValue } = live.capitalAtWork;
+  const {
+    deployed: deployedValue,
+    pending: pendingValue,
+    working: cashWorkingValue,
+    grossExposure: grossExposureValue,
+  } = live.capitalAtWork;
+  const workingValue = Math.max(0, grossExposureValue);
   const workingRatio = nav > 0 ? Math.max(0, workingValue / nav) : 0;
   const workingPct = nav > 0 ? Math.min(1, workingValue / nav) : 0;
   const activeScopeOverage = !live.coverage.full && workingRatio > 1.005;
@@ -497,6 +498,7 @@ export function CapitalPanel({ live, accent, systemState = 'running', style }: C
               deployedValue={deployedValue}
               pendingValue={pendingValue}
               workingValue={workingValue}
+              cashWorkingValue={cashWorkingValue}
               activeScopeOverage={activeScopeOverage}
               accent={accent}
             />
@@ -569,6 +571,7 @@ function IdleInfo({
   deployedValue,
   pendingValue,
   workingValue,
+  cashWorkingValue,
   activeScopeOverage,
   accent,
 }: {
@@ -579,6 +582,7 @@ function IdleInfo({
   deployedValue: number;
   pendingValue: number;
   workingValue: number;
+  cashWorkingValue: number;
   activeScopeOverage: boolean;
   accent: string;
 }) {
@@ -621,6 +625,7 @@ function IdleInfo({
         }}
       >
         <Row label={activeScopeOverage ? 'Active exposure' : 'At work'} value={money(workingValue, 12, TOKENS.ink1)} />
+        <Row label="Cash deployed" value={money(cashWorkingValue, 12, TOKENS.ink2)} />
         {showPendingBreakdown && (
           <div
             style={{

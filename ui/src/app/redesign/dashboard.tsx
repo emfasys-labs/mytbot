@@ -286,7 +286,7 @@ export function DashboardScreen({
   );
   const deploymentPct = useMemo(() => {
     if (navValue <= 0) return null;
-    const working = live.capitalAtWork.working;
+    const working = live.capitalAtWork.grossExposure;
     return Math.max(0, (working / navValue) * 100);
   }, [live.capitalAtWork, navValue]);
   const shownDeploymentPct = deploymentPct == null

@@ -115,11 +115,12 @@ export interface LiveData {
     deployed: number;
     pending: number;
     working: number;
+    grossExposure: number;
     source: 'dashboard_snapshot' | 'positions_orders';
     /** ``cash_deployed / full_book_nav`` — what the trading loop uses for
      *  deployment-pressure (loop-consistent across coverage gaps). */
     cashDeployedPct: number | null;
-    /** ``cash_deployed / active_nav`` — what the operator sees on the
+    /** ``gross_exposure / active_nav`` — what the operator sees on the
      *  scoped dashboard. Can exceed 1.0 during partial coverage when
      *  positions held at active brokers exceed active-broker NAV. */
     activeExposurePct: number | null;
@@ -969,11 +970,12 @@ export function useLiveSystem(): LiveData {
       ? snapshot.portfolio as Record<string, unknown>
       : null;
     const deployed = toNumber(portfolio?.cash_deployed, Number.NaN);
-    // Backend ([api/server.py]) now publishes both ratios on the snapshot:
-    //   - ``cash_deployed_pct``    = cash_deployed / full_book_nav (loop basis)
-    //   - ``active_exposure_pct``  = cash_deployed / active_nav (operator view)
-    // Surface both so the capital card can show the operator view while
-    // diagnostics can compare against the loop's deployment-pressure basis.
+    const grossExposure = toNumber(portfolio?.gross_exposure, Number.NaN);
+    // Backend ([api/server.py]) publishes both ratios on the snapshot:
+    //   - ``cash_deployed_pct``    = cash/margin used / full_book_nav
+    //   - ``active_exposure_pct``  = gross notional exposure / active_nav
+    // Surface both so the capital card can show the operator's book exposure
+    // while diagnostics can compare against the loop's cash-deployed basis.
     const cashDeployedPctRaw = toNumber(portfolio?.cash_deployed_pct, Number.NaN);
     const activeExposurePctRaw = toNumber(portfolio?.active_exposure_pct, Number.NaN);
     const cashDeployedPct = Number.isFinite(cashDeployedPctRaw) ? cashDeployedPctRaw : null;
@@ -983,6 +985,7 @@ export function useLiveSystem(): LiveData {
         deployed,
         pending: 0,
         working: deployed,
+        grossExposure: Number.isFinite(grossExposure) && grossExposure >= 0 ? grossExposure : deployed,
         source: 'dashboard_snapshot' as const,
         cashDeployedPct,
         activeExposurePct,
@@ -990,6 +993,7 @@ export function useLiveSystem(): LiveData {
     }
     return {
       ...localCapitalAtWork,
+      grossExposure: localCapitalAtWork.working,
       source: 'positions_orders' as const,
       cashDeployedPct,
       activeExposurePct,

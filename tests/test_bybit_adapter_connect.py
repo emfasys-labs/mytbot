@@ -23,8 +23,14 @@ from brokers.bybit.adapter import BybitAdapter
 class _StubHTTP:
     """Pybit HTTP stand-in. Every method just records the call."""
 
-    def __init__(self, *, wallet_results: dict[str, object | Exception]) -> None:
+    def __init__(
+        self,
+        *,
+        wallet_results: dict[str, object | Exception],
+        positions_results: list[object | Exception] | None = None,
+    ) -> None:
         self.wallet_results = wallet_results
+        self.positions_results = list(positions_results or [])
         self.calls: list[tuple[str, dict]] = []
 
     # Public
@@ -49,6 +55,15 @@ class _StubHTTP:
             )
         return result  # type: ignore[return-value]
 
+    def get_positions(self, **params: object) -> dict:
+        self.calls.append(("positions", params))
+        if self.positions_results:
+            result = self.positions_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result  # type: ignore[return-value]
+        return {"retCode": 0, "result": {"list": []}}
+
 
 class _AccountType400Error(Exception):
     """Mimic pybit's FailedRequestError string shape for a 400 accountType rejection."""
@@ -60,11 +75,23 @@ class _AccountType400Error(Exception):
         )
 
 
+class _Timestamp10002Error(Exception):
+    """Mimic Bybit's timestamp/recv-window rejection string."""
+
+    def __str__(self) -> str:  # pragma: no cover — simple passthrough
+        return (
+            "invalid request, please check your server timestamp or recv_window param: "
+            "req_timestamp[1781951294855],server_timestamp[1781951293821],"
+            "recv_window[10000] (ErrCode: 10002)"
+        )
+
+
 def _install_stub(
     monkeypatch: pytest.MonkeyPatch,
     wallet_results: dict[str, object | Exception],
+    positions_results: list[object | Exception] | None = None,
 ) -> tuple[_StubHTTP, dict]:
-    stub = _StubHTTP(wallet_results=wallet_results)
+    stub = _StubHTTP(wallet_results=wallet_results, positions_results=positions_results)
     factory_kwargs: dict = {}
 
     def _factory(*_a, **_kw) -> _StubHTTP:  # noqa: ANN001 — free form kwargs
@@ -166,3 +193,43 @@ async def test_get_balance_latches_unavailable_when_all_account_types_reject(
     # despite two get_balance() calls.
     probe_calls = [c for c in stub.calls if c[0] == "wallet_balance"]  # type: ignore[attr-defined]
     assert len(probe_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_timestamp_error_refreshes_offset_and_retries_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub, _factory_kwargs = _install_stub(
+        monkeypatch,
+        wallet_results={"UNIFIED": {"retCode": 0, "result": {"list": []}}},
+        positions_results=[
+            _Timestamp10002Error(),
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "size": "0.5",
+                            "avgPrice": "60000",
+                            "markPrice": "61000",
+                            "unrealisedPnl": "500",
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+    adapter = BybitAdapter(api_key="k", api_secret="s", paper_mode=True)
+    await adapter.connect()
+
+    positions = await adapter.get_positions()
+
+    assert len(positions) == 1
+    assert positions[0].symbol == "BTCUSDT"
+    assert adapter._positions_fail_count == 0
+    assert adapter._positions_breaker_until == 0
+    assert [name for name, _params in stub.calls].count("positions") == 2
+    # Initial connect sample + retry-time refresh after ErrCode 10002.
+    assert [name for name, _params in stub.calls].count("server_time") >= 2

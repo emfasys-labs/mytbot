@@ -2322,7 +2322,13 @@ async def get_dashboard_snapshot(
     portfolio["net_exposure"] = _decimal_str(net)
     portfolio["cash_deployed"] = _decimal_str(cash_deployed)
     portfolio["cash_deployed_pct"] = _decimal_str((cash_deployed / orig_nav) if orig_nav > 0 else Decimal("0"))
-    portfolio["active_exposure_pct"] = _decimal_str((cash_deployed / nav) if nav > 0 else Decimal("0"))
+    # Operator-facing deployment should answer "how much book is active?"
+    # rather than "how much cash/margin is consumed?". FX/futures can carry
+    # large notional exposure with lower cash factors, so using cash_deployed
+    # here makes a nearly fully exposed book look half idle.
+    gross_exposure_pct = (gross / nav) if nav > 0 else Decimal("0")
+    portfolio["gross_exposure_pct"] = _decimal_str(gross_exposure_pct)
+    portfolio["active_exposure_pct"] = _decimal_str(gross_exposure_pct)
     portfolio["positions_sample"] = sample[:24]
     portfolio["weakest_by_hold_score"] = []
     portfolio["highest_exit_pressure"] = []
