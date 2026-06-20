@@ -1720,12 +1720,18 @@ class Orchestrator:
                         loss_pct_position = (
                             decision.loss_absolute / pos_notional if pos_notional > 0 else Decimal("0")
                         )
+                        asset_class_raw = getattr(pos, "asset_class", "equity")
+                        asset_class_for_gate = str(
+                            getattr(asset_class_raw, "value", asset_class_raw)
+                        ).lower()
                         suppress, why = should_suppress_protective_exit(
                             config=pe_cfg,
                             age_sec=position_ages.get(f"{bname}:{sym}"),
                             loss_pct_nav=decision.loss_pct,
                             loss_pct_position=loss_pct_position,
                             structural_breach=decision.structural_stop_breached,
+                            asset_class=asset_class_for_gate,
+                            position_stop_breached=decision.position_stop_breached,
                         )
                         if suppress:
                             logger.info(
@@ -1773,6 +1779,13 @@ class Orchestrator:
                         Decimal(str(portfolio_state.get("high_watermark_value", nav)))
                     )
                     risk_engine.restore_runtime_state(portfolio_state)
+                    # Mark the symbol before any await-heavy execution path.
+                    # Stop-loss has precedence over softer derisk monitors;
+                    # without this early in-flight mark, parallel monitor
+                    # ticks can approve a second reduce before the first fill
+                    # has updated the ledger.
+                    self._stop_loss_last_close_ts[close_key] = now_ts
+                    self._derisk_inflight_ts[close_key] = now_ts
                     risk_decision = await risk_engine.evaluate_and_persist(sf, signal, portfolio_state)
                     if risk_decision.verdict != RiskVerdict.APPROVED:
                         logger.warning(
@@ -1781,13 +1794,11 @@ class Orchestrator:
                             sym,
                             risk_decision.reason,
                         )
-                        self._stop_loss_last_close_ts[close_key] = now_ts
                         continue
 
                     result = await execution_engine.execute(
                         signal, risk_decision, session_factory=sf
                     )
-                    self._stop_loss_last_close_ts[close_key] = now_ts
                     if result is None:
                         logger.warning(
                             "orchestrator | stop-loss close did not execute | broker={} symbol={} reason={}",
@@ -2109,6 +2120,7 @@ class Orchestrator:
                         loss_pct_nav=_loss_nav,
                         loss_pct_position=_loss_pos,
                         structural_breach=False,
+                        asset_class=str(getattr(p.asset_class, "value", p.asset_class)).lower(),
                     )
                     if suppress:
                         logger.info(
@@ -2476,8 +2488,8 @@ class Orchestrator:
                     )
                     if suppress_h:
                         logger.info(
-                            "orchestrator | profit-harvest SUPPRESSED (%s) | broker=%s symbol=%s "
-                            "reason=%s profit_abs=%s age=%s",
+                            "orchestrator | profit-harvest SUPPRESSED ({}) | broker={} symbol={} "
+                            "reason={} profit_abs={} age={}",
                             why_h,
                             broker,
                             sym,
@@ -2894,6 +2906,12 @@ class Orchestrator:
                         action.broker, action.symbol,
                     )
                     continue
+                if now_ts - self._stop_loss_last_close_ts.get(inflight_key, 0.0) < self._derisk_inflight_window_sec():
+                    logger.info(
+                        "orchestrator | intraday-derisk skipped | {} {} | stop-loss action already in flight",
+                        action.broker, action.symbol,
+                    )
+                    continue
                 # D125 fix #4 — never submit a derisk action to a closed
                 # session venue. The 2026-05-21 BF-B audit found ~8
                 # failed pre-market attempts before the first successful
@@ -2923,6 +2941,7 @@ class Orchestrator:
                         loss_pct_position=_loss_pos,
                         structural_breach=False,
                         is_most_severe_aggregate_tier=(tier_idx == 0),
+                        asset_class=str(getattr(action.asset_class, "value", action.asset_class)).lower(),
                     )
                     if suppress:
                         logger.info(
@@ -2960,6 +2979,7 @@ class Orchestrator:
                     )
                     self._intraday_derisk_last_action_ts[cool_key] = now_ts
                     continue
+                self._derisk_inflight_ts[inflight_key] = now_ts
                 result = await execution_engine.execute(signal, risk_decision, session_factory=sf)
                 self._intraday_derisk_last_action_ts[cool_key] = now_ts
                 if result is None:

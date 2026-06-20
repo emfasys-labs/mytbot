@@ -507,6 +507,12 @@ protective_exit_min_hold:
   catastrophic_loss_pct_position: 0.30 # or down >= 30% of its own cost basis.
   always_allow_structural_stop: true   # ATR structural stop = thesis invalidated.
   always_allow_most_severe_aggregate_tier: true  # -5% NAV tier always fires.
+  always_allow_asset_classes:
+    - crypto                         # crypto spot is too jumpy for the
+                                     # daily-thesis min-hold derisk shield.
+  always_allow_position_stop_asset_classes:
+    - crypto                         # fast-moving spot crypto: respect explicit
+                                     # position stops even before the 3-day hold.
 
 minimum_order_sizes_gbp:
   crypto: 10

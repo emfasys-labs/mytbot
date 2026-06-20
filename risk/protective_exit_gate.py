@@ -31,7 +31,7 @@ RiskEngine + ExecutionEngine path.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Optional
@@ -63,6 +63,13 @@ class ProtectiveExitConfig:
     always_allow_structural_stop: bool = True
     # The most-severe aggregate derisk tier is the portfolio survival floor.
     always_allow_most_severe_aggregate_tier: bool = True
+    # Asset classes that should not receive daily-horizon min-hold protection
+    # in the protective-exit monitors.
+    always_allow_asset_classes: frozenset[str] = field(default_factory=frozenset)
+    # Some asset classes move too quickly for a point-in-time position stop to
+    # be treated as daily-horizon noise. If their explicit position stop fires,
+    # let that stop through even while the position is young.
+    always_allow_position_stop_asset_classes: frozenset[str] = field(default_factory=frozenset)
 
 
 def parse_protective_exit_config(raw: Mapping[str, Any] | None) -> ProtectiveExitConfig:
@@ -70,6 +77,22 @@ def parse_protective_exit_config(raw: Mapping[str, Any] | None) -> ProtectiveExi
     (i.e. the pre-D166 protective behaviour is preserved exactly)."""
     if not isinstance(raw, Mapping) or not bool(raw.get("enabled", False)):
         return ProtectiveExitConfig(enabled=False)
+    raw_position_stop_classes = raw.get("always_allow_position_stop_asset_classes") or ()
+    if isinstance(raw_position_stop_classes, str):
+        raw_position_stop_classes = [raw_position_stop_classes]
+    raw_always_allow_classes = raw.get("always_allow_asset_classes") or ()
+    if isinstance(raw_always_allow_classes, str):
+        raw_always_allow_classes = [raw_always_allow_classes]
+    always_allow_classes = frozenset(
+        str(item).strip().lower()
+        for item in raw_always_allow_classes
+        if str(item).strip()
+    )
+    position_stop_classes = frozenset(
+        str(item).strip().lower()
+        for item in raw_position_stop_classes
+        if str(item).strip()
+    )
     return ProtectiveExitConfig(
         enabled=True,
         min_hold_sec=_to_decimal(raw.get("min_hold_sec")),
@@ -79,6 +102,8 @@ def parse_protective_exit_config(raw: Mapping[str, Any] | None) -> ProtectiveExi
         always_allow_most_severe_aggregate_tier=bool(
             raw.get("always_allow_most_severe_aggregate_tier", True)
         ),
+        always_allow_asset_classes=always_allow_classes,
+        always_allow_position_stop_asset_classes=position_stop_classes,
     )
 
 
@@ -142,6 +167,8 @@ def should_suppress_protective_exit(
     loss_pct_position: Decimal,
     structural_breach: bool = False,
     is_most_severe_aggregate_tier: bool = False,
+    asset_class: str | None = None,
+    position_stop_breached: bool = False,
 ) -> tuple[bool, str]:
     """Decide whether to SUPPRESS a soft protective cut on a young position.
 
@@ -155,11 +182,13 @@ def should_suppress_protective_exit(
       1. gate disabled                         -> allow (pre-D166 behaviour)
       2. structural ATR stop breached          -> allow (thesis invalidated)
       3. most-severe aggregate survival tier   -> allow (portfolio first)
-      4. catastrophic NAV-% loss               -> allow
-      5. catastrophic position-% loss          -> allow
-      6. age unknown                           -> allow (no evidence to gate on)
-      7. age < min_hold_sec                    -> SUPPRESS (let it mature)
-      8. otherwise (matured)                   -> allow
+      4. asset-class exception                 -> allow
+      5. asset-class position-stop exception   -> allow
+      6. catastrophic NAV-% loss               -> allow
+      7. catastrophic position-% loss          -> allow
+      8. age unknown                           -> allow (no evidence to gate on)
+      9. age < min_hold_sec                    -> SUPPRESS (let it mature)
+      10. otherwise (matured)                  -> allow
     """
     if not config.enabled:
         return (False, "gate_disabled")
@@ -167,6 +196,15 @@ def should_suppress_protective_exit(
         return (False, "structural_stop")
     if is_most_severe_aggregate_tier and config.always_allow_most_severe_aggregate_tier:
         return (False, "most_severe_tier")
+    asset_class_key = str(asset_class or "").strip().lower()
+    if asset_class_key and asset_class_key in config.always_allow_asset_classes:
+        return (False, f"asset_class_{asset_class_key}")
+    if (
+        position_stop_breached
+        and asset_class_key
+        and asset_class_key in config.always_allow_position_stop_asset_classes
+    ):
+        return (False, f"position_stop_{asset_class_key}")
     if config.catastrophic_loss_pct_nav > 0 and loss_pct_nav >= config.catastrophic_loss_pct_nav:
         return (False, "catastrophic_nav")
     if (

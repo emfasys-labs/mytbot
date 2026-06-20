@@ -17,11 +17,13 @@ edge-protected rebalance — plus the four behaviours the diagnosis demanded:
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from portfolio.portfolio_orchestrator import (
     BookPosition,
     OrchestratorConfig,
     StrategyIntent,
+    build_intents_from_candidates,
     build_intents_from_raw_signals,
     orchestrate,
 )
@@ -98,6 +100,58 @@ def test_per_name_concentration_cap_enforced():
     res = orchestrate(intents, [], nav=NAV, mode="hunter", config=_cfg(max_position_pct_of_nav=Decimal("0.05")))
     aaa = [t for t in res.targets if t.symbol == "AAA"][0]
     assert aaa.target_notional <= NAV * Decimal("0.05") + Decimal("0.01")
+
+
+def test_fx_pipeline_alias_nets_against_native_book_position():
+    # Pipeline candidates use yfinance-style GBPUSD=X, while the broker/local
+    # book holds native GBPUSD. They must be one book slot, otherwise the
+    # allocator tries to open a duplicate GBPUSD leg that final risk rejects.
+    book = [
+        BookPosition(
+            "GBPUSD",
+            Decimal("200000"),
+            Decimal("1.25"),
+            Decimal("1.25"),
+            "forex",
+            "ibkr",
+            holding_sec=Decimal("99999"),
+            unrealised_pnl=Decimal("0"),
+        )
+    ]
+    intents = [StrategyIntent("GBPUSD=X", "buy", Decimal("0.80"), "mean_reversion", "forex")]
+    res = orchestrate(
+        intents,
+        book,
+        nav=NAV,
+        mode="trader",
+        config=_cfg(
+            gross_target_pct={"trader": Decimal("0.10")},
+            max_position_pct_of_nav=Decimal("0.10"),
+            rebalance_band_pct_of_nav=Decimal("0.001"),
+        ),
+    )
+
+    assert any(t.symbol == "GBPUSD" for t in res.targets)
+    assert not any(t.symbol == "GBPUSD=X" for t in res.targets)
+    assert not any(o.symbol == "GBPUSD=X" for o in res.orders)
+    assert not any(o.symbol == "GBPUSD" and o.side == "buy" and not o.reduce_only for o in res.orders)
+    gbp_orders = [o for o in res.orders if o.symbol == "GBPUSD"]
+    assert gbp_orders and gbp_orders[0].side == "sell" and gbp_orders[0].reduce_only
+    assert res.diagnostics["symbol_aliases_normalized"] >= 1
+
+
+def test_candidate_adapter_normalizes_fx_pipeline_alias():
+    cand = SimpleNamespace(
+        symbol="EURUSD=X",
+        side="long",
+        confidence=Decimal("0.55"),
+        strategy_name="mean_reversion",
+        asset_class="forex",
+        metadata={},
+    )
+    intents = build_intents_from_candidates([cand])
+    assert len(intents) == 1
+    assert intents[0].symbol == "EURUSD"
 
 
 # ── 3. EDGE PROTECTION — don't flip/close a position that still has edge ─────

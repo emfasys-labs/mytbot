@@ -31,12 +31,16 @@ def test_parse_full_block():
             "catastrophic_loss_pct_position": 0.30,
             "always_allow_structural_stop": True,
             "always_allow_most_severe_aggregate_tier": True,
+            "always_allow_asset_classes": ["crypto"],
+            "always_allow_position_stop_asset_classes": ["crypto"],
         }
     )
     assert cfg.enabled is True
     assert cfg.min_hold_sec == Decimal("259200")
     assert cfg.catastrophic_loss_pct_nav == Decimal("0.04")
     assert cfg.catastrophic_loss_pct_position == Decimal("0.30")
+    assert cfg.always_allow_asset_classes == frozenset({"crypto"})
+    assert cfg.always_allow_position_stop_asset_classes == frozenset({"crypto"})
 
 
 # ── position age from fills ──────────────────────────────────────────────────
@@ -95,6 +99,44 @@ def test_suppress_young_soft_loss():
         age_sec=Decimal("3600"),          # 1h old, well under 3 days
         loss_pct_nav=Decimal("0.01"),     # mild
         loss_pct_position=Decimal("0.05"),
+    )
+    assert suppress is True
+    assert why == "within_min_hold"
+
+
+def test_crypto_position_stop_not_suppressed_when_young():
+    suppress, why = should_suppress_protective_exit(
+        config=_cfg(always_allow_position_stop_asset_classes=frozenset({"crypto"})),
+        age_sec=Decimal("3600"),
+        loss_pct_nav=Decimal("0.003"),
+        loss_pct_position=Decimal("0.06"),
+        asset_class="crypto",
+        position_stop_breached=True,
+    )
+    assert suppress is False
+    assert why == "position_stop_crypto"
+
+
+def test_crypto_soft_derisk_not_suppressed_when_asset_class_is_exempt():
+    suppress, why = should_suppress_protective_exit(
+        config=_cfg(always_allow_asset_classes=frozenset({"crypto"})),
+        age_sec=Decimal("3600"),
+        loss_pct_nav=Decimal("0.003"),
+        loss_pct_position=Decimal("0.05"),
+        asset_class="crypto",
+    )
+    assert suppress is False
+    assert why == "asset_class_crypto"
+
+
+def test_non_crypto_position_stop_still_suppressed_when_young():
+    suppress, why = should_suppress_protective_exit(
+        config=_cfg(always_allow_position_stop_asset_classes=frozenset({"crypto"})),
+        age_sec=Decimal("3600"),
+        loss_pct_nav=Decimal("0.003"),
+        loss_pct_position=Decimal("0.06"),
+        asset_class="stock_etf",
+        position_stop_breached=True,
     )
     assert suppress is True
     assert why == "within_min_hold"

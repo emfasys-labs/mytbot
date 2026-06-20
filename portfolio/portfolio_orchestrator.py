@@ -75,6 +75,21 @@ def _sign_of_side(side: str) -> int:
     return 0
 
 
+def _symbol_key(symbol: Any) -> str:
+    """Canonical key for portfolio netting.
+
+    Market-data symbols can differ from broker-native symbols. In particular,
+    yfinance-style FX pairs arrive as ``GBPUSD=X`` while IBKR/local positions
+    are held as ``GBPUSD``. Those must net as the same book slot, otherwise the
+    allocator repeatedly tries to open a duplicate position that final risk
+    rejects as already capped.
+    """
+    s = str(symbol or "").strip().upper()
+    if s.endswith("=X"):
+        return s[:-2]
+    return s
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Inputs
 # ─────────────────────────────────────────────────────────────────────────────
@@ -464,7 +479,15 @@ def orchestrate(
     if config.cluster_consolidation:
         intents, clusters_consolidated = consolidate_clusters(intents, config)
     book_list = list(book)
-    book_by_sym = {p.symbol: p for p in book_list}
+    book_by_sym: dict[str, BookPosition] = {}
+    symbol_aliases_normalized = 0
+    for p in book_list:
+        key = _symbol_key(p.symbol)
+        if key != str(p.symbol):
+            symbol_aliases_normalized += 1
+        # If duplicate aliases ever appear, keep the first live row. The normal
+        # broker merge should already collapse them; this is only a netting key.
+        book_by_sym.setdefault(key, p)
 
     diag: dict[str, Any] = {
         "intent_count": len(intents),
@@ -496,7 +519,9 @@ def orchestrate(
     # ── 1. ALPHA COMBINATION — net intents per symbol ──────────────────────
     combined: dict[str, dict[str, Any]] = {}
     for it in intents:
-        sym = it.symbol
+        sym = _symbol_key(it.symbol)
+        if sym != str(it.symbol):
+            symbol_aliases_normalized += 1
         temp_factor = config.temperament_factor(it.strategy, threat)
         if it.strategy in config.weapon_temperament:
             temperament_applied[it.strategy] = (
@@ -729,6 +754,7 @@ def orchestrate(
     diag["per_name_frac"] = str(per_name_frac)
     diag["per_name_cap"] = str(per_name_cap)
     diag["strategy_trust"] = {k: str(v) for k, v in config.strategy_trust.items()}
+    diag["symbol_aliases_normalized"] = symbol_aliases_normalized
     # D158 Phase 2 — surface the army's posture so the operator can SEE the
     # heterogeneous landscape (global threat + per-weapon effective factor).
     diag["mode"] = str(mode)
@@ -772,7 +798,7 @@ def build_intents_from_candidates(candidates: Iterable[Any]) -> list[StrategyInt
         cluster = md.get("cluster") if isinstance(md, dict) else None
         out.append(
             StrategyIntent(
-                symbol=str(getattr(c, "symbol", "")),
+                symbol=_symbol_key(getattr(c, "symbol", "")),
                 side=side,
                 conviction=_dec(getattr(c, "confidence", 0)),
                 strategy=str(getattr(c, "strategy_name", "") or ""),
@@ -799,7 +825,7 @@ def build_intents_from_raw_signals(raw_signals: Iterable[Any]) -> list[StrategyI
         cluster = md.get("cluster") if isinstance(md, dict) else None
         out.append(
             StrategyIntent(
-                symbol=str(getattr(rs, "symbol", "")),
+                symbol=_symbol_key(getattr(rs, "symbol", "")),
                 side=side,
                 conviction=_dec(getattr(rs, "confidence", 0)),
                 strategy=str(getattr(rs, "strategy", "")),

@@ -3251,6 +3251,39 @@ class TradingLoop:
                 )
                 if sig is None:
                     continue
+                block_reason, block_meta = await self._preflight_built_signal(
+                    sig,
+                    action,
+                    portfolio_dict=portfolio_dict,
+                    session_factory=session_factory,
+                )
+                if block_reason:
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(getattr(sig, "symbol", "") or ""),
+                                strategy=str(getattr(sig, "strategy", "") or ""),
+                                side=str(getattr(sig, "side", "") or ""),
+                                confidence=float(getattr(sig, "confidence", 0) or 0),
+                                status="filtered_preflight_viability",
+                                reason=block_reason,
+                                loop_iteration=self.iterations,
+                                metadata={
+                                    "kind": str(getattr(action, "kind", "") or ""),
+                                    "priority_score": str(getattr(action, "priority_score", "") or ""),
+                                    "orchestrator_path": "portfolio_orchestrator",
+                                    **block_meta,
+                                },
+                            )
+                        )
+                    logger.info(
+                        "orchestrator | preflight rejected {} {} | reason={} meta={}",
+                        getattr(sig, "symbol", od.symbol),
+                        getattr(sig, "side", od.side),
+                        block_reason,
+                        block_meta,
+                    )
+                    continue
                 ok = await self._process_signal_global(
                     sig, session_factory, portfolio_dict, total_equity, tradable,
                     sc_log_buffer=sc_log_buffer,
