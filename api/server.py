@@ -21,6 +21,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -38,6 +39,7 @@ from api.pnl_periods import (
     win_rate_from_daily_rows,
 )
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
+from core.instrument_profiles import crypto_display_name, with_logo
 from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_analyst_research_roundup, is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
@@ -52,7 +54,7 @@ from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
 from risk.parameters import ParameterManager
 from storage.db import bind_app_database, clear_app_database_bind, dispose_engine, init_async_database
-from storage.models import AIOutputLog, AnomalyLog, DailyPnL, FeatureSnapshot, NewsHeadline, OrderLog, PositionLog, RiskLog, SignalLog, ThesisLog
+from storage.models import AIOutputLog, AnomalyLog, DailyPnL, FeatureSnapshot, InstrumentRegistry, NewsHeadline, OrderLog, PositionLog, RiskLog, SignalLog, ThesisLog
 
 APP_ENV = os.getenv("APP_ENV", "paper")
 MUTATION_TOKEN = os.getenv("API_CONTROL_TOKEN", "").strip()
@@ -677,6 +679,221 @@ def _position_log_payload(
     }
 
 
+_INSTRUMENT_OVERRIDES: dict[str, dict[str, str]] = {
+    "SPY": {
+        "display_name": "SPDR S&P 500 ETF Trust",
+        "description": "ETF tracking the S&P 500 Index.",
+        "category": "ETF",
+        "logo_kind": "fund",
+    },
+    "QQQ": {
+        "display_name": "Invesco QQQ Trust",
+        "description": "ETF tracking the Nasdaq 100 Index.",
+        "category": "ETF",
+        "logo_kind": "fund",
+    },
+    "IWM": {
+        "display_name": "iShares Russell 2000 ETF",
+        "description": "ETF tracking small-cap US equities.",
+        "category": "ETF",
+        "logo_kind": "fund",
+    },
+    "TLT": {
+        "display_name": "iShares 20+ Year Treasury Bond ETF",
+        "description": "ETF tracking long-duration US Treasury bonds.",
+        "category": "Bond ETF",
+        "logo_kind": "fund",
+    },
+    "XLE": {
+        "display_name": "Energy Select Sector SPDR Fund",
+        "description": "ETF tracking large US energy-sector equities.",
+        "category": "Sector ETF",
+        "logo_kind": "fund",
+    },
+    "USO": {
+        "display_name": "United States Oil Fund",
+        "description": "ETF-style commodity fund linked to WTI crude oil futures.",
+        "category": "Commodity fund",
+        "logo_kind": "commodity",
+    },
+    "CL=F": {
+        "display_name": "Crude Oil Futures",
+        "description": "WTI crude oil front-month futures contract.",
+        "category": "Commodity future",
+        "logo_kind": "commodity",
+    },
+    "GC=F": {
+        "display_name": "Gold Futures",
+        "description": "Gold front-month futures contract.",
+        "category": "Commodity future",
+        "logo_kind": "commodity",
+    },
+    "SI=F": {
+        "display_name": "Silver Futures",
+        "description": "Silver front-month futures contract.",
+        "category": "Commodity future",
+        "logo_kind": "commodity",
+    },
+    "ES=F": {
+        "display_name": "S&P 500 Futures",
+        "description": "E-mini S&P 500 equity-index futures contract.",
+        "category": "Index future",
+        "logo_kind": "index",
+    },
+    "NQ=F": {
+        "display_name": "Nasdaq 100 Futures",
+        "description": "E-mini Nasdaq 100 equity-index futures contract.",
+        "category": "Index future",
+        "logo_kind": "index",
+    },
+}
+
+
+def _instrument_aliases(symbol: str, asset_class: str | None = None) -> set[str]:
+    s = str(symbol or "").strip().upper()
+    ac = str(asset_class or "").strip().lower()
+    out = {s} if s else set()
+    if not s:
+        return out
+    if ac in {"forex", "fx"} or (len(s) == 6 and s.isalpha()):
+        out.add(f"{s}=X")
+    if s.endswith("=X"):
+        out.add(s[:-2])
+    if ac == "crypto" and s.endswith("USD") and "-" not in s:
+        out.add(f"{s[:-3]}-USD")
+    if s.endswith("-USD"):
+        out.add(s.replace("-USD", "USD"))
+    return {x for x in out if x}
+
+
+def _fallback_instrument_profile(symbol: str, asset_class: str | None = None) -> dict[str, Any]:
+    s = str(symbol or "").strip().upper()
+    ac = str(asset_class or "").strip().lower()
+    override = _INSTRUMENT_OVERRIDES.get(s, {})
+    if override:
+        display = override.get("display_name") or s
+        description = override.get("description") or display
+        category = override.get("category") or ac or "Instrument"
+        logo_kind = override.get("logo_kind") or ac or "generic"
+    elif ac in {"forex", "fx"} or (len(s) == 6 and s.isalpha()):
+        base, quote = s[:3], s[3:6]
+        display = f"{base}/{quote}"
+        description = f"{base} versus {quote} foreign exchange pair."
+        category = "Forex pair"
+        logo_kind = "forex"
+    elif ac == "crypto" or s.endswith("-USD"):
+        coin = crypto_display_name(s) or s.replace("-USD", "").replace("USD", "")
+        display = coin or s
+        description = f"{display} digital asset."
+        category = "Crypto"
+        logo_kind = "crypto"
+    elif ac in {"etf", "bond_etf"}:
+        display = s
+        description = "Exchange-traded fund."
+        category = "ETF"
+        logo_kind = "fund"
+    elif ac in {"future", "futures"}:
+        display = s
+        description = "Futures contract."
+        category = "Future"
+        logo_kind = "future"
+    elif ac in {"index", "indices"}:
+        display = s
+        description = "Market index."
+        category = "Index"
+        logo_kind = "index"
+    else:
+        display = s
+        description = "Listed instrument."
+        category = "Equity"
+        logo_kind = "equity"
+    profile = {
+        "canonical_symbol": s,
+        "display_name": display,
+        "short_name": display,
+        "description": description,
+        "category": category,
+        "logo_url": None,
+        "logo_kind": logo_kind,
+        "region": None,
+        "exchange": None,
+        "currency": None,
+        "sector": None,
+        "industry": None,
+    }
+    return with_logo(profile, s, asset_class=ac)
+
+
+def _registry_profile(row: InstrumentRegistry | None, symbol: str, asset_class: str | None) -> dict[str, Any]:
+    fallback = _fallback_instrument_profile(symbol, asset_class)
+    if row is None:
+        return fallback
+    meta = row.metadata_ if isinstance(row.metadata_, dict) else {}
+    row_display = str(row.display_name or "").strip()
+    if not row_display or row_display.upper() == str(symbol or "").strip().upper():
+        display = str(fallback["display_name"] or symbol).strip()
+    else:
+        display = row_display
+    description = (
+        str(meta.get("description") or meta.get("long_name") or meta.get("summary") or "").strip()
+        or fallback["description"]
+    )
+    logo_url = str(meta.get("logo_url") or meta.get("logo") or "").strip() or None
+    profile = {
+        **fallback,
+        "canonical_symbol": row.canonical_symbol,
+        "display_name": display,
+        "short_name": str(meta.get("short_name") or display).strip() or display,
+        "description": description,
+        "category": str(meta.get("category") or fallback["category"]).strip() or fallback["category"],
+        "logo_url": logo_url,
+        "logo_kind": str(meta.get("logo_kind") or fallback["logo_kind"]).strip() or fallback["logo_kind"],
+        "region": row.region,
+        "exchange": row.exchange,
+        "currency": row.currency,
+        "sector": row.sector,
+        "industry": row.industry,
+    }
+    return with_logo(profile, row.canonical_symbol or symbol, asset_class=row.asset_class or asset_class)
+
+
+async def _enrich_position_instruments(
+    session_factory: Any,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+    aliases_by_key: dict[tuple[str, str], set[str]] = {}
+    wanted: set[str] = set()
+    for r in rows:
+        sym = str(r.get("symbol") or "").strip().upper()
+        ac = str(r.get("asset_class") or "").strip().lower()
+        aliases = _instrument_aliases(sym, ac)
+        aliases_by_key[(sym, ac)] = aliases
+        wanted.update(aliases)
+    registry: dict[str, InstrumentRegistry] = {}
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(InstrumentRegistry).where(InstrumentRegistry.canonical_symbol.in_(sorted(wanted)))
+            )
+            registry = {str(r.canonical_symbol).upper(): r for r in result.scalars().all()}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("api | instrument profile enrichment failed open: {}", exc)
+        registry = {}
+    enriched: list[dict[str, Any]] = []
+    for r in rows:
+        sym = str(r.get("symbol") or "").strip().upper()
+        ac = str(r.get("asset_class") or "").strip().lower()
+        match = None
+        for alias in aliases_by_key.get((sym, ac), {sym}):
+            match = registry.get(alias)
+            if match is not None:
+                break
+        enriched.append({**r, "instrument": _registry_profile(match, sym, ac)})
+    return enriched
+
+
 async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
     """Return current positions directly from connected broker adapters.
 
@@ -998,6 +1215,7 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
         )
     if live_rows:
         src = "live_broker" if APP_ENV == "live" else "live_broker+synthetic_paper_log"
+        live_rows = await _enrich_position_instruments(session_factory, live_rows)
         return {"positions": live_rows, "source": src}
 
     async with session_factory() as session:
@@ -1007,17 +1225,19 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
             return {"positions": [], "source": "position_log"}
         prices = await _latest_feature_prices(session, [r.symbol for r in rows])
     live_prices = await _live_broker_prices(rows)
+    payload_rows = [
+        _position_log_payload(
+            r,
+            current_price=live_prices.get(
+                r.symbol,
+                prices.get(r.symbol, Decimal(str(r.current_price or 0))),
+            ),
+        )
+        for r in rows
+    ]
+    payload_rows = await _enrich_position_instruments(session_factory, payload_rows)
     return {
-        "positions": [
-            _position_log_payload(
-                r,
-                current_price=live_prices.get(
-                    r.symbol,
-                    prices.get(r.symbol, Decimal(str(r.current_price or 0))),
-                ),
-            )
-            for r in rows
-        ],
+        "positions": payload_rows,
         "source": "position_log",
     }
 

@@ -9,6 +9,7 @@ import { Conviction, Coverage, LiveEvent, Position } from './data';
 import { prettySymbol } from './mapping';
 import { Card, Glyph, Label, NavNumber, Pill, Signed, Spark } from './primitives';
 import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } from './tokens';
+import { InstrumentAvatar, instrumentDisplayName, instrumentSubtitle } from './instrumentVisuals';
 import type { BackendSystemState } from '../lib/api';
 import type { LiveData } from './useLiveSystem';
 
@@ -1082,17 +1083,18 @@ function PositionChip({ pos, accent }: { pos: Position; accent: string }) {
       padding: '8px 12px', borderRadius: 10,
       background: TOKENS.bg2, border: `1px solid ${TOKENS.line}`,
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+      <InstrumentAvatar pos={pos} size={30} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minWidth: 94 }}>
         <span
-          title={pos.sym}
+          title={pos.description || instrumentDisplayName(pos)}
           style={{
             fontFamily: TOKENS.sans, fontSize: 12, fontWeight: 500,
-            color: TOKENS.ink0, letterSpacing: '-0.02em',
-          }}>{prettySymbol(pos.sym)}</span>
+            color: TOKENS.ink0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{instrumentDisplayName(pos)}</span>
         <span style={{
           fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3,
-          fontVariantNumeric: 'tabular-nums',
-        }}>{pos.qty}</span>
+          fontVariantNumeric: 'tabular-nums', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{instrumentSubtitle(pos) || pos.qty}</span>
       </div>
       <Spark values={[pos.avg, pos.avg * 1.01, pos.avg * 0.995, pos.last || pos.avg]} width={32} height={18} accent={accent} />
       <Signed value={pos.pnl} size={12} />

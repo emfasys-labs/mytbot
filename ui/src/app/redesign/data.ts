@@ -21,6 +21,15 @@ export interface Conviction {
 
 export interface Position {
   sym: string;
+  name?: string;
+  description?: string;
+  category?: string;
+  logoUrl?: string;
+  logoKind?: string;
+  exchange?: string;
+  currency?: string;
+  sector?: string;
+  industry?: string;
   qty: number;
   avg: number;
   last: number;

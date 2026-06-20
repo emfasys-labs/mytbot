@@ -360,6 +360,20 @@ export type ApiPositionsResponse = {
     current_price?: string;
     broker?: string;
     asset_class?: string;
+    instrument?: {
+      canonical_symbol?: string | null;
+      display_name?: string | null;
+      short_name?: string | null;
+      description?: string | null;
+      category?: string | null;
+      logo_url?: string | null;
+      logo_kind?: string | null;
+      region?: string | null;
+      exchange?: string | null;
+      currency?: string | null;
+      sector?: string | null;
+      industry?: string | null;
+    } | null;
   }>;
 };
 
@@ -533,6 +547,12 @@ export type UniverseSymbolRow = {
   name?: string | null;
   /** Short line for UI: name · class · sector, or ticker · class when unknown. */
   description?: string | null;
+  category?: string | null;
+  logo_url?: string | null;
+  logo_kind?: string | null;
+  exchange?: string | null;
+  currency?: string | null;
+  industry?: string | null;
   klass: string;
   stage: string;
   conviction: number;

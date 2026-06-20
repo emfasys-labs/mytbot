@@ -12,6 +12,7 @@ import {
 import { Card, Label, Spark } from '../primitives';
 import { ACCENTS, Density, TOKENS, type AccentName } from '../tokens';
 import type { LiveData } from '../useLiveSystem';
+import { InstrumentAvatar, instrumentDisplayName, instrumentSubtitle, type InstrumentVisual } from '../instrumentVisuals';
 
 // D118 — 4-stage funnel; promotions are an overlay on watching, not a stage.
 // ``broker_listings`` is a debug tooltip on ``unique_normalized`` only.
@@ -61,15 +62,25 @@ const ROW_STAGE_FILTERS = ['all', 'watching', 'promoted', 'active_reps', 'banned
 type RowStageFilter = typeof ROW_STAGE_FILTERS[number];
 
 function symbolTitle(row: UniverseSymbolRow): string {
-  return (row.description || row.name || row.sym).trim();
+  return (row.name || row.description || row.sym).trim();
 }
 
 function symbolSubtitle(row: UniverseSymbolRow): string {
-  const fallback =
-    row.sector && row.sector !== 'general'
-      ? `${row.klass} · ${row.sector.replace(/_/g, ' ')}`
-      : row.klass;
-  return (row.name || row.description || fallback).trim();
+  return instrumentSubtitle(universeVisual(row)) || row.klass;
+}
+
+function universeVisual(row: UniverseSymbolRow): InstrumentVisual {
+  return {
+    sym: row.sym,
+    name: row.name || row.sym,
+    description: row.description,
+    category: row.category || row.klass,
+    logoUrl: row.logo_url,
+    logoKind: row.logo_kind || row.klass,
+    assetClass: row.klass,
+    exchange: row.exchange,
+    currency: row.currency,
+  };
 }
 
 function fmtNum(n: number): string {
@@ -420,6 +431,7 @@ export function UniverseScreen({
               <TransitionsTab
                 accentColor={accentColor}
                 transitions={data?.transitions ?? []}
+                symbols={symbols}
                 onSelect={setSelected}
               />
             )}
@@ -1393,10 +1405,12 @@ function UniverseSummaryPanel({
 function TransitionsTab({
   accentColor,
   transitions,
+  symbols,
   onSelect,
 }: {
   accentColor: string;
   transitions: NonNullable<IntelligenceUniverseResponse['transitions']>;
+  symbols: UniverseSymbolRow[];
   onSelect: (sym: string) => void;
 }) {
   const [reasonFilter, setReasonFilter] = useState<string>('all');
@@ -1464,7 +1478,7 @@ function TransitionsTab({
               onClick={() => onSelect(t.symbol)}
               style={{
                 display: 'grid',
-                gridTemplateColumns: '80px 100px 1fr 1fr 80px',
+                gridTemplateColumns: '80px minmax(180px, 1.2fr) 1fr 1fr 80px',
                 gap: 8,
                 width: '100%',
                 padding: '8px 12px',
@@ -1480,7 +1494,12 @@ function TransitionsTab({
               }}
             >
               <span style={{ color: TOKENS.ink3 }}>{ts}</span>
-              <span style={{ color: accentColor }}>{t.symbol}</span>
+              <span style={{ color: accentColor }}>
+                {(() => {
+                  const row = symbols.find((x) => x.sym.toUpperCase() === t.symbol.toUpperCase());
+                  return row ? instrumentDisplayName(universeVisual(row)) : t.symbol;
+                })()}
+              </span>
               <span>
                 {t.from_tier} → {t.to_tier}
               </span>
@@ -1626,7 +1645,7 @@ function InstrumentsTab({
       >
         {view === 'grid' ? (
           <Card style={{ padding: 14 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
               {filtered.slice(0, 240).map((s) => {
                 const normalizedStage = rowStage(s);
                 const c = STAGE_COLORS[normalizedStage] ?? accentColor;
@@ -1659,9 +1678,27 @@ function InstrumentsTab({
                       cursor: 'pointer',
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {classGlyph(s.klass, 11)}
-                      <span style={{ fontFamily: TOKENS.sans, fontSize: 13, fontWeight: 500 }}>{s.sym}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <InstrumentAvatar pos={universeVisual(s)} size={30} />
+                      <div style={{ minWidth: 0 }}>
+                        <span
+                          style={{
+                            display: 'block',
+                            fontFamily: TOKENS.sans,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: TOKENS.ink0,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {instrumentDisplayName(universeVisual(s))}
+                        </span>
+                        <span style={{ display: 'block', fontFamily: TOKENS.mono, fontSize: 9, color: TOKENS.ink3 }}>
+                          {s.sym}
+                        </span>
+                      </div>
                     </div>
                     <div style={{
                       marginTop: 4,
@@ -1691,7 +1728,7 @@ function InstrumentsTab({
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead style={{ position: 'sticky', top: 0, background: TOKENS.bg1, zIndex: 1 }}>
                   <tr style={{ fontFamily: TOKENS.sans, fontSize: 10, color: TOKENS.ink3, textAlign: 'left' }}>
-                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>symbol</th>
+                    <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>instrument</th>
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>what</th>
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>stage</th>
                     <th style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>conv</th>
@@ -1730,7 +1767,25 @@ function InstrumentsTab({
                         onClick={() => onSelect(s.sym)}
                         style={{ cursor: 'pointer', fontFamily: TOKENS.sans, fontSize: 12 }}
                       >
-                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>{s.sym}</td>
+                        <td style={{ padding: 8, borderBottom: `1px solid ${TOKENS.line}` }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                            <InstrumentAvatar pos={universeVisual(s)} size={30} />
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{
+                                color: TOKENS.ink0,
+                                fontWeight: 600,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}>
+                                {instrumentDisplayName(universeVisual(s))}
+                              </div>
+                              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                                {s.sym}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
                         <td style={{
                           padding: 8,
                           borderBottom: `1px solid ${TOKENS.line}`,
@@ -1835,10 +1890,19 @@ function Inspector({
         >
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {classGlyph(s.klass, 14)}
-              <h2 style={{ margin: 0, fontFamily: TOKENS.sans, fontSize: 24, fontWeight: 300, color: TOKENS.ink0 }}>{s.sym}</h2>
+              <InstrumentAvatar pos={universeVisual(s)} size={42} />
+              <div>
+                <h2 style={{ margin: 0, fontFamily: TOKENS.sans, fontSize: 24, fontWeight: 300, color: TOKENS.ink0 }}>
+                  {instrumentDisplayName(universeVisual(s))}
+                </h2>
+                <div style={{ marginTop: 3, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3 }}>
+                  {s.sym}
+                </div>
+              </div>
             </div>
-            <div style={{ marginTop: 6, fontSize: 12, color: TOKENS.ink3 }}>{s.klass} · {stageLabel(rowStage(s))}</div>
+            <div style={{ marginTop: 8, fontSize: 12, color: TOKENS.ink3 }}>
+              {symbolSubtitle(s)} · {stageLabel(rowStage(s))}
+            </div>
             {(s.description || s.name) && (
               <div style={{
                 marginTop: 10,

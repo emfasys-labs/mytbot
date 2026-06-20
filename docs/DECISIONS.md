@@ -14,6 +14,38 @@
 
 ---
 
+## D184 — Real logo URLs for positions and Universe instruments
+**Date:** 2026-06-20
+**Decision:** Generated avatars are useful fallbacks, but the operator asked for real company/instrument logos in the Trading 212-style UI. Clearbit's free Logo API is not viable in 2026 because it was sunset in December 2025, so we avoid it. Instead, use API-key-free real image sources with deterministic fallback: official-domain favicons via Google's favicon proxy for companies/funds, CoinCap's public icon CDN for crypto, FlagCDN for FX base-currency flags, and CME favicon for futures.
+
+**Implementation.** New `core/instrument_profiles.py` centralizes domain/logo mappings and helpers: `logo_url_for_symbol()`, `with_logo()`, crypto display names, company/fund domain maps, FX flag mapping, and futures logo mapping. `/positions` profiles now call `with_logo()`. `universe/snapshot_service.py` now emits `logo_url` for Universe rows from the same helper. Fixed a symbol-collision bug where `CVX-USD` could inherit Chevron's equity name; crypto rows now use crypto display names where known (`CVX-USD` -> `Convex Finance`) and fall back to the token code.
+
+**Status:** Implemented + live after restart (PID 50396). Verification: `python -m py_compile core/instrument_profiles.py api/server.py universe/snapshot_service.py`; UI `npm run build` passed; `/system/status` running with five brokers; `/positions` emits real logo URLs for the live book (CME/FlagCDN/USCF/SSGA); `/intelligence/universe` sample emits real logo URLs (`AAPL` Apple favicon, `BTC-USD` CoinCap BTC icon, `COIN` Coinbase favicon, `AUDUSD=X` AU flag, `CVX-USD` Convex Finance CoinCap icon). UI still falls back to generated avatars if an external logo URL fails.
+
+---
+
+## D183 — Apply instrument visuals and readable profiles across Universe tab
+**Date:** 2026-06-20
+**Decision:** The Trading 212-style instrument presentation from positions should be consistent across the symbol-heavy Universe tab. The Universe page was still mostly ticker-first with simple class glyphs, so operators had to mentally map rows like `AUDUSD=X`, `BTC-USD`, or `CL=F`.
+
+**Implementation.** `universe/snapshot_service.py` now emits presentation fields on each Universe symbol row: `category`, `logo_url`, `logo_kind`, `exchange`, `currency`, and `industry`, with deterministic fallbacks for FX, crypto, ETFs/funds, futures, and equities. The TypeScript `UniverseSymbolRow` contract was extended to carry those fields. `ui/src/app/redesign/instrumentVisuals.tsx` was generalized from `Position` to an instrument-like interface so positions and Universe rows share the same avatar/name/subtitle helpers. `UniverseScreen.tsx` now uses the shared `InstrumentAvatar`, `instrumentDisplayName()`, and `instrumentSubtitle()` in the Instruments grid, Instruments list, transition rows, and inspector drawer.
+
+**Status:** Implemented + live after restart (PID 49256). Verification: `python -m py_compile universe/snapshot_service.py`; `npm run build` in `ui/` passed; `/system/status` running with five brokers; `/intelligence/universe` returns enriched sample rows (e.g. `AUDUSD=X` -> `AUD/USD` Forex pair, `BTC-USD` -> Bitcoin Crypto, `AAPL` -> Apple Equity); rebuilt frontend asset returns HTTP 200. Some catalogue names remain terse when the source catalogue only provides a short name; the UI contract is ready for richer registry/logo enrichment.
+
+---
+
+## D182 — Instrument presentation profiles for Trading 212-style positions
+**Date:** 2026-06-20
+**Decision:** Open positions should be shown as recognisable instruments, not raw broker symbols. The system already has the right foundation (`instrument_registry`), so the UI should consume a reusable instrument profile instead of hard-coding display names in React.
+
+**Implementation.** `/positions` now enriches every position row with an `instrument` object. The profile is loaded from `InstrumentRegistry` where possible and falls back deterministically for common asset classes: FX pairs (`GBPUSD` -> `GBP/USD`), crypto (`BTC-USD`), ETFs, equities, indexes, and futures (`CL=F` -> `Crude Oil Futures`). The object includes `display_name`, `short_name`, `description`, `category`, `logo_url`, `logo_kind`, `exchange`, `currency`, `sector`, and `industry`. Logo URLs can be supplied later through registry metadata; until then, the frontend renders polished generated avatars by asset class/symbol.
+
+**UI.** The redesign mapping now carries instrument metadata on `Position`. New `ui/src/app/redesign/instrumentVisuals.tsx` provides `InstrumentAvatar`, `instrumentDisplayName()`, and `instrumentSubtitle()`. The dashboard position chips and Book/Open Positions table now render logo/avatar + human name + subtitle while still exposing symbol and broker.
+
+**Status:** Implemented + live after restart (PID 53380). Verification: `python -m py_compile api/server.py`; `npm run build` in `ui/` passed; `/system/status` running with five brokers; `/positions` now returns enriched names for the live book (`WTI Crude Oil`, `GBP/USD`, `USD/JPY`, `United States Oil Fund`, `Energy Select Sector SPDR Fund`); served frontend and rebuilt asset both return HTTP 200. In-app Browser verification was attempted but the browser surface was unavailable in this session.
+
+---
+
 ## D181 — Profit Harvest v2 activated for reduce-only profit taking
 **Date:** 2026-06-20
 **Decision:** The operator explicitly requested an immediate comparison and activation of Profit Harvest v2. Current comparison is necessarily limited because v2 had only just started publishing recommendations, but the available evidence did not show an immediate conflict: current v2 rows and legacy v1 both recommend no action on the open book (`DO_NOT_TOUCH` / below threshold or venue closed), and historical v1 profit-harvest fills are net positive but small (`profit_harvest_monitor`: 9 fills, realised P&L about +$258).

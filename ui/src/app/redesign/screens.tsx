@@ -10,6 +10,7 @@ import type { LiveData } from './useLiveSystem';
 import { api, setApiControlToken, type AiPipelineStage, type AiPipelineView, type ConnectHubConnector, type DeploymentCheck, type DeploymentStage, type RoutingBrokerRow } from '../lib/api';
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 import { formatStrategyDisplayName } from './strategyLabels';
+import { InstrumentAvatar, instrumentDisplayName, instrumentSubtitle } from './instrumentVisuals';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
@@ -2094,7 +2095,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
   );
   const capitalAtWorkPct = nav > 0 ? Math.max(0, capitalAtWorkValue / nav) : 0;
 
-  const bookGridCols = '110px 110px 80px 80px 95px 1fr 80px';
+  const bookGridCols = 'minmax(210px, 1.5fr) 110px 80px 80px 95px minmax(100px, 1fr) 80px';
 
   return (
     <div style={{
@@ -2153,10 +2154,36 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                       gap: 12, alignItems: 'center', padding: '10px 0',
                       borderBottom: `1px solid ${TOKENS.line}`,
                     }}>
-                      <div>
-                        <div title={p.sym} style={{ fontFamily: TOKENS.sans, fontSize: 14, fontWeight: 500, color: TOKENS.ink0 }}>{prettySymbol(p.sym)}</div>
-                        <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
-                          qty {p.qty}{p.broker ? ` · ${p.broker}` : ''}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                        <InstrumentAvatar pos={p} size={36} />
+                        <div style={{ minWidth: 0 }}>
+                          <div
+                            title={p.description || instrumentDisplayName(p)}
+                            style={{
+                              fontFamily: TOKENS.sans,
+                              fontSize: 14,
+                              fontWeight: 600,
+                              color: TOKENS.ink0,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {instrumentDisplayName(p)}
+                          </div>
+                          <div
+                            title={instrumentSubtitle(p)}
+                            style={{
+                              fontFamily: TOKENS.mono,
+                              fontSize: 10,
+                              color: TOKENS.ink3,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {instrumentSubtitle(p)}{p.broker ? ` · ${p.broker}` : ''}
+                          </div>
                         </div>
                       </div>
                       <div>

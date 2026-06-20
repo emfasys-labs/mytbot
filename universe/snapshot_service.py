@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from brokers.ibkr.universe import load_ibkr_universe
+from core.instrument_profiles import crypto_display_name, logo_url_for_symbol
 from data.universe import UniverseManager
 from data.universe_builder import _to_yf_symbol
 from data.universe_tiers import load_universe_tiers
@@ -53,6 +54,84 @@ def _fmt_sector_label(sector: str | None) -> str | None:
     if not sector or str(sector).lower() == "general":
         return None
     return str(sector).replace("_", " ")
+
+
+def _instrument_presentation(sym: str, klass: str, name: str | None, sector: str | None) -> dict[str, Any]:
+    su = str(sym or "").strip().upper()
+    k = str(klass or "").strip().lower()
+    if su == "USO":
+        return {
+            "name": "United States Oil Fund",
+            "description": "ETF-style commodity fund linked to WTI crude oil futures.",
+            "category": "Commodity fund",
+            "logo_kind": "commodity",
+            "exchange": None,
+            "currency": "USD",
+            "industry": None,
+        }
+    if su == "XLE":
+        return {
+            "name": "Energy Select Sector SPDR Fund",
+            "description": "ETF tracking large US energy-sector equities.",
+            "category": "Sector ETF",
+            "logo_kind": "fund",
+            "exchange": None,
+            "currency": "USD",
+            "industry": "Energy",
+        }
+    if su == "CL=F":
+        return {
+            "name": "WTI Crude Oil",
+            "description": "WTI crude oil front-month futures contract.",
+            "category": "Commodity future",
+            "logo_kind": "commodity",
+            "exchange": "CME",
+            "currency": "USD",
+            "industry": "Energy",
+        }
+    if k == "fx" or su.endswith("=X"):
+        pair = su.replace("=X", "")
+        display = f"{pair[:3]}/{pair[3:6]}" if len(pair) >= 6 else su
+        return {
+            "name": display,
+            "description": f"{pair[:3]} versus {pair[3:6]} foreign exchange pair." if len(pair) >= 6 else f"{su} foreign exchange pair.",
+            "category": "Forex pair",
+            "logo_kind": "forex",
+            "exchange": "IDEALPRO",
+            "currency": None,
+            "industry": None,
+        }
+    if k == "crypto":
+        display = crypto_display_name(su) or su.replace("-USD", "").replace("USD", "") or su
+        return {
+            "name": display,
+            "description": f"{display} digital asset.",
+            "category": "Crypto",
+            "logo_kind": "crypto",
+            "exchange": None,
+            "currency": "USD" if "USD" in su else None,
+            "industry": None,
+        }
+    sec_lbl = _fmt_sector_label(sector)
+    if k == "etf":
+        return {
+            "name": name or su,
+            "description": name or (f"{su} · ETF" + (f" · {sec_lbl}" if sec_lbl else "")),
+            "category": "ETF",
+            "logo_kind": "fund",
+            "exchange": None,
+            "currency": "USD",
+            "industry": sec_lbl,
+        }
+    return {
+        "name": name or None,
+        "description": name or (f"{su} · {k}" + (f" · {sec_lbl}" if sec_lbl else "")),
+        "category": "Equity" if k == "equity" else k,
+        "logo_kind": k or "equity",
+        "exchange": None,
+        "currency": "USD" if k in {"equity", "etf"} else None,
+        "industry": sec_lbl,
+    }
 
 CONFIG_PATH = Path("config/universe_selection.yaml")
 
@@ -825,19 +904,9 @@ def _symbols_fallback(
         spark = [max(0, min(100, sc + j * 2 - 10)) for j in range(12)]
         cat_name, cat_sector = _catalog_lookup(sym)
         sector_ui = cat_sector if cat_sector else "general"
-        sec_lbl = _fmt_sector_label(sector_ui)
-        if cat_name:
-            name_ui: str | None = cat_name
-            desc_parts = [cat_name, klass]
-            if sec_lbl:
-                desc_parts.append(sec_lbl)
-            description_ui = " · ".join(desc_parts)
-        else:
-            name_ui = None
-            if sec_lbl:
-                description_ui = f"{su} · {klass} · {sec_lbl}"
-            else:
-                description_ui = f"{su} · {klass}"
+        pres = _instrument_presentation(sym, klass, cat_name, sector_ui)
+        name_ui: str | None = pres.get("name")
+        description_ui = str(pres.get("description") or f"{su} · {klass}")
         # D118 — attach per-symbol score-age + last-score telemetry when
         # available. The UI uses ``last_scored_at`` for the age stripe
         # and ``priority_breakdown`` (when present on a future API
@@ -849,6 +918,12 @@ def _symbols_fallback(
             "sym": su,
             "name": name_ui,
             "description": description_ui,
+            "category": pres.get("category"),
+            "logo_url": logo_url_for_symbol(su, klass=klass),
+            "logo_kind": pres.get("logo_kind"),
+            "exchange": pres.get("exchange"),
+            "currency": pres.get("currency"),
+            "industry": pres.get("industry"),
             "klass": klass,
             "sector": sector_ui,
             "stage": stage,

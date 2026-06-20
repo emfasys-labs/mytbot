@@ -365,6 +365,33 @@ export function mapPositions(
     }
     return {
       sym: (p.symbol ?? '').toUpperCase(),
+      name: typeof p.instrument?.display_name === 'string' && p.instrument.display_name.trim()
+        ? p.instrument.display_name.trim()
+        : undefined,
+      description: typeof p.instrument?.description === 'string' && p.instrument.description.trim()
+        ? p.instrument.description.trim()
+        : undefined,
+      category: typeof p.instrument?.category === 'string' && p.instrument.category.trim()
+        ? p.instrument.category.trim()
+        : undefined,
+      logoUrl: typeof p.instrument?.logo_url === 'string' && p.instrument.logo_url.trim()
+        ? p.instrument.logo_url.trim()
+        : undefined,
+      logoKind: typeof p.instrument?.logo_kind === 'string' && p.instrument.logo_kind.trim()
+        ? p.instrument.logo_kind.trim()
+        : undefined,
+      exchange: typeof p.instrument?.exchange === 'string' && p.instrument.exchange.trim()
+        ? p.instrument.exchange.trim()
+        : undefined,
+      currency: typeof p.instrument?.currency === 'string' && p.instrument.currency.trim()
+        ? p.instrument.currency.trim()
+        : undefined,
+      sector: typeof p.instrument?.sector === 'string' && p.instrument.sector.trim()
+        ? p.instrument.sector.trim()
+        : undefined,
+      industry: typeof p.instrument?.industry === 'string' && p.instrument.industry.trim()
+        ? p.instrument.industry.trim()
+        : undefined,
       qty: Number.isFinite(qty) ? Math.round(qty * 100) / 100 : 0,
       avg: Number.isFinite(avg) ? avg : 0,
       last: Number.isFinite(last) ? last : 0,
