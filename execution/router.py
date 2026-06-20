@@ -52,6 +52,12 @@ BROKER_ASSET_MAP = {
     "capitalcom": {
         "equity", "etf", "forex", "future"
     },
+    "ig": {
+        "equity", "etf", "forex", "future"
+    },
+    "coinbase": {
+        "crypto"
+    },
     # Adding new broker: just add its entry here
     # "bybit": {"crypto", "future"},
     # "deribit": {"crypto", "option"},
@@ -66,6 +72,8 @@ BROKER_FEE_MAP = {
     "alpaca":  Decimal("0.0000"),   # zero commission equities
     "trading212": Decimal("0.0000"),  # commission-free Invest (spread applies)
     "capitalcom": Decimal("0.0000"),  # spread-based CFD (no explicit commission)
+    "ig": Decimal("0.0000"),  # spread-based CFD/spread bet (no explicit commission)
+    "coinbase": Decimal("0.0060"),  # Advanced Trade taker ~0.40–0.60% (conservative prior)
 }
 
 # Pseudo-observation count for fee→routing prior when blending with online quality (Wave 9).

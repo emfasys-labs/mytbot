@@ -62,6 +62,17 @@ def test_canonical_to_broker_capitalcom() -> None:
     assert canonical_to_broker("ES=F", "capitalcom") == "US500"
 
 
+def test_canonical_to_broker_ig() -> None:
+    assert canonical_to_broker("AAPL", "ig") == "AAPL"
+    assert canonical_to_broker("EURUSD=X", "ig") == "EURUSD"
+    assert canonical_to_broker("ES=F", "ig") == "US500"
+
+
+def test_canonical_to_broker_coinbase() -> None:
+    assert canonical_to_broker("BTC-USD", "coinbase") == "BTC-USD"
+    assert canonical_to_broker("ETH-USD", "coinbase") == "ETH-USD"
+
+
 def test_canonical_to_broker_crypto_routes() -> None:
     assert canonical_to_broker("BTC-USD", "kraken") == "XBT/USD"
     assert canonical_to_broker("ETH-USD", "kraken") == "ETH/USD"

@@ -112,3 +112,31 @@ capitalcom:
     enabled: true
     reason: null
     restored_after: null
+
+ig:
+  taker_fee_bps: 0.0
+  borrow_rate_annual_pct: 8.0
+  equity:
+    enabled: true
+    reason: null
+    restored_after: null
+  etf:
+    enabled: true
+    reason: null
+    restored_after: null
+  forex:
+    enabled: true
+    reason: null
+    restored_after: null
+  future:
+    enabled: true
+    reason: null
+    restored_after: null
+
+coinbase:
+  taker_fee_bps: 60.0
+  borrow_rate_annual_pct: 0.0
+  crypto:
+    enabled: true
+    reason: null
+    restored_after: null

@@ -147,6 +147,51 @@ brokers:
     docs_url: https://open-api.capital.com/
     notes: Demo uses https://demo-api-capital.backend-capital.com when CAPITALCOM_PAPER_MODE=true.
 
+  ig:
+    label: IG
+    adapter: ig
+    enabled: true
+    certification: certified
+    auth_type: api_key
+    required_secrets:
+      - env: IG_API_KEY
+        label: API key
+      - env: IG_IDENTIFIER
+        label: IG username
+      - env: IG_PASSWORD
+        label: IG account password
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_equities: true
+      supports_forex: true
+    docs_url: https://labs.ig.com/rest-trading-api-reference.html
+    notes: Demo uses https://demo-api.ig.com/gateway/deal when IG_PAPER_MODE=true. IG_IDENTIFIER must be the Web API username from My IG → Settings → API keys (not your email). Password is the matching Web API password. Demo and live keys/credentials are not interchangeable.
+
+  coinbase:
+    label: Coinbase
+    adapter: coinbase
+    enabled: true
+    certification: certified
+    auth_type: api_key
+    required_secrets:
+      - env: COINBASE_API_KEY
+        label: API key name (organizations/.../apiKeys/...)
+      - env: COINBASE_API_SECRET
+        label: EC private key (PEM)
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_crypto_spot: true
+    docs_url: https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api
+    notes: Advanced Trade CDP key + ES256 private key JWT. Crypto spot only (BTC-USD style products).
+
 information_feeds:
   newsapi:
     label: NewsAPI

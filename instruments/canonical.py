@@ -38,7 +38,7 @@ AssetClassHint = Literal[
 ]
 
 
-_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "trading212", "capitalcom"}
+_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "coinbase", "trading212", "capitalcom", "ig"}
 
 # yfinance exchange suffix → ISO region/exchange hint
 _EXCHANGE_SUFFIX: dict[str, tuple[str, str]] = {
@@ -281,7 +281,7 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
         base, quote = sym[:3], sym[3:6]
         if b == "ibkr":
             return f"{base}.{quote}"
-        if b == "capitalcom":
+        if b in {"capitalcom", "ig"}:
             return f"{base}{quote}"
         return None  # only IBKR routes spot FX in this system
 
@@ -296,6 +296,8 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
             return f"{kbase}/USD"
         if b == "binance":
             return f"{base}USDT"
+        if b == "coinbase":
+            return f"{base}-USD"
         if b == "bybit":
             return f"{base}USDT"
         if b == "ibkr":
@@ -315,7 +317,7 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
             return None
         return f"{sym}_US_EQ"
 
-    if b == "capitalcom":
+    if b in {"capitalcom", "ig"}:
         if asset_class == "future":
             root = sym[:-2] if sym.endswith("=F") else sym
             if root in {"ES", "SPX"}:

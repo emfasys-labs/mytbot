@@ -14,6 +14,28 @@
 
 ---
 
+---
+
+## D188 — Coinbase Advanced Trade broker adapter (ninth venue)
+**Date:** 2026-06-20
+**Decision:** Add Coinbase as a ninth crypto spot venue via the Advanced Trade REST API (`https://api.coinbase.com/api/v3/brokerage`). Auth uses CDP API keys: per-request ES256 JWT (`Authorization: Bearer`) built from the full API key path (`COINBASE_API_KEY`) and EC private key PEM (`COINBASE_API_SECRET`). No passphrase (unlike legacy Coinbase Pro).
+
+**Implementation.** `brokers/coinbase/auth.py` (JWT + PEM `\n` normalization), `brokers/coinbase/adapter.py` — accounts, positions, market/limit orders, order book, candles; `paper_mode=True` uses local paper wallet (no native demo API). Wired registry, broker_manager, Connect Hub, permissions (crypto only), router fee map, canonical `BTC-USD` product ids. Dependency: `PyJWT[crypto]`. Tests: `tests/test_coinbase_adapter.py`.
+
+**Status:** Implemented. Requires `COINBASE_API_KEY` + `COINBASE_API_SECRET` in `.env`. Restart `python run.py` for ninth broker badge.
+
+---
+
+## D187 — IG Markets broker adapter (eighth venue)
+**Date:** 2026-06-20
+**Decision:** Add IG as an eighth spread-bet/CFD broker via the REST Deal API. Demo uses `https://demo-api.ig.com/gateway/deal`; live uses `https://api.ig.com/gateway/deal`. Auth is `POST /session` (Version 2) with `X-IG-API-KEY`, IG username (`IG_IDENTIFIER`), and IG account password (`IG_PASSWORD`); subsequent calls use `CST` + `X-SECURITY-TOKEN` headers (6-hour idle TTL, extended while in use).
+
+**Implementation.** `brokers/ig/adapter.py` — session auth, accounts/positions, market opens via `POST /positions/otc` + `/confirms`, reduce-only closes via `DELETE /positions/otc`, epic resolution via `/markets` search. Wired registry, broker_manager, Connect Hub, permissions, router, canonical mapping. Tests: `tests/test_ig_adapter.py`.
+
+**Status:** Implemented. Requires `IG_IDENTIFIER` and `IG_PASSWORD` in `.env` to connect. Restart `python run.py` for eighth broker badge.
+
+---
+
 ## D186 — Capital.com broker adapter (seventh venue)
 **Date:** 2026-06-20
 **Decision:** Add Capital.com as a seventh CFD broker via the public REST API. Demo uses `https://demo-api-capital.backend-capital.com/api/v1`; live uses `https://api-capital.backend-capital.com/api/v1`. Auth is `POST /session` with `X-CAP-API-KEY`, platform login (`CAPITALCOM_IDENTIFIER`), and API-key custom password (`CAPITALCOM_API_PASSWORD`); subsequent calls use `CST` + `X-SECURITY-TOKEN` headers (10-minute idle TTL, auto-refresh).

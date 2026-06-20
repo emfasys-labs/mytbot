@@ -17,6 +17,7 @@ ib_insync==0.9.86               # IBKR
 python-kraken-sdk==3.0.0        # Kraken
 python-binance==1.0.19          # Binance
 pybit==5.7.0                     # Bybit V5
+PyJWT[crypto]>=2.8.0,<3          # Coinbase Advanced Trade CDP JWT (ES256)
 alpaca-py==0.25.0               # Alpaca
 
 # ── Data & Features ───────────────────────────────────────────────────────────

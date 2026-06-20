@@ -16,6 +16,8 @@ from brokers.binance.adapter import BinanceAdapter
 from brokers.alpaca.adapter import AlpacaAdapter
 from brokers.trading212.adapter import Trading212Adapter
 from brokers.capitalcom.adapter import CapitalComAdapter
+from brokers.coinbase.adapter import CoinbaseAdapter
+from brokers.ig.adapter import IGAdapter
 
 # ─── Registry ─────────────────────────────────────────────────────────────────
 # Add new brokers here — one line each.
@@ -28,6 +30,8 @@ BROKER_REGISTRY: dict[str, type[BrokerAdapter]] = {
     "alpaca": AlpacaAdapter,
     "trading212": Trading212Adapter,
     "capitalcom": CapitalComAdapter,
+    "coinbase": CoinbaseAdapter,
+    "ig": IGAdapter,
     # "deribit": DeribitAdapter,    ← uncomment when ready
     # "okx":     OKXAdapter,        ← uncomment when ready
 }
