@@ -56,6 +56,12 @@ def test_canonical_to_broker_trading212_equity() -> None:
     assert canonical_to_broker("HSBA.L", "trading212") == "HSBA_GB_EQ"
 
 
+def test_canonical_to_broker_capitalcom() -> None:
+    assert canonical_to_broker("AAPL", "capitalcom") == "AAPL"
+    assert canonical_to_broker("EURUSD=X", "capitalcom") == "EURUSD"
+    assert canonical_to_broker("ES=F", "capitalcom") == "US500"
+
+
 def test_canonical_to_broker_crypto_routes() -> None:
     assert canonical_to_broker("BTC-USD", "kraken") == "XBT/USD"
     assert canonical_to_broker("ETH-USD", "kraken") == "ETH/USD"

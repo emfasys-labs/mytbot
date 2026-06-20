@@ -38,7 +38,7 @@ AssetClassHint = Literal[
 ]
 
 
-_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "trading212"}
+_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "trading212", "capitalcom"}
 
 # yfinance exchange suffix → ISO region/exchange hint
 _EXCHANGE_SUFFIX: dict[str, tuple[str, str]] = {
@@ -281,6 +281,8 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
         base, quote = sym[:3], sym[3:6]
         if b == "ibkr":
             return f"{base}.{quote}"
+        if b == "capitalcom":
+            return f"{base}{quote}"
         return None  # only IBKR routes spot FX in this system
 
     if asset_class == "crypto":
@@ -312,6 +314,22 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
                 return f"{head}_GB_EQ"
             return None
         return f"{sym}_US_EQ"
+
+    if b == "capitalcom":
+        if asset_class == "future":
+            root = sym[:-2] if sym.endswith("=F") else sym
+            if root in {"ES", "SPX"}:
+                return "US500"
+            if root in {"NQ", "NDX"}:
+                return "US100"
+            if root == "CL":
+                return "OIL_CRUDE"
+            if root == "GC":
+                return "GOLD"
+            return root
+        if "." in sym:
+            return None
+        return sym
 
     if asset_class == "future":
         # All adapters keep the =F form for now; futures routing is gated separately.

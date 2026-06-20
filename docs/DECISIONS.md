@@ -14,6 +14,16 @@
 
 ---
 
+## D186 — Capital.com broker adapter (seventh venue)
+**Date:** 2026-06-20
+**Decision:** Add Capital.com as a seventh CFD broker via the public REST API. Demo uses `https://demo-api-capital.backend-capital.com/api/v1`; live uses `https://api-capital.backend-capital.com/api/v1`. Auth is `POST /session` with `X-CAP-API-KEY`, platform login (`CAPITALCOM_IDENTIFIER`), and API-key custom password (`CAPITALCOM_API_PASSWORD`); subsequent calls use `CST` + `X-SECURITY-TOKEN` headers (10-minute idle TTL, auto-refresh).
+
+**Implementation.** `brokers/capitalcom/adapter.py` — session auth, accounts/positions, market opens via `POST /positions` + `/confirms`, reduce-only closes via `DELETE /positions/{dealId}`, epic resolution via `/markets` search. Wired registry, broker_manager, Connect Hub, permissions, router, canonical mapping. Tests: `tests/test_capitalcom_adapter.py`.
+
+**Status:** Implemented. Requires `CAPITALCOM_IDENTIFIER` (login email) in `.env` to connect. Restart `python run.py` for seventh broker badge.
+
+---
+
 ## D185 — Trading 212 broker adapter (sixth venue)
 **Date:** 2026-06-20
 **Decision:** Add Trading 212 as a sixth broker for UK/EU commission-free equities and ETFs via the public REST API (Invest / Stocks ISA). Paper uses `https://demo.trading212.com/api/v0` when `TRADING212_PAPER_MODE=true` (default); live uses `https://live.trading212.com/api/v0`. Auth is HTTP Basic (API key + secret). Symbol mapping uses T212 tickers (`AAPL_US_EQ`) with an instruments-metadata cache on connect and `_US_EQ` / `_GB_EQ` heuristics as fallback.

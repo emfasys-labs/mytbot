@@ -123,6 +123,30 @@ brokers:
     docs_url: https://docs.trading212.com/api
     notes: Demo paper uses https://demo.trading212.com/api/v0 when TRADING212_PAPER_MODE=true.
 
+  capitalcom:
+    label: Capital.com
+    adapter: capitalcom
+    enabled: true
+    certification: certified
+    auth_type: api_key
+    required_secrets:
+      - env: CAPITALCOM_API_KEY
+        label: API key
+      - env: CAPITALCOM_API_PASSWORD
+        label: API key password
+      - env: CAPITALCOM_IDENTIFIER
+        label: Platform login (email)
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_equities: true
+      supports_forex: true
+    docs_url: https://open-api.capital.com/
+    notes: Demo uses https://demo-api-capital.backend-capital.com when CAPITALCOM_PAPER_MODE=true.
+
 information_feeds:
   newsapi:
     label: NewsAPI

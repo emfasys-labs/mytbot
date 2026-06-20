@@ -49,6 +49,9 @@ BROKER_ASSET_MAP = {
     "trading212": {
         "equity", "etf"
     },
+    "capitalcom": {
+        "equity", "etf", "forex", "future"
+    },
     # Adding new broker: just add its entry here
     # "bybit": {"crypto", "future"},
     # "deribit": {"crypto", "option"},
@@ -62,6 +65,7 @@ BROKER_FEE_MAP = {
     "bybit":   Decimal("0.00055"),  # typical taker ~0.055% linear (tiered)
     "alpaca":  Decimal("0.0000"),   # zero commission equities
     "trading212": Decimal("0.0000"),  # commission-free Invest (spread applies)
+    "capitalcom": Decimal("0.0000"),  # spread-based CFD (no explicit commission)
 }
 
 # Pseudo-observation count for fee→routing prior when blending with online quality (Wave 9).

@@ -187,6 +187,14 @@ def _broker_configs_from_env() -> dict[str, dict[str, Any]]:
             "api_secret": os.getenv("TRADING212_API_SECRET", "").strip(),
             "base_url": os.getenv("TRADING212_BASE_URL", "").strip() or None,
         },
+        "capitalcom": {
+            "api_key": os.getenv("CAPITALCOM_API_KEY", "").strip(),
+            "api_password": os.getenv("CAPITALCOM_API_PASSWORD", "").strip(),
+            "identifier": os.getenv("CAPITALCOM_IDENTIFIER", "").strip()
+            or os.getenv("CAPITALCOM_LOGIN", "").strip()
+            or os.getenv("CAPITALCOM_EMAIL", "").strip(),
+            "base_url": os.getenv("CAPITALCOM_BASE_URL", "").strip() or None,
+        },
     }
 
 
@@ -215,6 +223,8 @@ def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
         pass
     if name == "ibkr":
         return True
+    if name == "capitalcom":
+        return bool(cfg.get("api_key") and cfg.get("api_password") and cfg.get("identifier"))
     if name in {"kraken", "binance", "bybit", "alpaca", "trading212"}:
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
     return True
@@ -409,6 +419,7 @@ class BrokerManager:
         "bybit": 45,
         "alpaca": 30,
         "trading212": 45,
+        "capitalcom": 45,
     }
 
     _STARTUP_TIMEOUT = 15.0  # max seconds to wait for any broker during startup
