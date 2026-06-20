@@ -46,6 +46,9 @@ BROKER_ASSET_MAP = {
     "alpaca": {
         "equity", "etf", "crypto"
     },
+    "trading212": {
+        "equity", "etf"
+    },
     # Adding new broker: just add its entry here
     # "bybit": {"crypto", "future"},
     # "deribit": {"crypto", "option"},
@@ -58,6 +61,7 @@ BROKER_FEE_MAP = {
     "binance": Decimal("0.0010"),   # 0.10% base
     "bybit":   Decimal("0.00055"),  # typical taker ~0.055% linear (tiered)
     "alpaca":  Decimal("0.0000"),   # zero commission equities
+    "trading212": Decimal("0.0000"),  # commission-free Invest (spread applies)
 }
 
 # Pseudo-observation count for fee→routing prior when blending with online quality (Wave 9).

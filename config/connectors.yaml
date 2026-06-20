@@ -102,6 +102,27 @@ brokers:
       supports_equities: true
       supports_crypto_spot: true
 
+  trading212:
+    label: Trading 212
+    adapter: trading212
+    enabled: true
+    certification: certified
+    auth_type: api_key
+    required_secrets:
+      - env: TRADING212_API_KEY
+        label: API key
+      - env: TRADING212_API_SECRET
+        label: API secret
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_equities: true
+    docs_url: https://docs.trading212.com/api
+    notes: Demo paper uses https://demo.trading212.com/api/v0 when TRADING212_PAPER_MODE=true.
+
 information_feeds:
   newsapi:
     label: NewsAPI

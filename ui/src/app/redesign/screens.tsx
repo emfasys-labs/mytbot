@@ -582,6 +582,60 @@ function isCoreConnector(row: ConnectHubConnector): boolean {
   return !!(row.capabilities?.core_required || row.capabilities?.non_disableable);
 }
 
+// ── Connect Hub UI polish (M11): certification badge, advanced-setup flag,
+// explicit per-connector status checklist, and asset-coverage pills. ─────────
+
+// Certification is an execution privilege, so it is only meaningful for venues
+// that can place trades or move money. The backend fail-closes to experimental
+// (connectors/certification.py), so we mirror that default here.
+const CERT_RELEVANT_CATEGORIES = new Set(['brokers', 'treasury_accounts']);
+
+function connectorCertification(row: ConnectHubConnector): 'certified' | 'experimental' | null {
+  if (!CERT_RELEVANT_CATEGORIES.has(row.category)) return null;
+  return (row.certification || '').trim().toLowerCase() === 'certified' ? 'certified' : 'experimental';
+}
+
+// Gateway / local-bridge auth types need a locally-running component (IB
+// Gateway/TWS, a MetaTrader bridge) plus a configured API port — materially
+// more setup than pasting an API key.
+function isAdvancedSetup(row: ConnectHubConnector): boolean {
+  return ['gateway', 'local_terminal', 'mt5_bridge'].includes((row.auth_type || '').trim().toLowerCase());
+}
+
+function advancedSetupHint(row: ConnectHubConnector): string {
+  const a = (row.auth_type || '').trim().toLowerCase();
+  if (a === 'gateway') {
+    return 'Requires IB Gateway or TWS running on the host that runs myTbot, API enabled, with the correct API port (paper 7497 / live 7496).';
+  }
+  return 'Requires a local terminal bridge running on the host that runs myTbot.';
+}
+
+// Explicit operational status, in the spec's order. "Connection test" is the
+// live healthy probe; the rest are declared connector capabilities (what the
+// venue supports), gated at execution time by certification + risk.
+const CONNECTOR_CHECKLIST: Array<{ key: string; label: string; live?: boolean }> = [
+  { key: 'healthy', label: 'Connection test', live: true },
+  { key: 'can_read_balance', label: 'Balances readable' },
+  { key: 'supports_paper', label: 'Paper trading' },
+  { key: 'supports_live', label: 'Live trading' },
+];
+
+function checklistValue(row: ConnectHubConnector, key: string, live?: boolean): boolean {
+  if (live) return !!(row.connected && row.healthy);
+  return !!row.capabilities?.[key];
+}
+
+const COVERAGE_KEYS = [
+  'supports_equities', 'supports_forex', 'supports_options',
+  'supports_crypto_spot', 'supports_crypto_derivatives',
+];
+
+function assetCoverageList(row: ConnectHubConnector): string[] {
+  return COVERAGE_KEYS
+    .filter((k) => row.capabilities?.[k])
+    .map((k) => k.replace('supports_', '').replace(/_/g, ' '));
+}
+
 function ConnectorCard({
   row,
   onConfigure,
@@ -595,11 +649,12 @@ function ConnectorCard({
   onDelete: (row: ConnectHubConnector) => void;
   busy?: boolean;
 }) {
-  const caps = capabilityList(row);
+  const coverage = assetCoverageList(row);
   const missing = (row.required_secrets ?? []).filter((s) => s.required && !s.configured);
   const core = isCoreConnector(row);
-  // D127 P1/P2/P3 — AI pipeline stages are never deletable. Broker
-  // certification remains a backend execution gate, not a per-card UI badge.
+  const cert = connectorCertification(row);
+  const advanced = isAdvancedSetup(row);
+  // D127 P1/P2/P3 — AI pipeline stages are never deletable.
   const showDelete = row.category !== 'ai_providers';
   return (
     <div style={{
@@ -630,21 +685,63 @@ function ConnectorCard({
         </div>
         <div style={{ display: 'grid', gap: 4, justifyItems: 'end' }}>
           <Pill size="sm" tone={connectorTone(row)}>{connectorStatusLabel(row)}</Pill>
+          {cert ? (
+            <span
+              title={cert === 'certified'
+                ? 'Certified — verified for live execution / treasury movement.'
+                : 'Experimental — informs and reads balances only; the risk engine blocks live execution until certified.'}
+            >
+              <Pill size="sm" tone={cert === 'certified' ? 'profit' : 'caution'}>
+                {cert === 'certified' ? 'Certified' : 'Experimental'}
+              </Pill>
+            </span>
+          ) : null}
+          {advanced ? (
+            <span title={advancedSetupHint(row)}>
+              <Pill size="sm" tone="info">Advanced setup</Pill>
+            </span>
+          ) : null}
         </div>
       </div>
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 6,
-        minHeight: 22,
-        alignItems: 'flex-start',
-      }}>
-        {caps.length > 0 ? caps.map((c) => (
-          <Pill key={c} size="sm" tone="neutral">{c}</Pill>
-        )) : (
-          <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no capabilities declared</span>
-        )}
-      </div>
+      {row.category === 'brokers' ? (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '3px 10px',
+        }}>
+          {CONNECTOR_CHECKLIST.map((item) => {
+            const ok = checklistValue(row, item.key, item.live);
+            return (
+              <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                <span style={{
+                  fontFamily: TOKENS.mono, fontSize: 11, lineHeight: 1,
+                  color: ok ? TOKENS.profit : TOKENS.ink4,
+                }}>{ok ? '✓' : '·'}</span>
+                <span style={{
+                  fontFamily: TOKENS.mono, fontSize: 10,
+                  color: ok ? TOKENS.ink2 : TOKENS.ink4,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{item.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, minHeight: 22, alignItems: 'flex-start' }}>
+          {capabilityList(row).length > 0 ? capabilityList(row).map((c) => (
+            <Pill key={c} size="sm" tone="neutral">{c}</Pill>
+          )) : (
+            <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no capabilities declared</span>
+          )}
+        </div>
+      )}
+      {coverage.length > 0 ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'flex-start' }}>
+          {coverage.map((c) => (
+            <Pill key={c} size="sm" tone="neutral">{c}</Pill>
+          ))}
+        </div>
+      ) : null}
       {row.roles?.length ? (
         <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, lineHeight: 1.5 }}>
           {row.roles.join(' · ')}

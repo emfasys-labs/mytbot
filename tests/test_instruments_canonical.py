@@ -51,6 +51,11 @@ def test_binance_usdt_normalises_to_canonical_usd() -> None:
     assert parsed.symbol == "BTC-USD"
 
 
+def test_canonical_to_broker_trading212_equity() -> None:
+    assert canonical_to_broker("AAPL", "trading212") == "AAPL_US_EQ"
+    assert canonical_to_broker("HSBA.L", "trading212") == "HSBA_GB_EQ"
+
+
 def test_canonical_to_broker_crypto_routes() -> None:
     assert canonical_to_broker("BTC-USD", "kraken") == "XBT/USD"
     assert canonical_to_broker("ETH-USD", "kraken") == "ETH/USD"

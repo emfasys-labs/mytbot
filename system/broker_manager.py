@@ -182,6 +182,11 @@ def _broker_configs_from_env() -> dict[str, dict[str, Any]]:
             "api_secret": os.getenv("ALPACA_API_SECRET", "").strip(),
             "base_url": os.getenv("ALPACA_BASE_URL", "").strip() or None,
         },
+        "trading212": {
+            "api_key": os.getenv("TRADING212_API_KEY", "").strip(),
+            "api_secret": os.getenv("TRADING212_API_SECRET", "").strip(),
+            "base_url": os.getenv("TRADING212_BASE_URL", "").strip() or None,
+        },
     }
 
 
@@ -210,7 +215,7 @@ def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
         pass
     if name == "ibkr":
         return True
-    if name in {"kraken", "binance", "bybit", "alpaca"}:
+    if name in {"kraken", "binance", "bybit", "alpaca", "trading212"}:
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
     return True
 
@@ -403,6 +408,7 @@ class BrokerManager:
         "binance": 45,
         "bybit": 45,
         "alpaca": 30,
+        "trading212": 45,
     }
 
     _STARTUP_TIMEOUT = 15.0  # max seconds to wait for any broker during startup

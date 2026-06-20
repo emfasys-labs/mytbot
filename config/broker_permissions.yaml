@@ -80,3 +80,15 @@ alpaca:
     enabled: true
     reason: null
     restored_after: null
+
+trading212:
+  taker_fee_bps: 0.0
+  borrow_rate_annual_pct: 6.0
+  equity:
+    enabled: true
+    reason: null
+    restored_after: null
+  etf:
+    enabled: true
+    reason: null
+    restored_after: null

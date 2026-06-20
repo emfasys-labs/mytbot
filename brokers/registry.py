@@ -14,6 +14,7 @@ from brokers.ibkr.adapter import IBKRAdapter
 from brokers.kraken.adapter import KrakenAdapter
 from brokers.binance.adapter import BinanceAdapter
 from brokers.alpaca.adapter import AlpacaAdapter
+from brokers.trading212.adapter import Trading212Adapter
 
 # ─── Registry ─────────────────────────────────────────────────────────────────
 # Add new brokers here — one line each.
@@ -24,6 +25,7 @@ BROKER_REGISTRY: dict[str, type[BrokerAdapter]] = {
     "kraken": KrakenAdapter,
     "binance": BinanceAdapter,
     "alpaca": AlpacaAdapter,
+    "trading212": Trading212Adapter,
     # "deribit": DeribitAdapter,    ← uncomment when ready
     # "okx":     OKXAdapter,        ← uncomment when ready
 }

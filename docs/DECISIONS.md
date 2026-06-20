@@ -14,6 +14,16 @@
 
 ---
 
+## D185 — Trading 212 broker adapter (sixth venue)
+**Date:** 2026-06-20
+**Decision:** Add Trading 212 as a sixth broker for UK/EU commission-free equities and ETFs via the public REST API (Invest / Stocks ISA). Paper uses `https://demo.trading212.com/api/v0` when `TRADING212_PAPER_MODE=true` (default); live uses `https://live.trading212.com/api/v0`. Auth is HTTP Basic (API key + secret). Symbol mapping uses T212 tickers (`AAPL_US_EQ`) with an instruments-metadata cache on connect and `_US_EQ` / `_GB_EQ` heuristics as fallback.
+
+**Implementation.** `brokers/trading212/adapter.py` (httpx, rate-spaced REST), registry + `broker_manager` env wiring, Connect Hub manifest, `broker_permissions.yaml`, router asset/fee maps, `instruments/canonical.py` translation. Certified in Connect Hub after unit tests; respects D127 certification gate. No crypto/FX/futures on T212 in v1.
+
+**Status:** Implemented. Restart `python run.py` to discover the sixth broker. Rotate API keys if they were exposed in chat.
+
+---
+
 ## D184 — Real logo URLs for positions and Universe instruments
 **Date:** 2026-06-20
 **Decision:** Generated avatars are useful fallbacks, but the operator asked for real company/instrument logos in the Trading 212-style UI. Clearbit's free Logo API is not viable in 2026 because it was sunset in December 2025, so we avoid it. Instead, use API-key-free real image sources with deterministic fallback: official-domain favicons via Google's favicon proxy for companies/funds, CoinCap's public icon CDN for crypto, FlagCDN for FX base-currency flags, and CME favicon for futures.

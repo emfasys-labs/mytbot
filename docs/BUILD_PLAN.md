@@ -20,6 +20,7 @@
 | M8 | Micro-Live + Iteration | Weeks 18+ | ✅ Complete (code); ongoing ops: soak, scale capital slowly |
 | M9 | D015 allocator + opportunity path | — | ✅ Complete (primary path default; see D004 amendment) |
 | M10 | Local-first AI + signal accumulation | — | ✅ Complete (`ai/router.py`, `signals/accumulator.py`, D012–D017) |
+| M11 | Productization (deployment model, Lite profile, desktop control plane) | — | 🚧 Planned — see `docs/DEPLOYMENT_MODEL.md` |
 
 **Post-M10 extensions:** IBKR single-leg options (**D016**, opt-in `ENABLE_OPTIONS`); paper soak and capital scaling remain operational gates, not new milestone IDs.
 
@@ -286,6 +287,49 @@ Cross-cutting fixes from audit rounds **P0/P1**; canonical reasoning in **`docs/
 - `risk/m8_loader.py` — optional YAML merge.
 - `brokers/bybit/adapter.py` + registry/router/permissions — second crypto venue (spot + USDT linear).
 - `signals/engine.py` + `config/strategies.yaml` — optional ATR-based volatility scaling on position size.
+
+---
+
+## M11 — Productization (deployment model + operator onboarding)
+
+**Goal:** turn the working `python run.py` system into an installable, self-hosted
+product with three run modes (this computer / home server / own cloud), without
+weakening any risk or safety control. Full rationale, audience model, and
+sequencing live in **`docs/DEPLOYMENT_MODEL.md`**.
+
+### Phase 0 — Decisions (locked)
+- [x] D-1 Lite profile avoids Docker — runs on SQLite (Decimal-safe). Spike proven: `scripts/spike_sqlite_decimal.py`.
+- [ ] D-2 Desktop control plane = Tauri (reuses `ui/`), not Electron.
+- [ ] D-3 Remote access via tunnel (Cloudflare Tunnel / Tailscale), not raw port-forwarding.
+- [ ] D-4 No native mobile app — responsive PWA dashboard instead.
+
+### Phase 1 — Open-source operator edition (Docker self-host; ship first)
+- [ ] Lite (SQLite) backend: `DATABASE_URL`/`DB_BACKEND` branch in `storage/db.py` + `alembic/env.py`; skip Postgres/Redis bring-up in `system/dependency_manager.py` for Lite.
+- [ ] Decimal-on-SQLite: shared `DecimalText` TypeDecorator (TEXT-backed) replacing bare `Numeric` for price/qty columns; precision test in `tests/`.
+- [ ] Portable queries: rewrite the 2 runtime `DISTINCT ON` sites (`api/server.py`, `data/regime_metrics.py`) to window-function form.
+- [ ] Install profiles (Lite / Standard / Local AI): split `requirements.txt` extras; `connectors/machine_probe.py` recommends; defer model downloads to Local-AI.
+- [x] Connect Hub UI polish: certification badge + IBKR "Advanced setup" flag + explicit per-connector status checklist (`ui/src/app/redesign/screens.tsx`).
+- [ ] Quick-start docs: one paper-mode-first path above `NEW_MACHINE_SETUP.md`; backup/restore + credential-rotation scripts.
+
+### Phase 2 — myTbot desktop application (control plane)
+- [ ] Tauri shell wrapping `ui/`; launches/manages backend per profile (Lite embedded / Standard via Docker).
+- [ ] Machine-suitability screen (reuse `connectors/machine_probe.py`) → profile recommendation; download local AI models only if chosen.
+- [ ] Run-mode selector → sets `API_HOST` + `VITE_API_BASE` + control token.
+- [ ] Managed background service (start/stop without the dashboard open).
+- [ ] Signed installer + auto-update channel.
+
+### Phase 3 — Bring your own server
+- [ ] SSH-based deploy of the compose bundle + read-only validation checks.
+- [ ] Secure remote dashboard via the Phase-0 tunnel.
+- [ ] Migration safety: single-armed-instance execution lock (control-state token + heartbeat stale-instance detector) + migration wizard (stop → confirm disarmed → rotate creds → deploy → read-only checks → re-arm paper → explicit live confirm).
+
+### Phase 4 — Wider connector catalogue
+- [ ] Add venues on real demand (Trading 212, Capital.com, Coinbase, MT5 bridge); each starts **Experimental** via `connectors/certification.py` until verified.
+
+**Deliverable:**
+> Download → connect one broker → run paper, with no terminal for the operator route;
+> a Docker self-host path for advanced users; and a guided route to a user-owned
+> 24/7 home or cloud instance — convenience never overriding risk/safety.
 
 ---
 
