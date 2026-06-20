@@ -35,6 +35,43 @@ class ProfitHarvestDecision:
 
 
 @dataclass(frozen=True)
+class ProfitHarvestV2Context:
+    """Advisory context for the second-generation harvest policy.
+
+    The fields are intentionally optional because live availability differs by
+    asset and broker. Missing intelligence must degrade to a deterministic
+    price/profit decision, never to a failed risk tick.
+    """
+
+    symbol: str = ""
+    asset_class: str = ""
+    accumulator_score: Decimal | None = None
+    ai_news_score: Decimal | None = None
+    meta_label_kept: bool | None = None
+    meta_label_probability: Decimal | None = None
+    age_sec: Decimal | None = None
+    session_open: bool = True
+
+
+@dataclass(frozen=True)
+class ProfitHarvestV2Decision:
+    action: str
+    reason: str
+    score: Decimal
+    reduce_fraction: Decimal
+    legacy_reason: str
+    profit_absolute: Decimal
+    profit_pct: Decimal
+    profit_pct_of_nav: Decimal
+    peak_profit_absolute: Decimal
+    giveback_fraction: Decimal
+    dynamic_giveback_pct: Decimal
+    profit_to_partial_trigger: Decimal
+    support_score: Decimal
+    modifiers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class HarvestThresholds:
     """Effective harvest thresholds for a single position at a single tick."""
 
@@ -150,6 +187,15 @@ def _clamp(value: Decimal, lo: Decimal, hi: Decimal) -> Decimal:
 def _lerp(lo: Decimal, hi: Decimal, t: Decimal) -> Decimal:
     t = _clamp(t, _ZERO, _ONE)
     return lo + (hi - lo) * t
+
+
+def _signed_optional_score(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return _clamp(Decimal(str(value)), Decimal("-1"), _ONE)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def resolve_harvest_thresholds(
@@ -413,4 +459,243 @@ def evaluate_profit_harvest(
         profit_nav_pct,
         peak,
         giveback,
+    )
+
+
+def evaluate_profit_harvest_v2(
+    *,
+    quantity: Decimal,
+    avg_entry_price: Decimal,
+    current_price: Decimal,
+    nav: Decimal,
+    thresholds: HarvestThresholds,
+    peak_profit_absolute: Decimal | None = None,
+    context: ProfitHarvestV2Context | None = None,
+) -> ProfitHarvestV2Decision:
+    """Second-generation, shadow-first profit harvesting recommendation.
+
+    This does **not** place orders. It classifies an open position into one of:
+
+    * ``DO_NOT_TOUCH`` — no usable position, flat/negative profit with no
+      thesis damage, or a closed venue.
+    * ``HOLD_RUNNER`` — profitable position with supportive signal/news/meta
+      evidence; leave the position alone and let the edge work.
+    * ``TRIM_PARTIAL`` — bank some profit while leaving a runner.
+    * ``CLOSE_FULL`` — severe giveback, very large win, or advisory evidence
+      says the thesis has deteriorated.
+
+    The v2 policy deliberately consumes the existing deterministic v1 decision
+    as one input. That makes shadow comparisons explainable: any divergence is
+    visible in ``legacy_reason`` and ``modifiers``.
+    """
+    ctx = context or ProfitHarvestV2Context()
+    legacy = evaluate_profit_harvest(
+        quantity=quantity,
+        avg_entry_price=avg_entry_price,
+        current_price=current_price,
+        nav=nav,
+        peak_profit_absolute=peak_profit_absolute,
+        min_profit_pct=thresholds.min_profit_pct,
+        min_profit_nav_pct=thresholds.min_profit_nav_pct,
+        trim_fraction=thresholds.trim_fraction,
+        full_close_profit_pct=thresholds.full_close_profit_pct,
+        trailing_giveback_pct=thresholds.trailing_giveback_pct,
+        peak_lock_min_nav_pct=thresholds.peak_lock_min_nav_pct,
+    )
+
+    zero = _ZERO
+    modifiers: dict[str, str] = {}
+    if quantity == 0 or avg_entry_price <= 0 or current_price <= 0:
+        return ProfitHarvestV2Decision(
+            action="DO_NOT_TOUCH",
+            reason="invalid_position",
+            score=zero,
+            reduce_fraction=zero,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=thresholds.trailing_giveback_pct,
+            profit_to_partial_trigger=zero,
+            support_score=zero,
+            modifiers=modifiers,
+        )
+
+    direction = _ONE if quantity > 0 else Decimal("-1")
+    support = zero
+    weight = zero
+    acc = _signed_optional_score(ctx.accumulator_score)
+    if acc is not None:
+        # Accumulator/news scores are symbol-direction signed. Convert them to
+        # support/opposition for the current position direction.
+        support += direction * acc * Decimal("0.45")
+        weight += Decimal("0.45")
+        modifiers["accumulator_score"] = str(acc)
+    news = _signed_optional_score(ctx.ai_news_score)
+    if news is not None:
+        support += direction * news * Decimal("0.25")
+        weight += Decimal("0.25")
+        modifiers["ai_news_score"] = str(news)
+    meta_prob = _signed_optional_score(ctx.meta_label_probability)
+    if meta_prob is not None:
+        # Probability is expected in [0, 1]; map 0.5 to neutral.
+        support += _clamp((meta_prob - Decimal("0.5")) * Decimal("2"), Decimal("-1"), _ONE) * Decimal("0.20")
+        weight += Decimal("0.20")
+        modifiers["meta_label_probability"] = str(meta_prob)
+    if ctx.meta_label_kept is not None:
+        support += (Decimal("0.15") if ctx.meta_label_kept else Decimal("-0.35"))
+        weight += Decimal("0.15")
+        modifiers["meta_label_kept"] = str(ctx.meta_label_kept)
+    support_score = _clamp(support / weight, Decimal("-1"), _ONE) if weight > 0 else zero
+
+    partial_abs = max(
+        abs(quantity) * avg_entry_price * thresholds.min_profit_pct,
+        nav * thresholds.min_profit_nav_pct if nav > 0 else zero,
+    )
+    profit_to_partial = (
+        legacy.profit_absolute / partial_abs if partial_abs > 0 else zero
+    )
+
+    dynamic_giveback = thresholds.trailing_giveback_pct
+    if profit_to_partial >= Decimal("4"):
+        dynamic_giveback -= Decimal("0.25")
+        modifiers["ratchet"] = "very_large_profit"
+    elif profit_to_partial >= Decimal("2"):
+        dynamic_giveback -= Decimal("0.15")
+        modifiers["ratchet"] = "large_profit"
+    if support_score >= Decimal("0.35"):
+        dynamic_giveback += Decimal("0.10")
+        modifiers["support_bias"] = "let_runner_breathe"
+    elif support_score <= Decimal("-0.25"):
+        dynamic_giveback -= Decimal("0.15")
+        modifiers["support_bias"] = "thesis_deteriorating"
+    dynamic_giveback = _clamp(dynamic_giveback, Decimal("0.20"), Decimal("0.75"))
+
+    score = _clamp(
+        (profit_to_partial * Decimal("0.35"))
+        + (legacy.giveback_fraction * Decimal("0.40"))
+        - (support_score * Decimal("0.45")),
+        Decimal("-1"),
+        Decimal("3"),
+    )
+
+    if not ctx.session_open:
+        return ProfitHarvestV2Decision(
+            action="DO_NOT_TOUCH",
+            reason="venue_closed_shadow_only",
+            score=score,
+            reduce_fraction=zero,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=dynamic_giveback,
+            profit_to_partial_trigger=profit_to_partial,
+            support_score=support_score,
+            modifiers=modifiers,
+        )
+
+    if legacy.profit_absolute <= 0:
+        action = "CLOSE_FULL" if support_score <= Decimal("-0.55") else "DO_NOT_TOUCH"
+        reason = "thesis_invalidated_loss" if action == "CLOSE_FULL" else "not_profitable"
+        return ProfitHarvestV2Decision(
+            action=action,
+            reason=reason,
+            score=score,
+            reduce_fraction=_ONE if action == "CLOSE_FULL" else zero,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=dynamic_giveback,
+            profit_to_partial_trigger=profit_to_partial,
+            support_score=support_score,
+            modifiers=modifiers,
+        )
+
+    if legacy.reason == "full_take_profit" or profit_to_partial >= Decimal("4"):
+        return ProfitHarvestV2Decision(
+            action="CLOSE_FULL",
+            reason="very_large_profit_bank",
+            score=score,
+            reduce_fraction=_ONE,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=dynamic_giveback,
+            profit_to_partial_trigger=profit_to_partial,
+            support_score=support_score,
+            modifiers=modifiers,
+        )
+
+    if legacy.giveback_fraction >= dynamic_giveback:
+        severe = legacy.giveback_fraction >= max(Decimal("0.80"), dynamic_giveback + Decimal("0.20"))
+        action = "CLOSE_FULL" if severe or support_score <= Decimal("-0.35") else "TRIM_PARTIAL"
+        return ProfitHarvestV2Decision(
+            action=action,
+            reason="dynamic_trailing_lock",
+            score=score,
+            reduce_fraction=_ONE if action == "CLOSE_FULL" else thresholds.trim_fraction,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=dynamic_giveback,
+            profit_to_partial_trigger=profit_to_partial,
+            support_score=support_score,
+            modifiers=modifiers,
+        )
+
+    if profit_to_partial >= _ONE:
+        if support_score >= Decimal("0.35") and legacy.giveback_fraction < dynamic_giveback:
+            action = "HOLD_RUNNER"
+            reason = "supported_runner"
+            fraction = zero
+        else:
+            action = "TRIM_PARTIAL"
+            reason = "bank_profit_leave_runner"
+            fraction = thresholds.trim_fraction
+        return ProfitHarvestV2Decision(
+            action=action,
+            reason=reason,
+            score=score,
+            reduce_fraction=fraction,
+            legacy_reason=legacy.reason,
+            profit_absolute=legacy.profit_absolute,
+            profit_pct=legacy.profit_pct,
+            profit_pct_of_nav=legacy.profit_pct_of_nav,
+            peak_profit_absolute=legacy.peak_profit_absolute,
+            giveback_fraction=legacy.giveback_fraction,
+            dynamic_giveback_pct=dynamic_giveback,
+            profit_to_partial_trigger=profit_to_partial,
+            support_score=support_score,
+            modifiers=modifiers,
+        )
+
+    return ProfitHarvestV2Decision(
+        action="HOLD_RUNNER" if support_score >= Decimal("0.25") else "DO_NOT_TOUCH",
+        reason="below_bank_threshold",
+        score=score,
+        reduce_fraction=zero,
+        legacy_reason=legacy.reason,
+        profit_absolute=legacy.profit_absolute,
+        profit_pct=legacy.profit_pct,
+        profit_pct_of_nav=legacy.profit_pct_of_nav,
+        peak_profit_absolute=legacy.peak_profit_absolute,
+        giveback_fraction=legacy.giveback_fraction,
+        dynamic_giveback_pct=dynamic_giveback,
+        profit_to_partial_trigger=profit_to_partial,
+        support_score=support_score,
+        modifiers=modifiers,
     )

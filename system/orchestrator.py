@@ -33,6 +33,9 @@ from risk.engine import Signal as RiskSignal
 from risk.engine import RiskVerdict
 from risk.profit_harvest import (
     evaluate_profit_harvest,
+    evaluate_profit_harvest_v2,
+    ProfitHarvestDecision,
+    ProfitHarvestV2Context,
     resolve_harvest_thresholds,
     should_defer_profit_harvest_for_redeployment,
 )
@@ -194,6 +197,7 @@ class Orchestrator:
         return False
 
     PROFIT_HARVEST_PEAKS_STATE_KEY = "risk.profit_harvest.peaks"
+    PROFIT_HARVEST_V2_SHADOW_STATE_KEY = "risk.profit_harvest.v2_shadow"
 
     async def _persist_profit_harvest_peaks(self) -> None:
         """Persist current peak P&L per position so an orchestrator restart
@@ -268,6 +272,31 @@ class Orchestrator:
                     await _dispose(eng)
                 except Exception:
                     pass
+
+    async def _persist_profit_harvest_v2_shadow(
+        self,
+        session_factory: Any,
+        rows: list[dict[str, Any]],
+        *,
+        active: bool = False,
+    ) -> None:
+        """Persist the latest v2 harvest recommendations for audit/scoreboard use."""
+        if not rows:
+            return
+        try:
+            from control.command_bus import CommandBus
+
+            payload = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "mode": "active" if active else "shadow",
+                "decisions": rows[-50:],
+            }
+            await CommandBus(session_factory).set_state(
+                self.PROFIT_HARVEST_V2_SHADOW_STATE_KEY,
+                payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orchestrator | profit-harvest v2 shadow persist failed: {}", exc)
 
     async def _load_persisted_capital_pct(self) -> None:
         """Restore operator capital allocation from durable control state.
@@ -2252,6 +2281,10 @@ class Orchestrator:
             close_cooldown_sec = max(5.0, float(ph_cfg.get("close_cooldown_sec", 90)))
         except (TypeError, ValueError):
             close_cooldown_sec = 90.0
+        v2_cfg = ph_cfg.get("v2") if isinstance(ph_cfg.get("v2"), dict) else {}
+        v2_active = bool((v2_cfg or {}).get("active", False)) or os.getenv(
+            "PROFIT_HARVEST_V2_ACTIVE", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         # Backwards-compat: a flat (legacy) config still maps to ``base``.
         if "base" not in ph_cfg and any(
@@ -2302,6 +2335,50 @@ class Orchestrator:
             ph_position_ages = (
                 await self._fills_age_seconds_by_symbol(sf) if ph_pe_cfg.enabled else {}
             )
+            v2_intel_by_symbol: dict[str, dict[str, Any]] = {}
+            try:
+                from control.command_bus import CommandBus
+                from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
+
+                def _sym_keys(value: str) -> set[str]:
+                    raw = str(value or "").strip().upper()
+                    keys = {raw}
+                    if raw.endswith("=X"):
+                        keys.add(raw[:-2])
+                    if raw.endswith("-USD"):
+                        keys.add(raw.replace("-USD", "USD"))
+                    return {k for k in keys if k}
+
+                dash = await CommandBus(sf).get_state(DASHBOARD_SNAPSHOT_KEY, None)
+                acc_blob = dash.get("accumulator") if isinstance(dash, dict) else None
+                if isinstance(acc_blob, dict):
+                    rows: list[Any] = []
+                    for bucket in ("top_by_magnitude", "bullish_top", "bearish_top"):
+                        raw_rows = acc_blob.get(bucket)
+                        if isinstance(raw_rows, list):
+                            rows.extend(raw_rows)
+                    for item in rows:
+                        if not isinstance(item, dict):
+                            continue
+                        raw_sym = str(item.get("symbol") or "").strip().upper()
+                        if not raw_sym:
+                            continue
+                        source_types = item.get("source_types_seen")
+                        has_ai_news = (
+                            isinstance(source_types, list)
+                            and any(str(src).lower() in {"news", "macro", "ai"} for src in source_types)
+                        )
+                        payload = {
+                            "accumulator_score": item.get("score"),
+                            "ai_news_score": item.get("score") if has_ai_news else None,
+                            "accumulator_direction": item.get("direction"),
+                            "accumulator_confidence": item.get("confidence"),
+                            "source_types_seen": source_types if isinstance(source_types, list) else [],
+                        }
+                        for key in _sym_keys(raw_sym):
+                            v2_intel_by_symbol.setdefault(key, payload)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("profit-harvest | v2 context load failed open | {}", exc)
             defer_harvest_for_redeploy = False
             try:
                 runtime = risk_engine.snapshot_runtime_state()
@@ -2360,6 +2437,7 @@ class Orchestrator:
 
             now_ts = datetime.now(timezone.utc).timestamp()
             active_keys: set[str] = set()
+            v2_shadow_rows: list[dict[str, Any]] = []
             for pos_key, row in positions.items():
                 try:
                     qty = Decimal(str(row.get("quantity", "0") or "0"))
@@ -2374,19 +2452,16 @@ class Orchestrator:
                 asset_class = str(row.get("asset_class") or "equity").strip().lower()
                 if not sym or not broker:
                     continue
-                # Venue closed → a harvest close cannot fill anyway. Skip
-                # quietly (DEBUG) instead of attempting + logging
-                # "did not execute" every cycle (the pre-market spam).
-                # It re-evaluates automatically once the venue reopens.
+                venue_open = True
                 try:
                     from core.market_session import is_tradeable as _is_tradeable
 
                     if not _is_tradeable(broker, asset_class, sym):
+                        venue_open = False
                         logger.debug(
                             "profit-harvest | skip (venue closed) | {} {}",
                             broker, sym,
                         )
-                        continue
                 except Exception:  # noqa: BLE001 — gate must never break the tick
                     pass
                 # PositionLog can lag or diverge from the fills ledger (especially
@@ -2469,7 +2544,103 @@ class Orchestrator:
                     trailing_giveback_pct=thresholds.trailing_giveback_pct,
                     peak_lock_min_nav_pct=thresholds.peak_lock_min_nav_pct,
                 )
-                if not decision.should_reduce:
+                meta_probability = None
+                meta_kept = None
+                if isinstance(im, dict):
+                    meta_probability = im.get("meta_label_probability")
+                    if "meta_label_kept" in im:
+                        meta_kept = bool(im.get("meta_label_kept"))
+                intel = v2_intel_by_symbol.get(sym) or {}
+                v2_decision = evaluate_profit_harvest_v2(
+                    quantity=qty,
+                    avg_entry_price=entry,
+                    current_price=current,
+                    nav=nav,
+                    thresholds=thresholds,
+                    peak_profit_absolute=peak,
+                    context=ProfitHarvestV2Context(
+                        symbol=sym,
+                        asset_class=asset_class,
+                        accumulator_score=intel.get("accumulator_score"),
+                        ai_news_score=intel.get("ai_news_score"),
+                        meta_label_kept=meta_kept,
+                        meta_label_probability=meta_probability,
+                        age_sec=ph_position_ages.get(f"{broker}:{sym}"),
+                        session_open=venue_open,
+                    ),
+                )
+                v2_shadow_rows.append(
+                    {
+                        "broker": broker,
+                        "symbol": sym,
+                        "asset_class": asset_class,
+                        "side": "long" if qty > 0 else "short",
+                        "action": v2_decision.action,
+                        "reason": v2_decision.reason,
+                        "score": str(v2_decision.score),
+                        "reduce_fraction": str(v2_decision.reduce_fraction),
+                        "legacy_should_reduce": bool(decision.should_reduce),
+                        "legacy_reason": decision.reason,
+                        "profit_absolute": str(v2_decision.profit_absolute),
+                        "profit_pct": str(v2_decision.profit_pct),
+                        "profit_pct_of_nav": str(v2_decision.profit_pct_of_nav),
+                        "peak_profit_absolute": str(v2_decision.peak_profit_absolute),
+                        "giveback_fraction": str(v2_decision.giveback_fraction),
+                        "dynamic_giveback_pct": str(v2_decision.dynamic_giveback_pct),
+                        "profit_to_partial_trigger": str(v2_decision.profit_to_partial_trigger),
+                        "support_score": str(v2_decision.support_score),
+                        "venue_open": venue_open,
+                        "v2_active": v2_active,
+                        "age_sec": (
+                            str(ph_position_ages.get(f"{broker}:{sym}"))
+                            if ph_position_ages.get(f"{broker}:{sym}") is not None
+                            else None
+                        ),
+                        "thresholds": {
+                            "min_profit_pct": str(thresholds.min_profit_pct),
+                            "min_profit_nav_pct": str(thresholds.min_profit_nav_pct),
+                            "full_close_profit_pct": str(thresholds.full_close_profit_pct),
+                            "trim_fraction": str(thresholds.trim_fraction),
+                            "trailing_giveback_pct": str(thresholds.trailing_giveback_pct),
+                        },
+                        "modifiers": dict(v2_decision.modifiers),
+                        "intel": {
+                            "accumulator_direction": intel.get("accumulator_direction"),
+                            "accumulator_confidence": intel.get("accumulator_confidence"),
+                            "source_types_seen": intel.get("source_types_seen", []),
+                        },
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                # Venue closed → a harvest close cannot fill anyway. Keep peak
+                # memory + v2 shadow scoring, but do not submit orders.
+                if not venue_open:
+                    continue
+                effective_decision = decision
+                effective_policy = "v1"
+                if v2_active:
+                    if (
+                        v2_decision.action in {"TRIM_PARTIAL", "CLOSE_FULL"}
+                        and v2_decision.reduce_fraction > 0
+                        and v2_decision.profit_absolute > 0
+                    ):
+                        effective_decision = ProfitHarvestDecision(
+                            should_reduce=True,
+                            reason=f"v2:{v2_decision.reason}",
+                            reduce_fraction=v2_decision.reduce_fraction,
+                            profit_absolute=v2_decision.profit_absolute,
+                            profit_pct=v2_decision.profit_pct,
+                            profit_pct_of_nav=v2_decision.profit_pct_of_nav,
+                            peak_profit_absolute=v2_decision.peak_profit_absolute,
+                            giveback_fraction=v2_decision.giveback_fraction,
+                        )
+                        effective_policy = "v2_active"
+                    else:
+                        # HOLD_RUNNER / DO_NOT_TOUCH take authority in active
+                        # mode. V2 loss-close remains advisory only; stop-loss
+                        # and derisk own loser exits.
+                        continue
+                if not effective_decision.should_reduce:
                     continue
                 # D168 — suppress a trailing-lock close that would realise a
                 # loss / immaterial gain on a position younger than the D166
@@ -2481,7 +2652,7 @@ class Orchestrator:
                     from risk.profit_harvest import should_suppress_harvest_for_horizon
 
                     suppress_h, why_h = should_suppress_harvest_for_horizon(
-                        decision=decision,
+                        decision=effective_decision,
                         age_sec=ph_position_ages.get(f"{broker}:{sym}"),
                         min_hold_sec=ph_pe_cfg.min_hold_sec,
                         nav=nav,
@@ -2493,15 +2664,15 @@ class Orchestrator:
                             why_h,
                             broker,
                             sym,
-                            decision.reason,
-                            decision.profit_absolute,
+                            effective_decision.reason,
+                            effective_decision.profit_absolute,
                             ph_position_ages.get(f"{broker}:{sym}"),
                         )
                         continue
                 if defer_harvest_for_redeploy:
                     continue
 
-                reduce_qty = (abs(qty) * decision.reduce_fraction).quantize(Decimal("0.00000001"))
+                reduce_qty = (abs(qty) * effective_decision.reduce_fraction).quantize(Decimal("0.00000001"))
                 if reduce_qty <= 0:
                     continue
                 signal = RiskSignal(
@@ -2518,13 +2689,22 @@ class Orchestrator:
                     metadata={
                         "reduce_only": True,
                         "profit_harvest_monitor": True,
-                        "profit_harvest_reason": decision.reason,
-                        "profit_harvest_reduce_fraction": str(decision.reduce_fraction),
-                        "profit_harvest_profit_absolute": str(decision.profit_absolute),
-                        "profit_harvest_profit_pct": str(decision.profit_pct),
-                        "profit_harvest_profit_pct_of_nav": str(decision.profit_pct_of_nav),
-                        "profit_harvest_peak_profit_absolute": str(decision.peak_profit_absolute),
-                        "profit_harvest_giveback_fraction": str(decision.giveback_fraction),
+                        "profit_harvest_policy": effective_policy,
+                        "profit_harvest_reason": effective_decision.reason,
+                        "profit_harvest_reduce_fraction": str(effective_decision.reduce_fraction),
+                        "profit_harvest_profit_absolute": str(effective_decision.profit_absolute),
+                        "profit_harvest_profit_pct": str(effective_decision.profit_pct),
+                        "profit_harvest_profit_pct_of_nav": str(effective_decision.profit_pct_of_nav),
+                        "profit_harvest_peak_profit_absolute": str(effective_decision.peak_profit_absolute),
+                        "profit_harvest_giveback_fraction": str(effective_decision.giveback_fraction),
+                        "profit_harvest_v2_active": v2_active,
+                        "profit_harvest_v2_action": v2_decision.action,
+                        "profit_harvest_v2_reason": v2_decision.reason,
+                        "profit_harvest_v2_score": str(v2_decision.score),
+                        "profit_harvest_v2_support_score": str(v2_decision.support_score),
+                        "profit_harvest_v2_dynamic_giveback_pct": str(v2_decision.dynamic_giveback_pct),
+                        "profit_harvest_v2_profit_to_partial_trigger": str(v2_decision.profit_to_partial_trigger),
+                        "profit_harvest_v2_modifiers": dict(v2_decision.modifiers),
                         "profit_harvest_thresholds": {
                             "min_profit_pct": str(thresholds.min_profit_pct),
                             "min_profit_nav_pct": str(thresholds.min_profit_nav_pct),
@@ -2558,7 +2738,7 @@ class Orchestrator:
                         "orchestrator | profit-harvest did not execute | broker={} symbol={} reason={}",
                         broker,
                         sym,
-                        decision.reason,
+                        effective_decision.reason,
                     )
                     continue
                 logger.warning(
@@ -2567,8 +2747,8 @@ class Orchestrator:
                     sym,
                     side,
                     reduce_qty,
-                    decision.reason,
-                    decision.profit_absolute,
+                    effective_decision.reason,
+                    effective_decision.profit_absolute,
                 )
                 # Persist the fill into PositionLog + daily_pnl. Without
                 # this, the position never updates and the monitor fires
@@ -2587,6 +2767,14 @@ class Orchestrator:
                 await self._persist_profit_harvest_peaks()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("orchestrator | profit-harvest peak persist tick error: {}", exc)
+            try:
+                await self._persist_profit_harvest_v2_shadow(
+                    sf,
+                    v2_shadow_rows,
+                    active=v2_active,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | profit-harvest v2 shadow persist tick error: {}", exc)
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | profit-harvest tick error (non-fatal): {}", exc)
         finally:

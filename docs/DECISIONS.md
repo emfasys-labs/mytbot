@@ -14,6 +14,30 @@
 
 ---
 
+## D181 — Profit Harvest v2 activated for reduce-only profit taking
+**Date:** 2026-06-20
+**Decision:** The operator explicitly requested an immediate comparison and activation of Profit Harvest v2. Current comparison is necessarily limited because v2 had only just started publishing recommendations, but the available evidence did not show an immediate conflict: current v2 rows and legacy v1 both recommend no action on the open book (`DO_NOT_TOUCH` / below threshold or venue closed), and historical v1 profit-harvest fills are net positive but small (`profit_harvest_monitor`: 9 fills, realised P&L about +$258).
+
+**Activation boundary.** `config/risk_limits.yaml::profit_harvest.v2.active: true` now makes v2 the active authority for profit-harvest decisions. When active, `HOLD_RUNNER` and `DO_NOT_TOUCH` suppress v1 harvests; `TRIM_PARTIAL` and `CLOSE_FULL` can submit reduce-only orders through the existing risk engine and execution engine. V2 **does not** use the profit-harvest path to close losing positions; loser exits remain owned by stop-loss and derisk. This keeps the new engine focused on profit capture rather than becoming a second stop-loss system.
+
+**Implementation.** `system/orchestrator._run_profit_harvest_tick()` now converts active v2 trim/close recommendations into the effective `ProfitHarvestDecision`, stamps order metadata with `profit_harvest_policy=v2_active`, `profit_harvest_v2_*` diagnostics, and still enforces venue-open checks, cooldowns, D168 horizon suppression, risk approval, reduce-only execution, and fill persistence. The v2 state payload now records `mode: active` when active.
+
+**Status:** Implemented + live after restart (PID 53060). Tests: `tests/test_profit_harvest.py` includes active-mode integration and is green (`21 passed`, known AsyncMock warnings in the test harness). Current live v2 state after the pre-activation comparison: all five open positions were `DO_NOT_TOUCH`; no immediate profit-harvest fill was expected from activation. Fully reversible by setting `profit_harvest.v2.active: false` or env override removal.
+
+---
+
+## D180 — Profit Harvest v2: shadow-first runner intelligence and closed-session peak memory
+**Date:** 2026-06-20
+**Decision:** The old profit-harvest monitor could only answer "trim/close or do nothing" from static profit thresholds. That was too blunt for the owner's goal: maximise profit capture while minimising churn. A winner with strong ongoing conviction should be a **HOLD_RUNNER**, while a flat/invalid/no-harvest setup should be **DO_NOT_TOUCH**. Those are different states and need different audit trails. We also found a live blind spot: the orchestrator skipped closed venues before updating peak P&L, so weekend/closed-session gains did not feed trailing-lock memory.
+
+**Implementation.** Added a pure, tested v2 advisory engine in `risk/profit_harvest.py`: `ProfitHarvestV2Context`, `ProfitHarvestV2Decision`, and `evaluate_profit_harvest_v2()`. It consumes existing v1 thresholds plus advisory inputs from the signal accumulator, AI/news score, and meta-labeller shadow metadata. It classifies each open position as `HOLD_RUNNER`, `DO_NOT_TOUCH`, `TRIM_PARTIAL`, or `CLOSE_FULL`, with a score, support score, dynamic giveback ratchet, profit-to-trigger ratio, and explainable modifiers. It remains shadow-only: live orders still follow the existing v1 harvest rule plus D168 horizon guard.
+
+**Orchestrator wiring.** `system/orchestrator._run_profit_harvest_tick()` now loads accumulator/AI context from `dashboard.snapshot`, computes v2 decisions for each open position, and persists the latest rows into `ControlState` key `risk.profit_harvest.v2_shadow` for later scoreboarding. It also updates profit-harvest peak memory before the venue-open check, then refuses to submit harvest orders if the venue is closed. This preserves trailing-memory across weekends/closed sessions without trying to trade into a closed market.
+
+**Status:** Implemented + live after restart (PID 32080). Tests: `tests/test_profit_harvest.py` now covers supported runners, unsupported partial trims, severe giveback closes, and closed-venue shadow-only behavior (`20 passed`). `python -m py_compile risk/profit_harvest.py system/orchestrator.py tests/test_profit_harvest.py` clean; `git diff --check` clean except Windows line-ending warnings. Live verification: `/system/status` is `running`, five brokers connected, first loop completed, and `ControlState[risk.profit_harvest.v2_shadow]` is publishing decisions. Next: add a read-only v2 shadow scorecard comparing v2 recommendations against realised fills before considering any live enforcement.
+
+---
+
 ## D170 — Move the "reasoning" AI layer off the local GPU onto Gemini 2.5 Flash (free), validated by an A/B quality harness
 **Date:** 2026-06-18
 **Decision:** The owner cannot keep a dedicated machine running 24/7 and wants zero hosting cost, so the bot must become host-portable (target: a free always-on cloud VM, e.g. Oracle Cloud Always-Free ARM). The one component that needs a GPU is the local LLM reasoning layer (`local_reasoning`). It is **not** load-bearing by design (chain: rules → FinBERT → local LLM → premium fallback; AI only scores/explains, never trades — rule 7), so it can move to a hosted endpoint without touching the trading core.

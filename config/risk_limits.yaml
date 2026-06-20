@@ -115,6 +115,8 @@ aggregate_derisk:
 #     ``Order.instrument_metadata["profit_harvest"]`` (always win).
 profit_harvest:
   enabled: true
+  v2:
+    active: true                 # V2 controls profit-taking; still reduce-only + risk-gated.
   monitor_interval_sec: 20      # Fallback cadence; overridden by mode_interval_sec.
   close_cooldown_sec: 90
 

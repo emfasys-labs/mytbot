@@ -11,7 +11,10 @@ from risk.engine import RiskVerdict
 from risk.profit_harvest import evaluate_profit_harvest, resolve_harvest_thresholds
 from risk.profit_harvest import should_defer_profit_harvest_for_redeployment
 from risk.profit_harvest import (
+    HarvestThresholds,
     ProfitHarvestDecision,
+    ProfitHarvestV2Context,
+    evaluate_profit_harvest_v2,
     should_suppress_harvest_for_horizon,
 )
 from system.orchestrator import Orchestrator
@@ -299,6 +302,93 @@ def test_resolve_thresholds_overrides_win() -> None:
     assert out.trim_fraction == Decimal("0.90")
 
 
+def _v2_thresholds() -> HarvestThresholds:
+    return HarvestThresholds(
+        min_profit_pct=Decimal("0.05"),
+        min_profit_nav_pct=Decimal("0.001"),
+        full_close_profit_pct=Decimal("0.30"),
+        trim_fraction=Decimal("0.25"),
+        trailing_giveback_pct=Decimal("0.45"),
+        peak_lock_min_nav_pct=Decimal("0.0002"),
+    )
+
+
+def test_profit_harvest_v2_holds_supported_runner() -> None:
+    decision = evaluate_profit_harvest_v2(
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("108"),
+        nav=Decimal("100000"),
+        thresholds=_v2_thresholds(),
+        peak_profit_absolute=Decimal("820"),
+        context=ProfitHarvestV2Context(
+            accumulator_score=Decimal("0.75"),
+            ai_news_score=Decimal("0.60"),
+            meta_label_kept=True,
+            meta_label_probability=Decimal("0.72"),
+        ),
+    )
+
+    assert decision.action == "HOLD_RUNNER"
+    assert decision.reason == "supported_runner"
+    assert decision.reduce_fraction == Decimal("0")
+    assert decision.support_score > Decimal("0.35")
+
+
+def test_profit_harvest_v2_trims_when_profit_ready_without_support() -> None:
+    decision = evaluate_profit_harvest_v2(
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("108"),
+        nav=Decimal("100000"),
+        thresholds=_v2_thresholds(),
+        peak_profit_absolute=Decimal("820"),
+        context=ProfitHarvestV2Context(accumulator_score=Decimal("0.05")),
+    )
+
+    assert decision.action == "TRIM_PARTIAL"
+    assert decision.reason == "bank_profit_leave_runner"
+    assert decision.reduce_fraction == Decimal("0.25")
+
+
+def test_profit_harvest_v2_closes_on_severe_giveback_and_bad_thesis() -> None:
+    decision = evaluate_profit_harvest_v2(
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("103"),
+        nav=Decimal("100000"),
+        thresholds=_v2_thresholds(),
+        peak_profit_absolute=Decimal("1500"),
+        context=ProfitHarvestV2Context(
+            accumulator_score=Decimal("-0.80"),
+            ai_news_score=Decimal("-0.65"),
+            meta_label_kept=False,
+            meta_label_probability=Decimal("0.25"),
+        ),
+    )
+
+    assert decision.action == "CLOSE_FULL"
+    assert decision.reason == "dynamic_trailing_lock"
+    assert decision.reduce_fraction == Decimal("1")
+    assert decision.dynamic_giveback_pct < Decimal("0.45")
+
+
+def test_profit_harvest_v2_closed_venue_is_shadow_only() -> None:
+    decision = evaluate_profit_harvest_v2(
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("100"),
+        current_price=Decimal("108"),
+        nav=Decimal("100000"),
+        thresholds=_v2_thresholds(),
+        peak_profit_absolute=Decimal("820"),
+        context=ProfitHarvestV2Context(session_open=False),
+    )
+
+    assert decision.action == "DO_NOT_TOUCH"
+    assert decision.reason == "venue_closed_shadow_only"
+    assert decision.reduce_fraction == Decimal("0")
+
+
 @pytest.mark.asyncio
 async def test_profit_harvest_tick_submits_reduce_only_trim(monkeypatch) -> None:
     orch = Orchestrator()
@@ -365,6 +455,71 @@ async def test_profit_harvest_tick_submits_reduce_only_trim(monkeypatch) -> None
     assert signal_sent.suggested_quantity == Decimal("5.00000000")
     assert signal_sent.metadata["reduce_only"] is True
     assert signal_sent.metadata["profit_harvest_reason"] == "partial_take_profit"
+
+
+@pytest.mark.asyncio
+async def test_profit_harvest_v2_active_submits_v2_trim(monkeypatch) -> None:
+    orch = Orchestrator()
+
+    monkeypatch.setattr(
+        Orchestrator, "_read_active_profile_mode", staticmethod(lambda: "trader")
+    )
+
+    risk_engine = MagicMock()
+    risk_engine.config = {"profit_harvest": {**_DYNAMIC_CFG, "v2": {"active": True}}}
+    risk_engine.update_high_watermark = MagicMock()
+    risk_engine.restore_runtime_state = MagicMock()
+    risk_engine.evaluate_and_persist = AsyncMock(
+        return_value=SimpleNamespace(verdict=RiskVerdict.APPROVED, reason="ok")
+    )
+
+    execution_engine = MagicMock()
+    execution_engine.execute = AsyncMock(return_value=SimpleNamespace(status="filled"))
+    orch._trading_loop = MagicMock(risk_engine=risk_engine, execution_engine=execution_engine)
+    orch._broker_manager = MagicMock()
+
+    monkeypatch.setattr(
+        "storage.db.init_async_database",
+        AsyncMock(return_value=(MagicMock(), MagicMock(name="sf"))),
+    )
+    monkeypatch.setattr("storage.db.dispose_engine", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "system.portfolio_equity.live_portfolio_value",
+        AsyncMock(return_value=Decimal("10000")),
+    )
+    monkeypatch.setattr(
+        "run_m3._load_portfolio_state",
+        AsyncMock(
+            return_value={
+                "portfolio_value": Decimal("10000"),
+                "high_watermark_value": Decimal("10000"),
+                "positions": {
+                    "alpaca:SPY": {
+                        "symbol": "SPY",
+                        "broker": "alpaca",
+                        "asset_class": "equity",
+                        "quantity": Decimal("10"),
+                        "avg_entry_price": Decimal("100"),
+                        "current_price": Decimal("102"),
+                        "instrument_metadata": {
+                            "profit_harvest": {
+                                "min_profit_pct": "0.01",
+                                "full_close_profit_pct": "0.05",
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+    )
+
+    await orch._run_profit_harvest_tick()
+
+    risk_engine.evaluate_and_persist.assert_awaited_once()
+    signal_sent = risk_engine.evaluate_and_persist.await_args.args[1]
+    assert signal_sent.metadata["profit_harvest_policy"] == "v2_active"
+    assert signal_sent.metadata["profit_harvest_reason"] == "v2:bank_profit_leave_runner"
+    assert signal_sent.metadata["profit_harvest_v2_action"] == "TRIM_PARTIAL"
 
 
 @pytest.mark.asyncio
