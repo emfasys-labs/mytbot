@@ -38,7 +38,7 @@ AssetClassHint = Literal[
 ]
 
 
-_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "coinbase", "trading212", "capitalcom", "ig"}
+_BROKER_NAMES = {"ibkr", "alpaca", "kraken", "binance", "bybit", "coinbase", "trading212", "capitalcom", "ig", "oanda"}
 
 # yfinance exchange suffix → ISO region/exchange hint
 _EXCHANGE_SUFFIX: dict[str, tuple[str, str]] = {
@@ -281,7 +281,7 @@ def canonical_to_broker(canonical: str | CanonicalSymbol, broker: str) -> Option
         base, quote = sym[:3], sym[3:6]
         if b == "ibkr":
             return f"{base}.{quote}"
-        if b in {"capitalcom", "ig"}:
+        if b in {"capitalcom", "ig", "oanda"}:
             return f"{base}{quote}"
         return None  # only IBKR routes spot FX in this system
 

@@ -53,7 +53,8 @@ export function mapSystemState(
 /**
  * Map raw ``/system/status.brokers`` rows into dashboard badges.
  *
- * The backend distinguishes four meaningful broker states — ``live``,
+ * The backend distinguishes five meaningful broker states — ``live``,
+ * ``paper`` (connected on a demo/practice endpoint or local paper wallet),
  * ``warming`` (connected but account snapshot not yet ready), ``offline``
  * (configured but unreachable, with a concrete error), and ``off`` (no
  * credentials). Collapsing the last two into a single "warming" pill — as
@@ -75,7 +76,13 @@ export function mapSystemState(
 export function mapBrokers(
   brokers: Record<
     string,
-    { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
+    {
+      configured: boolean;
+      connected: boolean;
+      balance_ready?: boolean;
+      paper_mode?: boolean | null;
+      error?: string | null;
+    }
   >,
   excludedNames?: Set<string>,
   orchestratorIdle = false,
@@ -94,7 +101,9 @@ export function mapBrokers(
         return { name, state, error: err, excluded };
       }
       if (b.balance_ready === false) return { name, state: 'warming', error: err, excluded };
-      return { name, state: 'live', error: err, excluded };
+      const executionState: BrokerStatus['state'] =
+        b.paper_mode === true ? 'paper' : 'live';
+      return { name, state: executionState, error: err, excluded };
     })
     .map((row): BrokerStatus => {
       if (orchestratorIdle && row.state === 'warming') {

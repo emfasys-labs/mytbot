@@ -140,3 +140,11 @@ coinbase:
     enabled: true
     reason: null
     restored_after: null
+
+oanda:
+  taker_fee_bps: 0.0
+  borrow_rate_annual_pct: 0.0
+  forex:
+    enabled: true
+    reason: null
+    restored_after: null

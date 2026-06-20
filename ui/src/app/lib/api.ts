@@ -779,7 +779,13 @@ export type SystemStatusResponse = {
   active_brokers?: string[];
   brokers?: Record<
     string,
-    { configured: boolean; connected: boolean; balance_ready?: boolean; error?: string | null }
+    {
+      configured: boolean;
+      connected: boolean;
+      balance_ready?: boolean;
+      paper_mode?: boolean | null;
+      error?: string | null;
+    }
   >;
   /** Portfolio coverage summary: is NAV reflecting every configured wallet?
    *  When ``full`` is false, ``excluded`` carries the failing brokers with

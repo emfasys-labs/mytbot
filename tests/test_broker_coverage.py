@@ -121,6 +121,26 @@ class TestCoverageShape:
         assert cov["configured"] == []
         assert cov["excluded"] == []
 
+    def test_status_to_dict_includes_paper_mode(self) -> None:
+        report = BrokerReport()
+        report.brokers["oanda"] = BrokerStatus(
+            name="oanda",
+            configured=True,
+            connected=True,
+            balance_ready=True,
+            paper_mode=True,
+        )
+        report.brokers["alpaca"] = BrokerStatus(
+            name="alpaca",
+            configured=True,
+            connected=True,
+            balance_ready=True,
+            paper_mode=False,
+        )
+        payload = report.to_dict()
+        assert payload["oanda"]["paper_mode"] is True
+        assert payload["alpaca"]["paper_mode"] is False
+
 
 class TestCoverageSync:
     """Orchestrator keeps the risk engine's disabled_brokers set in sync."""

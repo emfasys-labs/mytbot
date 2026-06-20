@@ -192,6 +192,27 @@ brokers:
     docs_url: https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api
     notes: Advanced Trade CDP key + ES256 private key JWT. Crypto spot only (BTC-USD style products).
 
+  oanda:
+    label: OANDA
+    adapter: oanda
+    enabled: true
+    certification: certified
+    auth_type: api_key
+    required_secrets:
+      - env: OANDA_API_TOKEN
+        label: Live personal access token
+      - env: OANDA_API_TOKEN_PAPER
+        label: Practice personal access token
+    capabilities:
+      can_trade: true
+      can_read_balance: true
+      can_withdraw: false
+      supports_paper: true
+      supports_live: true
+      supports_forex: true
+    docs_url: https://developer.oanda.com/rest-live-v20/introduction/
+    notes: Practice uses https://api-fxpractice.oanda.com when OANDA_PAPER_MODE=true (or APP_ENV=paper); live uses https://api-fxtrade.oanda.com. Practice and live tokens are not interchangeable — set OANDA_API_TOKEN_PAPER and OANDA_API_TOKEN separately. Optional OANDA_ACCOUNT_ID / OANDA_ACCOUNT_ID_PAPER; otherwise the CFD account is preferred.
+
 information_feeds:
   newsapi:
     label: NewsAPI

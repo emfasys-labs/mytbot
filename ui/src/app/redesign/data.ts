@@ -181,7 +181,7 @@ export interface Strategy {
   lastConfidence?: number | null;
 }
 
-export type BrokerUiState = 'live' | 'warming' | 'offline' | 'off';
+export type BrokerUiState = 'live' | 'paper' | 'warming' | 'offline' | 'off';
 
 export interface BrokerStatus {
   name: string;

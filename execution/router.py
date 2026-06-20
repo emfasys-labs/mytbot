@@ -58,6 +58,9 @@ BROKER_ASSET_MAP = {
     "coinbase": {
         "crypto"
     },
+    "oanda": {
+        "forex"
+    },
     # Adding new broker: just add its entry here
     # "bybit": {"crypto", "future"},
     # "deribit": {"crypto", "option"},
@@ -74,6 +77,7 @@ BROKER_FEE_MAP = {
     "capitalcom": Decimal("0.0000"),  # spread-based CFD (no explicit commission)
     "ig": Decimal("0.0000"),  # spread-based CFD/spread bet (no explicit commission)
     "coinbase": Decimal("0.0060"),  # Advanced Trade taker ~0.40–0.60% (conservative prior)
+    "oanda": Decimal("0.0000"),  # spread-based FX (no explicit commission)
 }
 
 # Pseudo-observation count for fee→routing prior when blending with online quality (Wave 9).

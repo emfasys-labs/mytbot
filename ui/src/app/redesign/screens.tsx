@@ -2479,14 +2479,10 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
             <div style={{ color: TOKENS.ink3, fontFamily: TOKENS.mono, fontSize: 11 }}>No brokers configured</div>
           ) : (
             live.brokers.map((b) => {
-              // Distinct pill tone per broker state so an operator can tell
-              // at a glance whether a broker is live, transiently warming,
-              // or in a user-actionable failure (offline). The ``title``
-              // surfaces the backend's concrete error without crowding the
-              // card — same pattern the status bar uses for kill-switch
-              // tooltips.
+              // Connected-ready brokers (live or paper) share the same positive
+              // tone; warming/offline/off stay distinct.
               const tone: 'profit' | 'caution' | 'danger' | 'neutral' =
-                b.state === 'live' ? 'profit' :
+                b.state === 'live' || b.state === 'paper' ? 'profit' :
                 b.state === 'warming' ? 'caution' :
                 b.state === 'offline' ? 'danger' :
                 'neutral';

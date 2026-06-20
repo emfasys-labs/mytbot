@@ -73,6 +73,11 @@ def test_canonical_to_broker_coinbase() -> None:
     assert canonical_to_broker("ETH-USD", "coinbase") == "ETH-USD"
 
 
+def test_canonical_to_broker_oanda() -> None:
+    assert canonical_to_broker("EURUSD=X", "oanda") == "EURUSD"
+    assert canonical_to_broker("GBPUSD=X", "oanda") == "GBPUSD"
+
+
 def test_canonical_to_broker_crypto_routes() -> None:
     assert canonical_to_broker("BTC-USD", "kraken") == "XBT/USD"
     assert canonical_to_broker("ETH-USD", "kraken") == "ETH/USD"

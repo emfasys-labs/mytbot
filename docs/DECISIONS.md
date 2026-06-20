@@ -16,6 +16,28 @@
 
 ---
 
+---
+
+## D190 — Broker dashboard pills: paper vs live execution mode
+**Date:** 2026-06-20
+**Decision:** The Capital card BROKERS list must distinguish venue execution mode, not just connectivity. Connected brokers now expose `paper_mode` on each `/system/status.brokers` row (sourced from the adapter after connect). The UI maps `paper_mode: true` → amber **paper** pill and `paper_mode: false` → green **live** pill; warming/offline/off semantics unchanged.
+
+**Implementation.** `system/broker_manager.py::BrokerStatus.paper_mode` + `to_dict()`; `ui/src/app/redesign/mapping.ts::mapBrokers()`; `BrokerUiState` adds `'paper'`.
+
+**Status:** Implemented. Requires `python run.py` restart + UI hard refresh.
+
+---
+
+## D189 — OANDA broker adapter (tenth venue)
+**Date:** 2026-06-20
+**Decision:** Add OANDA as a tenth forex venue via the v20 REST API. Practice uses `https://api-fxpractice.oanda.com`; live uses `https://api-fxtrade.oanda.com`. Auth is a personal access token in the `Authorization: Bearer` header. Account id is optional (`OANDA_ACCOUNT_ID`); when omitted the adapter uses the first `/v3/accounts` entry.
+
+**Implementation.** `brokers/oanda/adapter.py` — account summary, open positions, pricing/order book, candles, market/limit orders, reduce-only position closes. Wired registry, broker_manager, Connect Hub, permissions (forex only), router fee map, canonical FX mapping (`EURUSD=X` ↔ `EUR_USD`). Tests: `tests/test_oanda_adapter.py`.
+
+**Status:** Implemented. Requires `OANDA_API_TOKEN` in `.env`. Restart `python run.py` for tenth broker badge.
+
+---
+
 ## D188 — Coinbase Advanced Trade broker adapter (ninth venue)
 **Date:** 2026-06-20
 **Decision:** Add Coinbase as a ninth crypto spot venue via the Advanced Trade REST API (`https://api.coinbase.com/api/v3/brokerage`). Auth uses CDP API keys: per-request ES256 JWT (`Authorization: Bearer`) built from the full API key path (`COINBASE_API_KEY`) and EC private key PEM (`COINBASE_API_SECRET`). No passphrase (unlike legacy Coinbase Pro).

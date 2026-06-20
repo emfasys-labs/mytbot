@@ -63,6 +63,11 @@ def _dashboard_ready_hold_sec() -> float:
         return 8.0
 
 
+def _adapter_paper_mode(adapter: BrokerAdapter) -> bool:
+    """Read the adapter's active demo/practice vs live execution mode."""
+    return bool(getattr(adapter, "paper_mode", True))
+
+
 def _balance_ready_mature(status: "BrokerStatus", *, now: float | None = None) -> bool:
     if not (status.connected and status.balance_ready):
         return False
@@ -81,6 +86,8 @@ class BrokerStatus:
     balance_ready: bool = False
     balance_ready_since: float | None = None
     error: str | None = None
+    # Venue execution mode after connect (adapter demo/practice vs live endpoint).
+    paper_mode: bool | None = None
 
 
 @dataclass
@@ -149,6 +156,7 @@ class BrokerReport:
                 "balance_ready": s.balance_ready,
                 "balance_ready_since": s.balance_ready_since,
                 "error": s.error,
+                "paper_mode": s.paper_mode,
             }
             for name, s in self.brokers.items()
         }
@@ -208,6 +216,14 @@ def _broker_configs_from_env() -> dict[str, dict[str, Any]]:
             "api_secret": os.getenv("COINBASE_API_SECRET", "").strip(),
             "base_url": os.getenv("COINBASE_BASE_URL", "").strip() or None,
         },
+        "oanda": {
+            "api_token": os.getenv("OANDA_API_TOKEN", "").strip()
+            or os.getenv("OANDA_API_KEY", "").strip(),
+            "api_token_paper": os.getenv("OANDA_API_TOKEN_PAPER", "").strip(),
+            "account_id": os.getenv("OANDA_ACCOUNT_ID", "").strip() or None,
+            "account_id_paper": os.getenv("OANDA_ACCOUNT_ID_PAPER", "").strip() or None,
+            "base_url": os.getenv("OANDA_BASE_URL", "").strip() or None,
+        },
     }
 
 
@@ -242,6 +258,8 @@ def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
         return bool(cfg.get("api_key") and cfg.get("password") and cfg.get("identifier"))
     if name == "coinbase":
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
+    if name == "oanda":
+        return bool(cfg.get("api_token") or cfg.get("api_token_paper"))
     if name in {"kraken", "binance", "bybit", "alpaca", "trading212"}:
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
     return True
@@ -439,6 +457,7 @@ class BrokerManager:
         "capitalcom": 45,
         "ig": 45,
         "coinbase": 45,
+        "oanda": 45,
     }
 
     _STARTUP_TIMEOUT = 15.0  # max seconds to wait for any broker during startup
@@ -619,6 +638,7 @@ class BrokerManager:
                     status.error = None
                     status.balance_ready = False
                     status.balance_ready_since = None
+                    status.paper_mode = _adapter_paper_mode(adapter)
                     self.adapters["ibkr"] = adapter
                     self._ibkr_fail_count = 0
                     logger.info("broker | ibkr | connected (background)")
@@ -667,6 +687,7 @@ class BrokerManager:
                 status.error = None
                 status.balance_ready = False
                 status.balance_ready_since = None
+                status.paper_mode = _adapter_paper_mode(adapter)
                 self.adapters[name] = adapter
                 self._broker_fail_count[name] = 0
                 self._broker_ready_state[name] = True
@@ -878,6 +899,7 @@ class BrokerManager:
                 status.connected = False
                 status.balance_ready = False
                 status.balance_ready_since = None
+                status.paper_mode = None
                 status.error = "Disconnected"
             self._broker_fail_count[name] = max(1, self._broker_fail_count.get(name, 0))
             logger.warning("broker | {} | disconnected (health poll)", name)
@@ -919,6 +941,7 @@ class BrokerManager:
                 st.connected = False
                 st.balance_ready = False
                 st.balance_ready_since = None
+                st.paper_mode = None
 
     def get_adapter(self, name: str) -> BrokerAdapter | None:
         return self.adapters.get(name)

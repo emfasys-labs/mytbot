@@ -18,6 +18,7 @@ from brokers.trading212.adapter import Trading212Adapter
 from brokers.capitalcom.adapter import CapitalComAdapter
 from brokers.coinbase.adapter import CoinbaseAdapter
 from brokers.ig.adapter import IGAdapter
+from brokers.oanda.adapter import OandaAdapter
 
 # ─── Registry ─────────────────────────────────────────────────────────────────
 # Add new brokers here — one line each.
@@ -32,6 +33,7 @@ BROKER_REGISTRY: dict[str, type[BrokerAdapter]] = {
     "capitalcom": CapitalComAdapter,
     "coinbase": CoinbaseAdapter,
     "ig": IGAdapter,
+    "oanda": OandaAdapter,
     # "deribit": DeribitAdapter,    ← uncomment when ready
     # "okx":     OKXAdapter,        ← uncomment when ready
 }
