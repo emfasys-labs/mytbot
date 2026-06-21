@@ -212,7 +212,7 @@ export function Signed({
       color: muted ? TOKENS.ink2 : pos ? TOKENS.profit : TOKENS.loss,
       letterSpacing: '-0.01em',
     }}>
-      {pos ? '+' : '−'}{prefix}{Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+      {pos ? '+' : '−'}{prefix}{Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </span>
   );
 }

@@ -225,3 +225,63 @@ def futures_multiplier(symbol: str) -> Optional[Decimal]:
     """
     spec = futures_spec_for(symbol)
     return spec.multiplier if spec is not None else None
+
+
+def normalize_futures_mark_price(
+    symbol: str,
+    raw_price: Decimal,
+    *,
+    avg_entry_price: Decimal | None = None,
+) -> Decimal:
+    """Coerce a venue quote onto per-unit futures marks (e.g. USD/bbl for ``CL=F``).
+
+    Some venues return IB-style contract-cost scales (``price * multiplier``) or
+    CFD point scales (``price * 100``). When an entry average is known, pick the
+    candidate closest to that anchor within a sane band.
+    """
+    if raw_price <= 0:
+        return raw_price
+    mult = futures_multiplier(symbol)
+    if mult is None:
+        return raw_price
+
+    ref = avg_entry_price if avg_entry_price is not None and avg_entry_price > 0 else None
+    candidates: list[Decimal] = [raw_price]
+    if mult > 0:
+        candidates.append(raw_price / mult)
+    for factor in (Decimal("100"), Decimal("10")):
+        candidates.append(raw_price / factor)
+        if mult > 0:
+            candidates.append(raw_price / (mult * factor))
+
+    if ref is not None:
+        sane = [
+            c
+            for c in candidates
+            if c > 0 and Decimal("0.25") <= (c / ref) <= Decimal("4")
+        ]
+        if sane:
+            return min(sane, key=lambda c: abs(c - ref))
+    return raw_price
+
+
+def pick_mark_quotes(quotes: list[Decimal], *, ref_price: Decimal | None = None) -> Decimal:
+    """Choose a robust mark from one or more venue quotes."""
+    cleaned = [q for q in quotes if q > 0]
+    if not cleaned:
+        return Decimal(0)
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if ref_price is not None and ref_price > 0:
+        sane = [
+            q
+            for q in cleaned
+            if Decimal("0.2") <= (q / ref_price) <= Decimal("5")
+        ]
+        if sane:
+            cleaned = sane
+    cleaned.sort()
+    mid = len(cleaned) // 2
+    if len(cleaned) % 2 == 1:
+        return cleaned[mid]
+    return (cleaned[mid - 1] + cleaned[mid]) / Decimal("2")

@@ -12,6 +12,7 @@ import { ACCENTS, AccentName, CURRENCY_SYMBOL, Density, SystemState, TOKENS } fr
 import { InstrumentAvatar, instrumentDisplayName, instrumentSubtitle } from './instrumentVisuals';
 import type { BackendSystemState } from '../lib/api';
 import type { LiveData } from './useLiveSystem';
+import { fmtDashPnlSigned } from '../lib/dashboardFormat';
 
 export type PnlWindow = 'today' | 'week' | 'month' | 'ytd' | 'historical';
 const PNL_WINDOWS: PnlWindow[] = ['today', 'week', 'month', 'ytd', 'historical'];
@@ -368,7 +369,7 @@ export function DashboardScreen({
                     color: dayChange >= 0 ? TOKENS.profit : TOKENS.loss,
                     fontVariantNumeric: 'tabular-nums',
                   }}>
-                    {dayChange >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(dayChange).toFixed(2)}
+                    {fmtDashPnlSigned(dayChange, CURRENCY_SYMBOL)}
                   </span>
                   <span style={{
                     fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink3,
@@ -406,7 +407,7 @@ export function DashboardScreen({
                     color: realisedWindow.net >= 0 ? TOKENS.profit : TOKENS.loss,
                     fontVariantNumeric: 'tabular-nums',
                   }}>
-                    {realisedWindow.net >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(realisedWindow.net).toFixed(2)}
+                    {fmtDashPnlSigned(realisedWindow.net, CURRENCY_SYMBOL)}
                   </span>
                   <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
                     {PNL_WINDOW_LABEL[pnlWindow]}
@@ -531,7 +532,8 @@ function BookFooter({ live }: { live: LiveData }) {
         <>
           {' · '}
           <span style={{ color: totalPnl >= 0 ? TOKENS.profit : TOKENS.loss }}>
-            {totalPnl >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(totalPnl).toFixed(0)}
+            {totalPnl >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}
+            {Math.abs(totalPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
           </span>
         </>
       )}

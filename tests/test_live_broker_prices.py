@@ -28,9 +28,10 @@ def _clear_last_good_px():
 
 
 class _FakePosition:
-    def __init__(self, symbol: str, broker: str = "ibkr") -> None:
+    def __init__(self, symbol: str, broker: str = "ibkr", avg_entry_price: str = "100") -> None:
         self.symbol = symbol
         self.broker = broker
+        self.avg_entry_price = avg_entry_price
 
 
 class _FakeAdapter:
@@ -96,7 +97,7 @@ def test_deterministic_median_positive_quote(monkeypatch: pytest.MonkeyPatch) ->
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL", broker="ibkr")]))
     # median(100.25, 100.10) = 100.175 — no longer a speed race.
-    assert out == {"AAPL": Decimal("100.175")}
+    assert out == {("ibkr", "AAPL"): Decimal("100.175")}
 
 
 def test_zero_adapter_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,7 +114,7 @@ def test_zero_adapter_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("AAPL")]))
-    assert out == {"AAPL": Decimal("42.13")}
+    assert out == {("ibkr", "AAPL"): Decimal("42.13")}
 
 
 def test_exception_adapter_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,7 +129,7 @@ def test_exception_adapter_does_not_block(monkeypatch: pytest.MonkeyPatch) -> No
     )
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("COHR")]))
-    assert out == {"COHR": Decimal("77.77")}
+    assert out == {("ibkr", "COHR"): Decimal("77.77")}
 
 
 def test_all_adapters_zero_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,11 +162,11 @@ def test_last_good_price_carries_forward_on_transient_miss(
 
     # Cycle 1: real price -> cached.
     _install_orch(monkeypatch, _FakeBM({"alpaca": _FakeAdapter(Decimal("100.50"))}))
-    assert asyncio.run(server._live_broker_prices(pos)) == {"AAPL": Decimal("100.50")}
+    assert asyncio.run(server._live_broker_prices(pos)) == {("ibkr", "AAPL"): Decimal("100.50")}
 
     # Cycle 2: every probe returns 0 (transient outage) -> carry-forward.
     _install_orch(monkeypatch, _FakeBM({"alpaca": _FakeAdapter(Decimal(0))}))
-    assert asyncio.run(server._live_broker_prices(pos)) == {"AAPL": Decimal("100.50")}
+    assert asyncio.run(server._live_broker_prices(pos)) == {("ibkr", "AAPL"): Decimal("100.50")}
 
     # With TTL disabled, a miss is NOT carried (old behaviour preserved).
     monkeypatch.setenv("LIVE_PX_LAST_GOOD_TTL_SEC", "0")
@@ -192,7 +193,10 @@ def test_multiple_positions_each_resolved(monkeypatch: pytest.MonkeyPatch) -> No
     out = asyncio.run(
         server._live_broker_prices([_FakePosition("AAPL"), _FakePosition("MSFT"), _FakePosition("NVDA")])
     )
-    assert out == {"AAPL": Decimal("190.10"), "MSFT": Decimal("410.25")}
+    assert out == {
+        ("ibkr", "AAPL"): Decimal("190.10"),
+        ("ibkr", "MSFT"): Decimal("410.25"),
+    }
 
 
 def test_timeout_does_not_leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +211,26 @@ def test_timeout_does_not_leak(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     _install_orch(monkeypatch, bm)
     out = asyncio.run(server._live_broker_prices([_FakePosition("X")]))
-    assert out == {"X": Decimal("2.0")}
+    assert out == {("ibkr", "X"): Decimal("2.0")}
+
+
+def test_futures_use_position_broker_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CFD venue returning a 100x-scaled quote must not mark an IBKR future."""
+    import api.server as server
+
+    bm = _FakeBM(
+        {
+            "ibkr": _FakeAdapter(Decimal("76.20")),
+            "ig": _FakeAdapter(Decimal("7661.947")),
+        }
+    )
+    _install_orch(monkeypatch, bm)
+    out = asyncio.run(
+        server._live_broker_prices(
+            [_FakePosition("CL=F", broker="ibkr", avg_entry_price="76.14")]
+        )
+    )
+    assert out[("ibkr", "CL=F")] == Decimal("76.20")
 
 
 def test_paper_mtm_ignores_native_broker_unrealised(monkeypatch: pytest.MonkeyPatch) -> None:

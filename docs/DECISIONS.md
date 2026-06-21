@@ -18,6 +18,18 @@
 
 ---
 
+## D192 — Futures mark-price sanity (fix fake +$11M CL=F unrealised)
+**Date:** 2026-06-21
+**Decision:** Cross-broker median marking must not be used for futures rows, and futures quotes must be normalized to per-unit marks before computing `(price - avg) * qty`.
+
+**Problem.** Live `/positions` showed `CL=F` unrealised **+$11,378,710** with `LAST=3869.04` vs entry **76.14**. The position is 3 WTI contracts (`qty=3000` internal units = 3×1000 bbl). Real P&L should be on the order of hundreds of dollars, not millions. Root cause: `_live_broker_prices()` median-combined a sane ~$76/bbl quote with a ~100× scaled quote from an unrelated CFD venue (~7662), yielding a median ~3869 and `(3869-76)*3000`.
+
+**Fix.** (1) `core/instruments.py`: `normalize_futures_mark_price()` + `pick_mark_quotes()` with entry-anchored outlier rejection. (2) `_live_broker_prices()` resolves marks per `(broker, symbol)`; futures consult **only** the position broker. (3) IBKR `get_positions()` always divides `marketPrice` by contract multiplier; `get_last_price()` normalizes futures. (4) Trading-loop mark oracle is broker-scoped with the same normalization.
+
+**Status:** Implemented. Tests: `tests/test_futures_mark_price.py`, updated `tests/test_live_broker_prices.py`. Requires `python run.py` restart to clear cached bad marks.
+
+---
+
 ## D191 — IBKR auto-reconnect when Gateway port reopens
 **Date:** 2026-06-21
 **Decision:** The broker reconnect loop must attempt a real ib_insync connect whenever IB Gateway's API port is reachable, not only when the cheap raw socket handshake probe succeeds. After hours offline, Gateway often accepts TCP while the raw `v100..176` probe still false-negatives (disclaimer pending / slow warm-up), which previously blocked `_background_ibkr_connect` entirely and left IBKR stuck offline in the UI despite an operator restart.

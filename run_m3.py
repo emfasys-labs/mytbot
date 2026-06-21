@@ -861,6 +861,12 @@ async def _refresh_position_marks_and_persist(
             px = Decimal("0")
             if price_oracle is not None:
                 try:
+                    px = await price_oracle(
+                        sym,
+                        broker=str(row.broker or ""),
+                        avg_entry_price=avg if avg > 0 else None,
+                    )
+                except TypeError:
                     px = await price_oracle(sym)
                 except Exception:  # noqa: BLE001
                     px = Decimal("0")
@@ -872,6 +878,10 @@ async def _refresh_position_marks_and_persist(
             if px <= 0:
                 # Still nothing — keep the last-known price (best effort).
                 px = Decimal(str(row.current_price or 0))
+            from core.instruments import futures_multiplier, normalize_futures_mark_price
+
+            if px > 0 and futures_multiplier(sym) is not None and avg > 0:
+                px = normalize_futures_mark_price(sym, px, avg_entry_price=avg)
             unreal = _compute_unrealised_pnl(qty, px, avg)
             new_row = PositionLog(
                 timestamp=ts,

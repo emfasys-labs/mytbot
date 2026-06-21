@@ -40,6 +40,7 @@ from api.pnl_periods import (
 )
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from core.instrument_profiles import crypto_display_name, with_logo
+from core.instruments import futures_multiplier, normalize_futures_mark_price, pick_mark_quotes
 from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_analyst_research_roundup, is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
@@ -509,14 +510,8 @@ async def _latest_feature_prices(session, symbols: list[str]) -> dict[str, Decim
     return out
 
 
-# Last-good live price per symbol: (price, monotonic_ts). IBKR's per-symbol
-# get_last_price is slow (qualify + reqMktData + ~1.2s wait) and
-# disconnect/maintenance-prone, so with 50+ open symbols a *random* subset
-# of probes times out every refresh. Without this cache those symbols
-# vanish from the price map and the unrealised total oscillates between the
-# true MTM and a fabricated near-flat figure (the -$5247 ↔ -$245 flicker).
-# Carrying the last good quote for a short TTL holds the number steady.
-_LAST_GOOD_PX: dict[str, tuple[Decimal, float]] = {}
+# Last-good live price per (broker, symbol): (price, monotonic_ts).
+_LAST_GOOD_PX: dict[tuple[str, str], tuple[Decimal, float]] = {}
 
 
 def _last_good_px_ttl() -> float:
@@ -526,20 +521,13 @@ def _last_good_px_ttl() -> float:
         return 90.0
 
 
-async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
+async def _live_broker_prices(rows: list[PositionLog]) -> dict[tuple[str, str], Decimal]:
     """Best-effort live last-price lookup via broker adapters.
 
-    Hourly FeatureSnapshot bars are far too stale to drive a live equity
-    curve — brokers expose a real-time `get_last_price(symbol)` which is the
-    freshest source we have. Query all connected adapters per symbol and pick
-    a deterministic median positive quote. The old "first non-zero wins" race
-    made Book unrealised totals snap flat when a stale/default quote returned
-    a few milliseconds before the genuine market-data source.
-
-    A fresh positive quote refreshes the per-symbol last-good cache; a
-    symbol whose probes all fail/timeout this cycle falls back to its last
-    good quote within ``LIVE_PX_LAST_GOOD_TTL_SEC`` so a transient miss can
-    no longer collapse it (and the unrealised total no longer flickers).
+    Marks are resolved per ``(broker, symbol)`` so a CFD venue cannot pollute
+    an IBKR futures row. For futures, only the position broker is consulted;
+    for other assets a robust median of same-symbol quotes may be used when
+    the position broker has no mark.
     """
     orch = _get_orchestrator()
     if orch is None:
@@ -552,72 +540,103 @@ async def _live_broker_prices(rows: list[PositionLog]) -> dict[str, Decimal]:
     if not adapters:
         return {}
 
-    async def _probe(broker_name: str, adapter, sym: str) -> tuple[str, Decimal]:
+    async def _probe(broker_name: str, adapter, sym: str) -> Decimal:
         try:
             px = await asyncio.wait_for(adapter.get_last_price(sym), timeout=1.5)
         except Exception:  # noqa: BLE001
-            return broker_name, Decimal(0)
+            return Decimal(0)
         if px is None:
-            return broker_name, Decimal(0)
+            return Decimal(0)
         try:
             d = Decimal(str(px))
         except Exception:  # noqa: BLE001
-            return broker_name, Decimal(0)
-        return broker_name, d if d > 0 else Decimal(0)
+            return Decimal(0)
+        return d if d > 0 else Decimal(0)
 
-    symbol_rows: dict[str, list[PositionLog]] = {}
+    row_keys: dict[tuple[str, str], PositionLog] = {}
     for r in rows:
         sym = str(r.symbol or "").strip().upper()
-        if sym:
-            symbol_rows.setdefault(sym, []).append(r)
+        broker = str(r.broker or "").strip().lower()
+        if sym and broker:
+            row_keys[(broker, sym)] = r
 
-    async def _one(sym: str) -> tuple[str, Decimal]:
-        tasks = [asyncio.create_task(_probe(name, a, sym)) for name, a in adapters]
-        done: set[asyncio.Task] = set()
-        pending: set[asyncio.Task] = set(tasks)
-        try:
-            done, pending = await asyncio.wait(tasks, timeout=1.8)
-            quotes: list[Decimal] = []
-            for t in done:
-                try:
-                    _broker, px = t.result()
-                except Exception:  # noqa: BLE001
-                    continue
-                if px > 0:
-                    quotes.append(px)
-            if quotes:
-                quotes.sort()
-                mid = len(quotes) // 2
-                if len(quotes) % 2 == 1:
-                    return sym, quotes[mid]
-                return sym, (quotes[mid - 1] + quotes[mid]) / Decimal("2")
-        finally:
-            for t in pending:
-                t.cancel()
-        return sym, Decimal(0)
+    async def _one(key: tuple[str, str]) -> tuple[tuple[str, str], Decimal]:
+        broker, sym = key
+        row = row_keys[key]
+        avg = Decimal(str(row.avg_entry_price or 0))
+        is_future = futures_multiplier(sym) is not None
+        quotes: list[Decimal] = []
 
-    results = await asyncio.gather(*(_one(sym) for sym in symbol_rows), return_exceptions=True)
-    out: dict[str, Decimal] = {}
+        adapter = bm.adapters.get(broker)
+        if adapter is not None:
+            px = await _probe(broker, adapter, sym)
+            if px > 0:
+                quotes.append(
+                    normalize_futures_mark_price(
+                        sym,
+                        px,
+                        avg_entry_price=avg if avg > 0 else None,
+                    )
+                )
+
+        if not is_future:
+            other_tasks = [
+                asyncio.create_task(_probe(name, ad, sym))
+                for name, ad in adapters
+                if name != broker
+            ]
+            if other_tasks:
+                done, pending = await asyncio.wait(other_tasks, timeout=1.8)
+                for t in pending:
+                    t.cancel()
+                for t in done:
+                    try:
+                        px = t.result()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if px > 0:
+                        quotes.append(px)
+
+        chosen = pick_mark_quotes(quotes, ref_price=avg if avg > 0 else None)
+        return key, chosen
+
+    results = await asyncio.gather(*(_one(key) for key in row_keys), return_exceptions=True)
+    out: dict[tuple[str, str], Decimal] = {}
     now_m = _time.monotonic()
     for res in results:
         if isinstance(res, Exception):
             continue
-        sym, px = res
-        if sym and px > 0:
-            out[sym] = px
-            _LAST_GOOD_PX[sym] = (px, now_m)  # refresh last-good cache
-    # Carry-forward: any requested symbol whose probes all failed this cycle
-    # but which has a recent good quote keeps that quote, so a transient
-    # IBKR timeout cannot zero it out and flicker the totals.
+        key, px = res
+        if px > 0:
+            out[key] = px
+            _LAST_GOOD_PX[key] = (px, now_m)
     ttl = _last_good_px_ttl()
     if ttl > 0:
-        for sym in symbol_rows:
-            if sym in out:
+        for key in row_keys:
+            if key in out:
                 continue
-            cached = _LAST_GOOD_PX.get(sym)
+            cached = _LAST_GOOD_PX.get(key)
             if cached is not None and (now_m - cached[1]) <= ttl and cached[0] > 0:
-                out[sym] = cached[0]
+                out[key] = cached[0]
     return out
+
+
+def _position_mark_price(
+    row: PositionLog,
+    live_prices: dict[tuple[str, str], Decimal],
+    feature_prices: dict[str, Decimal],
+) -> Decimal:
+    broker = str(row.broker or "").strip().lower()
+    sym = str(row.symbol or "").strip().upper()
+    avg = Decimal(str(row.avg_entry_price or 0))
+    px = live_prices.get((broker, sym), Decimal(0))
+    if px <= 0:
+        px = feature_prices.get(sym, Decimal(0))
+    if px <= 0:
+        px = Decimal(str(row.current_price or 0))
+    if px > 0 and futures_multiplier(sym) is not None and avg > 0:
+        px = normalize_futures_mark_price(sym, px, avg_entry_price=avg)
+    return px
 
 
 async def _latest_position_log_rows(
@@ -997,7 +1016,7 @@ async def _merge_synthetic_paper_positions_from_log(
             continue
         if qty == 0:
             continue
-        px = live_px.get(sym) or prices.get(sym) or Decimal(str(r.current_price or 0))
+        px = _position_mark_price(r, live_px, prices)
         if px <= 0 and avg > 0:
             px = avg
         pnl = (px - avg) * qty if avg > 0 else Decimal(0)
@@ -1061,17 +1080,7 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         avg = Decimal(str(r.avg_entry_price or 0))
         if avg <= 0 or qty == 0:
             continue
-        px = live_prices.get(r.symbol)
-        if px is None or px <= 0:
-            px = feature_prices.get(r.symbol)
-        if px is None or px <= 0:
-            # Last persisted mark only — NEVER the average entry price.
-            # Marking a position at its own entry fabricates exactly $0
-            # unrealised, which is what made the headline oscillate between
-            # the true MTM and a fake near-flat figure. If we have no real
-            # mark for this position, omit it (honest "unknown", not a
-            # fabricated "flat") rather than poison the total.
-            px = Decimal(str(r.current_price or 0))
+        px = _position_mark_price(r, live_prices, feature_prices)
         if px <= 0 or px == avg:
             continue
         total += (px - avg) * qty
@@ -1228,10 +1237,7 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
     payload_rows = [
         _position_log_payload(
             r,
-            current_price=live_prices.get(
-                r.symbol,
-                prices.get(r.symbol, Decimal(str(r.current_price or 0))),
-            ),
+            current_price=_position_mark_price(r, live_prices, prices),
         )
         for r in rows
     ]

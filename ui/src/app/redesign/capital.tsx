@@ -45,6 +45,7 @@ import {
   useState,
 } from 'react';
 import { Card, Label } from './primitives';
+import { fmtDashPnlSigned } from '../lib/dashboardFormat';
 import { CURRENCY_SYMBOL, SystemState, TOKENS } from './tokens';
 import type { LiveData } from './useLiveSystem';
 import type { Position } from './data';
@@ -874,7 +875,7 @@ function TrimPreview({
                       flex: 1,
                     }}
                   >
-                    pnl {(p.pnl ?? 0) >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(p.pnl ?? 0).toFixed(0)}
+                    pnl {fmtDashPnlSigned(p.pnl ?? 0, CURRENCY_SYMBOL)}
                   </span>
                   {money(posValue, 11, willGo ? TOKENS.caution : TOKENS.ink2)}
                 </div>

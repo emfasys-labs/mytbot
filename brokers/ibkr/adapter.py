@@ -1515,7 +1515,7 @@ class IBKRAdapter(BrokerAdapter):
                     if mult > 0:
                         if avg_px and avg_px > 0:
                             avg_px = avg_px / mult
-                        if pi is None and mpx and mpx > 0:
+                        if mpx and mpx > 0:
                             mpx = mpx / mult
                         qty = qty * mult
                 inst_meta: Optional[dict[str, Any]] = None
@@ -1674,7 +1674,9 @@ class IBKRAdapter(BrokerAdapter):
                 return Decimal(0)
             # Healthy read → reset the disconnect breaker.
             self._md_disconnect_logged = False
-            return last
+            from core.instruments import normalize_futures_mark_price
+
+            return normalize_futures_mark_price(symbol, last)
         except Exception as exc:  # noqa: BLE001
             if _is_disconnect_exc(exc):
                 # Expected, transient socket drop. Trip the cooldown, log ONCE

@@ -11,6 +11,7 @@ import { api, setApiControlToken, type AiPipelineStage, type AiPipelineView, typ
 import { capitalAtWork, mapOrdersToTradeLog, normalizeSide, prettySymbol } from './mapping';
 import { formatStrategyDisplayName } from './strategyLabels';
 import { InstrumentAvatar, instrumentDisplayName, instrumentSubtitle } from './instrumentVisuals';
+import { fmtDashMoney, fmtDashPnlSigned } from '../lib/dashboardFormat';
 
 export function SignalsScreen({ accent, live }: { accent: AccentName; live: LiveData }) {
   const accentColor = ACCENTS[accent].main;
@@ -2396,7 +2397,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                             title={`Transaction fee: ${feeNum.toFixed(4)}`}
                             style={{ color: TOKENS.ink2, fontFamily: TOKENS.mono, fontSize: 11 }}
                           >
-                            {feeNum.toFixed(2)}
+                            {fmtDashMoney(feeNum, CURRENCY_SYMBOL)}
                           </span>
                         ) : (
                           <span style={{ color: TOKENS.ink3 }}>—</span>
@@ -2424,7 +2425,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 color: totalPnl >= 0 ? TOKENS.profit : TOKENS.loss,
                 letterSpacing: '-0.02em',
               }}>
-                {totalPnl >= 0 ? '+' : '−'}{CURRENCY_SYMBOL}{Math.abs(totalPnl).toFixed(2)}
+                {fmtDashPnlSigned(totalPnl, CURRENCY_SYMBOL)}
               </div>
             </div>
             <div style={{ borderTop: `1px solid ${TOKENS.line}`, paddingTop: 10 }}>
@@ -2452,14 +2453,14 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
                 padding: '3px 0', fontFamily: TOKENS.mono, fontSize: 11,
               }}>
                 <span style={{ color: TOKENS.ink3 }}>deployed</span>
-                <span style={{ color: TOKENS.ink1 }}>{CURRENCY_SYMBOL}{deployedCapital.toFixed(2)}</span>
+                <span style={{ color: TOKENS.ink1 }}>{fmtDashMoney(deployedCapital, CURRENCY_SYMBOL)}</span>
               </div>
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
                 padding: '3px 0', fontFamily: TOKENS.mono, fontSize: 11,
               }}>
                 <span style={{ color: TOKENS.ink3 }}>pending orders</span>
-                <span style={{ color: TOKENS.ink1 }}>{CURRENCY_SYMBOL}{pendingCapital.toFixed(2)}</span>
+                <span style={{ color: TOKENS.ink1 }}>{fmtDashMoney(pendingCapital, CURRENCY_SYMBOL)}</span>
               </div>
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
@@ -2467,7 +2468,7 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
               }}>
                 <span style={{ color: TOKENS.ink3 }}>total working</span>
                 <span style={{ color: TOKENS.ink1 }}>
-                  {CURRENCY_SYMBOL}{capitalAtWorkValue.toFixed(2)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
+                  {fmtDashMoney(capitalAtWorkValue, CURRENCY_SYMBOL)} ({(capitalAtWorkPct * 100).toFixed(1)}%)
                 </span>
               </div>
             </div>
@@ -2566,7 +2567,10 @@ export function BookScreen({ accent, live }: { accent: AccentName; live: LiveDat
 
 function fmtPrice(v: number): string {
   if (!Number.isFinite(v) || v === 0) return '—';
-  return v >= 100 ? v.toFixed(2) : v.toFixed(4);
+  if (v >= 100) {
+    return v.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  }
+  return v.toLocaleString(undefined, { maximumFractionDigits: 4, minimumFractionDigits: 2 });
 }
 
 /** Compact account-currency formatter for position notionals. Uses ``k`` /
@@ -2574,10 +2578,19 @@ function fmtPrice(v: number): string {
  *  cards while still exposing exact cents for small positions. */
 function fmtNotional(v: number): string {
   if (!Number.isFinite(v) || v <= 0) return '—';
-  if (v >= 1_000_000) return `${CURRENCY_SYMBOL}${(v / 1_000_000).toFixed(2)}M`;
-  if (v >= 10_000) return `${CURRENCY_SYMBOL}${(v / 1_000).toFixed(1)}k`;
-  if (v >= 1_000) return `${CURRENCY_SYMBOL}${(v / 1_000).toFixed(2)}k`;
-  return `${CURRENCY_SYMBOL}${v.toFixed(2)}`;
+  if (v >= 1_000_000) {
+    const m = v / 1_000_000;
+    return `${CURRENCY_SYMBOL}${m.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}M`;
+  }
+  if (v >= 10_000) {
+    const k = v / 1_000;
+    return `${CURRENCY_SYMBOL}${k.toLocaleString(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}k`;
+  }
+  if (v >= 1_000) {
+    const k = v / 1_000;
+    return `${CURRENCY_SYMBOL}${k.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}k`;
+  }
+  return fmtDashMoney(v, CURRENCY_SYMBOL);
 }
 
 export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveData }) {

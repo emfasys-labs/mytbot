@@ -386,7 +386,7 @@ class TradingLoop:
         # {sym: (Decimal, monotonic_ts)}. Lets the persisted mark stay real
         # for forex/futures/crypto symbols that have no M2 feature bars,
         # which otherwise carried their entry price forever.
-        self._mark_px_cache: dict[str, tuple[Decimal, float]] = {}
+        self._mark_px_cache: dict[tuple[str, str] | str, tuple[Decimal, float]] = {}
         self._loop_started_monotonic: float | None = None
         try:
             self._warmup_min_sec: float = max(
@@ -695,42 +695,65 @@ class TradingLoop:
             )
         return kept
 
-    async def _live_price_oracle(self, sym: str) -> Decimal:
+    async def _live_price_oracle(
+        self,
+        sym: str,
+        *,
+        broker: str = "",
+        avg_entry_price: Decimal | None = None,
+    ) -> Decimal:
         """Venue-native last price for the mark-to-market sweep.
 
-        Queries connected broker adapters (all asset classes — forex,
-        futures, crypto, equities), first positive quote wins, with a
-        short per-probe timeout. A last-good cache (TTL
-        ``MARK_PX_CACHE_TTL_SEC``, default 180s) bridges transient broker
-        timeouts so a momentary miss never re-stamps a position at its
-        entry price. Returns ``Decimal(0)`` only when truly unknown — the
-        sweep then falls back to feature close / last mark.
+        Prefers the position broker's adapter so unrelated CFD/crypto venues
+        cannot pollute futures marks. A last-good cache bridges transient misses.
         """
+        from core.instruments import futures_multiplier, normalize_futures_mark_price
+
         bm = self._broker_manager
         s = str(sym or "").strip()
+        b = str(broker or "").strip().lower()
+        ref = avg_entry_price if avg_entry_price is not None and avg_entry_price > 0 else None
         if not s or bm is None:
             return Decimal("0")
         adapters = getattr(bm, "adapters", None)
         if not isinstance(adapters, dict) or not adapters:
             return Decimal("0")
-        for _name, adapter in list(adapters.items()):
+
+        async def _probe(name: str, adapter) -> Decimal:
             try:
                 raw = await asyncio.wait_for(adapter.get_last_price(s), timeout=1.0)
             except Exception:  # noqa: BLE001
-                continue
+                return Decimal("0")
             try:
                 px = Decimal(str(raw))
             except Exception:  # noqa: BLE001
-                continue
+                return Decimal("0")
+            if px <= 0:
+                return Decimal("0")
+            if futures_multiplier(s) is not None:
+                return normalize_futures_mark_price(s, px, avg_entry_price=ref)
+            return px
+
+        ordered = list(adapters.items())
+        if b and b in adapters:
+            ordered = [(b, adapters[b])] + [(n, a) for n, a in adapters.items() if n != b]
+        if futures_multiplier(s) is not None and b and b in adapters:
+            ordered = [(b, adapters[b])]
+
+        for name, adapter in ordered:
+            px = await _probe(name, adapter)
             if px > 0:
-                self._mark_px_cache[s] = (px, time.monotonic())
+                cache_key = (b or name, s.upper())
+                self._mark_px_cache[cache_key] = (px, time.monotonic())
                 return px
-        # All probes missed this cycle → carry the last good quote.
         try:
             ttl = max(0.0, float(os.getenv("MARK_PX_CACHE_TTL_SEC", "180")))
         except (TypeError, ValueError):
             ttl = 180.0
-        cached = self._mark_px_cache.get(s)
+        cache_key = (b, s.upper()) if b else None
+        cached = self._mark_px_cache.get(cache_key) if cache_key else None
+        if cached is None and not b:
+            cached = self._mark_px_cache.get(s.upper())
         if cached is not None and ttl > 0 and (time.monotonic() - cached[1]) <= ttl:
             return cached[0]
         return Decimal("0")

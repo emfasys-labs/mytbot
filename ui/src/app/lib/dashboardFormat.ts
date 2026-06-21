@@ -34,3 +34,23 @@ export function fmtDashMoneySigned(n: number, currency = '$'): string {
   const body = abs.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   return `${sign}${currency}${body}`;
 }
+
+/** Unsigned currency amount with grouping (deployed capital, fees, notionals). */
+export function fmtDashMoney(n: number, currency = '$'): string {
+  if (!Number.isFinite(n)) return '—';
+  return `${currency}${n.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/** Signed P&L with explicit ``+`` on gains (Book totals, dashboard cards). */
+export function fmtDashPnlSigned(n: number, currency = '$'): string {
+  if (!Number.isFinite(n)) return '—';
+  const sign = n >= 0 ? '+' : '−';
+  const body = Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${sign}${currency}${body}`;
+}
