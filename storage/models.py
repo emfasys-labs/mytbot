@@ -9,7 +9,6 @@ This is the immutable audit log.
 from sqlalchemy import (
     Column,
     String,
-    Numeric,
     DateTime,
     Boolean,
     Integer,
@@ -20,6 +19,8 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import DeclarativeBase
+
+from storage.types import DecimalSafe
 
 
 class Base(DeclarativeBase):
@@ -35,10 +36,10 @@ class SignalLog(Base):
     symbol          = Column(String(72), nullable=False, index=True)
     side            = Column(String(4), nullable=False)     # "buy" | "sell"
     strategy        = Column(String(50), nullable=False)
-    confidence      = Column(Numeric(5, 4), nullable=False)
+    confidence      = Column(DecimalSafe(5, 4), nullable=False)
     asset_class     = Column(String(20), nullable=False)
     broker          = Column(String(20), nullable=False)
-    news_score      = Column(Numeric(5, 4), nullable=True)
+    news_score      = Column(DecimalSafe(5, 4), nullable=True)
     news_veto       = Column(Boolean, default=False)
     metadata_       = Column("metadata", JSON, nullable=True)
 
@@ -67,13 +68,13 @@ class OrderLog(Base):
     symbol              = Column(String(72), nullable=False)
     side                = Column(String(4), nullable=False)
     order_type          = Column(String(20), nullable=False)
-    quantity            = Column(Numeric(20, 8), nullable=False)
-    limit_price         = Column(Numeric(20, 8), nullable=True)
+    quantity            = Column(DecimalSafe(20, 8), nullable=False)
+    limit_price         = Column(DecimalSafe(20, 8), nullable=True)
     broker              = Column(String(20), nullable=False)
     status              = Column(String(20), nullable=False)
-    filled_quantity     = Column(Numeric(20, 8), nullable=True)
-    avg_fill_price      = Column(Numeric(20, 8), nullable=True)
-    fee                 = Column(Numeric(20, 8), nullable=True)
+    filled_quantity     = Column(DecimalSafe(20, 8), nullable=True)
+    avg_fill_price      = Column(DecimalSafe(20, 8), nullable=True)
+    fee                 = Column(DecimalSafe(20, 8), nullable=True)
     paper_mode          = Column(Boolean, default=True)
     instrument_metadata = Column(JSON, nullable=True)
 
@@ -106,30 +107,30 @@ class FillLog(Base):
     asset_class         = Column(String(20), nullable=False, default="")
     side                = Column(String(8), nullable=False)            # buy / sell
     order_type          = Column(String(20), nullable=False, default="")
-    quantity            = Column(Numeric(20, 8), nullable=False)       # absolute filled qty
-    signed_quantity     = Column(Numeric(20, 8), nullable=False)       # +buy / -sell; position qty = SUM(this)
-    fill_price          = Column(Numeric(20, 8), nullable=False)
-    notional            = Column(Numeric(20, 8), nullable=False, default=0)
-    fee                 = Column(Numeric(20, 8), nullable=False, default=0)
+    quantity            = Column(DecimalSafe(20, 8), nullable=False)       # absolute filled qty
+    signed_quantity     = Column(DecimalSafe(20, 8), nullable=False)       # +buy / -sell; position qty = SUM(this)
+    fill_price          = Column(DecimalSafe(20, 8), nullable=False)
+    notional            = Column(DecimalSafe(20, 8), nullable=False, default=0)
+    fee                 = Column(DecimalSafe(20, 8), nullable=False, default=0)
     # D130 — execution-quality capture. ``intended_price`` is the signal's
     # target price (``signal.suggested_price``) known at order time;
     # ``slippage_bps`` is signed adverse slippage = positive when the fill
     # was WORSE than intended (a cost), negative on price improvement.
     # Both NULL when no intended price was available (cannot be backfilled
     # onto pre-D130 fills — only forward-captured fills carry it).
-    intended_price      = Column(Numeric(20, 8), nullable=True)
-    slippage_bps        = Column(Numeric(12, 4), nullable=True)
+    intended_price      = Column(DecimalSafe(20, 8), nullable=True)
+    slippage_bps        = Column(DecimalSafe(12, 4), nullable=True)
     reduce_only         = Column(Boolean, nullable=False, default=False)
     # Realised P&L (weighted-average cost). Non-zero only on closing
     # (position-decreasing) fills.
-    realised_pnl        = Column(Numeric(20, 8), nullable=False, default=0)
-    avg_cost_basis      = Column(Numeric(20, 8), nullable=True)        # WAC of the position at fill time
-    position_qty_after  = Column(Numeric(20, 8), nullable=False)       # signed position qty after this fill
-    holding_period_sec  = Column(Numeric(20, 2), nullable=True)        # lot age when closed (closing fills only)
+    realised_pnl        = Column(DecimalSafe(20, 8), nullable=False, default=0)
+    avg_cost_basis      = Column(DecimalSafe(20, 8), nullable=True)        # WAC of the position at fill time
+    position_qty_after  = Column(DecimalSafe(20, 8), nullable=False)       # signed position qty after this fill
+    holding_period_sec  = Column(DecimalSafe(20, 2), nullable=True)        # lot age when closed (closing fills only)
     # Strategy / signal context
     strategy            = Column(String(64), nullable=True, index=True)
     signal_id           = Column(String, nullable=True, index=True)
-    signal_confidence   = Column(Numeric(10, 6), nullable=True)
+    signal_confidence   = Column(DecimalSafe(10, 6), nullable=True)
     mode                = Column(String(16), nullable=True)            # hunter / trader / defender
     # Audit / reconciliation
     is_paper            = Column(Boolean, nullable=False, default=True)
@@ -148,10 +149,10 @@ class PositionLog(Base):
     timestamp       = Column(DateTime(timezone=True), nullable=False, index=True)
     symbol          = Column(String(72), nullable=False, index=True)
     broker          = Column(String(20), nullable=False)
-    quantity        = Column(Numeric(20, 8), nullable=False)
-    avg_entry_price = Column(Numeric(20, 8), nullable=False)
-    current_price   = Column(Numeric(20, 8), nullable=False)
-    unrealised_pnl  = Column(Numeric(20, 8), nullable=False)
+    quantity        = Column(DecimalSafe(20, 8), nullable=False)
+    avg_entry_price = Column(DecimalSafe(20, 8), nullable=False)
+    current_price   = Column(DecimalSafe(20, 8), nullable=False)
+    unrealised_pnl  = Column(DecimalSafe(20, 8), nullable=False)
     asset_class     = Column(String(20), nullable=False)
     instrument_metadata = Column(JSON, nullable=True)
 
@@ -195,11 +196,11 @@ class PriceHistory(Base):
     timestamp   = Column(DateTime(timezone=True), primary_key=True)
     symbol      = Column(String(20), primary_key=True, index=True)
     timeframe   = Column(String(5), primary_key=True)         # "1m", "5m", "1h", "1d"
-    open        = Column(Numeric(20, 8), nullable=False)
-    high        = Column(Numeric(20, 8), nullable=False)
-    low         = Column(Numeric(20, 8), nullable=False)
-    close       = Column(Numeric(20, 8), nullable=False)
-    volume      = Column(Numeric(30, 8), nullable=False)
+    open        = Column(DecimalSafe(20, 8), nullable=False)
+    high        = Column(DecimalSafe(20, 8), nullable=False)
+    low         = Column(DecimalSafe(20, 8), nullable=False)
+    close       = Column(DecimalSafe(20, 8), nullable=False)
+    volume      = Column(DecimalSafe(30, 8), nullable=False)
     broker      = Column(String(20), primary_key=True)
 
     __table_args__ = (
@@ -213,11 +214,11 @@ class DailyPnL(Base):
 
     id              = Column(Integer, primary_key=True, autoincrement=True)
     date            = Column(String(10), nullable=False, index=True)    # "2026-04-04"
-    realised_pnl    = Column(Numeric(20, 8), nullable=False, default=0)
-    unrealised_pnl  = Column(Numeric(20, 8), nullable=False, default=0)
-    total_fees      = Column(Numeric(20, 8), nullable=False, default=0)
+    realised_pnl    = Column(DecimalSafe(20, 8), nullable=False, default=0)
+    unrealised_pnl  = Column(DecimalSafe(20, 8), nullable=False, default=0)
+    total_fees      = Column(DecimalSafe(20, 8), nullable=False, default=0)
     trade_count     = Column(Integer, nullable=False, default=0)
-    portfolio_value = Column(Numeric(20, 8), nullable=False, default=0)
+    portfolio_value = Column(DecimalSafe(20, 8), nullable=False, default=0)
     strategy_breakdown = Column(JSON, nullable=True)
 
 
@@ -242,11 +243,11 @@ class FeatureSnapshot(Base):
     symbol = Column(String(32), nullable=False)
     timeframe = Column(String(8), nullable=False)
     bar_timestamp = Column(DateTime(timezone=True), nullable=False)
-    open = Column(Numeric(20, 8), nullable=False)
-    high = Column(Numeric(20, 8), nullable=False)
-    low = Column(Numeric(20, 8), nullable=False)
-    close = Column(Numeric(20, 8), nullable=False)
-    volume = Column(Numeric(30, 8), nullable=False)
+    open = Column(DecimalSafe(20, 8), nullable=False)
+    high = Column(DecimalSafe(20, 8), nullable=False)
+    low = Column(DecimalSafe(20, 8), nullable=False)
+    close = Column(DecimalSafe(20, 8), nullable=False)
+    volume = Column(DecimalSafe(30, 8), nullable=False)
     features = Column(JSON, nullable=False)
     validation = Column(JSON, nullable=True)
     data_source = Column(String(20), nullable=False, default="yfinance")
@@ -285,7 +286,7 @@ class MacroObservation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     series_id = Column(String(32), nullable=False)
     obs_date = Column(String(10), nullable=False)
-    value = Column(Numeric(24, 10), nullable=False)
+    value = Column(DecimalSafe(24, 10), nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False)
 
 
@@ -298,11 +299,11 @@ class ParameterLog(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now())
     parameter = Column(String(64), nullable=False, index=True)
     layer = Column(String(20), nullable=False)  # regime | ai | ai_rejected | expiry
-    old_value = Column(Numeric(20, 8), nullable=False)
-    new_value = Column(Numeric(20, 8), nullable=False)
+    old_value = Column(DecimalSafe(20, 8), nullable=False)
+    new_value = Column(DecimalSafe(20, 8), nullable=False)
     reason = Column(Text, nullable=False)
     source = Column(String(50), nullable=False, default="system")
-    confidence = Column(Numeric(5, 4), nullable=True)
+    confidence = Column(DecimalSafe(5, 4), nullable=True)
     expiry_time = Column(DateTime(timezone=True), nullable=True)
     evidence = Column(JSON, nullable=True)
 
@@ -316,8 +317,8 @@ class AIOutputLog(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True, server_default=func.now())
     symbol = Column(String(32), nullable=True, index=True)
     context_type = Column(String(20), nullable=False, index=True)  # news | macro | rationale
-    score = Column(Numeric(10, 6), nullable=True)
-    confidence = Column(Numeric(10, 6), nullable=True)
+    score = Column(DecimalSafe(10, 6), nullable=True)
+    confidence = Column(DecimalSafe(10, 6), nullable=True)
     event_type = Column(String(32), nullable=True)
     regime_label = Column(String(64), nullable=True)
     decay_hours = Column(Integer, nullable=True)
@@ -326,7 +327,7 @@ class AIOutputLog(Base):
     source = Column(String(32), nullable=False, default="system")
     signal_id = Column(String(128), nullable=True, index=True)
     latency_ms = Column(Integer, nullable=True)
-    cost_estimate_gbp = Column(Numeric(12, 6), nullable=True)
+    cost_estimate_gbp = Column(DecimalSafe(12, 6), nullable=True)
 
 
 class AnomalyLog(Base):
@@ -337,12 +338,12 @@ class AnomalyLog(Base):
     symbol = Column(String(20), nullable=False, index=True)
     asset_class = Column(String(20), nullable=False)
     direction = Column(String(8), nullable=False)
-    price_move_pct = Column(Numeric(10, 4), nullable=False)
-    price_z_score = Column(Numeric(10, 4), nullable=False)
-    volume_z_score = Column(Numeric(10, 4), nullable=True)
-    news_velocity = Column(Numeric(10, 4), nullable=True)
-    news_sentiment = Column(Numeric(10, 4), nullable=True)
-    anomaly_score = Column(Numeric(10, 4), nullable=False)
+    price_move_pct = Column(DecimalSafe(10, 4), nullable=False)
+    price_z_score = Column(DecimalSafe(10, 4), nullable=False)
+    volume_z_score = Column(DecimalSafe(10, 4), nullable=True)
+    news_velocity = Column(DecimalSafe(10, 4), nullable=True)
+    news_sentiment = Column(DecimalSafe(10, 4), nullable=True)
+    anomaly_score = Column(DecimalSafe(10, 4), nullable=False)
     opportunities_found = Column(Integer, nullable=True)
     thesis_generated = Column(Boolean, default=False)
     signals_produced = Column(Integer, nullable=True)
@@ -356,13 +357,13 @@ class ThesisLog(Base):
     trigger_symbol = Column(String(20), nullable=False, index=True)
     trigger_direction = Column(String(8), nullable=False)
     trigger_explanation = Column(Text, nullable=False)
-    overall_confidence = Column(Numeric(10, 4), nullable=False)
+    overall_confidence = Column(DecimalSafe(10, 4), nullable=False)
     time_horizon_hours = Column(Integer, nullable=False)
     opportunities = Column(JSON, nullable=True)
     invalidation_conditions = Column(JSON, nullable=True)
     model_used = Column(String(64), nullable=False)
     tokens_used = Column(Integer, nullable=True)
-    ai_cost_usd = Column(Numeric(12, 6), nullable=True)
+    ai_cost_usd = Column(DecimalSafe(12, 6), nullable=True)
 
 
 class ControlCommand(Base):
@@ -528,10 +529,10 @@ class ModelPrediction(Base):
     prediction_ts = Column(DateTime(timezone=True), nullable=False)
     horizon_seconds = Column(Integer, nullable=True)
     horizon_bars = Column(Integer, nullable=True)
-    predicted_probability = Column(Numeric(10, 8), nullable=True)
-    expected_return = Column(Numeric(20, 10), nullable=True)
-    expected_volatility = Column(Numeric(20, 10), nullable=True)
-    confidence = Column(Numeric(10, 8), nullable=True)
+    predicted_probability = Column(DecimalSafe(10, 8), nullable=True)
+    expected_return = Column(DecimalSafe(20, 10), nullable=True)
+    expected_volatility = Column(DecimalSafe(20, 10), nullable=True)
+    confidence = Column(DecimalSafe(10, 8), nullable=True)
     feature_hash = Column(String(64), nullable=False, index=True)
     mode = Column(String(16), nullable=False, default="research")  # research | paper | live
     metadata_ = Column("metadata", JSON, nullable=True)
@@ -552,8 +553,8 @@ class StrategyCandidateLog(Base):
     symbol = Column(String(72), nullable=False, index=True)
     strategy = Column(String(50), nullable=False, index=True)
     side = Column(String(8), nullable=True)
-    confidence = Column(Numeric(12, 6), nullable=True)
-    adjusted_strength = Column(Numeric(20, 8), nullable=True)
+    confidence = Column(DecimalSafe(12, 6), nullable=True)
+    adjusted_strength = Column(DecimalSafe(20, 8), nullable=True)
     status = Column(
         String(40),
         nullable=False,

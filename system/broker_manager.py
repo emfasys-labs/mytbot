@@ -532,13 +532,16 @@ class BrokerManager:
 
         return self.report
 
-    async def _probe_ibkr_ready(self, cfg: dict[str, Any], status: BrokerStatus) -> bool:
+    async def _probe_ibkr_gateway(
+        self, cfg: dict[str, Any], status: BrokerStatus
+    ) -> tuple[bool, bool]:
         """
         Cheap IBKR readiness probe.
 
-        This intentionally does not update ``_ibkr_last_attempt`` or the
-        exponential failure count. When TWS/Gateway is closed, we still want to
-        notice within the next health poll after the operator launches it.
+        Returns ``(tcp_reachable, api_handshake_ok)``. This intentionally does
+        not update ``_ibkr_last_attempt`` or the exponential failure count.
+        When TWS/Gateway is closed, we still want to notice within the next
+        health poll after the operator launches it.
         """
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 7497)
@@ -554,7 +557,7 @@ class BrokerManager:
                 "accept the paper trading disclaimer / API-client prompt in Gateway."
             )
             logger.warning("broker | ibkr | {}", status.error)
-            return False
+            return False, False
 
         api_ok = await asyncio.get_event_loop().run_in_executor(
             None, _ibkr_api_alive, host, port, 5.0
@@ -566,15 +569,23 @@ class BrokerManager:
                 "then restart Gateway if the prompt is not visible (possible zombie state)"
             )
             logger.warning("broker | ibkr | {}", status.error)
-            return False
+            return True, False
 
-        return True
+        status.error = None
+        return True, True
+
+    async def _probe_ibkr_ready(self, cfg: dict[str, Any], status: BrokerStatus) -> bool:
+        """Backward-compatible wrapper: full readiness = TCP up and API handshake ok."""
+        _tcp_ok, api_ok = await self._probe_ibkr_gateway(cfg, status)
+        return api_ok
 
     async def _handle_ibkr(
         self,
         cfg: dict[str, Any],
         status: BrokerStatus,
         *,
+        tcp_ready: bool | None = None,
+        api_ready: bool | None = None,
         probe_ready: bool | None = None,
     ) -> None:
         """
@@ -582,20 +593,33 @@ class BrokerManager:
           1. TCP probe — is the port open at all?
           2. API health check — does the Gateway actually respond to protocol?
           3. Background connect with single-attempt guard
+
+        When the port is open we always attempt the real ib_insync connect even
+        if the cheap raw handshake probe fails — that probe false-negatives on
+        slow post-startup Gateway windows and previously blocked auto-recovery.
         """
         if self._ibkr_connecting.locked():
             logger.debug("broker | ibkr | connection attempt already in progress, skipping")
             return
 
-        api_ready = await self._probe_ibkr_ready(cfg, status) if probe_ready is None else probe_ready
+        if probe_ready is not None:
+            # Legacy kwarg from older reconnect paths/tests.
+            tcp_ready = bool(probe_ready)
+            api_ready = bool(probe_ready)
+        if tcp_ready is None or api_ready is None:
+            tcp_ready, api_ready = await self._probe_ibkr_gateway(cfg, status)
         self._broker_ready_state["ibkr"] = bool(api_ready)
-        if not api_ready:
+        if not tcp_ready:
             return
 
-        self._ibkr_fail_count = 0
-        logger.info(
-            "broker | ibkr | Gateway API alive — connecting in background"
-        )
+        if api_ready:
+            self._ibkr_fail_count = 0
+            logger.info("broker | ibkr | Gateway API alive — connecting in background")
+        else:
+            logger.info(
+                "broker | ibkr | Gateway port open — attempting ib_insync connect "
+                "(raw API probe inconclusive)"
+            )
         self._late_connect_task = asyncio.create_task(
             self._background_ibkr_connect(cfg, status),
             name="ibkr-background-connect",
@@ -822,7 +846,8 @@ class BrokerManager:
                 cfg = self.configs.get(name, {})
                 status = self.report.brokers[name]
                 readiness_bypass = False
-                ibkr_probe_ready: bool | None = None
+                ibkr_tcp_ready = False
+                ibkr_api_ready = False
                 if name == "ibkr":
                     # #2c — during a known Gateway maintenance window, do NOT
                     # probe or attempt: it is *expected* down. This kills the
@@ -834,18 +859,15 @@ class BrokerManager:
                         continue
                     backoff = self._ibkr_backoff()
                     last = self._ibkr_last_attempt
-                    ibkr_probe_ready = await self._probe_ibkr_ready(cfg, status)
-                    # #2a — probe-driven re-detection. Previously a reconnect
-                    # was only bypassed on the first False→True edge; if the
-                    # probe flicked ready while Gateway was still in a zombie
-                    # re-auth state the edge was consumed and real recovery
-                    # then waited out the 300s backoff (→ the observed
-                    # 10–27 min gaps). Now ANY poll where the probe says
-                    # Gateway is reachable forces an attempt, so recovery is
-                    # ≈ the next health poll (≤10s) once it is genuinely back —
-                    # without polling faster (the probe still gates it).
-                    readiness_bypass = bool(ibkr_probe_ready)
-                    self._broker_ready_state[name] = bool(ibkr_probe_ready)
+                    ibkr_tcp_ready, ibkr_api_ready = await self._probe_ibkr_gateway(cfg, status)
+                    # #2a — probe-driven re-detection. When the Gateway port is
+                    # open, bypass the multi-minute failure backoff and attempt
+                    # ib_insync connect on the next poll. The cheap raw API
+                    # handshake often false-negatives while Gateway is still
+                    # warming or waiting on the paper disclaimer, so TCP open
+                    # is the reconnect gate — not raw handshake success.
+                    readiness_bypass = bool(ibkr_tcp_ready)
+                    self._broker_ready_state[name] = bool(ibkr_api_ready)
                 else:
                     backoff = self._broker_backoff(name)
                     last = self._broker_last_attempt.get(name, 0)
@@ -856,7 +878,12 @@ class BrokerManager:
                 attempted.append(name)
 
                 if name == "ibkr":
-                    await self._handle_ibkr(cfg, status, probe_ready=ibkr_probe_ready)
+                    await self._handle_ibkr(
+                        cfg,
+                        status,
+                        tcp_ready=ibkr_tcp_ready,
+                        api_ready=ibkr_api_ready,
+                    )
                     if self._late_connect_task:
                         try:
                             await self._late_connect_task

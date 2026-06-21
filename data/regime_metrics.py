@@ -6,11 +6,10 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy import text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from storage.models import AIOutputLog
+from storage.models import AIOutputLog, FeatureSnapshot
 
 
 async def fetch_latest_feature_rows(
@@ -18,20 +17,38 @@ async def fetch_latest_feature_rows(
     symbols: list[str],
     timeframe: str,
 ) -> list[dict[str, Any]]:
-    """Latest bar per symbol (PostgreSQL DISTINCT ON)."""
+    """Latest bar per symbol — portable across Postgres and SQLite.
+
+    Uses a ``ROW_NUMBER()`` window (replacing PostgreSQL ``DISTINCT ON`` +
+    ``ANY(array)``) so the Lite/SQLite profile works identically.
+    """
     if not symbols:
         return []
     tf = timeframe[:8]
     syms = [s[:32] for s in symbols]
-    stmt = text(
-        """
-        SELECT DISTINCT ON (symbol) symbol, features, bar_timestamp
-        FROM feature_snapshots
-        WHERE timeframe = :tf AND symbol = ANY(:syms)
-        ORDER BY symbol, bar_timestamp DESC
-        """
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=FeatureSnapshot.symbol,
+            order_by=FeatureSnapshot.bar_timestamp.desc(),
+        )
+        .label("rn")
     )
-    rows = (await session.execute(stmt, {"tf": tf, "syms": syms})).fetchall()
+    ranked = (
+        select(
+            FeatureSnapshot.symbol.label("symbol"),
+            FeatureSnapshot.features.label("features"),
+            FeatureSnapshot.bar_timestamp.label("bar_timestamp"),
+            rn,
+        )
+        .where(FeatureSnapshot.timeframe == tf, FeatureSnapshot.symbol.in_(syms))
+        .subquery()
+    )
+    stmt = (
+        select(ranked.c.symbol, ranked.c.features, ranked.c.bar_timestamp)
+        .where(ranked.c.rn == 1)
+    )
+    rows = (await session.execute(stmt)).fetchall()
     return [{"symbol": str(r[0]), "features": dict(r[1] or {}), "bar_timestamp": r[2]} for r in rows]
 
 

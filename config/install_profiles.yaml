@@ -1,0 +1,55 @@
+# config/install_profiles.yaml
+# =============================
+# M11 install profiles. The setup wizard probes the machine
+# (connectors/machine_probe.py) and recommends the highest profile the
+# hardware comfortably supports. Local-AI models are downloaded only after
+# the operator explicitly chooses that profile — never automatically.
+#
+# Thresholds live here (not in code) so they can be tuned without a release.
+
+profiles:
+  lite:
+    label: Lite
+    summary: >
+      Core trading engine, rules AI, dashboard and all broker connections.
+      Runs on SQLite with no Docker — the easiest install for lower-spec machines.
+    requirements: requirements-lite.txt
+    db_backend: sqlite
+    docker_required: false
+    requires_ollama: false
+    includes: [core_engine, rules_ai, dashboard, brokers, sqlite]
+    min_specs: { ram_gb: 2, disk_free_gb: 2 }
+
+  standard:
+    label: Standard
+    summary: >
+      Everything in Lite plus FinBERT financial-sentiment scoring and the
+      Postgres/TimescaleDB Docker stack. Recommended for most capable PCs.
+    requirements: requirements.txt
+    db_backend: postgres
+    docker_required: true
+    requires_ollama: false
+    includes: [core_engine, rules_ai, dashboard, brokers, finbert_sentiment, postgres]
+    min_specs: { ram_gb: 8, disk_free_gb: 6 }
+
+  local_ai:
+    label: Local AI
+    summary: >
+      Everything in Standard plus local reasoning LLMs via Ollama for enhanced
+      AI analysis. Needs substantial RAM/disk and ideally a CUDA GPU.
+    requirements: requirements.txt          # + Ollama runtime (a separate binary, not pip)
+    db_backend: postgres
+    docker_required: true
+    requires_ollama: true
+    includes: [core_engine, rules_ai, dashboard, brokers, finbert_sentiment, postgres, local_reasoning_llm]
+    # vram is handled by the GPU gate below, not as a hard minimum (a beefy
+    # CPU-only box can still run local models, just slower).
+    min_specs: { ram_gb: 16, disk_free_gb: 20 }
+
+recommendation:
+  # Local-AI strongly prefers a GPU with enough VRAM. Without one, only
+  # recommend it on a beefy CPU-only box (local models run far slower on CPU).
+  local_ai_min_vram_gb: 6
+  local_ai_cpu_fallback_ram_gb: 32
+  # Order tried high → low; the first profile whose gates pass is recommended.
+  order: [local_ai, standard, lite]

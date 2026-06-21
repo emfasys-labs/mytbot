@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from connectors.install_profiles import recommend_profile
+
 # Step ids.
 STEP_BROKER = "broker"
 STEP_FEEDS = "feeds"
@@ -161,6 +163,10 @@ def build_onboarding_view(
     ready_to_finish = not required_outstanding
     completed = bool(persisted.get("completed"))
 
+    # M11 — recommend the install profile the machine supports (Lite / Standard
+    # / Local AI). Best-effort: only when a probe is available.
+    install_profile = recommend_profile(machine_probe) if machine_probe else None
+
     return {
         "steps": steps,
         "current_step": current,
@@ -170,4 +176,5 @@ def build_onboarding_view(
         "completed_at": persisted.get("completed_at"),
         # Show the wizard until it is explicitly completed.
         "show_wizard": not completed,
+        "install_profile": install_profile,
     }

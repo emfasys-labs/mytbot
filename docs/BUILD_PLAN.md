@@ -304,12 +304,12 @@ sequencing live in **`docs/DEPLOYMENT_MODEL.md`**.
 - [ ] D-4 No native mobile app — responsive PWA dashboard instead.
 
 ### Phase 1 — Open-source operator edition (Docker self-host; ship first)
-- [ ] Lite (SQLite) backend: `DATABASE_URL`/`DB_BACKEND` branch in `storage/db.py` + `alembic/env.py`; skip Postgres/Redis bring-up in `system/dependency_manager.py` for Lite.
-- [ ] Decimal-on-SQLite: shared `DecimalText` TypeDecorator (TEXT-backed) replacing bare `Numeric` for price/qty columns; precision test in `tests/`.
-- [ ] Portable queries: rewrite the 2 runtime `DISTINCT ON` sites (`api/server.py`, `data/regime_metrics.py`) to window-function form.
-- [ ] Install profiles (Lite / Standard / Local AI): split `requirements.txt` extras; `connectors/machine_probe.py` recommends; defer model downloads to Local-AI.
+- [x] Lite (SQLite) backend: `DB_BACKEND=sqlite` / `DATABASE_URL` branch in `storage/db.py`; `system/dependency_manager.py` skips Postgres/Redis bring-up for Lite. (Lite uses `create_all`, not Alembic — `alembic/env.py` stays Postgres-only by design.)
+- [x] Decimal-on-SQLite: shared `DecimalSafe` TypeDecorator (`storage/types.py`, native NUMERIC on Postgres / exact TEXT on SQLite) across all price/qty columns; position `SUM(signed_quantity)` summed in Python on SQLite (`storage/fills_ledger.py`); precision tests `tests/test_sqlite_lite_backend.py` + spike `scripts/spike_sqlite_decimal.py`. `aiosqlite` added to `requirements.txt`.
+- [x] Portable queries: rewrote the 2 runtime `DISTINCT ON` sites (`api/server.py`, `data/regime_metrics.py`) to `ROW_NUMBER()` window form (+ portable `:cutoff` / `IN` for `now()-interval` / `ANY(array)`).
+- [x] Install profiles (Lite / Standard / Local AI): layered requirements (`requirements-lite.txt` base + `requirements.txt` Standard extras); config catalogue `config/install_profiles.yaml`; machine-probe recommender `connectors/install_profiles.py` surfaced in the onboarding wizard; tests `tests/test_install_profiles.py`. Local-AI models stay runtime (Ollama), never auto-pip.
 - [x] Connect Hub UI polish: certification badge + IBKR "Advanced setup" flag + explicit per-connector status checklist (`ui/src/app/redesign/screens.tsx`).
-- [ ] Quick-start docs: one paper-mode-first path above `NEW_MACHINE_SETUP.md`; backup/restore + credential-rotation scripts.
+- [x] Quick-start docs: `docs/QUICKSTART.md` (paper-mode-first Lite path) + backup/restore (SQLite copy / `pg_dump`) + migration/credential-rotation checklist; `.env.example` gained the `DB_BACKEND=sqlite` Lite block.
 
 ### Phase 2 — myTbot desktop application (control plane)
 - [ ] Tauri shell wrapping `ui/`; launches/manages backend per profile (Lite embedded / Standard via Docker).

@@ -1,0 +1,70 @@
+# requirements-lite.txt
+# ======================
+# M11 Lite profile — the Docker-free, low-spec install.
+#
+#   pip install -r requirements-lite.txt
+#
+# This is the shared base for every profile. It runs the full trading engine,
+# all broker connectors, the dashboard and backtests on **SQLite** (set
+# DB_BACKEND=sqlite) with no Docker, Postgres, Redis, or heavy AI stack.
+#
+# AI under Lite is the deterministic rules layer only — FinBERT sentiment and
+# local reasoning models are NOT installed (see requirements.txt for Standard,
+# which layers them on top of this file). The code degrades gracefully when
+# torch/transformers are absent (ai/providers/fin_sentiment_provider.py).
+#
+# Python 3.12+ supported; 3.13 needs wheels for pydantic-core.
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+pydantic>=2.10.0,<3
+loguru==0.7.2
+pyyaml==6.0.1
+aiohttp==3.9.5
+
+# ── Broker SDKs ───────────────────────────────────────────────────────────────
+ib_insync==0.9.86               # IBKR
+python-kraken-sdk==3.0.0        # Kraken
+python-binance==1.0.19          # Binance
+pybit==5.7.0                     # Bybit V5
+PyJWT[crypto]>=2.8.0,<3          # Coinbase Advanced Trade CDP JWT (ES256)
+alpaca-py==0.25.0               # Alpaca
+
+# ── Data & Features ───────────────────────────────────────────────────────────
+numpy>=2.2.6,<3
+pandas>=2.3.2,<4
+pandas-ta==0.4.71b0             # Technical indicators (pre-release wheel on PyPI)
+lxml>=4.9,<7                    # HTML parsing for instrument-registry Wikipedia source (D116)
+yfinance>=0.2.40                # Historical data (research/backtest)
+
+# ── ML & Strategy ─────────────────────────────────────────────────────────────
+scikit-learn>=1.6.0
+xgboost>=2.1.0
+lightgbm>=4.5.0
+vectorbt>=0.26.1
+timeseriescv>=0.2               # Purged / combinatorial time-series CV (M3)
+
+# ── AI (rules + optional premium) ───────────────────────────────────────────────
+# anthropic is a small pure-Python HTTP client and a startup import via the
+# legacy ai/news_classifier.py; premium escalation stays OFF by default
+# (config/ai.yaml). FinBERT (torch/transformers) and local reasoning are added
+# by the Standard / Local-AI profiles, not here.
+anthropic==0.28.0
+
+# ── Storage (SQLite) ────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.36,<3
+aiosqlite>=0.20,<1             # Async SQLite driver — the Lite persistence backend
+alembic==1.13.1                 # Migrations (used by the Postgres/Standard profile)
+pytest>=8.0,<9
+pytest-asyncio>=0.24,<1
+
+# ── API & Dashboard ───────────────────────────────────────────────────────────
+fastapi==0.135.3
+starlette==1.0.0
+python-multipart>=0.0.20
+uvicorn==0.30.1
+websockets>=13.0,<16            # yfinance 0.2.x imports websockets.asyncio (>=13)
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+httpx==0.27.0                   # HTTP client for alerts + machine/Ollama probe
+psutil>=5.9,<7                  # Machine probe (Connect Hub / install profiles)

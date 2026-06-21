@@ -60,7 +60,21 @@ def get_session_factory() -> async_sessionmaker[AsyncSession] | None:
     return session_factory
 
 
+def _db_backend() -> str:
+    return (os.getenv("DB_BACKEND") or "").strip().lower()
+
+
 def database_async_url_from_env() -> str | None:
+    # Explicit async DSN override wins (advanced users supply their own driver).
+    explicit = (os.getenv("DATABASE_URL") or "").strip()
+    if explicit:
+        if explicit.startswith("sqlite:") and "+aiosqlite" not in explicit:
+            return explicit.replace("sqlite:", "sqlite+aiosqlite:", 1)
+        return explicit
+    # M11 Lite profile: Docker-free SQLite. No POSTGRES_* required.
+    if _db_backend() == "sqlite":
+        path = (os.getenv("SQLITE_PATH") or "data/mytbot.db").strip()
+        return f"sqlite+aiosqlite:///{path}"
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = os.getenv("POSTGRES_PORT", "5432")
     db = os.getenv("POSTGRES_DB", "mytbot")
@@ -181,21 +195,32 @@ async def init_async_database() -> tuple[AsyncEngine | None, async_sessionmaker[
     if not url:
         logger.warning("storage | POSTGRES_* incomplete — persistence disabled")
         return None, None
+    is_sqlite = url.startswith("sqlite")
+    if is_sqlite:
+        # Ensure the SQLite file's parent directory exists.
+        db_path = url.split(":///", 1)[-1]
+        if db_path and db_path != ":memory:":
+            os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
     engine: AsyncEngine | None = None
     try:
         engine = create_async_engine(url, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            await _ensure_additive_schema_patches(conn)
-            await _try_create_price_hypertable(conn)
+            if not is_sqlite:
+                # Postgres-only: information_schema patches + Timescale hypertable.
+                await _ensure_additive_schema_patches(conn)
+                await _try_create_price_hypertable(conn)
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        logger.info(
-            "storage | connected | {}@{}:{}/{}",
-            os.getenv("POSTGRES_USER", "mytbot"),
-            os.getenv("POSTGRES_HOST", "localhost"),
-            os.getenv("POSTGRES_PORT", "5432"),
-            os.getenv("POSTGRES_DB", "mytbot"),
-        )
+        if is_sqlite:
+            logger.info("storage | connected | SQLite (Lite profile) | {}", url)
+        else:
+            logger.info(
+                "storage | connected | {}@{}:{}/{}",
+                os.getenv("POSTGRES_USER", "mytbot"),
+                os.getenv("POSTGRES_HOST", "localhost"),
+                os.getenv("POSTGRES_PORT", "5432"),
+                os.getenv("POSTGRES_DB", "mytbot"),
+            )
         return engine, factory
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()

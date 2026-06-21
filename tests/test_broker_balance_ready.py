@@ -215,8 +215,8 @@ async def test_reconnect_loop_ibkr_ready_transition_bypasses_backoff(
     status = BrokerStatus(name="ibkr", configured=True, connected=False)
     mgr.report.brokers["ibkr"] = status
 
-    async def _ready_probe(cfg: dict[str, Any], st: BrokerStatus) -> bool:
-        return True
+    async def _ready_probe(cfg: dict[str, Any], st: BrokerStatus) -> tuple[bool, bool]:
+        return True, True
 
     called = asyncio.Event()
 
@@ -224,12 +224,58 @@ async def test_reconnect_loop_ibkr_ready_transition_bypasses_backoff(
         cfg: dict[str, Any],
         st: BrokerStatus,
         *,
+        tcp_ready: bool | None = None,
+        api_ready: bool | None = None,
         probe_ready: bool | None = None,
     ) -> None:
-        assert probe_ready is True
+        assert tcp_ready is True
+        assert api_ready is True
         called.set()
 
-    monkeypatch.setattr(mgr, "_probe_ibkr_ready", _ready_probe)
+    monkeypatch.setattr(mgr, "_probe_ibkr_gateway", _ready_probe)
+    monkeypatch.setattr(mgr, "_handle_ibkr", _handle)
+
+    task = asyncio.create_task(mgr._reconnect_loop())
+    try:
+        await asyncio.wait_for(called.wait(), timeout=0.5)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_reconnect_loop_ibkr_tcp_open_attempts_connect_when_api_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Port open + raw API probe fail must still schedule ib_insync connect."""
+    mgr = BrokerManager(paper_mode=True)
+    mgr._HEALTH_POLL_SEC = 0.01
+    mgr._ibkr_fail_count = 5
+    mgr._ibkr_last_attempt = time.monotonic()
+    status = BrokerStatus(name="ibkr", configured=True, connected=False)
+    mgr.report.brokers["ibkr"] = status
+
+    async def _tcp_up_api_down(cfg: dict[str, Any], st: BrokerStatus) -> tuple[bool, bool]:
+        return True, False
+
+    called = asyncio.Event()
+
+    async def _handle(
+        cfg: dict[str, Any],
+        st: BrokerStatus,
+        *,
+        tcp_ready: bool | None = None,
+        api_ready: bool | None = None,
+        probe_ready: bool | None = None,
+    ) -> None:
+        assert tcp_ready is True
+        assert api_ready is False
+        called.set()
+
+    monkeypatch.setattr(mgr, "_probe_ibkr_gateway", _tcp_up_api_down)
     monkeypatch.setattr(mgr, "_handle_ibkr", _handle)
 
     task = asyncio.create_task(mgr._reconnect_loop())

@@ -58,6 +58,40 @@ def _dec(value: Any, default: Decimal = _ZERO) -> Decimal:
     return d
 
 
+def _is_sqlite(session) -> bool:
+    """True when the bound engine is SQLite (the Lite profile).
+
+    On SQLite, SQL-side ``SUM`` coerces through double and loses Decimal
+    precision (proven by ``scripts/spike_sqlite_decimal.py``), so the
+    position-critical signed-quantity total is summed in Python. Postgres
+    ``SUM(NUMERIC)`` is exact and stays in SQL.
+    """
+    try:
+        return session.bind.dialect.name == "sqlite"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _sum_signed_quantity(session, broker: str, symbol: str) -> Decimal:
+    """Exact ``SUM(signed_quantity)`` on both backends (Python-side on SQLite)."""
+    if _is_sqlite(session):
+        rows = await session.execute(
+            select(FillLog.signed_quantity).where(
+                FillLog.broker == broker, FillLog.symbol == symbol
+            )
+        )
+        total = _ZERO
+        for (v,) in rows.all():
+            total += _dec(v)
+        return total
+    q = await session.execute(
+        select(func.coalesce(func.sum(FillLog.signed_quantity), 0)).where(
+            FillLog.broker == broker, FillLog.symbol == symbol
+        )
+    )
+    return _dec(q.scalar())
+
+
 async def available_quantity(session_factory, broker: str, symbol: str) -> Decimal:
     """Race-free current signed position quantity = SUM(signed_quantity).
 
@@ -72,12 +106,7 @@ async def available_quantity(session_factory, broker: str, symbol: str) -> Decim
     if not b or not s:
         return _ZERO
     async with session_factory() as session:
-        q = await session.execute(
-            select(func.coalesce(func.sum(FillLog.signed_quantity), 0)).where(
-                FillLog.broker == b, FillLog.symbol == s
-            )
-        )
-        return _dec(q.scalar())
+        return await _sum_signed_quantity(session, b, s)
 
 
 async def position_state(session_factory, broker: str, symbol: str) -> tuple[Decimal, int]:
@@ -96,16 +125,13 @@ async def position_state(session_factory, broker: str, symbol: str) -> tuple[Dec
     if not b or not s:
         return (_ZERO, 0)
     async with session_factory() as session:
-        q = await session.execute(
-            select(
-                func.coalesce(func.sum(FillLog.signed_quantity), 0),
-                func.count(FillLog.id),
-            ).where(FillLog.broker == b, FillLog.symbol == s)
+        qty = await _sum_signed_quantity(session, b, s)
+        cnt_q = await session.execute(
+            select(func.count(FillLog.id)).where(
+                FillLog.broker == b, FillLog.symbol == s
+            )
         )
-        row = q.first()
-        if row is None:
-            return (_ZERO, 0)
-        return (_dec(row[0]), int(row[1] or 0))
+        return (qty, int(cnt_q.scalar() or 0))
 
 
 async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Decimal, Optional[datetime]]:

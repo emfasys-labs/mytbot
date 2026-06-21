@@ -163,6 +163,13 @@ async def _check_redis_direct() -> bool:
         return False
 
 
+def _lite_sqlite() -> bool:
+    """True under the M11 Lite profile (embedded SQLite, no Docker services)."""
+    if (os.getenv("DB_BACKEND") or "").strip().lower() == "sqlite":
+        return True
+    return (os.getenv("DATABASE_URL") or "").strip().lower().startswith("sqlite")
+
+
 class DependencyManager:
     """Ensures Postgres and Redis are available, starting Docker containers if needed."""
 
@@ -172,6 +179,15 @@ class DependencyManager:
 
     async def ensure_all(self) -> DependencyReport:
         report = DependencyReport()
+
+        if _lite_sqlite():
+            # Lite profile: persistence is embedded SQLite and Redis is unused,
+            # so no Docker services are required. Report satisfied so startup
+            # proceeds without attempting any container bring-up.
+            report.postgres.healthy = True
+            report.redis.healthy = True
+            logger.info("deps | Lite (SQLite) profile — skipping Postgres/Redis bring-up")
+            return report
 
         pg, rd = await asyncio.gather(
             self._ensure_postgres(report),

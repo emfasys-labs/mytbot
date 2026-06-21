@@ -18,6 +18,16 @@
 
 ---
 
+## D191 — IBKR auto-reconnect when Gateway port reopens
+**Date:** 2026-06-21
+**Decision:** The broker reconnect loop must attempt a real ib_insync connect whenever IB Gateway's API port is reachable, not only when the cheap raw socket handshake probe succeeds. After hours offline, Gateway often accepts TCP while the raw `v100..176` probe still false-negatives (disclaimer pending / slow warm-up), which previously blocked `_background_ibkr_connect` entirely and left IBKR stuck offline in the UI despite an operator restart.
+
+**Implementation.** `BrokerManager._probe_ibkr_gateway()` now returns `(tcp_reachable, api_handshake_ok)`. Reconnect backoff bypass uses `tcp_reachable`; `_handle_ibkr()` always schedules background connect when the port is open. Status text still distinguishes disclaimer/zombie states when the raw probe fails.
+
+**Status:** Implemented. Requires `python run.py` restart.
+
+---
+
 ## D190 — Broker dashboard pills: paper vs live execution mode
 **Date:** 2026-06-20
 **Decision:** The Capital card BROKERS list must distinguish venue execution mode, not just connectivity. Connected brokers now expose `paper_mode` on each `/system/status.brokers` row (sourced from the adapter after connect). The UI maps `paper_mode: true` → amber **paper** pill and `paper_mode: false` → green **live** pill; warming/offline/off semantics unchanged.

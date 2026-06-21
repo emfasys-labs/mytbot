@@ -3832,16 +3832,20 @@ async def diagnostics_accounting(
         latest_q = await session.execute(
             text(
                 """
-                WITH latest AS (
-                  SELECT DISTINCT ON (broker, symbol)
+                WITH ranked AS (
+                  SELECT
                     broker, symbol, quantity, current_price, avg_entry_price,
-                    unrealised_pnl, timestamp
+                    unrealised_pnl, timestamp,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY broker, symbol
+                      ORDER BY timestamp DESC, id DESC
+                    ) AS rn
                   FROM positions
-                  ORDER BY broker, symbol, timestamp DESC, id DESC
                 )
                 SELECT broker, symbol, quantity, current_price, avg_entry_price,
                        unrealised_pnl, timestamp
-                FROM latest
+                FROM ranked
+                WHERE rn = 1
                 ORDER BY broker, symbol
                 """
             )
@@ -3866,7 +3870,7 @@ async def diagnostics_accounting(
                       ORDER BY timestamp, id
                     ) AS prev_timestamp
                   FROM positions
-                  WHERE timestamp >= now() - interval '48 hours'
+                  WHERE timestamp >= :cutoff
                 )
                 SELECT broker, symbol, quantity, timestamp,
                        prev_quantity, prev_timestamp
@@ -3876,7 +3880,8 @@ async def diagnostics_accounting(
                 ORDER BY timestamp DESC, broker, symbol
                 LIMIT 100
                 """
-            )
+            ),
+            {"cutoff": datetime.now(timezone.utc) - timedelta(hours=48)},
         )
         shocks = list(shock_q.mappings().all())
 
