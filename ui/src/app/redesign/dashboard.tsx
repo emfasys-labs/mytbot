@@ -215,7 +215,9 @@ export function DashboardScreen({
     if (!twrMetric || !twrMetric.since) return 'waiting for ledger';
     return `since ${shortDateLabel(twrMetric.since)}`;
   }, [twrMetric]);
-  const realisedHistoryDays = live.realisedSeries.length;
+  const performanceDays = Number.isFinite(twrMetric?.days ?? Number.NaN)
+    ? Number(twrMetric?.days)
+    : 0;
   const deploymentPct = useMemo(() => {
     if (navValue <= 0) return null;
     const working = live.capitalAtWork.grossExposure;
@@ -317,7 +319,7 @@ export function DashboardScreen({
                 twrSub={twrSub}
                 sharpe={null}
                 sharpeRaw={null}
-                sampleCount={realisedHistoryDays}
+                sampleCount={performanceDays}
                 maxDrawdownPct={null}
                 drawdownLabel=""
                 deploymentPct={shownDeploymentPct}
