@@ -94,14 +94,14 @@ shed:
 # Capital-recycling safety net. The rotation gate only fires when a fresh
 # opportunity beats a held position by min_edge_advantage + round-trip fees;
 # when nothing clears that bar a fully-deployed book stays idle indefinitely
-# (realised P&L flat-lines). This independently banks take-profit winners and
-# culls dead-edge holdings every iteration so freed cash is redeployed by the
-# build-up path. Conservative by design — raise take_profit_pct / lower
-# max_actions_per_tick to trade less aggressively.
+# (realised P&L flat-lines). This independently banks winners whose return has
+# beaten their live remaining-edge estimate and culls dead-edge holdings every
+# iteration so freed cash is redeployed by the build-up path. Fixed return
+# targets are forbidden; use dimensionless coefficients only.
 capital_recycle:
   enabled: true
-  # Unrealised return at/above which a winner is partially harvested.
-  take_profit_pct: "0.08"
+  # Winner harvest trigger = live expected_remaining_edge × this coefficient.
+  take_profit_edge_multiplier: "1.0"
   # Fraction of the winning position trimmed (rest is left to run).
   take_profit_trim_fraction: "0.25"
   # Live held-edge at/below which a position is treated as dead weight and

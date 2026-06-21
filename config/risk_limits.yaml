@@ -106,13 +106,10 @@ aggregate_derisk:
 # risk/execution path; AI never places orders.
 #
 # Thresholds are NOT hard-coded numbers. They are resolved per-position at
-# every tick from:
-#   * ``base``  — operator-set floors / starting points.
-#   * ``volatility`` — scales thresholds to the asset's recent realised
-#     volatility (calm names trim earlier; volatile names get more room).
-#   * ``mode_bias`` — defender tightens, hunter loosens, trader is neutral.
-#   * Per-position overrides set by the entry strategy via
-#     ``Order.instrument_metadata["profit_harvest"]`` (always win).
+# every tick from realised volatility, mode context, and current position
+# state. Fixed profit targets like "8%" or "30%" are forbidden by project
+# rule; only dimensionless coefficients and operational cadence values belong
+# here.
 profit_harvest:
   enabled: true
   v2:
@@ -129,29 +126,16 @@ profit_harvest:
     trader: 8
     defender: 8
 
-  # Operator-set floors / fallbacks (used when volatility cannot be measured
-  # and as a lower bound under the dynamic resolver).
+  # Position-management coefficients. No fixed profit targets live here.
   base:
-    min_profit_pct: "0.08"
-    min_profit_nav_pct: "0.0025"
     trim_fraction: "0.25"
-    full_close_profit_pct: "0.30"
-    trailing_giveback_pct: "0.45"
-    # Trailing-lock fires even after the position rolls back through zero,
-    # provided the prior peak was at least this fraction of NAV (defends
-    # against locking on noise on tiny positions).
-    peak_lock_min_nav_pct: "0.0002"
 
   volatility:
     fallback_vol: "0.015"        # Used when no feature snapshot is available
     vol_low: "0.005"             # ≤ this is "calm"
     vol_high: "0.05"             # ≥ this is "wild"
-    min_profit_k: "4.0"          # Daily-horizon winners need room to compound
-    min_profit_floor: "0.03"
-    min_profit_ceil: "0.20"
-    full_close_k: "4.0"          # Full-close trigger ≈ 4x daily vol
-    full_close_floor: "0.10"
-    full_close_ceil: "0.50"
+    min_profit_vol_multiplier: "1.0"  # Partial trigger = realised vol × this coefficient
+    full_close_multiple_of_partial: "4.0"
     giveback_vol_low: "0.40"     # In calm regimes, lock with 40% giveback
     giveback_vol_high: "0.70"    # In wild regimes, allow 70% giveback
 

@@ -18,6 +18,42 @@
 
 ---
 
+## D195 — Flow-neutral TWR as primary percentage return
+**Date:** 2026-06-21
+**Decision:** The dashboard's primary percentage return is Time-Weighted Return (TWR), computed from trading P&L and neutral to broker/balance flows.
+
+**Problem.** The operator wants a percentage return that answers "how much did the bot earn, and from when?" without paper broker additions/removals manufacturing performance. Raw NAV return cannot answer that because NAV changes when brokers are connected, disconnected, funded, or excluded.
+
+**Implementation.** `/pnl.metrics.twr` is computed server-side from the canonical `daily_pnl` ledger. Daily trading P&L is `realised - fees + change_in_unrealised`; any remaining NAV movement is inferred as external flow. The UI performance strip displays `TWR` as the primary return percentage with subtitle `since <date> · net <P&L>`. Current live value after restart: TWR about `-0.74% since 2026-06-18`, net trading P&L about `-$8.9k`, and about `$105k` classified as external flow.
+
+**Status:** Implemented. Tests: `tests/test_twr_metrics.py` **3 passed**; `py_compile` clean; UI `npm run build` passed. Restarted `python run.py`.
+
+---
+
+## D194 — Broker coverage changes are not trading performance
+**Date:** 2026-06-21
+**Decision:** Dashboard performance stats must come from the trading ledger, not account NAV movement, because adding/removing brokers changes visible balances without creating alpha.
+
+**Problem.** The dashboard showed `NAV Δ +8.1% since 18 Jun` after new brokers with paper balances were connected. That number was mathematically true account-value movement but false as a performance signal: realised trading P&L was negative (`/pnl` gross realised about `-$7.1k`, `/performance` net realised after fees about `-$11.3k`).
+
+**Implementation.** The main dashboard performance strip no longer computes return, Sharpe, or drawdown from `daily_pnl.portfolio_value`. The first performance card is now `Realised P&L`, sourced from the canonical P&L ledger as `all_time.realised - all_time.fees`, so broker activation/deactivation cannot manufacture performance. Sharpe and trading drawdown remain suppressed until a proper trading-return series exists with enough daily observations.
+
+**Status:** Implemented in UI. Build passed (`npm run build`). NAV remains available as account state; performance is separated from broker coverage plumbing.
+
+---
+
+## D193 — Dynamic trading parameters and account-currency FX P&L
+**Date:** 2026-06-21
+**Decision:** Trading thresholds must not be fixed absolute market parameters. Profit harvest and capital recycling now derive harvest/recycle triggers from volatility, mode coefficients, and live remaining edge; FX P&L shown to the UI/allocator must be account-currency P&L.
+
+**Problem.** The live book was not harvesting/recycling because fixed profit gates (`8%`, `30%`, and a NAV floor) were too blunt for the actual positions. At the same time, `USDJPY` unrealised P&L was computed as raw JPY and displayed/allocated as USD, inflating the open-book P&L swing.
+
+**Implementation.** Added mandatory no-static-threshold rule to `AGENTS.md` and `.cursorrules`. Added `core/pnl.py::unrealised_pnl_account_currency()` and wired `/positions`, live broker position fallback, global-edge book building, and the D015 portfolio bridge. Reworked `risk.profit_harvest.resolve_harvest_thresholds()` so partial/full profit bands are volatility-derived; fixed NAV/peak-lock profit floors and absolute profit overrides are disabled/audited. Replaced `capital_recycle.take_profit_pct` with `take_profit_edge_multiplier`, so winner recycle is based on live remaining-edge estimate.
+
+**Status:** Implemented. Tests: focused P&L/profit-harvest/global-edge suite `60 passed`. Restarted `python run.py`; live `USDJPY` P&L now displays account-currency USD.
+
+---
+
 ## D192 — Futures mark-price sanity (fix fake +$11M CL=F unrealised)
 **Date:** 2026-06-21
 **Decision:** Cross-broker median marking must not be used for futures rows, and futures quotes must be normalized to per-unit marks before computing `(price - avg) * qty`.

@@ -35,12 +35,14 @@ from api.pnl_periods import (
     equity_max_drawdown_pct,
     merge_live_today_unrealised_into_period,
     month_to_date_range,
+    time_weighted_return_from_daily_rows,
     week_to_date_range,
     win_rate_from_daily_rows,
 )
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from core.instrument_profiles import crypto_display_name, with_logo
 from core.instruments import futures_multiplier, normalize_futures_mark_price, pick_mark_quotes
+from core.pnl import unrealised_pnl_account_currency
 from control.command_bus import CAPITAL_ALLOCATION_STATE_KEY, CommandBus
 from data.news_quality import is_analyst_research_roundup, is_displayable_news_item
 from system.dashboard_publish import DASHBOARD_SNAPSHOT_KEY
@@ -693,7 +695,15 @@ def _position_log_payload(
         "quantity": _decimal_str(qty),
         "avg_entry_price": _decimal_str(avg),
         "current_price": _decimal_str(current),
-        "unrealised_pnl": _decimal_str((current - avg) * qty),
+        "unrealised_pnl": _decimal_str(
+            unrealised_pnl_account_currency(
+                symbol=str(r.symbol or ""),
+                asset_class=str(r.asset_class or ""),
+                quantity=qty,
+                avg_entry_price=avg,
+                current_price=current,
+            )
+        ),
         "asset_class": r.asset_class,
     }
 
@@ -938,19 +948,29 @@ async def _live_broker_positions(limit: int) -> list[dict[str, Any]]:
                 qty = Decimal(str(getattr(p, "quantity", 0) or 0))
                 avg = Decimal(str(getattr(p, "avg_entry_price", 0) or 0))
                 current = Decimal(str(getattr(p, "current_price", 0) or 0))
-                pnl_raw = getattr(p, "unrealised_pnl", None)
-                pnl = Decimal(str(pnl_raw)) if pnl_raw is not None else (current - avg) * qty
+                asset_class = getattr(p, "asset_class", "")
+                if hasattr(asset_class, "value"):
+                    asset_class = asset_class.value
+                symbol = str(getattr(p, "symbol", "") or "").strip().upper()
+                if str(asset_class or "").strip().lower() in {"forex", "fx"}:
+                    pnl = unrealised_pnl_account_currency(
+                        symbol=symbol,
+                        asset_class=str(asset_class or ""),
+                        quantity=qty,
+                        avg_entry_price=avg,
+                        current_price=current,
+                    )
+                else:
+                    pnl_raw = getattr(p, "unrealised_pnl", None)
+                    pnl = Decimal(str(pnl_raw)) if pnl_raw is not None else (current - avg) * qty
             except Exception:  # noqa: BLE001
                 continue
             if qty == 0:
                 continue
-            asset_class = getattr(p, "asset_class", "")
-            if hasattr(asset_class, "value"):
-                asset_class = asset_class.value
             out.append(
                 {
                     "timestamp": ts,
-                    "symbol": str(getattr(p, "symbol", "") or "").strip().upper(),
+                    "symbol": symbol,
                     "broker": str(getattr(p, "broker", broker_name) or broker_name).strip().lower(),
                     "quantity": _decimal_str(qty),
                     "avg_entry_price": _decimal_str(avg),
@@ -2331,14 +2351,16 @@ async def get_pnl(
         ytd_net_realised = Decimal(str(agg[0] or 0))
         ytd_order_fees = Decimal(str(agg[1] or 0))
         ytd_order_trades = int(agg[2] or 0)
-        pv_q = await session.execute(
-            select(DailyPnL.portfolio_value)
+        daily_q = await session.execute(
+            select(DailyPnL)
             .where(DailyPnL.date >= PRODUCTION_PNL_START)
             .order_by(DailyPnL.date.asc())
             .limit(400)
         )
+        daily_rows = list(daily_q.scalars().all())
         pv_vals: list[Decimal] = []
-        for x in pv_q.scalars().all():
+        for r in daily_rows:
+            x = r.portfolio_value
             if x is None:
                 continue
             try:
@@ -2416,6 +2438,11 @@ async def get_pnl(
         if coverage_full and today_unrealised != 0
         else (latest_unrealised_db if coverage_full else Decimal(0))
     )
+    twr = time_weighted_return_from_daily_rows(
+        daily_rows,
+        latest_unrealised=all_time_unrealised if coverage_full else latest_unrealised_db,
+        latest_portfolio_value=display_value if coverage_full else None,
+    )
 
     return {
         "today": {
@@ -2440,6 +2467,7 @@ async def get_pnl(
         "metrics": {
             "win_rate_days": win_rate,
             "max_drawdown_pct": max_dd,
+            "twr": twr,
         },
     }
 
@@ -2624,7 +2652,7 @@ async def get_pnl_realised_curve(
     days: int = Query(400, ge=1, le=1100),
     session_factory=Depends(_session_factory),
 ):
-    """Daily *realised* P&L series from the canonical ``daily_pnl`` ledger.
+    """Daily net closed P&L series from the canonical ``daily_pnl`` ledger.
 
     SINGLE SOURCE OF TRUTH. This reads the same persisted per-day ledger
     as the headline ``/pnl`` numbers, so the cumulative graph and the big
@@ -2653,7 +2681,9 @@ async def get_pnl_realised_curve(
     trades_by_day: dict[str, int] = {}
     for dr in drows:
         try:
-            by_day[str(dr.date)] = Decimal(str(dr.realised_pnl or 0))
+            realised = Decimal(str(dr.realised_pnl or 0))
+            fees = Decimal(str(dr.total_fees or 0))
+            by_day[str(dr.date)] = realised - fees
         except Exception:  # noqa: BLE001
             by_day[str(dr.date)] = Decimal("0")
         trades_by_day[str(dr.date)] = int(dr.trade_count or 0)

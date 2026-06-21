@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from core.models_runtime import AssetClass, HeldPositionState, PortfolioState, ProfileMode, Side
+from core.pnl import unrealised_pnl_account_currency
 
 
 def _ac(s: str) -> AssetClass:
@@ -73,9 +74,15 @@ def portfolio_dict_to_runtime_state(
             avg = Decimal(str(row.get("avg_entry_price", cur)))
             mv = abs(qty) * cur
             cost_basis = abs(qty) * avg
-            ur = (cur - avg) * qty
-            ur_pct = (ur / cost_basis) if cost_basis > 0 else Decimal("0")
             ac = _ac(str(row.get("asset_class", "")))
+            ur = unrealised_pnl_account_currency(
+                symbol=str(row.get("symbol", sym)),
+                asset_class=ac,
+                quantity=qty,
+                avg_entry_price=avg,
+                current_price=cur,
+            )
+            ur_pct = (ur / cost_basis) if cost_basis > 0 else Decimal("0")
             broker = str(row.get("broker", "") or "").strip()[:20] or None
             held.append(
                 HeldPositionState(

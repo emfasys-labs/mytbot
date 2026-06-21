@@ -80,7 +80,7 @@ class HarvestThresholds:
     full_close_profit_pct: Decimal
     trim_fraction: Decimal
     trailing_giveback_pct: Decimal
-    peak_lock_min_nav_pct: Decimal = Decimal("0.0005")
+    peak_lock_min_nav_pct: Decimal = _ZERO
     inputs: dict[str, Any] = field(default_factory=dict)
     rationale: dict[str, str] = field(default_factory=dict)
 
@@ -215,7 +215,10 @@ def resolve_harvest_thresholds(
       neutral vol so we never harvest on hard-coded numbers — every threshold
       is at least anchored to a measured-or-defaulted vol.
     * ``overrides`` is per-position strategy intent, persisted at order time
-      via ``instrument_metadata.profit_harvest``. Overrides win when present.
+      via ``instrument_metadata.profit_harvest``. Absolute profit-threshold
+      overrides are intentionally ignored: live harvest bands must be derived
+      from volatility and mode context, not fixed percentages hidden in order
+      metadata.
     """
     cfg = dict(config or {})
     base = dict(cfg.get("base") or {})
@@ -247,27 +250,25 @@ def resolve_harvest_thresholds(
     giveback_mult = _to_decimal(mode.get("giveback_mult"), _ONE)
     trim_mult = _to_decimal(mode.get("trim_fraction_mult"), _ONE)
 
-    # ── Min-profit (partial take-profit trigger), volatility-anchored.
-    k_min = _to_decimal(vol_cfg.get("min_profit_k"), Decimal("1.5"))
-    min_floor = _to_decimal(vol_cfg.get("min_profit_floor"), Decimal("0.004"))
-    min_ceil = _to_decimal(vol_cfg.get("min_profit_ceil"), Decimal("0.05"))
-    base_min = _to_decimal(base.get("min_profit_pct"), Decimal("0.012"))
-    min_dynamic = _clamp(k_min * vol, min_floor, min_ceil)
-    # Blend the operator-set base with the vol-anchored value so the YAML floor
-    # is honoured and the live signal can stretch above it.
-    min_profit_pct = max(base_min, min_dynamic) * threshold_mult
+    # ── Min-profit (partial take-profit trigger), volatility-anchored only.
+    # No operator-set fixed profit floors here. The configured values are
+    # dimensionless coefficients applied to live/measured volatility.
+    k_min = _to_decimal(
+        vol_cfg.get("min_profit_vol_multiplier", vol_cfg.get("min_profit_k")),
+        Decimal("1.5"),
+    )
+    min_profit_pct = max(_ZERO, k_min * vol * threshold_mult)
 
-    # ── Full-close trigger (let winners run further, but cap eventually).
-    k_full = _to_decimal(vol_cfg.get("full_close_k"), Decimal("4.0"))
-    full_floor = _to_decimal(vol_cfg.get("full_close_floor"), Decimal("0.012"))
-    full_ceil = _to_decimal(vol_cfg.get("full_close_ceil"), Decimal("0.20"))
-    base_full = _to_decimal(base.get("full_close_profit_pct"), Decimal("0.035"))
-    full_dynamic = _clamp(k_full * vol, full_floor, full_ceil)
-    full_close_profit_pct = max(base_full, full_dynamic) * threshold_mult
-
-    # Always keep full > min so the state machine has both bands.
-    if full_close_profit_pct <= min_profit_pct:
-        full_close_profit_pct = min_profit_pct + Decimal("0.005")
+    # ── Full-close trigger is a multiple of the partial trigger, not a fixed
+    # return target. If the partial trigger is zero, both bands stay zero and
+    # the pure evaluator's profit>0 checks still prevent meaningless closes.
+    full_multiple = _to_decimal(
+        vol_cfg.get("full_close_multiple_of_partial", vol_cfg.get("full_close_k")),
+        Decimal("3"),
+    )
+    if full_multiple <= _ONE:
+        full_multiple = _ONE + vol_norm
+    full_close_profit_pct = min_profit_pct * full_multiple
 
     # ── Trim fraction: defender takes more off the table; hunter leaves a runner.
     base_trim = _to_decimal(base.get("trim_fraction"), Decimal("0.50"))
@@ -278,31 +279,37 @@ def resolve_harvest_thresholds(
     # ── Trailing giveback: scale up with vol so chop doesn't stop us out.
     gb_low = _to_decimal(vol_cfg.get("giveback_vol_low"), Decimal("0.25"))
     gb_high = _to_decimal(vol_cfg.get("giveback_vol_high"), Decimal("0.55"))
-    base_gb = _to_decimal(base.get("trailing_giveback_pct"), Decimal("0.35"))
     gb_dynamic = _lerp(gb_low, gb_high, vol_norm)
-    # Use whichever is larger (config base acts as a floor) then bias by mode.
     gb_lo_bound = _to_decimal(bounds.get("giveback_min"), Decimal("0.10"))
     gb_hi_bound = _to_decimal(bounds.get("giveback_max"), Decimal("0.80"))
-    trailing_giveback_pct = _clamp(
-        max(base_gb, gb_dynamic) * giveback_mult, gb_lo_bound, gb_hi_bound
+    trailing_giveback_pct = _clamp(gb_dynamic * giveback_mult, gb_lo_bound, gb_hi_bound)
+
+    # ── NAV-relative floor is intentionally disabled. The position-relative
+    # threshold already scales to the instrument's own volatility and notional;
+    # adding a fixed NAV percentage was what blocked sensible small winner
+    # harvesting on the current book.
+    min_profit_nav_pct = _ZERO
+
+    # ── Peak-lock material floor is derived from the same dynamic band rather
+    # than a fixed NAV percentage. The pure evaluator compares peak P&L to NAV;
+    # here the materiality gate is zero so the dynamic giveback/profit bands
+    # and D168 horizon guard own the actual decision.
+    peak_lock_min_nav_pct = _ZERO
+
+    # ── Per-position strategy overrides may tune sizing/giveback, but not
+    # absolute profit thresholds. That prevents metadata from bypassing the
+    # project-level no-static-threshold rule.
+    ignored_absolute_overrides = sorted(
+        k
+        for k in ovr.keys()
+        if k
+        in {
+            "min_profit_pct",
+            "full_close_profit_pct",
+            "min_profit_nav_pct",
+            "peak_lock_min_nav_pct",
+        }
     )
-
-    # ── NAV-relative floor — small slivers vs NAV aren't worth chasing.
-    base_nav = _to_decimal(base.get("min_profit_nav_pct"), Decimal("0.001"))
-    min_profit_nav_pct = base_nav * threshold_mult
-
-    # ── Peak-lock material floor: how big the peak (vs NAV) must have been
-    # before a trailing-lock close is allowed. Defender tightens, hunter loosens.
-    base_peak_lock = _to_decimal(base.get("peak_lock_min_nav_pct"), Decimal("0.0005"))
-    peak_lock_min_nav_pct = base_peak_lock * threshold_mult
-
-    # ── Per-position strategy overrides win unconditionally over computed values.
-    if "min_profit_pct" in ovr:
-        min_profit_pct = _to_decimal(ovr.get("min_profit_pct"), min_profit_pct)
-    if "full_close_profit_pct" in ovr:
-        full_close_profit_pct = _to_decimal(
-            ovr.get("full_close_profit_pct"), full_close_profit_pct
-        )
     if "trim_fraction" in ovr:
         trim_fraction = _clamp(
             _to_decimal(ovr.get("trim_fraction"), trim_fraction), trim_lo, trim_hi
@@ -313,14 +320,6 @@ def resolve_harvest_thresholds(
             gb_lo_bound,
             gb_hi_bound,
         )
-    if "min_profit_nav_pct" in ovr:
-        min_profit_nav_pct = _to_decimal(
-            ovr.get("min_profit_nav_pct"), min_profit_nav_pct
-        )
-    if "peak_lock_min_nav_pct" in ovr:
-        peak_lock_min_nav_pct = _to_decimal(
-            ovr.get("peak_lock_min_nav_pct"), peak_lock_min_nav_pct
-        )
 
     inputs = {
         "profile_mode": active_mode,
@@ -330,18 +329,21 @@ def resolve_harvest_thresholds(
         "giveback_mult": str(giveback_mult),
         "trim_fraction_mult": str(trim_mult),
         "override_keys": sorted(ovr.keys()),
+        "ignored_absolute_override_keys": ignored_absolute_overrides,
     }
     rationale = {
         "min_profit_pct": (
-            f"max(base={base_min}, k_min*vol={min_dynamic})*mode={threshold_mult}"
+            f"vol={vol}*multiplier={k_min}*mode={threshold_mult}"
         ),
         "full_close_profit_pct": (
-            f"max(base={base_full}, k_full*vol={full_dynamic})*mode={threshold_mult}"
+            f"min_profit_pct*full_multiple={full_multiple}"
         ),
         "trim_fraction": f"base*{trim_mult} clamped [{trim_lo},{trim_hi}]",
         "trailing_giveback_pct": (
-            f"lerp(vol_norm={vol_norm})*mode={giveback_mult} floor=base={base_gb}"
+            f"lerp(vol_norm={vol_norm})*mode={giveback_mult}"
         ),
+        "min_profit_nav_pct": "disabled; position-relative volatility band owns harvest trigger",
+        "peak_lock_min_nav_pct": "disabled; D168 horizon guard and dynamic giveback own lock quality",
     }
 
     return HarvestThresholds(

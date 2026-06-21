@@ -1591,8 +1591,8 @@ class GlobalEdgeCoordinator:
         P&L flat-lines even though winners could be banked and dead weight
         culled. This method is the missing capital-recycling path:
 
-          * **Take-profit** — a position whose unrealised return ≥
-            ``take_profit_pct`` gets a reduce-only trim of
+          * **Take-profit** — a position whose unrealised return exceeds its
+            live remaining-edge estimate gets a reduce-only trim of
             ``take_profit_trim_fraction`` (lock the gain, let the rest run).
           * **Dead-edge cull** — a position whose live
             ``expected_remaining_edge`` ≤ ``dead_edge_floor`` (flat/losing
@@ -1616,7 +1616,7 @@ class GlobalEdgeCoordinator:
             except (TypeError, ValueError):
                 return Decimal(default)
 
-        take_profit_pct = _d("take_profit_pct", "0.02")
+        take_profit_edge_multiplier = _d("take_profit_edge_multiplier", "1")
         trim_fraction = _d("take_profit_trim_fraction", "0.50")
         dead_edge_floor = _d("dead_edge_floor", "0.01")
         # NOTE: the net-of-cost governor must NOT throttle this path. A
@@ -1671,7 +1671,16 @@ class GlobalEdgeCoordinator:
             except (TypeError, ValueError):
                 return Decimal("0")
 
-        winners = [h for h in held if _unrl(h) >= take_profit_pct and take_profit_pct > 0]
+        def _take_profit_trigger(h: HeldPositionEdge) -> Decimal:
+            return max(Decimal("0"), h.expected_remaining_edge) * max(
+                Decimal("0"), take_profit_edge_multiplier
+            )
+
+        def _is_recyclable_winner(h: HeldPositionEdge) -> bool:
+            ret = _unrl(h)
+            return ret > 0 and ret >= _take_profit_trigger(h)
+
+        winners = [h for h in held if _is_recyclable_winner(h)]
         winners.sort(key=lambda h: float(_unrl(h)), reverse=True)
         dead = [h for h in held if h.expected_remaining_edge <= dead_edge_floor]
         dead.sort(key=lambda h: float(h.expected_remaining_edge))
@@ -1686,7 +1695,7 @@ class GlobalEdgeCoordinator:
             if _recently_touched(h.symbol):
                 continue
             seen.add(h.symbol)
-            is_winner = _unrl(h) >= take_profit_pct and take_profit_pct > 0
+            is_winner = _is_recyclable_winner(h)
             if is_winner and trim_fraction < 1:
                 trim_notional = (h.notional * trim_fraction)
                 close_only = False
@@ -1708,6 +1717,7 @@ class GlobalEdgeCoordinator:
             meta["sizing_final_capital_required"] = str(trim_notional)
             meta["capital_recycle_reason"] = reason
             meta["capital_recycle_symbol_cooldown_sec"] = str(symbol_cooldown_sec)
+            meta["capital_recycle_take_profit_trigger"] = str(_take_profit_trigger(h))
             if h.broker:
                 meta["broker"] = h.broker
             out.append(

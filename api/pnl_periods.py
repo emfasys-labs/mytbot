@@ -99,6 +99,92 @@ def equity_max_drawdown_pct(values: list[Decimal]) -> float | None:
     return float(max_dd * Decimal("100"))
 
 
+def _dec(v: Any) -> Decimal:
+    if v is None:
+        return Decimal("0")
+    try:
+        d = Decimal(str(v))
+    except Exception:  # noqa: BLE001
+        return Decimal("0")
+    return Decimal("0") if d.is_nan() else d
+
+
+def time_weighted_return_from_daily_rows(
+    rows: list[Any],
+    *,
+    latest_unrealised: Decimal | None = None,
+    latest_portfolio_value: Decimal | None = None,
+) -> dict[str, Any]:
+    """Flow-neutral TWR from daily trading P&L rows.
+
+    ``portfolio_value`` is account state and can jump when brokers/paper
+    balances are added or removed. TWR must not treat that jump as alpha. We
+    therefore use daily trading P&L as the numerator:
+
+    ``realised - fees + change_in_unrealised``
+
+    and infer any remaining NAV movement as an external flow. With only daily
+    rows we cannot know exact intraday flow timing, so each daily sub-period
+    uses ``ending_nav - trading_pnl`` as the capital base. This makes broker
+    activation/deactivation affect capital managed, not return earned.
+    """
+    clean = sorted(
+        [r for r in rows if getattr(r, "date", None) is not None],
+        key=lambda r: str(getattr(r, "date")),
+    )
+    if not clean:
+        return {
+            "twr_pct": None,
+            "since": None,
+            "days": 0,
+            "net_trading_pnl": "0",
+            "external_flow": "0",
+            "method": "daily_flow_neutral",
+        }
+
+    latest_date = str(getattr(clean[-1], "date"))
+    product = Decimal("1")
+    prev_unrealised = Decimal("0")
+    prev_nav: Decimal | None = None
+    net_trading_pnl = Decimal("0")
+    external_flow = Decimal("0")
+    days = 0
+
+    for row in clean:
+        row_date = str(getattr(row, "date"))
+        nav = _dec(getattr(row, "portfolio_value", None))
+        unreal = _dec(getattr(row, "unrealised_pnl", None))
+        if row_date == latest_date:
+            if latest_portfolio_value is not None and latest_portfolio_value > 0:
+                nav = latest_portfolio_value
+            if latest_unrealised is not None:
+                unreal = latest_unrealised
+        realised = _dec(getattr(row, "realised_pnl", None))
+        fees = _dec(getattr(row, "total_fees", None))
+        trading_pnl = realised - fees + (unreal - prev_unrealised)
+        capital_base = nav - trading_pnl
+        if capital_base <= 0 and prev_nav is not None and prev_nav > 0:
+            capital_base = prev_nav
+        if capital_base > 0:
+            product *= Decimal("1") + (trading_pnl / capital_base)
+            days += 1
+        if prev_nav is not None:
+            external_flow += nav - prev_nav - trading_pnl
+        net_trading_pnl += trading_pnl
+        prev_unrealised = unreal
+        prev_nav = nav if nav > 0 else prev_nav
+
+    twr_pct = (product - Decimal("1")) * Decimal("100") if days else None
+    return {
+        "twr_pct": float(twr_pct) if twr_pct is not None else None,
+        "since": str(getattr(clean[0], "date")),
+        "days": days,
+        "net_trading_pnl": str(net_trading_pnl),
+        "external_flow": str(external_flow),
+        "method": "daily_flow_neutral",
+    }
+
+
 async def win_rate_from_daily_rows(session: Any, *, limit_days: int = 120) -> float | None:
     """Among days with at least one trade, fraction with positive realised P&L."""
     q = await session.execute(

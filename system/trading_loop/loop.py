@@ -73,6 +73,7 @@ from system.portfolio_equity import live_portfolio_value
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
+from core.pnl import unrealised_pnl_account_currency
 from run_m3 import (
     _apply_signal_to_portfolio_state,
     _load_portfolio_state,
@@ -3175,14 +3176,22 @@ class TradingLoop:
                     continue
                 avg = Decimal(str(p.get("avg_entry_price", "0") or "0"))
                 cur = Decimal(str(p.get("current_price", avg) or avg))
-                unreal = (cur - avg) * qty
+                asset_class = str(p.get("asset_class", "") or "")
+                symbol = str(p.get("symbol", sym))
+                unreal = unrealised_pnl_account_currency(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    quantity=qty,
+                    avg_entry_price=avg,
+                    current_price=cur,
+                )
                 book.append(
                     BookPosition(
-                        symbol=str(p.get("symbol", sym)),
+                        symbol=symbol,
                         signed_qty=qty,
                         avg_price=avg,
                         current_price=cur,
-                        asset_class=str(p.get("asset_class", "") or ""),
+                        asset_class=asset_class,
                         broker=str(p.get("broker", "") or ""),
                         holding_sec=Decimal(str(p.get("holding_sec", "0") or "0")),
                         unrealised_pnl=unreal,

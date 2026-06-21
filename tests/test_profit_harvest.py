@@ -120,22 +120,14 @@ _DYNAMIC_CFG = {
     "enabled": True,
     "close_cooldown_sec": "5",
     "base": {
-        "min_profit_pct": "0.012",
-        "min_profit_nav_pct": "0.001",
         "trim_fraction": "0.50",
-        "full_close_profit_pct": "0.035",
-        "trailing_giveback_pct": "0.35",
     },
     "volatility": {
         "fallback_vol": "0.015",
         "vol_low": "0.005",
         "vol_high": "0.05",
-        "min_profit_k": "1.5",
-        "min_profit_floor": "0.004",
-        "min_profit_ceil": "0.05",
-        "full_close_k": "4.0",
-        "full_close_floor": "0.012",
-        "full_close_ceil": "0.20",
+        "min_profit_vol_multiplier": "1.5",
+        "full_close_multiple_of_partial": "4.0",
         "giveback_vol_low": "0.25",
         "giveback_vol_high": "0.55",
     },
@@ -291,15 +283,16 @@ def test_resolve_thresholds_mode_bias() -> None:
     assert defender.trailing_giveback_pct < hunter.trailing_giveback_pct
 
 
-def test_resolve_thresholds_overrides_win() -> None:
+def test_resolve_thresholds_ignore_absolute_profit_overrides() -> None:
     out = resolve_harvest_thresholds(
         config=_DYNAMIC_CFG,
         profile_mode="hunter",
         volatility_pct=Decimal("0.04"),
         overrides={"min_profit_pct": "0.005", "trim_fraction": "0.90"},
     )
-    assert out.min_profit_pct == Decimal("0.005")
+    assert out.min_profit_pct == Decimal("0.04") * Decimal("1.5") * Decimal("1.50")
     assert out.trim_fraction == Decimal("0.90")
+    assert out.inputs["ignored_absolute_override_keys"] == ["min_profit_pct"]
 
 
 def _v2_thresholds() -> HarvestThresholds:
@@ -432,11 +425,10 @@ async def test_profit_harvest_tick_submits_reduce_only_trim(monkeypatch) -> None
                         "asset_class": "equity",
                         "quantity": Decimal("10"),
                         "avg_entry_price": Decimal("100"),
-                        "current_price": Decimal("102"),
+                        "current_price": Decimal("103"),
                         "instrument_metadata": {
                             "profit_harvest": {
-                                "min_profit_pct": "0.01",
-                                "full_close_profit_pct": "0.05",
+                                "trim_fraction": "0.50",
                             }
                         },
                     }
@@ -500,11 +492,10 @@ async def test_profit_harvest_v2_active_submits_v2_trim(monkeypatch) -> None:
                         "asset_class": "equity",
                         "quantity": Decimal("10"),
                         "avg_entry_price": Decimal("100"),
-                        "current_price": Decimal("102"),
+                        "current_price": Decimal("103"),
                         "instrument_metadata": {
                             "profit_harvest": {
-                                "min_profit_pct": "0.01",
-                                "full_close_profit_pct": "0.05",
+                                "trim_fraction": "0.50",
                             }
                         },
                     }

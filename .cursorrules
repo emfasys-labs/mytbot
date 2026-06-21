@@ -1,0 +1,12 @@
+PROJECT NON-NEGOTIABLE: No static trading thresholds or magic market parameters.
+Unless a number is a mathematical identity, exchange/protocol constraint,
+accounting convention, or pure UI/cadence setting, it must not be a fixed
+trading rule such as 8%, $500, 3 trades, or 0.25% NAV. Entry, exit, sizing,
+profit harvest, replacement, derisk, stop, universe selection, throttling, and
+capital allocation parameters must be dynamic variables derived from live or
+learned market state: volatility, liquidity, cost, regime, signal edge,
+portfolio exposure, broker constraints, position age, or audited model
+evidence. If a numeric coefficient remains, document what it multiplies and why
+it is dimensionless; if a fixed safety bound is unavoidable, document the
+external reason. Treat any existing absolute trading threshold touched during a
+task as technical debt to replace, not copy.

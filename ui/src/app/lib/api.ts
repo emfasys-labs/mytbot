@@ -259,6 +259,14 @@ export type ApiPnlResponse = {
   metrics?: {
     win_rate_days?: number | null;
     max_drawdown_pct?: number | null;
+    twr?: {
+      twr_pct?: number | null;
+      since?: string | null;
+      days?: number;
+      net_trading_pnl?: string;
+      external_flow?: string;
+      method?: string;
+    };
   };
 };
 

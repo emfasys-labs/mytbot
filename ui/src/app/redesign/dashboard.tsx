@@ -23,6 +23,7 @@ const PNL_WINDOW_LABEL: Record<PnlWindow, string> = {
   ytd: 'YTD',
   historical: 'Historical',
 };
+const MIN_SHARPE_DAILY_RETURNS = 20;
 
 /** UTC "YYYY-MM-DD" for the start of the selected window. */
 function pnlWindowStart(win: PnlWindow): string {
@@ -60,10 +61,12 @@ function shortDayLabel(iso: string): string {
   return m && d ? `${Number(m)}/${Number(d)}` : iso;
 }
 
-function shortDateLabel(iso: string | null): string {
+function shortDateLabel(iso: string | null | undefined): string {
   if (!iso) return 'history';
-  const [y, m, d] = iso.split('-');
-  return y && m && d ? `${Number(d)} ${new Date(`${y}-${m}-01T00:00:00Z`).toLocaleString(undefined, { month: 'short', timeZone: 'UTC' })}` : iso;
+  const [y, m, d] = String(iso).split('-');
+  return y && m && d
+    ? `${Number(d)} ${new Date(`${y}-${m}-01T00:00:00Z`).toLocaleString(undefined, { month: 'short', timeZone: 'UTC' })}`
+    : String(iso);
 }
 
 function fmtPct(value: number | null, digits = 1): string {
@@ -77,82 +80,10 @@ function fmtRatio(value: number | null, digits = 2): string {
   return value.toFixed(digits);
 }
 
-function ymdUtc(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function performanceStats(
-  history: Array<{ date: string; value: number }>,
-  navNow: number,
-): {
-  returnPct: number | null;
-  returnLabel: string;
-  sharpe: number | null;
-  sharpeRaw: number | null;
-  sampleCount: number;
-  maxDrawdownPct: number | null;
-  drawdownLabel: string;
-} {
-  const today = ymdUtc(new Date());
-  const clean = [...(history ?? [])]
-    .filter((p) => p.date && Number.isFinite(p.value) && p.value > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  if (Number.isFinite(navNow) && navNow > 0) {
-    const last = clean[clean.length - 1];
-    if (!last || last.date < today) clean.push({ date: today, value: navNow });
-    else clean[clean.length - 1] = { date: last.date, value: navNow };
-  }
-  if (clean.length === 0) {
-    return {
-      returnPct: null,
-      returnLabel: 'waiting for history',
-      sharpe: null,
-      sharpeRaw: null,
-      sampleCount: 0,
-      maxDrawdownPct: null,
-      drawdownLabel: 'waiting for history',
-    };
-  }
-  const ytdStart = `${new Date().getUTCFullYear()}-01-01`;
-  const first = clean[0];
-  const hasYtdBaseline = first.date <= ytdStart;
-  const returnRows = hasYtdBaseline ? clean.filter((p) => p.date >= ytdStart) : clean;
-  const returnBase = returnRows[0]?.value ?? first.value;
-  const returnPct = returnBase > 0 && navNow > 0 ? ((navNow / returnBase) - 1) * 100 : null;
-  const returnLabel = hasYtdBaseline ? 'YTD' : `since ${shortDateLabel(first.date)}`;
-
-  let peak = clean[0].value;
-  let maxDd = 0;
-  for (const p of clean) {
-    peak = Math.max(peak, p.value);
-    if (peak > 0) maxDd = Math.min(maxDd, (p.value / peak) - 1);
-  }
-
-  const returns: number[] = [];
-  for (let i = 1; i < clean.length; i += 1) {
-    const prev = clean[i - 1].value;
-    const cur = clean[i].value;
-    if (prev > 0 && cur > 0) returns.push((cur / prev) - 1);
-  }
-  let sharpeRaw: number | null = null;
-  if (returns.length >= 3) {
-    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const variance = returns.reduce((a, r) => a + (r - mean) ** 2, 0) / Math.max(1, returns.length - 1);
-    const sd = Math.sqrt(variance);
-    sharpeRaw = sd > 0 ? (mean / sd) * Math.sqrt(252) : null;
-  }
-  return {
-    returnPct,
-    returnLabel,
-    sharpe: sharpeRaw,
-    sharpeRaw,
-    sampleCount: returns.length,
-    maxDrawdownPct: maxDd * 100,
-    drawdownLabel: `since ${shortDateLabel(first.date)}`,
-  };
+function apiNumber(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  const n = typeof value === 'number' ? value : Number(String(value).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -276,16 +207,15 @@ export function DashboardScreen({
   const topConviction = live.conviction[0];
   const tradable = live.tradableCapital;
   const navPending = state !== 'off' && !live.navReady;
-  const performanceHistory = useMemo(
-    () => (scopedMetricMode && navValue > 0
-      ? [{ date: ymdUtc(new Date()), value: navValue }]
-      : live.equitySeries),
-    [scopedMetricMode, live.equitySeries, navValue],
-  );
-  const perf = useMemo(
-    () => performanceStats(performanceHistory, navValue),
-    [performanceHistory, navValue],
-  );
+  const twrMetric = live.pnl?.metrics?.twr;
+  const twrPct = Number.isFinite(twrMetric?.twr_pct ?? Number.NaN)
+    ? Number(twrMetric?.twr_pct)
+    : null;
+  const twrSub = useMemo(() => {
+    if (!twrMetric || !twrMetric.since) return 'waiting for ledger';
+    return `since ${shortDateLabel(twrMetric.since)}`;
+  }, [twrMetric]);
+  const realisedHistoryDays = live.realisedSeries.length;
   const deploymentPct = useMemo(() => {
     if (navValue <= 0) return null;
     const working = live.capitalAtWork.grossExposure;
@@ -383,13 +313,13 @@ export function DashboardScreen({
               <div style={{ flex: 1 }} />
 
               <PerformanceStrip
-                returnPct={perf.returnPct}
-                returnLabel={perf.returnLabel}
-                sharpe={perf.sharpe}
-                sharpeRaw={perf.sharpeRaw}
-                sampleCount={perf.sampleCount}
-                maxDrawdownPct={perf.maxDrawdownPct}
-                drawdownLabel={perf.drawdownLabel}
+                twrPct={twrPct}
+                twrSub={twrSub}
+                sharpe={null}
+                sharpeRaw={null}
+                sampleCount={realisedHistoryDays}
+                maxDrawdownPct={null}
+                drawdownLabel=""
                 deploymentPct={shownDeploymentPct}
                 deploymentSub={deploymentSub}
               />
@@ -401,7 +331,7 @@ export function DashboardScreen({
                 marginBottom: 8, flexWrap: 'wrap', gap: 10,
               }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-                  <Label accent={TOKENS.ink3}>Realised P&L</Label>
+                  <Label accent={TOKENS.ink3}>Closed P&L</Label>
                   <span style={{
                     fontFamily: TOKENS.mono, fontSize: 13,
                     color: realisedWindow.net >= 0 ? TOKENS.profit : TOKENS.loss,
@@ -686,8 +616,8 @@ function NavPendingPanel({
 }
 
 function PerformanceStrip({
-  returnPct,
-  returnLabel,
+  twrPct,
+  twrSub,
   sharpe,
   sharpeRaw,
   sampleCount,
@@ -696,8 +626,8 @@ function PerformanceStrip({
   deploymentPct,
   deploymentSub,
 }: {
-  returnPct: number | null;
-  returnLabel: string;
+  twrPct: number | null;
+  twrSub: string;
   sharpe: number | null;
   sharpeRaw: number | null;
   sampleCount: number;
@@ -706,7 +636,7 @@ function PerformanceStrip({
   deploymentPct: number | null;
   deploymentSub: string;
 }) {
-  const returnColor = returnPct == null ? TOKENS.ink3 : returnPct >= 0 ? TOKENS.profit : TOKENS.loss;
+  const twrColor = twrPct == null ? TOKENS.ink3 : twrPct >= 0 ? TOKENS.profit : TOKENS.loss;
   const sharpeColor = sharpe == null
     ? TOKENS.ink3
     : sharpe >= 2
@@ -726,9 +656,18 @@ function PerformanceStrip({
     : deploymentPct >= 90
       ? TOKENS.caution
       : TOKENS.info;
-  const sharpeSub = sampleCount > 0 ? drawdownLabel : 'waiting for history';
+  const remainingDays = Math.max(0, MIN_SHARPE_DAILY_RETURNS - sampleCount);
+  const waitSub = remainingDays === 1 ? '1 day left' : `${remainingDays} days left`;
+  const sharpeSub = sampleCount >= MIN_SHARPE_DAILY_RETURNS
+    ? drawdownLabel
+    : waitSub;
   const metrics = [
-    { label: 'Return', value: fmtPct(returnPct, 1), sub: returnLabel, color: returnColor },
+    {
+      label: 'TWR',
+      value: fmtPct(twrPct, 2),
+      sub: twrSub,
+      color: twrColor,
+    },
     {
       label: 'Sharpe',
       value: fmtRatio(sharpe, 2),
@@ -736,7 +675,12 @@ function PerformanceStrip({
       color: sharpeColor,
       titleExtra: sampleCount > 0 ? `${sampleCount} daily returns` : '',
     },
-    { label: 'Max DD', value: fmtPct(maxDrawdownPct, 1), sub: drawdownLabel, color: drawdownColor },
+    {
+      label: 'Trade DD',
+      value: fmtPct(maxDrawdownPct, 1),
+      sub: maxDrawdownPct == null && sampleCount < MIN_SHARPE_DAILY_RETURNS ? waitSub : drawdownLabel,
+      color: drawdownColor,
+    },
     { label: 'Deployment', value: fmtPct(deploymentPct, 0), sub: deploymentSub, color: deploymentColor },
   ];
   return (

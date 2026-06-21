@@ -631,10 +631,10 @@ export function mapPnlRollups(
   // book (unrealised swings every tick and reads as a "loss" while the book is
   // simply in flight). The backend derives these realised figures from filled
   // orders including opening/closing fees.
-  const wApi = toNumber(pnl?.week?.realised, 0);
-  const mApi = toNumber(pnl?.month?.realised, 0);
-  const yApi = toNumber(pnl?.all_time?.realised, 0);
-  const todayApi = toNumber(pnl?.today?.realised, 0);
+  const wApi = toNumber(pnl?.week?.realised, 0) - toNumber(pnl?.week?.fees, 0);
+  const mApi = toNumber(pnl?.month?.realised, 0) - toNumber(pnl?.month?.fees, 0);
+  const yApi = toNumber(pnl?.all_time?.realised, 0) - toNumber(pnl?.all_time?.fees, 0);
+  const todayApi = toNumber(pnl?.today?.realised, 0) - toNumber(pnl?.today?.fees, 0);
   if (hasPartialBrokerCoverage(pnl)) {
     return { d: todayApi, w: 0, m: 0, y: 0 };
   }
