@@ -1147,6 +1147,52 @@ export type RoutingQualityResponse = {
   runtime_summary?: Record<string, unknown>;
 };
 
+export type TradeAdmissionResponse = {
+  since_hours?: number;
+  aggregate?: {
+    total?: number;
+    by_decision?: Record<string, number>;
+    by_downstream?: Record<string, number>;
+    by_outcome?: Record<string, number>;
+  };
+  by_strategy?: Array<{ strategy: string; by_decision: Record<string, number>; total: number }>;
+  model_health?: {
+    trained_rows?: number;
+    buckets?: number;
+    base_rate?: number;
+    ready?: boolean;
+    min_samples?: number;
+    global_wins?: number;
+    global_losses?: number;
+  };
+  estimates?: { avoided_drawdown_move?: number; missed_winner_move?: number };
+  coverage_by_asset_class?: Array<{
+    asset_class: string;
+    candidates: number;
+    labelled: number;
+    coverage: number;
+  }>;
+  top_rejection_reasons?: Array<{ reason: string; count: number }>;
+  rows?: Array<{
+    id: string;
+    timestamp: string | null;
+    symbol: string;
+    strategy: string;
+    side: string | null;
+    broker: string | null;
+    decision: string;
+    reason: string | null;
+    shadow_only: boolean;
+    active_applied: boolean;
+    score: string | null;
+    uncertainty: string | null;
+    downstream_status: string | null;
+    outcome_label: string | null;
+    outcome_net_pnl: string | null;
+  }>;
+  error?: string;
+};
+
 async function getJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, { headers: dashboardReadHeaders() });
@@ -1255,6 +1301,8 @@ export const api = {
   getRoutingQuality: () => getJson<RoutingQualityResponse>('/diagnostics/routing-quality'),
   getStrategyCandidateMix: (sinceHours = 24) =>
     getJson<StrategyCandidateMixResponse>(`/diagnostics/strategy-candidates?since_hours=${sinceHours}`),
+  getTradeAdmission: (sinceHours = 24, limit = 50) =>
+    getJson<TradeAdmissionResponse>(`/diagnostics/trade-admission?since_hours=${sinceHours}&limit=${limit}`),
   getOrders: (limit = 40) => getJson<ApiOrdersResponse>(`/orders?limit=${limit}`),
 };
 

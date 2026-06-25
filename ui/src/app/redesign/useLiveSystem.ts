@@ -25,6 +25,7 @@ import {
   type IntelligenceUniverseResponse,
   type RoutingQualityResponse,
   type StrategyCandidateMixResponse,
+  type TradeAdmissionResponse,
   type SystemStatusResponse,
   type SystemState as BackendSystemState,
   type TradingMode,
@@ -161,6 +162,7 @@ export interface LiveData {
   runtimeDemand: Record<string, unknown> | null;
   runtimeMetaLabeling: Record<string, unknown> | null;
   routingQuality: RoutingQualityResponse | null;
+  tradeAdmission: TradeAdmissionResponse | null;
   deployment: DeploymentReadiness | null;
 
   loopIteration: number;
@@ -337,6 +339,7 @@ export function useLiveSystem(): LiveData {
   const [runtimeDemand, setRuntimeDemand] = useState<Record<string, unknown> | null>(null);
   const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
   const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
+  const [tradeAdmission, setTradeAdmission] = useState<TradeAdmissionResponse | null>(null);
   const [deployment, setDeployment] = useState<DeploymentReadiness | null>(null);
   const [strategyMix, setStrategyMix] = useState<StrategyCandidateMixResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
@@ -461,6 +464,7 @@ export function useLiveSystem(): LiveData {
         api.getRealisedCurve(400),
         api.getConnectHub(),
         api.getDeploymentReadiness(),
+        api.getTradeAdmission(24, 50),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -476,7 +480,9 @@ export function useLiveSystem(): LiveData {
       const realisedCurveRes = res[11].status === 'fulfilled' ? res[11].value : null;
       const connectHubRes = res[12].status === 'fulfilled' ? res[12].value : null;
       const deploymentRes = res[13].status === 'fulfilled' ? res[13].value : null;
+      const tradeAdmissionRes = res[14].status === 'fulfilled' ? res[14].value : null;
       setDeployment(deploymentRes);
+      if (tradeAdmissionRes) setTradeAdmission(tradeAdmissionRes);
       if (modeHttpRes?.mode) {
         const m = String(modeHttpRes.mode).toLowerCase();
         if (m === 'defender' || m === 'trader' || m === 'hunter') {
@@ -1165,6 +1171,7 @@ export function useLiveSystem(): LiveData {
     runtimeDemand,
     runtimeMetaLabeling,
     routingQuality,
+    tradeAdmission,
     deployment,
 
     loopIteration,

@@ -104,6 +104,7 @@ async def flatten_local_paper_book(
     refuse_live_local_paper_flatten()
 
     from storage.db import dispose_engine, init_async_database
+    from storage.fills_ledger import record_fill
     from storage.models import OrderLog, PositionLog
 
     engine, session_factory = await init_async_database()
@@ -119,14 +120,23 @@ async def flatten_local_paper_book(
             return LocalPaperFlattenResult(previews=previews, applied=False)
 
         now = datetime.now(timezone.utc)
+        fill_specs = []
         async with session_factory() as session:
             for row, item in zip(rows, previews, strict=True):
                 signal_id = str(uuid.uuid4())
                 order_id = str(uuid.uuid4())
+                broker_order_id = f"paper-local-flatten-{order_id[:12]}"
+                metadata = {
+                    "reduce_only": True,
+                    "close_only": True,
+                    "flatten_all": True,
+                    "flatten_reason": reason,
+                    "source_position_id": row.id,
+                }
                 session.add(
                     OrderLog(
                         id=order_id,
-                        broker_order_id=f"paper-local-flatten-{order_id[:12]}",
+                        broker_order_id=broker_order_id,
                         signal_id=signal_id,
                         timestamp=now,
                         symbol=row.symbol,
@@ -140,13 +150,7 @@ async def flatten_local_paper_book(
                         avg_fill_price=item.price,
                         fee=Decimal("0"),
                         paper_mode=True,
-                        instrument_metadata={
-                            "reduce_only": True,
-                            "close_only": True,
-                            "flatten_all": True,
-                            "flatten_reason": reason,
-                            "source_position_id": row.id,
-                        },
+                        instrument_metadata=metadata,
                     )
                 )
                 session.add(
@@ -166,7 +170,30 @@ async def flatten_local_paper_book(
                         ),
                     )
                 )
+                fill_specs.append(
+                    {
+                        "broker": row.broker,
+                        "symbol": row.symbol,
+                        "side": item.side,
+                        "quantity": item.quantity,
+                        "fill_price": item.price,
+                        "asset_class": row.asset_class,
+                        "order_type": "market",
+                        "reduce_only": True,
+                        "strategy": reason,
+                        "signal_id": signal_id,
+                        "mode": "paper",
+                        "is_paper": True,
+                        "derisk_source": reason,
+                        "order_id": order_id,
+                        "broker_order_id": broker_order_id,
+                        "instrument_metadata": metadata,
+                        "timestamp": now,
+                    }
+                )
             await session.commit()
+        for spec in fill_specs:
+            await record_fill(session_factory, **spec)
         return LocalPaperFlattenResult(previews=previews, applied=True)
     finally:
         if engine is not None:

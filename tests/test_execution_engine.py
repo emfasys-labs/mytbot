@@ -159,9 +159,23 @@ class _FakeBroker:
 
 
 class _FakeCryptoBroker(_FakeBroker):
-    def __init__(self) -> None:
+    def __init__(self, broker_name: str = "kraken", positions: list[Position] | None = None) -> None:
         super().__init__()
-        self.broker_name = "kraken"
+        self.broker_name = broker_name
+        self._positions = positions
+
+    async def get_positions(self):
+        if self._positions is not None:
+            return list(self._positions)
+        return await super().get_positions()
+
+
+class _FakeBrokerManager:
+    def __init__(self, adapters: dict[str, _FakeCryptoBroker]) -> None:
+        self.adapters = adapters
+
+    def is_broker_available(self, name: str) -> bool:
+        return str(name).strip().lower() in self.adapters
 
 
 def _approved_decision() -> RiskDecision:
@@ -359,6 +373,142 @@ async def test_crypto_paper_wallet_exhausted_reservation_reroutes_to_next_venue(
     assert result2.filled_quantity == Decimal("0.3")
     assert engine._crypto_paper_room_reserved["bybit"] == Decimal("30.0")
     assert engine.last_skip_reason is None
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_same_symbol_add_stays_on_existing_venue(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+
+    held = Position(
+        symbol="ADA-USD",
+        asset_class=AssetClass.CRYPTO,
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("0.15"),
+        current_price=Decimal("0.15"),
+        unrealised_pnl=Decimal("0"),
+        broker="binance",
+    )
+    adapters = {
+        "binance": _FakeCryptoBroker("binance", positions=[held]),
+        "bybit": _FakeCryptoBroker("bybit", positions=[]),
+        "kraken": _FakeCryptoBroker("kraken", positions=[]),
+    }
+    monkeypatch.setattr("execution.engine.get_broker", lambda name, *args, **kwargs: adapters[str(name).lower()])
+    monkeypatch.setattr(
+        "system.paper_wallet.venue_deploy_room",
+        lambda broker: {"binance": Decimal("50"), "bybit": Decimal("500"), "kraken": Decimal("500")}.get(broker),
+    )
+
+    engine = ExecutionEngine(
+        broker_configs={},
+        paper_mode=True,
+        allowed_brokers=["binance", "bybit", "kraken"],
+        broker_manager=_FakeBrokerManager(adapters),
+    )
+
+    sig = Signal(
+        signal_id="s-ada",
+        symbol="ADA-USD",
+        side="buy",
+        strategy="portfolio_orchestrator",
+        confidence=0.9,
+        suggested_quantity=Decimal("1000"),
+        suggested_price=Decimal("0.1"),
+        broker="bybit",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is not None
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_quantity == Decimal("500")
+    assert result.broker_order_id.startswith("paper-")
+    assert sig.metadata == {}
+    assert engine._crypto_paper_room_reserved["binance"] == Decimal("50")
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_same_symbol_does_not_open_second_venue_when_existing_full(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+
+    held = Position(
+        symbol="ADA-USD",
+        asset_class=AssetClass.CRYPTO,
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("0.15"),
+        current_price=Decimal("0.15"),
+        unrealised_pnl=Decimal("0"),
+        broker="binance",
+    )
+    adapters = {
+        "binance": _FakeCryptoBroker("binance", positions=[held]),
+        "bybit": _FakeCryptoBroker("bybit", positions=[]),
+        "kraken": _FakeCryptoBroker("kraken", positions=[]),
+    }
+    monkeypatch.setattr("execution.engine.get_broker", lambda name, *args, **kwargs: adapters[str(name).lower()])
+    monkeypatch.setattr(
+        "system.paper_wallet.venue_deploy_room",
+        lambda broker: {"binance": Decimal("0"), "bybit": Decimal("500"), "kraken": Decimal("500")}.get(broker),
+    )
+
+    engine = ExecutionEngine(
+        broker_configs={},
+        paper_mode=True,
+        allowed_brokers=["binance", "bybit", "kraken"],
+        broker_manager=_FakeBrokerManager(adapters),
+    )
+
+    sig = Signal(
+        signal_id="s-ada",
+        symbol="ADA-USD",
+        side="buy",
+        strategy="portfolio_orchestrator",
+        confidence=0.9,
+        suggested_quantity=Decimal("1000"),
+        suggested_price=Decimal("0.1"),
+        broker="binance",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is None
+    assert engine.last_skip_reason == "same_symbol_venue_consolidation"
+    assert engine.last_skip_metadata["preferred_broker"] == "binance"
+    assert engine.last_skip_metadata["broker"] == "bybit"
+
+
+@pytest.mark.asyncio
+async def test_crypto_paper_zero_accounting_notional_is_skipped(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    broker = _FakeCryptoBroker("binance", positions=[])
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+    monkeypatch.setattr("system.paper_wallet.venue_deploy_room", lambda _broker: Decimal("0.001"))
+
+    sig = Signal(
+        signal_id="s-dust",
+        symbol="ADA-USD",
+        side="buy",
+        strategy="portfolio_orchestrator",
+        confidence=0.9,
+        suggested_quantity=Decimal("1"),
+        suggested_price=Decimal("0.1"),
+        broker="binance",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True, allowed_brokers=["binance"])
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is None
+    assert engine.last_skip_reason == "zero_notional_after_accounting_rounding"
 
 
 @pytest.mark.asyncio

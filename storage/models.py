@@ -565,6 +565,61 @@ class StrategyCandidateLog(Base):
     metadata_ = Column("metadata", JSON, nullable=True)
 
 
+class TradeAdmissionLog(Base):
+    """Pre-risk trade admission audit and outcome ledger.
+
+    One row per executable candidate reaching the shared execution chokepoint.
+    This table is deliberately separate from ``strategy_candidate_log``:
+    strategy_candidate_log explains the strategy funnel, while this ledger
+    preserves the exact trade-admission context needed to learn which proposed
+    trades should have been allowed, delayed, reduced, or refused.
+    """
+
+    __tablename__ = "trade_admission_log"
+    __table_args__ = (
+        Index("ix_trade_admission_symbol_ts", "symbol", "timestamp"),
+        Index("ix_trade_admission_signal_id", "signal_id"),
+        Index("ix_trade_admission_decision_ts", "decision", "timestamp"),
+    )
+
+    id = Column(String(40), primary_key=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    loop_iteration = Column(Integer, nullable=True, index=True)
+    symbol = Column(String(72), nullable=False, index=True)
+    strategy = Column(String(64), nullable=False, index=True)
+    side = Column(String(8), nullable=True)
+    broker = Column(String(20), nullable=True, index=True)
+    asset_class = Column(String(20), nullable=True, index=True)
+    signal_id = Column(String(128), nullable=True, index=True)
+    source_path = Column(String(32), nullable=False, default="unknown")
+    decision = Column(String(32), nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    shadow_only = Column(Boolean, nullable=False, default=True)
+    active_applied = Column(Boolean, nullable=False, default=False)
+    admission_score = Column(DecimalSafe(12, 8), nullable=True)
+    uncertainty = Column(DecimalSafe(12, 8), nullable=True)
+    suggested_notional = Column(DecimalSafe(20, 8), nullable=True)
+    suggested_quantity = Column(DecimalSafe(20, 8), nullable=True)
+    suggested_price = Column(DecimalSafe(20, 8), nullable=True)
+    features = Column(JSON, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    downstream_status = Column(String(40), nullable=True, index=True)
+    downstream_reason = Column(Text, nullable=True)
+    execution_status = Column(String(40), nullable=True)
+    outcome_label = Column(String(40), nullable=True, index=True)
+    outcome_net_pnl = Column(DecimalSafe(20, 8), nullable=True)
+    outcome_return = Column(DecimalSafe(20, 10), nullable=True)
+    outcome_observed_at = Column(DateTime(timezone=True), nullable=True)
+    # Per-horizon outcome snapshots: {"60": {...}, "240": {...}, "1440": {...}}.
+    outcome_horizons = Column(JSON, nullable=True)
+    # myTbot-native rich labels at the longest matured horizon:
+    # net_return_after_costs, max_adverse_move, max_favorable_move,
+    # hit_stop_like_condition, needed_derisk, churn_reentry, execution_failed,
+    # venue_closed_or_bad_route, became_profitable_later,
+    # better_than_book_holding, worse_than_cash.
+    outcome_labels = Column(JSON, nullable=True)
+
+
 class InstrumentRegistry(Base):
     """Canonical instrument master populated from public maintained sources.
 

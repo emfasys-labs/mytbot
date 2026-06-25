@@ -1,0 +1,39 @@
+# Trade Admission Intelligence
+# ============================
+# Shadow-first layer that audits whether a proposed trade should be allowed,
+# delayed, reduced, or rejected before the risk engine sees it.
+#
+# Defaults are deliberately non-invasive: decisions are logged and labelled,
+# but live order flow is unchanged unless shadow_only is set false AND an
+# enforcement flag below is explicitly enabled.
+#
+# NOTE on `enabled: true` vs the design doc's `enabled: false`: Phase 1 is
+# instrumentation. We keep the layer ENABLED so it records candidates, builds
+# the outcome ledger, and trains the calibrated model — but `shadow_only: true`
+# guarantees zero effect on live order flow (`should_block()` always returns
+# False in shadow). Enforcement only begins when BOTH shadow_only is false and
+# the relevant flag (block_new_opens / allow_size_haircuts) is true, and only
+# after shadow diagnostics prove improvement.
+
+enabled: true
+shadow_only: true
+
+# Enforcement switches. Keep false until shadow diagnostics prove improvement.
+block_new_opens: false
+allow_size_haircuts: false
+
+# Operational/audit settings, not market thresholds.
+diagnostics_since_hours: 24
+outcome_horizons_minutes:
+  - 60
+  - 240
+  - 1440
+max_rows_per_cycle: 500
+
+# Calibrated model. The only learning knob is the minimum bucket sample size;
+# the decision boundary itself is derived from the observed win-rate
+# distribution (no static market thresholds).
+model_enabled: true
+model_min_bucket_samples: 25
+model_refresh_minutes: 30
+model_lookback_days: 30

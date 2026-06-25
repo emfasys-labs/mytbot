@@ -42,6 +42,7 @@ from execution.planner import build_execution_plan
 from execution.router import BROKER_ASSET_MAP, SmartOrderRouter
 from graph.engine import DependencyGraphEngine
 from graph.pipeline import DiscoveryPipeline
+from intelligence.trade_admission import TradeAdmissionService
 from portfolio.allocation_engine import build_allocation_decision
 from portfolio.d015_smoothing import allocation_smoothing_snapshot, apply_allocation_smoothing
 from risk.engine import RiskEngine, RiskVerdict
@@ -364,6 +365,8 @@ class TradingLoop:
         self.execution_engine: ExecutionEngine | None = None
         self.sig_engine: SignalEngine | None = None
         self.router: SmartOrderRouter | None = None
+        self.trade_admission = TradeAdmissionService()
+        self._admission_model_refreshed_at: datetime | None = None
         self.last_iteration_at: datetime | None = None
         self.iterations: int = 0
         self.last_error: str | None = None
@@ -1095,6 +1098,50 @@ class TradingLoop:
                     Decimal(str(portfolio_state.get("high_watermark_value", total_equity)))
                 )
                 self.risk_engine.restore_runtime_state(portfolio_state)
+                # Trade admission (pre-risk). Runs AFTER portfolio_state is
+                # loaded so book-exposure / drawdown features are populated on
+                # the legacy path too.
+                admission_decision = await self.trade_admission.evaluate_signal(
+                    signal,
+                    session_factory=session_factory,
+                    portfolio_state=portfolio_state,
+                    loop_iteration=self.iterations,
+                    source_path="legacy",
+                )
+                if self.trade_admission.should_block(admission_decision):
+                    funnel.record_execution_blocked(strategy_key)
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=str(signal.symbol),
+                                strategy=str(getattr(signal, "strategy", "") or ""),
+                                side=str(getattr(signal, "side", "") or ""),
+                                confidence=float(getattr(signal, "confidence", 0) or 0),
+                                status="filtered_trade_admission",
+                                reason=admission_decision.reason,
+                                loop_iteration=self.iterations,
+                                metadata={
+                                    "decision": admission_decision.action.value,
+                                    "score": (
+                                        str(admission_decision.score)
+                                        if admission_decision.score is not None
+                                        else None
+                                    ),
+                                    "uncertainty": (
+                                        str(admission_decision.uncertainty)
+                                        if admission_decision.uncertainty is not None
+                                        else None
+                                    ),
+                                },
+                            )
+                        )
+                    await self.trade_admission.mark_status(
+                        session_factory,
+                        signal,
+                        status="admission_blocked",
+                        reason=admission_decision.reason,
+                    )
+                    return False
                 risk_decision = await self.risk_engine.evaluate_and_persist(
                     session_factory, signal, portfolio_state,
                 )
@@ -1131,8 +1178,20 @@ class TradingLoop:
                         timeframe=self.timeframe,
                         feature_ts=datetime.now(timezone.utc),
                     )
+                    await self.trade_admission.mark_status(
+                        session_factory,
+                        signal,
+                        status="risk_rejected",
+                        reason=str(risk_decision.reason or risk_decision.verdict.value),
+                    )
                     return False
                 funnel.record_risk_approved(strategy_key)
+                await self.trade_admission.mark_status(
+                    session_factory,
+                    signal,
+                    status="risk_approved",
+                    reason=str(risk_decision.reason or ""),
+                )
                 await _persist_signal(
                     session_factory, signal,
                     paper_mode=self.paper_mode,
@@ -1176,6 +1235,13 @@ class TradingLoop:
                         )
                     except Exception:  # noqa: BLE001
                         pass
+                    await self.trade_admission.mark_status(
+                        session_factory,
+                        signal,
+                        status="execution_incomplete",
+                        reason=engine_reason,
+                        execution_status="none",
+                    )
                     return False
                 status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
                 if status_val != "filled":
@@ -1207,6 +1273,13 @@ class TradingLoop:
                     except Exception:  # noqa: BLE001
                         pass
                     # Only treat fully filled orders as executed positions.
+                    await self.trade_admission.mark_status(
+                        session_factory,
+                        signal,
+                        status="execution_incomplete",
+                        reason=f"order_status_{status_val}",
+                        execution_status=status_val,
+                    )
                     return False
                 filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
                 if filled_qty <= 0:
@@ -1237,6 +1310,13 @@ class TradingLoop:
                         )
                     except Exception:  # noqa: BLE001
                         pass
+                    await self.trade_admission.mark_status(
+                        session_factory,
+                        signal,
+                        status="execution_incomplete",
+                        reason="execution_zero_fill",
+                        execution_status=status_val,
+                    )
                     return False
                 # Refresh portfolio state after execution so persisted position/PnL
                 # reflect newly filled orders (not the pre-trade snapshot).
@@ -1361,6 +1441,13 @@ class TradingLoop:
                     )
                 funnel.record_execution_approved(strategy_key)
                 funnel.record_executed(strategy_key)
+                await self.trade_admission.mark_status(
+                    session_factory,
+                    signal,
+                    status="executed",
+                    reason="order_filled",
+                    execution_status=status_val,
+                )
                 return True
 
             while not self._stop_event.is_set():
@@ -2723,6 +2810,31 @@ class TradingLoop:
                         "dynamic_bias": dict(meta_dynamic_bias),
                         "diagnostics": dict(meta_dynamic_diag),
                     }
+                    try:
+                        labelled = await self.trade_admission.label_due(session_factory)
+                        # Periodically retrain the calibrated model from matured
+                        # outcomes (interval-gated so it does not run every tick).
+                        model_health = None
+                        _cfg = self.trade_admission.cfg
+                        if _cfg.model_enabled:
+                            _now = datetime.now(timezone.utc)
+                            _last = self._admission_model_refreshed_at
+                            if _last is None or (_now - _last).total_seconds() >= _cfg.model_refresh_minutes * 60:
+                                model_health = await self.trade_admission.refresh_model(session_factory)
+                                self._admission_model_refreshed_at = _now
+                        hb_extra["trade_admission"] = {
+                            "enabled": bool(self.trade_admission.cfg.enabled),
+                            "shadow_only": bool(self.trade_admission.cfg.shadow_only),
+                            "outcomes_labelled": int(labelled),
+                            "model": model_health or self.trade_admission.model.health(),
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        self._swallow("trade_admission_label_due", exc)
+                        hb_extra["trade_admission"] = {
+                            "enabled": bool(getattr(self.trade_admission.cfg, "enabled", False)),
+                            "shadow_only": bool(getattr(self.trade_admission.cfg, "shadow_only", True)),
+                            "error": str(exc)[:200],
+                        }
                     if self.router is not None:
                         rq = self.router.export_quality_state()
                         hb_extra["routing_quality"] = {
@@ -4862,6 +4974,47 @@ class TradingLoop:
                 signal.metadata = {}
             signal.metadata.setdefault("pipeline_symbol", signal.symbol)
             signal.symbol = native
+        admission_decision = await self.trade_admission.evaluate_signal(
+            signal,
+            session_factory=session_factory,
+            portfolio_state=portfolio_dict,
+            loop_iteration=self.iterations,
+            source_path="global",
+        )
+        if self.trade_admission.should_block(admission_decision):
+            funnel.record_execution_blocked(strategy_key)
+            if sc_log_buffer is not None:
+                sc_log_buffer.append(
+                    strategy_candidate_row(
+                        symbol=str(signal.symbol),
+                        strategy=str(getattr(signal, "strategy", "") or ""),
+                        side=str(getattr(signal, "side", "") or ""),
+                        confidence=float(getattr(signal, "confidence", 0) or 0),
+                        status="filtered_trade_admission",
+                        reason=admission_decision.reason,
+                        loop_iteration=self.iterations,
+                        metadata={
+                            "decision": admission_decision.action.value,
+                            "score": (
+                                str(admission_decision.score)
+                                if admission_decision.score is not None
+                                else None
+                            ),
+                            "uncertainty": (
+                                str(admission_decision.uncertainty)
+                                if admission_decision.uncertainty is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+            await self.trade_admission.mark_status(
+                session_factory,
+                signal,
+                status="admission_blocked",
+                reason=admission_decision.reason,
+            )
+            return False
         self.risk_engine.update_high_watermark(
             Decimal(str(portfolio_dict.get("high_watermark_value", total_equity)))
         )
@@ -4896,8 +5049,20 @@ class TradingLoop:
                 timeframe=self.timeframe,
                 feature_ts=datetime.now(timezone.utc),
             )
+            await self.trade_admission.mark_status(
+                session_factory,
+                signal,
+                status="risk_rejected",
+                reason=str(risk_decision.reason or risk_decision.verdict.value),
+            )
             return False
         funnel.record_risk_approved(strategy_key)
+        await self.trade_admission.mark_status(
+            session_factory,
+            signal,
+            status="risk_approved",
+            reason=str(risk_decision.reason or ""),
+        )
         await _persist_signal(
             session_factory,
             signal,
@@ -4946,6 +5111,13 @@ class TradingLoop:
                 )
             except Exception:  # noqa: BLE001
                 pass
+            await self.trade_admission.mark_status(
+                session_factory,
+                signal,
+                status="execution_incomplete",
+                reason=engine_reason,
+                execution_status="none",
+            )
             return False
         status_val = str(getattr(getattr(result, "status", None), "value", getattr(result, "status", ""))).lower()
         if status_val != "filled":
@@ -4976,6 +5148,13 @@ class TradingLoop:
                 )
             except Exception:  # noqa: BLE001
                 pass
+            await self.trade_admission.mark_status(
+                session_factory,
+                signal,
+                status="execution_incomplete",
+                reason=f"order_status_{status_val}",
+                execution_status=status_val,
+            )
             return False
         filled_qty = Decimal(str(getattr(result, "filled_quantity", "0") or "0"))
         if filled_qty <= 0:
@@ -5006,6 +5185,13 @@ class TradingLoop:
                 )
             except Exception:  # noqa: BLE001
                 pass
+            await self.trade_admission.mark_status(
+                session_factory,
+                signal,
+                status="execution_incomplete",
+                reason="execution_zero_fill",
+                execution_status=status_val,
+            )
             return False
         post_trade_state = await _load_portfolio_state(
             session_factory,
@@ -5062,6 +5248,13 @@ class TradingLoop:
             )
         funnel.record_execution_approved(strategy_key)
         funnel.record_executed(strategy_key)
+        await self.trade_admission.mark_status(
+            session_factory,
+            signal,
+            status="executed",
+            reason="order_filled",
+            execution_status=status_val,
+        )
         return True
 
     def _load_mode_cadence_map(self) -> dict[str, int]:

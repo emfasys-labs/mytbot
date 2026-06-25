@@ -18,6 +18,61 @@
 
 ---
 
+## D198 — Crypto same-symbol venue consolidation
+**Date:** 2026-06-25
+**Decision:** A paper crypto top-up may not open a new broker row for a symbol already held elsewhere.
+
+**Problem.** ADA-USD was opened on Binance, then topped up on Bybit and Kraken. The allocator intended one ADA exposure, and risk capped total single-name exposure, but the no-native-paper crypto execution path treated exhausted per-venue paper room as permission to spill the same additive symbol into another venue.
+
+**Fix.** `ExecutionEngine` now checks existing Binance/Bybit/Kraken paper crypto positions before additive no-native-paper crypto fills. If the symbol is already held, the add is routed only to the dominant existing venue; if that venue was already attempted and has no room, the add is skipped instead of opening a fresh venue line. Reduce-only/close orders remain exempt so exits can flatten every broker row. Accounting-zero crypto dust orders are skipped before they can create filled zero-notional rows.
+
+**Status:** Implemented. `python -m py_compile execution\engine.py tests\test_execution_engine.py` passed; `pytest tests\test_execution_engine.py -q` -> `45 passed`.
+
+---
+
+## D197 — Trade admission schema drift blocked routing
+**Date:** 2026-06-25
+**Decision:** Live startup must self-heal nullable `trade_admission_log` columns added after the first D196 table creation.
+
+**Problem.** The live system was otherwise healthy, but every orchestrator order failed after risk approval because the existing Postgres table lacked `outcome_horizons` and `outcome_labels`. SQLAlchemy selected those ORM columns during admission downstream-status updates, raising `UndefinedColumnError` inside the order-routing path.
+
+**Fix.** Patched the live database with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for both JSON columns, then added the same additive repair to `storage.db._ensure_additive_schema_patches()`. Next loop confirmed routing recovered: orchestrator generated six orders and filled four paper orders (`XLE`, `USO`, `GLD`, `ADA-USD`).
+
+**Status:** Implemented. `python -m py_compile storage/db.py` passed. `/system/status` healthy with 10 brokers, Postgres/Redis healthy, AI/news fresh, and no API errors.
+
+---
+
+## D196 — Trade Admission Intelligence shadow ledger
+**Date:** 2026-06-25
+**Decision:** myTbot now has a native pre-risk admission layer that audits whether each executable candidate should be allowed, delayed, reduced, or rejected before risk/execution, defaulting to shadow-only.
+
+**Problem.** The system already logs strategy candidates, risk decisions, orders, fills, and P&L, but it lacked a dedicated memory of the exact trade context at the execution chokepoint. That made it harder to learn which proposed opens looked attractive before execution yet later became weak, noisy, unfilled, risk-rejected, or loss-prone after costs.
+
+**Implementation.** Added `intelligence/trade_admission/` with config, schemas, feature extraction, a conservative admission policy, service wrapper, persistence helpers, outcome labeling, and diagnostics. Added `storage.models.TradeAdmissionLog` as a separate audit/outcome ledger. `TradingLoop` now evaluates built signals in both legacy and global/orchestrated chokepoints before risk, stamps admission metadata onto the signal, and updates the ledger as the candidate moves through risk rejection, execution skip, or fill. The per-iteration heartbeat labels due outcomes from matched fills and reports admission status. `/diagnostics/trade-admission` exposes aggregate and recent-row diagnostics. `config/trade_admission.yaml` keeps the layer enabled but shadow-only by default; enforcement switches remain off.
+
+**Status:** Implemented shadow-only. Tests: `tests/test_trade_admission.py`, strategy candidate flow, and SQLite schema suite passed (`9 passed`); `py_compile` clean. No live behavior change unless `shadow_only: false` plus enforcement flags are explicitly enabled.
+
+---
+
+## D196.1 — Trade Admission: close the seven production gaps
+**Date:** 2026-06-25
+**Decision:** Promote the D196 shadow ledger from a bare Phase-1 instrument to a complete shadow-first layer by closing seven audit gaps, while keeping live order flow unchanged (still shadow-only by default).
+
+**Gaps closed.**
+1. **Calibrated learning model** — new `intelligence/trade_admission/model.py` (`AdmissionModel`): smoothed historical win-rate bucketed by `(strategy, asset_class, evidence_band)` with Laplace smoothing and conservative abstention below `model_min_bucket_samples`. The decision boundary is distribution-derived (one binomial standard error below the global base rate), not a static threshold. Trained from matured outcomes by `train_admission_model()`, refreshed on an interval in the heartbeat; the policy consults it to REJECT/DEFER materially-below-average buckets and (when enabled) haircut marginal ones.
+2. **Rich outcome labels** — the labeler now computes myTbot-native labels (`net_return_after_costs`, `max_adverse_move`/`max_favorable_move` from `PriceHistory`, `hit_stop_like_condition`, `needed_derisk`, `churn_reentry`, `execution_failed`, `venue_closed_or_bad_route`, `became_profitable_later`, `better_than_book_holding`, `worse_than_cash`) into `outcome_labels`.
+3. **Multi-horizon outcomes** — a row finalises once its longest horizon matures; all configured horizons (`60/240/1440`) are then computed in one pass into `outcome_horizons`.
+4. **CLOSE_ONLY emitted** — feature builder derives `close_only_book`/`drawdown_fraction` from portfolio risk flags; the policy emits CLOSE_ONLY for new opens while a book is in close-only/drawdown retreat (reductions still allowed).
+5. **UI panel** — `/diagnostics/trade-admission` is fetched in `useLiveSystem` and rendered as a `TradeAdmissionCard` on the Risk screen (shadow/active badge, decisions, model health, avoided-drawdown / missed-winner estimates, top rejection reasons, data coverage by asset class, recent candidates).
+6. **Legacy path book features** — legacy admission now runs *after* `_load_portfolio_state`, so exposure/drawdown features are populated on both chokepoints.
+7. **Config consistency** — `model_*` knobs added; `enabled: true` retained (Phase-1 data collection) with an explicit comment that `shadow_only: true` guarantees no live effect.
+
+Also added an Alembic migration `d196a1b2c3d4_trade_admission_log.py` (the additive `outcome_horizons`/`outcome_labels` self-heal already landed in `storage.db` via D197).
+
+**Status:** Implemented shadow-only. Tests: `tests/test_trade_admission.py` (`7 passed`, +3 new for model/CLOSE_ONLY/multi-horizon) plus candidate-flow/SQLite suites; `py_compile` clean; UI `npm run build` clean. **Requires `python run.py` restart** for the new policy/model/loop wiring. Still no live behavior change unless `shadow_only: false` plus an enforcement flag is set.
+
+---
+
 ## D195 — Flow-neutral TWR as primary percentage return
 **Date:** 2026-06-21
 **Decision:** The dashboard's primary percentage return is Time-Weighted Return (TWR), computed from trading P&L and neutral to broker/balance flows.

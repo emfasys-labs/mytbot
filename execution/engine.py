@@ -245,6 +245,48 @@ class ExecutionEngine:
                 return candidate
         return None
 
+    async def _crypto_existing_symbol_expression(self, symbol: str) -> tuple[str | None, list[str]]:
+        """Return the preferred already-held paper crypto venue for ``symbol``."""
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None, []
+
+        candidates: dict[str, Decimal] = {}
+        bm = getattr(self, "_broker_manager", None)
+        adapters = getattr(bm, "adapters", None) if bm is not None else None
+        if not isinstance(adapters, dict):
+            adapters = self._brokers
+
+        for broker_name in ("binance", "bybit", "kraken"):
+            adapter = adapters.get(broker_name) if isinstance(adapters, dict) else None
+            if adapter is None:
+                continue
+            try:
+                positions = await adapter.get_positions()
+            except Exception:  # noqa: BLE001
+                continue
+            exposure = Decimal("0")
+            for pos in positions or []:
+                try:
+                    pos_sym = str(getattr(pos, "symbol", "") or "").strip().upper()
+                    qty = Decimal(str(getattr(pos, "quantity", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if pos_sym != sym or qty == 0:
+                    continue
+                try:
+                    px = Decimal(str(getattr(pos, "current_price", "0") or "0"))
+                except Exception:  # noqa: BLE001
+                    px = Decimal("0")
+                exposure += abs(qty) * px if px > 0 else abs(qty)
+            if exposure > 0:
+                candidates[broker_name] = exposure
+
+        if not candidates:
+            return None, []
+        preferred = max(candidates.items(), key=lambda item: item[1])[0]
+        return preferred, sorted(candidates)
+
     def add_allowed_broker(self, name: str) -> None:
         """Register a venue that became available after engine construction (e.g. late IBKR connect)."""
         n = (name or "").strip().lower()
@@ -504,6 +546,37 @@ class ExecutionEngine:
             )
             if not _is_close:
                 try:
+                    preferred_broker, held_brokers = await self._crypto_existing_symbol_expression(signal.symbol)
+                    if preferred_broker and broker_name_l != preferred_broker:
+                        if preferred_broker not in _attempted_crypto_venues:
+                            new_md = dict(signal.metadata or {})
+                            new_md["same_symbol_consolidated_from"] = broker_name_l
+                            new_md["same_symbol_consolidated_to"] = preferred_broker
+                            new_md["same_symbol_existing_brokers"] = held_brokers
+                            logger.info(
+                                "EXEC REROUTE (same-symbol consolidation) | %s %s %s -> %s held=%s",
+                                signal.symbol, signal.side, broker_name_l, preferred_broker, held_brokers,
+                            )
+                            return await self.execute(
+                                replace(signal, broker=preferred_broker, metadata=new_md),
+                                risk_decision,
+                                session_factory=session_factory,
+                            )
+                        self.last_skip_reason = "same_symbol_venue_consolidation"
+                        self.last_skip_metadata = {
+                            "symbol": str(signal.symbol or ""),
+                            "broker": broker_name_l,
+                            "preferred_broker": preferred_broker,
+                            "existing_brokers": held_brokers,
+                        }
+                        logger.warning(
+                            "EXEC SKIP (same-symbol consolidation) | %s %s broker=%s preferred=%s held=%s",
+                            signal.symbol, signal.side, broker_name_l, preferred_broker, held_brokers,
+                        )
+                        return None
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("same-symbol crypto consolidation skipped (non-fatal): %s", exc)
+                try:
                     room, reserved, effective_room = self._crypto_paper_effective_room(broker_name_l)
                     if room is not None:
                         _px = (
@@ -565,6 +638,13 @@ class ExecutionEngine:
                                 float(_notional), float(effective_room), float(room), float(reserved),
                             )
                             _notional = effective_room
+                        if _notional.quantize(Decimal("0.01"), rounding=ROUND_DOWN) <= 0:
+                            self.last_skip_reason = "zero_notional_after_accounting_rounding"
+                            logger.info(
+                                "EXEC SKIP (zero accounting notional) | %s %s broker=%s notional=%s",
+                                signal.symbol, signal.side, broker_name_l, str(_notional),
+                            )
+                            return None
                         self._crypto_paper_room_reserved[broker_name_l] = reserved + _notional
                 except Exception as exc:  # noqa: BLE001 — bound must never crash exec
                     logger.debug("crypto venue cap check skipped (non-fatal): %s", exc)

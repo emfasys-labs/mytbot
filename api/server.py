@@ -3739,6 +3739,42 @@ async def diagnostics_strategy_candidates(
     return await fetch_strategy_mix_diagnostics(session_factory, since_hours=since_hours)
 
 
+@app.get("/diagnostics/trade-admission")
+async def diagnostics_trade_admission(
+    since_hours: float = Query(24, ge=0.5, le=168),
+    limit: int = Query(50, ge=1, le=500),
+    session_factory=Depends(_session_factory),
+):
+    """Trade Admission Intelligence audit and outcome diagnostics."""
+    if session_factory is None:
+        return {"since_hours": since_hours, "aggregate": {}, "rows": [], "error": "no_database"}
+    from intelligence.trade_admission.config import load_admission_config
+    from intelligence.trade_admission.ledger import (
+        fetch_admission_diagnostics,
+        train_admission_model,
+    )
+
+    model_health = None
+    try:
+        cfg = load_admission_config()
+        if cfg.model_enabled:
+            model = await train_admission_model(
+                session_factory,
+                lookback_days=cfg.model_lookback_days,
+                min_samples=cfg.model_min_bucket_samples,
+            )
+            model_health = model.health()
+    except Exception:  # noqa: BLE001
+        model_health = None
+
+    return await fetch_admission_diagnostics(
+        session_factory,
+        since_hours=since_hours,
+        limit=limit,
+        model_health=model_health,
+    )
+
+
 @app.get("/diagnostics/balances")
 async def diagnostics_balances(
     response: Response,

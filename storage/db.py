@@ -182,6 +182,33 @@ async def _ensure_additive_schema_patches(conn: AsyncConnection) -> None:
                 "ON news_headlines (ingest_provider)"
             )
         )
+        has_trade_admission = await conn.scalar(
+            text("SELECT to_regclass('public.trade_admission_log') IS NOT NULL")
+        )
+        if has_trade_admission:
+            for column_name in ("outcome_horizons", "outcome_labels"):
+                has_column = await conn.scalar(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'trade_admission_log'
+                              AND column_name = :column_name
+                        )
+                        """
+                    ),
+                    {"column_name": column_name},
+                )
+                if not has_column:
+                    await conn.execute(
+                        text(f"ALTER TABLE trade_admission_log ADD COLUMN {column_name} JSON")
+                    )
+                    logger.info(
+                        "storage | schema patch | added trade_admission_log.{}",
+                        column_name,
+                    )
     except Exception as exc:  # noqa: BLE001
         logger.warning("storage | additive schema patch failed | {}", exc)
 

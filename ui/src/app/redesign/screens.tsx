@@ -2953,7 +2953,107 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
           </div>
         )}
       </Card>
+      <TradeAdmissionCard live={live} />
     </div>
+  );
+}
+
+function TradeAdmissionCard({ live }: { live: LiveData }) {
+  const ta = live.tradeAdmission;
+  const byDecision = ta?.aggregate?.by_decision ?? {};
+  const total = ta?.aggregate?.total ?? 0;
+  const model = ta?.model_health ?? {};
+  const estimates = ta?.estimates ?? {};
+  const coverage = ta?.coverage_by_asset_class ?? [];
+  const reasons = ta?.top_rejection_reasons ?? [];
+  const rows = ta?.rows ?? [];
+  // Shadow vs active: any row with active_applied true means enforcement is live.
+  const active = rows.some((r) => r.active_applied);
+  const blocked = (byDecision.reject ?? 0) + (byDecision.defer ?? 0) + (byDecision.close_only ?? 0);
+  const allowed = (byDecision.allow ?? 0) + (byDecision.allow_smaller ?? 0);
+  const pill = (label: string, color: string) => (
+    <span style={{
+      fontFamily: TOKENS.mono, fontSize: 10, color,
+      border: `1px solid ${color}`, borderRadius: 4, padding: '1px 6px',
+    }}>{label}</span>
+  );
+  return (
+    <Card style={{ gridColumn: '1 / -1' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <Label style={{ margin: 0 }}>Trade admission</Label>
+        {active
+          ? pill('ACTIVE', TOKENS.caution)
+          : pill('SHADOW', TOKENS.info)}
+        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          {total} candidates / {ta?.since_hours ?? 24}h
+        </span>
+        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: model.ready ? TOKENS.profit : TOKENS.ink4 }}>
+          model {model.ready ? 'ready' : 'warming'} · {Math.round(Number(model.trained_rows) || 0)} rows · base {((Number(model.base_rate) || 0) * 100).toFixed(0)}%
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>decisions</div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, marginBottom: 6 }}>
+            allowed {allowed} · blocked {blocked}
+          </div>
+          <div style={{ display: 'grid', gap: 4 }}>
+            {Object.entries(byDecision).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+              <div key={k} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>{k}: {v}</div>
+            ))}
+            {Object.keys(byDecision).length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no candidates yet</div>
+            )}
+          </div>
+          <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            avoided drawdown move {((Number(estimates.avoided_drawdown_move) || 0) * 100).toFixed(2)}%
+          </div>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+            missed winner move {((Number(estimates.missed_winner_move) || 0) * 100).toFixed(2)}%
+          </div>
+        </div>
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>top rejection reasons</div>
+          <div style={{ display: 'grid', gap: 4 }}>
+            {reasons.slice(0, 6).map((r, i) => (
+              <div key={i} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {r.count}× {r.reason}
+              </div>
+            ))}
+            {reasons.length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>none</div>
+            )}
+          </div>
+          <div style={{ marginTop: 10, fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 6 }}>data coverage</div>
+          <div style={{ display: 'grid', gap: 4 }}>
+            {coverage.slice(0, 5).map((c) => (
+              <div key={c.asset_class} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                {c.asset_class}: {c.labelled}/{c.candidates} ({(c.coverage * 100).toFixed(0)}%)
+              </div>
+            ))}
+            {coverage.length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no coverage yet</div>
+            )}
+          </div>
+        </div>
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>recent candidates</div>
+          <div style={{ display: 'grid', gap: 4 }}>
+            {rows.slice(0, 8).map((r) => {
+              const blk = ['reject', 'defer', 'close_only'].includes((r.decision || '').toLowerCase());
+              return (
+                <div key={r.id} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: blk ? (TOKENS.caution) : TOKENS.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {prettySymbol(r.symbol)} · {r.decision}{r.outcome_label ? ` → ${r.outcome_label}` : ''}
+                </div>
+              );
+            })}
+            {rows.length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no candidates yet</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 
