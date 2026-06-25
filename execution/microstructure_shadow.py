@@ -128,6 +128,9 @@ def score_microstructure_shadow(
         "microstructure_shadow_risk": round(risk, 6),
         "microstructure_shadow_label": label,
         "microstructure_shadow_reasons": ",".join(dict.fromkeys(reasons)),
+        "microstructure_label": label,
+        "microstructure_reasons": ",".join(dict.fromkeys(reasons)),
+        "microstructure_risk": round(risk, 6),
     }
 
 

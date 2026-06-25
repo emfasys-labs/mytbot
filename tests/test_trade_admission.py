@@ -184,6 +184,24 @@ def test_close_only_book_emits_close_only():
     assert decision.active_applied is True
 
 
+def test_shadow_microstructure_label_feeds_active_admission_reject():
+    cand = _candidate(
+        confidence="0.8",
+        trade_quality_score="0.8",
+        microstructure_shadow_label="high_risk",
+    )
+    feats = build_features(cand, {"portfolio_value": Decimal("100000"), "positions": {}})
+    decision = decide_admission(
+        cand,
+        feats,
+        AdmissionConfig(shadow_only=False, block_new_opens=True),
+    )
+    assert feats.values["microstructure_label"] == "high_risk"
+    assert decision.action == AdmissionAction.REJECT
+    assert decision.active_applied is True
+    assert decision.reason == "microstructure_high_risk"
+
+
 def test_admission_model_abstains_when_thin():
     model = AdmissionModel.from_outcomes(
         [{"strategy": "s", "asset_class": "equity", "score": Decimal("0.5"), "win": True}],
@@ -213,4 +231,3 @@ def test_admission_model_flags_below_base_bucket():
     )
     assert decision.action == AdmissionAction.REJECT
     assert decision.model_probability is not None
-

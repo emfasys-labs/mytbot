@@ -13,20 +13,11 @@ signal_engine:
   # a no-op until BOTH gates are flipped AND a registered+approved
   # model exists. See docs/MODEL_GOVERNANCE.md.
   #
-  # D163 Phase 1 — SHADOWED OFF. The trained meta-labeler is an unproven
-  # brain layer; the clean-core soak runs on the edge gate + orchestrator
-  # (the proven controls) only. The heuristic meta-labeler in
-  # signals/meta_labeler.py remains the live filter. Re-admit the trained
-  # model later via shadow evidence (Phase 4), not by default.
-  use_trained_meta_labeler: false
-  # D169 (Phase 4) — SHADOW the trained meta-labeller: score every signal and
-  # stamp the would-keep/would-drop decision on the metadata, but NEVER drop a
-  # signal on it. `scripts/report_brain_shadow.py` grades those shadow
-  # decisions against the live fills scoreboard; only after it shows a
-  # RE-ADMIT verdict should `use_trained_meta_labeler` be flipped on.
-  # Requires `config/meta_labeler.yaml::trained_meta_labeler.enabled: true`
-  # so the model actually scores (shadow = score-but-don't-act).
-  trained_meta_labeler_shadow: true
+  # D201 — ACTIVE in paper order flow. The trained meta-labeller now drops
+  # candidates it scores below its dynamic calibration threshold instead of
+  # only stamping advisory metadata.
+  use_trained_meta_labeler: true
+  trained_meta_labeler_shadow: false
   default_position_pct: 0.05
   arbitrage_position_pct: 0.02
   arbitrage_skip_news_veto: true
@@ -500,7 +491,7 @@ strategies:
       - [XLE, TLT, -0.8]
       - [BTC-USD, DXY, -1.0]
     learned_graph_shadow:
-      enabled: true
+      enabled: false
       artifact_path: artifacts/models/demand_graph/latest_phase_e_relational_graph.json
       scale: 30.0
 

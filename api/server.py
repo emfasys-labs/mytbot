@@ -3775,6 +3775,53 @@ async def diagnostics_trade_admission(
     )
 
 
+@app.get("/diagnostics/adaptive-tuner")
+async def diagnostics_adaptive_tuner(
+    limit: int = Query(50, ge=1, le=500),
+    session_factory=Depends(_session_factory),
+):
+    """Adaptive Tuner state + recent applied parameter changes."""
+    from intelligence.adaptive_tuner.service import AdaptiveTunerService
+
+    try:
+        svc = AdaptiveTunerService()
+        out: dict = svc.diagnostics()
+    except Exception as exc:  # noqa: BLE001
+        return {"enabled": False, "error": str(exc), "applied_log": []}
+
+    out["applied_log"] = []
+    if session_factory is not None:
+        try:
+            from sqlalchemy import select
+
+            from storage.models import ParameterTuningLog
+
+            async with session_factory() as session:
+                rows = (
+                    await session.execute(
+                        select(ParameterTuningLog)
+                        .order_by(ParameterTuningLog.timestamp.desc())
+                        .limit(max(1, limit))
+                    )
+                ).scalars().all()
+                out["applied_log"] = [
+                    {
+                        "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                        "parameter": r.parameter,
+                        "regime": r.regime,
+                        "old_value": str(r.old_value) if r.old_value is not None else None,
+                        "new_value": str(r.new_value) if r.new_value is not None else None,
+                        "source": r.source,
+                        "reward": str(r.reward) if r.reward is not None else None,
+                        "rationale": r.rationale,
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:  # noqa: BLE001
+            out["applied_log_error"] = str(exc)
+    return out
+
+
 @app.get("/diagnostics/balances")
 async def diagnostics_balances(
     response: Response,

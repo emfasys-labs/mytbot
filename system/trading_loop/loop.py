@@ -43,6 +43,7 @@ from execution.router import BROKER_ASSET_MAP, SmartOrderRouter
 from graph.engine import DependencyGraphEngine
 from graph.pipeline import DiscoveryPipeline
 from intelligence.trade_admission import TradeAdmissionService
+from intelligence.adaptive_tuner import AdaptiveTunerService
 from portfolio.allocation_engine import build_allocation_decision
 from portfolio.d015_smoothing import allocation_smoothing_snapshot, apply_allocation_smoothing
 from risk.engine import RiskEngine, RiskVerdict
@@ -70,7 +71,12 @@ from system.funnel_telemetry import (
     get_default_funnel_telemetry,
     record_strategy_candidate_rows,
 )
-from system.portfolio_equity import live_portfolio_value
+from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
+from portfolio.broker_budget import (
+    cap_orders_to_broker_budgets,
+    compute_broker_budgets,
+    existing_notional_by_broker,
+)
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
@@ -366,6 +372,7 @@ class TradingLoop:
         self.sig_engine: SignalEngine | None = None
         self.router: SmartOrderRouter | None = None
         self.trade_admission = TradeAdmissionService()
+        self.adaptive_tuner = AdaptiveTunerService()
         self._admission_model_refreshed_at: datetime | None = None
         self.last_iteration_at: datetime | None = None
         self.iterations: int = 0
@@ -2493,14 +2500,44 @@ class TradingLoop:
                                 "tradable_capital",
                                 state_equity * Decimal(str(self.capital_pct)),
                             )
+                            # Adaptive Tuner — run a (cadence-gated) tuning cycle
+                            # from realized performance, then inject the live,
+                            # bounded, regime-conditioned overrides into the
+                            # orchestrator config before it is built. Regime is
+                            # the AI macro regime, falling back to the mode.
+                            _tuner_regime = str(
+                                (getattr(ai_result, "macro_regime", None) or mode_raw or "unknown")
+                            ).strip().lower() or "unknown"
+                            try:
+                                await self.adaptive_tuner.maybe_run_cycle(
+                                    session_factory,
+                                    regime=_tuner_regime,
+                                    nav=state_equity,
+                                    loop_iteration=self.iterations,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                self._swallow("adaptive_tuner_cycle", exc)
+                            _po_block = dict(strategies_cfg.get("portfolio_orchestrator") or {})
+                            try:
+                                _ovr = self.adaptive_tuner.overrides_for(
+                                    "portfolio_orchestrator", _tuner_regime
+                                )
+                                for _name, _val in _ovr.items():
+                                    if "." in _name:
+                                        _root, _leaf = _name.split(".", 1)
+                                        _sub = dict(_po_block.get(_root) or {})
+                                        _sub[_leaf] = float(_val)
+                                        _po_block[_root] = _sub
+                                    else:
+                                        _po_block[_name] = float(_val)
+                            except Exception as exc:  # noqa: BLE001
+                                self._swallow("adaptive_tuner_overrides", exc)
                             # D156 — portfolio orchestrator. When enabled it
                             # owns rebalancing: net strategy candidates into one
                             # conviction-weighted target per symbol, protect
                             # maturing edge, and skip the global-edge rotation/
                             # recycle tick. Gated off by default → zero change.
-                            _orch_cfg = OrchestratorConfig.from_yaml(
-                                strategies_cfg.get("portfolio_orchestrator")
-                            )
+                            _orch_cfg = OrchestratorConfig.from_yaml(_po_block)
                             if _orch_cfg.enabled and not zero_allocation:
                                 # D163 — a-priori edge-Kelly trust: route capital
                                 # toward weapons with the strongest PROVEN edge,
@@ -3335,6 +3372,34 @@ class TradingLoop:
             result.diagnostics.get("increases"), result.diagnostics.get("suppressed_rebalances"),
             result.diagnostics.get("net_target"),
         )
+
+        # Per-broker buying-power cap: the orchestrator sized against ONE global
+        # NAV pool (capital_pct of total equity), but capital is not fungible
+        # across venues. Cap each opening order to its broker's own deployable
+        # room (broker equity × capital_pct − existing notional), funding the
+        # strongest convictions first. Closes/reduces always pass (they free
+        # capital). Constraint-only — never loosens risk.
+        if self._broker_manager is not None:
+            try:
+                snap = await live_portfolio_snapshot(self._broker_manager)
+                per_broker_equity = dict(snap.per_broker or {})
+                if per_broker_equity:
+                    budgets = compute_broker_budgets(
+                        per_broker_equity,
+                        Decimal(str(self.capital_pct)),
+                        existing_notional_by_broker(portfolio_dict),
+                    )
+                    capped_orders, bb_diag = cap_orders_to_broker_budgets(result.orders, budgets)
+                    if bb_diag.get("shrunk") or bb_diag.get("dropped"):
+                        logger.info(
+                            "orchestrator | broker-budget cap | shrunk={} dropped={} room={}",
+                            bb_diag.get("shrunk"), bb_diag.get("dropped"),
+                            bb_diag.get("broker_room_after"),
+                        )
+                    result.orders[:] = capped_orders
+                    result.diagnostics["broker_budget"] = bb_diag
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("orchestrator | broker-budget cap skipped | {}", exc)
 
         # Price map for quantity sizing: the signal engine converts the
         # orchestrator's target NOTIONAL into a share quantity via

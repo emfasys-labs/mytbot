@@ -620,6 +620,32 @@ class TradeAdmissionLog(Base):
     outcome_labels = Column(JSON, nullable=True)
 
 
+class ParameterTuningLog(Base):
+    """Adaptive Tuner audit ledger — one row per applied parameter change.
+
+    Records every bounded, regime-conditioned parameter move the tuner makes
+    live, with the reward that motivated it and (optionally) the AI rationale.
+    Append-only; the tuner's learning state lives separately in an atomic JSON
+    file (``data/state/adaptive_tuner_state.json``).
+    """
+
+    __tablename__ = "parameter_tuning_log"
+    __table_args__ = (
+        Index("ix_parameter_tuning_param_ts", "parameter", "timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    parameter = Column(String(96), nullable=False, index=True)
+    regime = Column(String(32), nullable=True, index=True)
+    old_value = Column(DecimalSafe(20, 8), nullable=True)
+    new_value = Column(DecimalSafe(20, 8), nullable=True)
+    source = Column(String(24), nullable=True)         # exploit / explore / ai_guided
+    reward = Column(DecimalSafe(20, 10), nullable=True)
+    rationale = Column(Text, nullable=True)
+    evidence = Column(JSON, nullable=True)
+
+
 class InstrumentRegistry(Base):
     """Canonical instrument master populated from public maintained sources.
 

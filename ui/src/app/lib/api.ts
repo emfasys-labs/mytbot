@@ -1193,6 +1193,40 @@ export type TradeAdmissionResponse = {
   error?: string;
 };
 
+export type AdaptiveTunerResponse = {
+  enabled?: boolean;
+  cycles?: number;
+  regime?: string;
+  reward_trend?: number[];
+  ai_advisor?: boolean;
+  tunable_count?: number;
+  parameters?: Record<string, {
+    namespace?: string;
+    bounds?: number[];
+    current?: Record<string, number>;
+  }>;
+  recent_proposals?: Array<{
+    param: string;
+    regime: string;
+    old: number;
+    new: number;
+    source: string;
+    reward: number;
+    rationale?: string;
+  }>;
+  applied_log?: Array<{
+    timestamp: string | null;
+    parameter: string;
+    regime: string | null;
+    old_value: string | null;
+    new_value: string | null;
+    source: string | null;
+    reward: string | null;
+    rationale: string | null;
+  }>;
+  error?: string;
+};
+
 async function getJson<T>(path: string): Promise<T> {
   const base = await resolveApiBase();
   const r = await fetch(`${base}${path}`, { headers: dashboardReadHeaders() });
@@ -1303,6 +1337,8 @@ export const api = {
     getJson<StrategyCandidateMixResponse>(`/diagnostics/strategy-candidates?since_hours=${sinceHours}`),
   getTradeAdmission: (sinceHours = 24, limit = 50) =>
     getJson<TradeAdmissionResponse>(`/diagnostics/trade-admission?since_hours=${sinceHours}&limit=${limit}`),
+  getAdaptiveTuner: (limit = 50) =>
+    getJson<AdaptiveTunerResponse>(`/diagnostics/adaptive-tuner?limit=${limit}`),
   getOrders: (limit = 40) => getJson<ApiOrdersResponse>(`/orders?limit=${limit}`),
 };
 

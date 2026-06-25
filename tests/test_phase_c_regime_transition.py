@@ -139,6 +139,65 @@ def test_transition_shadow_metadata_is_inert(monkeypatch) -> None:
     assert r.regime_label != "crash"  # transition shadow does not override label
 
 
+def test_active_transition_detector_throttles_allocation(monkeypatch) -> None:
+    reset_regime_classifier_cache()
+
+    class _Stub:
+        feature_names = (
+            "trend_strength",
+            "breadth_score",
+            "market_state_score",
+            "chaos_penalty",
+            "volatility_structure",
+            "anomaly_breadth",
+            "correlation_crowding",
+            "liquidity_state",
+            "news_conflict_score",
+        )
+
+        def predict(self, x):  # noqa: ANN001
+            from risk.regime_transition import RegimeTransitionPrediction
+
+            return RegimeTransitionPrediction(
+                probability=0.9,
+                label="stress_transition",
+                threshold=0.6,
+                model_version="test",
+            )
+
+    monkeypatch.setattr(
+        "risk.regime_state._load_regime_transition_gate",
+        lambda: _RegimeTransitionGate(enabled=True, shadow_only=False, artifact_path=Path("x"), threshold=0.6),
+    )
+    monkeypatch.setattr("risk.regime_state._load_regime_transition_artefact", lambda gate: _Stub())
+    now = datetime.now(timezone.utc)
+    portfolio = PortfolioState(
+        timestamp=now,
+        mode="hunter",
+        nav=Decimal("100000"),
+        cash=Decimal("50000"),
+        available_buying_power=Decimal("50000"),
+        gross_exposure=Decimal("50000"),
+        net_exposure=Decimal("50000"),
+        leverage_ratio=Decimal("1"),
+        drawdown_from_hwm_pct=Decimal("0"),
+    )
+    rows = [
+        {"symbol": "A", "features": {"mom_10": 2.0, "rsi_14": 60.0, "volume_z": 0.5, "relative_dollar_volume": 1.1}},
+        {"symbol": "B", "features": {"mom_10": 1.0, "rsi_14": 57.0, "volume_z": 0.3, "relative_dollar_volume": 1.0}},
+        {"symbol": "C", "features": {"mom_10": 1.5, "rsi_14": 59.0, "volume_z": 0.2, "relative_dollar_volume": 1.2}},
+    ]
+    r = compute_regime_state_from_inputs(
+        portfolio_state=portfolio,
+        allocation_cfg=load_allocation(),
+        feature_rows=rows,
+        news_dispersion=None,
+    )
+    assert r.metadata["regime_transition_shadow_only"] is False
+    assert r.metadata["regime_transition_active_multiplier"] == 0.1
+    assert r.drawdown_throttle == Decimal("0.1")
+
+
 def test_phase_c_report_loads_transition_config(tmp_path: Path) -> None:
     cfg = tmp_path / "regime_models.yaml"
     cfg.write_text(

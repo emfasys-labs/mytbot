@@ -102,7 +102,7 @@ def build_features(candidate: AdmissionCandidate, portfolio_state: dict[str, Any
         "strategy": candidate.strategy,
         "source_path": candidate.source_path,
         "meta_label_kept": md.get("meta_label_kept"),
-        "microstructure_label": md.get("microstructure_label"),
+        "microstructure_label": md.get("microstructure_label") or md.get("microstructure_shadow_label"),
         "execution_gated": md.get("execution_gated"),
     }
     evidence_keys = ["confidence", "quality", "accumulator", "news_abs", "volume_component"]

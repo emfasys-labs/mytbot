@@ -2954,7 +2954,74 @@ export function RiskScreen({ accent, live }: { accent: AccentName; live: LiveDat
         )}
       </Card>
       <TradeAdmissionCard live={live} />
+      <AdaptiveTunerCard live={live} />
     </div>
+  );
+}
+
+function AdaptiveTunerCard({ live }: { live: LiveData }) {
+  const t = live.adaptiveTuner;
+  const params = t?.parameters ?? {};
+  const proposals = t?.recent_proposals ?? [];
+  const trend = t?.reward_trend ?? [];
+  const enabled = !!t?.enabled;
+  const pill = (label: string, color: string) => (
+    <span style={{
+      fontFamily: TOKENS.mono, fontSize: 10, color,
+      border: `1px solid ${color}`, borderRadius: 4, padding: '1px 6px',
+    }}>{label}</span>
+  );
+  const lastReward = trend.length ? trend[trend.length - 1] : 0;
+  return (
+    <Card style={{ gridColumn: '1 / -1' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <Label style={{ margin: 0 }}>Adaptive tuner</Label>
+        {enabled ? pill('LIVE', TOKENS.profit) : pill('OFF', TOKENS.ink4)}
+        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+          {t?.cycles ?? 0} cycles · regime {t?.regime ?? 'unknown'} · {t?.tunable_count ?? 0} params
+        </span>
+        <span style={{ fontFamily: TOKENS.mono, fontSize: 10, color: lastReward >= 0 ? TOKENS.profit : TOKENS.loss }}>
+          reward {(lastReward * 100).toFixed(3)}%
+        </span>
+        {t?.ai_advisor ? pill('AI advisor', TOKENS.info) : null}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>live parameters</div>
+          <div style={{ display: 'grid', gap: 5 }}>
+            {Object.entries(params).map(([key, p]) => {
+              const cur = p.current ?? {};
+              const vals = Object.entries(cur);
+              const bounds = p.bounds ?? [];
+              const shortKey = key.replace('portfolio_orchestrator.', '');
+              return (
+                <div key={key} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3 }}>
+                  {shortKey} {bounds.length === 2 ? `[${bounds[0]}–${bounds[1]}]` : ''}: {' '}
+                  {vals.length ? vals.map(([r, v]) => `${r}=${Number(v).toFixed(3)}`).join(' · ') : '—'}
+                </div>
+              );
+            })}
+            {Object.keys(params).length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no tunable params</div>
+            )}
+          </div>
+        </div>
+        <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontFamily: TOKENS.mono, fontSize: 11, color: TOKENS.ink2, marginBottom: 8 }}>recent changes</div>
+          <div style={{ display: 'grid', gap: 4 }}>
+            {proposals.slice(0, 8).map((pr, i) => (
+              <div key={i} style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <span style={{ color: pr.source === 'ai_guided' ? TOKENS.info : TOKENS.ink3 }}>{pr.source}</span>
+                {' '}{pr.param.replace('portfolio_orchestrator.', '')} {Number(pr.old).toFixed(3)}→{Number(pr.new).toFixed(3)} ({pr.regime})
+              </div>
+            ))}
+            {proposals.length === 0 && (
+              <div style={{ fontFamily: TOKENS.mono, fontSize: 10, color: TOKENS.ink4 }}>no changes yet</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

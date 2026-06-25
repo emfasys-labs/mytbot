@@ -26,6 +26,7 @@ import {
   type RoutingQualityResponse,
   type StrategyCandidateMixResponse,
   type TradeAdmissionResponse,
+  type AdaptiveTunerResponse,
   type SystemStatusResponse,
   type SystemState as BackendSystemState,
   type TradingMode,
@@ -163,6 +164,7 @@ export interface LiveData {
   runtimeMetaLabeling: Record<string, unknown> | null;
   routingQuality: RoutingQualityResponse | null;
   tradeAdmission: TradeAdmissionResponse | null;
+  adaptiveTuner: AdaptiveTunerResponse | null;
   deployment: DeploymentReadiness | null;
 
   loopIteration: number;
@@ -340,6 +342,7 @@ export function useLiveSystem(): LiveData {
   const [runtimeMetaLabeling, setRuntimeMetaLabeling] = useState<Record<string, unknown> | null>(null);
   const [routingQuality, setRoutingQuality] = useState<RoutingQualityResponse | null>(null);
   const [tradeAdmission, setTradeAdmission] = useState<TradeAdmissionResponse | null>(null);
+  const [adaptiveTuner, setAdaptiveTuner] = useState<AdaptiveTunerResponse | null>(null);
   const [deployment, setDeployment] = useState<DeploymentReadiness | null>(null);
   const [strategyMix, setStrategyMix] = useState<StrategyCandidateMixResponse | null>(null);
   const [loadedStrategies, setLoadedStrategies] = useState<
@@ -465,6 +468,7 @@ export function useLiveSystem(): LiveData {
         api.getConnectHub(),
         api.getDeploymentReadiness(),
         api.getTradeAdmission(24, 50),
+        api.getAdaptiveTuner(50),
       ]);
       const pnlRes = res[0].status === 'fulfilled' ? res[0].value : null;
       const histRes = res[1].status === 'fulfilled' ? res[1].value : null;
@@ -481,8 +485,10 @@ export function useLiveSystem(): LiveData {
       const connectHubRes = res[12].status === 'fulfilled' ? res[12].value : null;
       const deploymentRes = res[13].status === 'fulfilled' ? res[13].value : null;
       const tradeAdmissionRes = res[14].status === 'fulfilled' ? res[14].value : null;
+      const adaptiveTunerRes = res[15].status === 'fulfilled' ? res[15].value : null;
       setDeployment(deploymentRes);
       if (tradeAdmissionRes) setTradeAdmission(tradeAdmissionRes);
+      if (adaptiveTunerRes) setAdaptiveTuner(adaptiveTunerRes);
       if (modeHttpRes?.mode) {
         const m = String(modeHttpRes.mode).toLowerCase();
         if (m === 'defender' || m === 'trader' || m === 'hunter') {
@@ -1172,6 +1178,7 @@ export function useLiveSystem(): LiveData {
     runtimeMetaLabeling,
     routingQuality,
     tradeAdmission,
+    adaptiveTuner,
     deployment,
 
     loopIteration,

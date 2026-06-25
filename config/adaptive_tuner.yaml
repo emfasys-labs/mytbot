@@ -1,0 +1,59 @@
+# Adaptive Tuner
+# ==============
+# Live, bounded, regime-conditioned self-tuning of the highest-leverage
+# behavioural parameters. The tuner observes realized performance, attributes
+# it to the parameter values in force, and nudges them toward better historical
+# performance — within the hard [min, max] rails below. No redeploy needed.
+#
+# Safety: every move is a single bounded step, clamped to [min, max], logged,
+# and reversible (set enabled: false → the YAML defaults take over again). The
+# tuner only adjusts sizing/aggression coefficients; it NEVER touches the risk
+# engine's veto rails or places orders.
+
+enabled: true
+
+# Cadence + learning controls (operational, not market thresholds).
+apply_every_n_cycles: 20          # ~40 min at 120s/iter — roughly matches the reward window
+                                  # so each value's reward reflects the period it was in force
+                                  # (cadence << window → indistinguishable rewards → no learning)
+attribution_window_hours: 1.0     # reward = net realized P&L over this window / NAV
+                                  # kept close to the cadence period so reward is attributable
+                                  # to the value that was actually in force
+exploration_rate: 0.15            # fraction of cycles that explore vs exploit
+min_samples_to_exploit: 8         # a value-bucket needs this many obs before trusted
+regime_conditioned: true          # learn separate values per market regime
+state_path: data/state/adaptive_tuner_state.json
+max_recent_proposals: 50
+
+ai_advisor:
+  enabled: true                   # AI proposes WHICH param + a rationale (bounded optimizer decides magnitude)
+  min_cycles_between_calls: 5      # rate-limit (free Gemini tier)
+
+# The tunable surface. Each entry is bounded by hard [min, max] rails; the tuner
+# can only ever move within them, one `step` at a time.
+parameters:
+  - name: entry_conviction_threshold
+    namespace: portfolio_orchestrator
+    min: 0.08
+    max: 0.40
+    step: 0.02
+  - name: concentration_exponent
+    namespace: portfolio_orchestrator
+    min: 1.0
+    max: 2.5
+    step: 0.1
+  - name: net_cap_pct_of_gross
+    namespace: portfolio_orchestrator
+    min: 0.40
+    max: 1.00
+    step: 0.05
+  - name: max_position_pct_of_nav
+    namespace: portfolio_orchestrator
+    min: 0.10
+    max: 0.30
+    step: 0.02
+  - name: gross_target_pct.trader
+    namespace: portfolio_orchestrator
+    min: 0.50
+    max: 1.20
+    step: 0.05

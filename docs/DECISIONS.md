@@ -18,6 +18,30 @@
 
 ---
 
+## D201 — Shadow governance promoted to active paper gates
+**Date:** 2026-06-25
+**Decision:** Developed governance layers should influence paper order flow unless they are purely diagnostic and have no active trading hook.
+
+**Problem.** After the AAPL loss, several useful controls still lived in shadow-only mode: trained meta-label decisions were scored but not enforced, trade admission could block but size haircuts were still disabled, and the regime transition detector only produced dashboard metadata. Separately, microstructure evidence was stamped as `microstructure_shadow_label`, while trade admission looked for `microstructure_label`, so one active gate could miss evidence another layer had already computed.
+
+**Fix.** Promoted trained meta-label gating in `config/strategies.yaml` (`use_trained_meta_labeler: true`, `trained_meta_labeler_shadow: false`). Enabled active trade admission blocking and size haircuts in `config/trade_admission.yaml`. Wired non-shadow regime-transition stress probability into allocator exposure by tightening `RegimeState.drawdown_throttle`. Added microstructure alias fields so active admission can see execution-quality risk labels. Disabled read-only shadow diagnostics that do not govern order flow (`FUSION_SHADOW=0`, demand learned-graph shadow off, transition-policy shadow off).
+
+**Status:** Implemented and restarted. Focused tests: `tests/test_trade_admission.py`, `tests/test_wave2_wiring.py`, `tests/test_phase_c_regime_transition.py` -> `27 passed`; py_compile clean. Runtime after restart: `state=running`, 10/10 brokers connected, `can_trade=true`, first loop completed.
+
+---
+
+## D200 — Trade admission blocks bad new opens after AAPL shadow miss
+**Date:** 2026-06-25
+**Decision:** Trade Admission Intelligence is active for new opens in paper mode defaults.
+
+**Problem.** After the D199 reset, AAPL was opened long by `portfolio_orchestrator` even though the executable signal carried `meta_label_kept=false` and `trade_admission_decision=defer` with reason `prior_trade_filter_drop`. The layer worked diagnostically, but `config/trade_admission.yaml` still had `shadow_only: true` and `block_new_opens: false`, so the warning was logged but the order proceeded.
+
+**Fix.** Set `shadow_only: false` and `block_new_opens: true`. New opens with explicit admission rejects/defer decisions now block before risk/execution. Reduce-only/close orders remain allowed so the system can still exit or trim positions.
+
+**Status:** Implemented. `pytest tests\test_trade_admission.py -q` -> `7 passed`; `py_compile` clean.
+
+---
+
 ## D198 — Crypto same-symbol venue consolidation
 **Date:** 2026-06-25
 **Decision:** A paper crypto top-up may not open a new broker row for a symbol already held elsewhere.
@@ -27,6 +51,20 @@
 **Fix.** `ExecutionEngine` now checks existing Binance/Bybit/Kraken paper crypto positions before additive no-native-paper crypto fills. If the symbol is already held, the add is routed only to the dominant existing venue; if that venue was already attempted and has no room, the add is skipped instead of opening a fresh venue line. Reduce-only/close orders remain exempt so exits can flatten every broker row. Accounting-zero crypto dust orders are skipped before they can create filled zero-notional rows.
 
 **Status:** Implemented. `python -m py_compile execution\engine.py tests\test_execution_engine.py` passed; `pytest tests\test_execution_engine.py -q` -> `45 passed`.
+
+---
+
+## D199 — Cross-broker buying-power + live Adaptive Tuner (self-tuning brain) + AI advisor
+**Date:** 2026-06-25
+**Decision:** Three aligned capabilities, all active (experimental system, no phased rollout): (1) per-broker buying-power so the global allocator respects each venue's real cash silo; (2) a live, bounded, regime-conditioned parameter self-tuner; (3) an AI advisor inside the tuner loop.
+
+**Point 1 — per-broker buying-power.** The portfolio orchestrator already nets across all brokers into one conviction-ranked book sized against a single global NAV pool (`tradable = total_equity × capital_pct`), but capital is not fungible across venues. New pure module `portfolio/broker_budget.py` caps each opening order to its broker's deployable room (`broker_equity × capital_pct − existing_notional`), funding the strongest convictions first; reduce/close always pass (they free capital). Wired into `_run_orchestrated_tick` after `orchestrate()` using `system.portfolio_equity.live_portfolio_snapshot().per_broker`. Constraint-only — never loosens risk (rule 2).
+
+**Point 2 — Adaptive Tuner.** New package `intelligence/adaptive_tuner/` runs a cadence-gated cycle that: computes a reward (net realized P&L over a window / NAV from the `fills` ledger), attributes it to the parameter values in force, and nudges each tunable parameter ONE bounded step toward its best-observed value per market regime (contextual hill-climb with ε-exploration). Tunable surface (`config/adaptive_tuner.yaml`, hard `[min,max]` rails): orchestrator `entry_conviction_threshold`, `concentration_exponent`, `net_cap_pct_of_gross`, `max_position_pct_of_nav`, `gross_target_pct.trader`. Live values are injected into the orchestrator config each tick (rebuilt via `OrchestratorConfig.from_yaml`), so tuning is live with **no redeploy**. Learning state persists atomically to `data/state/adaptive_tuner_state.json`; every applied change is audited to the new `parameter_tuning_log` table (migration `d198a1b2c3d4`). Reversible (`enabled: false` → YAML defaults resume).
+
+**Point 3 — AI advisor.** `intelligence/adaptive_tuner/ai_advisor.py` calls the OpenAI-compatible `local_reasoning` endpoint (Gemini) with a grounded, retrieved context of the system's own recent behaviour (reward trend, current values + bounds, best-observed value per regime, fills summary) and returns a soft per-parameter DIRECTION hint + rationale. Advisory only (rule 7): it never sets a value or magnitude — the bounded optimizer always decides, clamped to rails. Degrades to statistics-only on any failure (rate limit / unreachable / bad JSON).
+
+**Diagnostics/UI:** `GET /diagnostics/adaptive-tuner` (state + applied log); Risk-screen `AdaptiveTunerCard` (live values, regime, reward, recent changes). **Status:** Implemented + active. Tests: `tests/test_adaptive_tuner.py` (7), `tests/test_broker_budget.py` (5); full suite **2065 passed** (1 pre-existing unrelated OANDA env-leak), UI `npm run build` clean. **Requires `python run.py` restart.**
 
 ---
 

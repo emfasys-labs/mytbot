@@ -240,17 +240,17 @@ def _maybe_add_transition_shadow(
     market_state_score: Decimal,
     breadth_score: Decimal,
     meta: dict,
-) -> None:
+) -> Decimal | None:
     meta["regime_transition_used"] = False
     if insufficient:
-        return
+        return None
     gate = _load_regime_transition_gate()
     if not gate.enabled:
-        return
+        return None
     artefact = _load_regime_transition_artefact(gate)
     if artefact is None:
         meta["regime_transition_reason"] = "artefact_unavailable"
-        return
+        return None
     feature_names = tuple(getattr(artefact, "feature_names", None) or gate.feature_names)
     feats = _build_transition_feature_vector(
         feature_names=feature_names,
@@ -260,19 +260,24 @@ def _maybe_add_transition_shadow(
     )
     if not feats:
         meta["regime_transition_reason"] = "no_features_configured"
-        return
+        return None
     try:
         pred = artefact.predict(feats)
     except Exception as exc:  # noqa: BLE001
         logger.warning("regime_state | transition predict failed: %s", exc)
         meta["regime_transition_reason"] = "predict_failed"
-        return
+        return None
     meta["regime_transition_used"] = True
     meta["regime_transition_shadow_only"] = bool(gate.shadow_only)
     meta["regime_transition_probability"] = float(pred.probability)
     meta["regime_transition_label"] = str(pred.label)
     meta["regime_transition_threshold"] = float(pred.threshold)
     meta["regime_transition_model_version"] = str(pred.model_version)
+    if gate.shadow_only or str(pred.label).lower() != "stress_transition":
+        return None
+    multiplier = clip_decimal(Decimal("1") - Decimal(str(pred.probability)), Decimal("0.1"), Decimal("1"))
+    meta["regime_transition_active_multiplier"] = float(multiplier)
+    return multiplier
 
 
 def _maybe_apply_classifier(
@@ -479,13 +484,15 @@ def compute_regime_state_from_inputs(
         meta=meta,
     )
 
-    _maybe_add_transition_shadow(
+    transition_multiplier = _maybe_add_transition_shadow(
         insufficient=insufficient,
         comps=comps,
         market_state_score=market_state_score,
         breadth_score=breadth_score,
         meta=meta,
     )
+    if transition_multiplier is not None:
+        drawdown_throttle = min(drawdown_throttle, transition_multiplier)
 
     return RegimeState(
         timestamp=ts,

@@ -16,11 +16,12 @@
 # after shadow diagnostics prove improvement.
 
 enabled: true
-shadow_only: true
+shadow_only: false
 
-# Enforcement switches. Keep false until shadow diagnostics prove improvement.
-block_new_opens: false
-allow_size_haircuts: false
+# Enforcement switches. Active for new opens after D200: shadow evidence caught
+# AAPL as a prior trade-filter drop, but shadow-only mode let the buy through.
+block_new_opens: true
+allow_size_haircuts: true
 
 # Operational/audit settings, not market thresholds.
 diagnostics_since_hours: 24
