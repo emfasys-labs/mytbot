@@ -20,6 +20,7 @@ class TunableParam:
     max_value: Decimal
     step: Decimal
     regime_conditioned: bool = True
+    loss_guard_direction: str = "none"
 
     @property
     def key(self) -> str:

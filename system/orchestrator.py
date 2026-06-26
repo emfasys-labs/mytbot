@@ -2675,6 +2675,28 @@ class Orchestrator:
                 reduce_qty = (abs(qty) * effective_decision.reduce_fraction).quantize(Decimal("0.00000001"))
                 if reduce_qty <= 0:
                     continue
+                try:
+                    paper_fee_bps = Decimal(str(risk_engine.config.get("paper_fee_bps", 0)))
+                except Exception:  # noqa: BLE001
+                    paper_fee_bps = Decimal("0")
+                expected_close_fee = (
+                    reduce_qty * current * paper_fee_bps / Decimal("10000")
+                ).quantize(Decimal("0.00000001"))
+                expected_harvest_profit = (
+                    effective_decision.profit_absolute * effective_decision.reduce_fraction
+                ).quantize(Decimal("0.00000001"))
+                expected_net_harvest_profit = expected_harvest_profit - expected_close_fee
+                if expected_net_harvest_profit <= 0:
+                    logger.info(
+                        "orchestrator | profit-harvest SUPPRESSED (cost_not_covered) | "
+                        "broker={} symbol={} reason={} expected_profit={} expected_fee={}",
+                        broker,
+                        sym,
+                        effective_decision.reason,
+                        expected_harvest_profit,
+                        expected_close_fee,
+                    )
+                    continue
                 signal = RiskSignal(
                     signal_id=f"profitharvest-{sym}-{int(now_ts)}",
                     symbol=sym,
@@ -2693,6 +2715,8 @@ class Orchestrator:
                         "profit_harvest_reason": effective_decision.reason,
                         "profit_harvest_reduce_fraction": str(effective_decision.reduce_fraction),
                         "profit_harvest_profit_absolute": str(effective_decision.profit_absolute),
+                        "profit_harvest_expected_close_fee": str(expected_close_fee),
+                        "profit_harvest_expected_net_profit": str(expected_net_harvest_profit),
                         "profit_harvest_profit_pct": str(effective_decision.profit_pct),
                         "profit_harvest_profit_pct_of_nav": str(effective_decision.profit_pct_of_nav),
                         "profit_harvest_peak_profit_absolute": str(effective_decision.peak_profit_absolute),

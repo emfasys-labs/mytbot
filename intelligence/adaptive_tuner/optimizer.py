@@ -52,6 +52,24 @@ def _best_bucket(buckets: dict[str, dict[str, Any]], min_samples: int) -> tuple[
     return best_val, (best_mean if best_val is not None else 0.0)
 
 
+def _apply_loss_guard(p: TunableParam, cur: float, new: float, reward: Decimal) -> tuple[float, bool]:
+    """On a losing reward, move one bounded step in the configured de-risk direction."""
+    if reward >= 0:
+        return new, False
+    direction = (p.loss_guard_direction or "none").strip().lower()
+    step = float(p.step)
+    lo, hi = float(p.min_value), float(p.max_value)
+    if direction == "up":
+        guarded = min(hi, max(new, cur + step))
+        return guarded, guarded != new
+    if direction == "down":
+        guarded = max(lo, min(new, cur - step))
+        return guarded, guarded != new
+    if direction == "hold" and new != cur:
+        return cur, True
+    return new, False
+
+
 def attribute_and_propose(
     state: dict[str, Any],
     config: TunerConfig,
@@ -127,6 +145,10 @@ def attribute_and_propose(
             else:
                 new = cur
             source = "exploit"
+
+        new, loss_guarded = _apply_loss_guard(p, cur, new, reward)
+        if loss_guarded:
+            source = f"{source}_loss_guard"
 
         ps["current"][reg] = new
         ps["last_applied"][reg] = new

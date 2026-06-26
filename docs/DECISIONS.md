@@ -18,6 +18,18 @@
 
 ---
 
+## D205 — Poor-performance incident: churn, fee leakage, and false learning
+**Date:** 2026-06-26
+**Decision:** Poor paper performance is treated as a control-system failure until proven otherwise; learning and profit-harvest paths must use executable, net-of-cost evidence.
+
+**Problem.** Live audit showed infra healthy but behaviour poor: TWR about `-0.42%` since 2026-06-25, net trading P&L about `-$5.26k`, with historical AAPL damage plus continuing AUDUSD/XRP unrealised loss. The main live leak was churn: repeated ETH/XRP opens followed by profit-harvest sells, while fees alone reached about `$1.89k` over 145 fills. Trade admission diagnostics also showed bad learning hygiene: many due rows were pending because labelling waited for the longest horizon, and executed open rows without mark prices were being treated as fee-only losses.
+
+**Fix.** Adaptive tuner parameters now declare `loss_guard_direction`; on negative realised reward, the optimiser moves one bounded step in the configured de-risk direction instead of exploring into more risk. Tuner cycles now skip when there are no fills in the attribution window, so no-outcome periods cannot randomly move live parameters. Profit-harvest now suppresses reduce-only harvests when expected close-leg fee consumes the harvested gross profit. Trade admission labelling now labels at the first matured horizon, marks open trades to market from `price_history` or `feature_snapshots` when available, and labels still-open executed rows as `unpriced` rather than training on fee-only false negatives.
+
+**Status:** Implemented and restarted via `python run.py` PID 51844. Recomputed recent admission outcomes: `not_executed=625`, `unpriced=53`, `negative=27`, `pending=48`; model has 27 real negative rows and no false fee-only open losses. Verification: focused tests `tests/test_adaptive_tuner.py`, `tests/test_trade_admission.py`, `tests/test_profit_harvest.py` -> `44 passed`; `py_compile` clean. Runtime after restart: paper, 10/10 brokers, pipeline running; first loop had not completed at the immediate post-restart health check.
+
+---
+
 ## D204 — Replace direct-news hard veto with tunable learning penalty
 **Date:** 2026-06-26
 **Decision:** Direct symbol/company news should influence score and size through parameters, not hard-coded rejection.

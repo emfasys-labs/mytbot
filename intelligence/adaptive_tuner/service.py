@@ -142,6 +142,19 @@ class AdaptiveTunerService:
             return None
 
         reward, fills_summary = await self._recent_reward(session_factory, nav)
+        if int(fills_summary.get("fills", 0) or 0) <= 0:
+            logger.info(
+                "adaptive_tuner | regime={} skipped | no executed fills in attribution window",
+                regime,
+            )
+            return {
+                "regime": regime,
+                "reward": float(reward),
+                "applied": 0,
+                "ai_used": False,
+                "fills_summary": fills_summary,
+                "skipped": "no_fills",
+            }
 
         # Reward trend for AI context.
         trend = list(self.state.get("reward_trend", []))[-8:]

@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from intelligence.trade_admission.model import AdmissionModel
-from storage.models import FillLog, PriceHistory, TradeAdmissionLog
+from storage.models import FeatureSnapshot, FillLog, PriceHistory, TradeAdmissionLog
 
 _STOP_DERISK_SOURCES = {"stop_loss", "intraday_derisk", "aggregate_derisk"}
 _FAIL_TOKENS = ("fail", "error", "reject", "blocked")
@@ -148,7 +148,7 @@ async def _price_excursion(
     try:
         rows = (
             await session.execute(
-                select(PriceHistory.high, PriceHistory.low)
+                select(PriceHistory.timestamp, PriceHistory.high, PriceHistory.low, PriceHistory.close)
                 .where(
                     PriceHistory.symbol == symbol,
                     PriceHistory.timestamp > start,
@@ -160,8 +160,30 @@ async def _price_excursion(
         ).all()
     except Exception:  # noqa: BLE001
         return out
-    highs = [h for h, _ in ((_dec(a), _dec(b)) for a, b in rows) if h is not None]
-    lows = [l for _, l in ((_dec(a), _dec(b)) for a, b in rows) if l is not None]
+    if not rows:
+        try:
+            rows = (
+                await session.execute(
+                    select(
+                        FeatureSnapshot.bar_timestamp,
+                        FeatureSnapshot.high,
+                        FeatureSnapshot.low,
+                        FeatureSnapshot.close,
+                    )
+                    .where(
+                        FeatureSnapshot.symbol == symbol,
+                        FeatureSnapshot.bar_timestamp > start,
+                        FeatureSnapshot.bar_timestamp <= end,
+                    )
+                    .order_by(FeatureSnapshot.bar_timestamp.asc())
+                    .limit(5000)
+                )
+            ).all()
+        except Exception:  # noqa: BLE001
+            rows = []
+    highs = [h for _ts, h, _l, _c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if h is not None]
+    lows = [l for _ts, _h, l, _c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if l is not None]
+    closes = [(ts, c) for ts, _h, _l, c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if c is not None]
     if not highs or not lows:
         return out
     hi = max(highs)
@@ -174,6 +196,10 @@ async def _price_excursion(
     out["max_favorable_move"] = float(max(Decimal("0"), favorable))
     out["max_adverse_move"] = float(max(Decimal("0"), adverse))
     out["became_profitable_later"] = bool(favorable > 0 and adverse > 0)
+    if closes:
+        ts, close = closes[-1]
+        out["horizon_price"] = close
+        out["horizon_price_at"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
     return out
 
 
@@ -188,11 +214,32 @@ def _status_flags(row: TradeAdmissionLog) -> dict[str, bool]:
     }
 
 
-def _horizon_snapshot(fills: list[dict[str, Any]], end: datetime) -> dict[str, Any]:
+def _horizon_snapshot(
+    fills: list[dict[str, Any]],
+    end: datetime,
+    *,
+    horizon_price: Decimal | None = None,
+) -> dict[str, Any]:
     """Aggregate fill-derived outcome for fills that landed by ``end``."""
     within = [f for f in fills if f["ts"] is not None and f["ts"] <= end]
-    pnl = sum((f["pnl"] for f in within), Decimal("0"))
+    realised = sum((f.get("realised", Decimal("0")) for f in within), Decimal("0"))
+    fees = sum((f.get("fee", Decimal("0")) for f in within), Decimal("0"))
+    pnl = realised - fees
     notional = sum((f["notional"] for f in within), Decimal("0"))
+    mtm_used = False
+    signed_qty = sum((f.get("signed_qty", Decimal("0")) for f in within), Decimal("0"))
+    priced_qty = sum((abs(f.get("signed_qty", Decimal("0"))) for f in within if f.get("fill_price") is not None), Decimal("0"))
+    if realised == 0 and signed_qty != 0 and horizon_price is not None and priced_qty > 0:
+        weighted_entry = (
+            sum(
+                (abs(f.get("signed_qty", Decimal("0"))) * f["fill_price"])
+                for f in within
+                if f.get("fill_price") is not None
+            )
+            / priced_qty
+        )
+        pnl = signed_qty * (horizon_price - weighted_entry) - fees
+        mtm_used = True
     needed_derisk = any(f["derisk"] for f in within)
     hit_stop = any(f["derisk"] in _STOP_DERISK_SOURCES for f in within)
     # churn: an opening fill that lands after the book had flattened.
@@ -207,6 +254,9 @@ def _horizon_snapshot(fills: list[dict[str, Any]], end: datetime) -> dict[str, A
         "fills": len(within),
         "net_return_after_costs": float(pnl / notional) if notional > 0 else None,
         "net_pnl": float(pnl),
+        "realised_pnl": float(realised),
+        "fees": float(fees),
+        "mark_to_market_used": mtm_used,
         "needed_derisk": needed_derisk,
         "hit_stop_like_condition": hit_stop,
         "churn_reentry": churn,
@@ -225,18 +275,18 @@ async def label_due_outcomes(
 ) -> int:
     """Attach fill- and price-derived outcomes to matured admission rows.
 
-    A row is finalised once its *longest* horizon has elapsed; at that point all
-    shorter horizons are computed from stored data in a single pass. Direct
+    A row is labelled once its first configured horizon has elapsed; all
+    horizons that are mature at that time are computed from stored data. Direct
     ``signal_id`` fill matches drive realised P&L; price history drives adverse/
-    favorable excursion. Rich myTbot-native labels at the longest horizon are
+    favorable excursion. Rich myTbot-native labels at the latest mature horizon are
     written to ``outcome_labels``; per-horizon snapshots to ``outcome_horizons``.
     """
     if session_factory is None:
         return 0
     horizons = sorted({max(1, int(h)) for h in horizons_minutes} or {60})
-    max_h = horizons[-1]
+    first_h = horizons[0]
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=max_h)
+    cutoff = now - timedelta(minutes=first_h)
     async with session_factory() as session:
         q = await session.execute(
             select(TradeAdmissionLog)
@@ -261,18 +311,24 @@ async def label_due_outcomes(
                         FillLog.realised_pnl,
                         FillLog.fee,
                         FillLog.notional,
+                        FillLog.signed_quantity,
+                        FillLog.fill_price,
                         FillLog.derisk_source,
                         FillLog.position_qty_after,
                     ).where(FillLog.signal_id == row.signal_id)
                 )
-                for ts, rpnl, fee, notional, derisk, qty_after in fq.all():
+                for ts, rpnl, fee, notional, signed_qty, fill_price, derisk, qty_after in fq.all():
                     if ts is not None and ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
                     fills.append(
                         {
                             "ts": ts,
+                            "realised": _dec(rpnl) or Decimal("0"),
+                            "fee": _dec(fee) or Decimal("0"),
                             "pnl": (_dec(rpnl) or Decimal("0")) - (_dec(fee) or Decimal("0")),
                             "notional": _dec(notional) or Decimal("0"),
+                            "signed_qty": _dec(signed_qty) or Decimal("0"),
+                            "fill_price": _dec(fill_price),
                             "derisk": str(derisk or "").strip().lower(),
                             "qty_after": _dec(qty_after) or Decimal("0"),
                         }
@@ -283,9 +339,7 @@ async def label_due_outcomes(
                 end = start + timedelta(minutes=h)
                 if end > now:
                     continue
-                snap = _horizon_snapshot(fills, end)
-                snap.update(
-                    await _price_excursion(
+                price_context = await _price_excursion(
                         session,
                         symbol=row.symbol,
                         side=row.side,
@@ -293,11 +347,15 @@ async def label_due_outcomes(
                         start=start,
                         end=end,
                     )
+                snap = _horizon_snapshot(fills, end, horizon_price=_dec(price_context.get("horizon_price")))
+                snap.update(
+                    price_context
                 )
                 horizon_snaps[str(h)] = snap
 
-            # Coarse summary + rich labels from the longest matured horizon.
-            longest = horizon_snaps.get(str(max_h)) or (
+            # Coarse summary + rich labels from the latest matured horizon.
+            latest_h = max((int(k) for k in horizon_snaps), default=first_h)
+            longest = horizon_snaps.get(str(latest_h)) or (
                 horizon_snaps[max(horizon_snaps, key=lambda k: int(k))] if horizon_snaps else {}
             )
             executed = bool(longest.get("fills"))
@@ -305,12 +363,21 @@ async def label_due_outcomes(
             status_flags = _status_flags(row)
             rich = dict(longest)
             rich.update(status_flags)
+            rich["outcome_maturity_minutes"] = latest_h
             row.outcome_horizons = _json_safe(horizon_snaps)
             row.outcome_labels = _json_safe(rich)
             row.outcome_observed_at = now
             if not executed:
                 row.outcome_label = "not_executed"
                 row.outcome_net_pnl = Decimal("0")
+                row.outcome_return = None
+            elif (
+                int(longest.get("fills") or 0) > 0
+                and not bool(longest.get("mark_to_market_used"))
+                and Decimal(str(longest.get("realised_pnl", 0) or 0)) == 0
+            ):
+                row.outcome_label = "unpriced"
+                row.outcome_net_pnl = None
                 row.outcome_return = None
             else:
                 row.outcome_net_pnl = net_pnl
@@ -516,4 +583,3 @@ async def fetch_admission_diagnostics(
             logger.debug("trade_admission | diagnostics failed | {}", exc)
             out["error"] = str(exc)
     return out
-

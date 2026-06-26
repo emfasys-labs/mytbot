@@ -19,7 +19,7 @@ from intelligence.trade_admission.schema import (
     AdmissionConfig,
 )
 from intelligence.trade_admission.service import TradeAdmissionService
-from storage.models import Base, FillLog, TradeAdmissionLog
+from storage.models import Base, FeatureSnapshot, FillLog, PriceHistory, TradeAdmissionLog
 
 
 @pytest_asyncio.fixture
@@ -226,6 +226,207 @@ async def test_label_due_outcomes_matches_fill_by_signal_id(sf):
     assert "60" in row.outcome_horizons
     assert isinstance(row.outcome_labels, dict)
     assert row.outcome_labels.get("better_than_book_holding") is True
+
+
+@pytest.mark.asyncio
+async def test_label_due_outcomes_uses_first_mature_horizon_for_fast_learning(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                side="sell",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("-10"),
+                fill_price=Decimal("103"),
+                notional=Decimal("1030"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("30"),
+                position_qty_after=Decimal("0"),
+                signal_id="sig-1",
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60, 240, 1440))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "positive"
+    assert set(row.outcome_horizons) == {"60"}
+    assert row.outcome_labels["outcome_maturity_minutes"] == 60
+
+
+@pytest.mark.asyncio
+async def test_label_due_outcomes_marks_open_trade_to_market(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("10"),
+                fill_price=Decimal("100"),
+                notional=Decimal("1000"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("0"),
+                position_qty_after=Decimal("10"),
+                signal_id="sig-1",
+            )
+        )
+        session.add(
+            PriceHistory(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=40),
+                symbol="AAPL",
+                timeframe="1m",
+                broker="test",
+                open=Decimal("104"),
+                high=Decimal("106"),
+                low=Decimal("103"),
+                close=Decimal("105"),
+                volume=Decimal("1000"),
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60,))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "positive"
+    assert row.outcome_net_pnl == Decimal("49.0")
+    assert row.outcome_labels["mark_to_market_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_label_due_outcomes_marks_to_market_from_feature_snapshot(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("10"),
+                fill_price=Decimal("100"),
+                notional=Decimal("1000"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("0"),
+                position_qty_after=Decimal("10"),
+                signal_id="sig-1",
+            )
+        )
+        session.add(
+            FeatureSnapshot(
+                symbol="AAPL",
+                timeframe="1m",
+                bar_timestamp=datetime.now(timezone.utc) - timedelta(minutes=40),
+                open=Decimal("104"),
+                high=Decimal("106"),
+                low=Decimal("103"),
+                close=Decimal("105"),
+                volume=Decimal("1000"),
+                features={},
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60,))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "positive"
+    assert row.outcome_net_pnl == Decimal("49.0")
+    assert row.outcome_labels["mark_to_market_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_label_due_outcomes_does_not_train_fee_only_open_without_price(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("10"),
+                fill_price=Decimal("100"),
+                notional=Decimal("1000"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("0"),
+                position_qty_after=Decimal("10"),
+                signal_id="sig-1",
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60,))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "unpriced"
+    assert row.outcome_net_pnl is None
 
 
 def _candidate(**md):

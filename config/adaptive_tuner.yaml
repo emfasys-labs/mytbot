@@ -37,28 +37,34 @@ parameters:
     min: 0.08
     max: 0.40
     step: 0.02
+    loss_guard_direction: up
   - name: concentration_exponent
     namespace: portfolio_orchestrator
     min: 1.0
     max: 2.5
     step: 0.1
+    loss_guard_direction: down
   - name: net_cap_pct_of_gross
     namespace: portfolio_orchestrator
     min: 0.40
     max: 1.00
     step: 0.05
+    loss_guard_direction: down
   - name: max_position_pct_of_nav
     namespace: portfolio_orchestrator
     min: 0.10
     max: 0.30
     step: 0.02
+    loss_guard_direction: down
   - name: gross_target_pct.trader
     namespace: portfolio_orchestrator
     min: 0.50
     max: 1.20
     step: 0.05
+    loss_guard_direction: down
   - name: directional_news_weight
     namespace: trade_admission
     min: 0.00
     max: 1.00
     step: 0.05
+    loss_guard_direction: up

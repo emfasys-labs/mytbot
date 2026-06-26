@@ -49,6 +49,7 @@ def load_tuner_config(path: str | Path = "config/adaptive_tuner.yaml") -> TunerC
                 max_value=hi,
                 step=_dec(row.get("step"), "0.05"),
                 regime_conditioned=_bool(row.get("regime_conditioned"), True),
+                loss_guard_direction=str(row.get("loss_guard_direction") or "none").strip().lower(),
             )
         )
 
