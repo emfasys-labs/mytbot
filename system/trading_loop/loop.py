@@ -46,6 +46,7 @@ from intelligence.trade_admission import TradeAdmissionService
 from intelligence.adaptive_tuner import AdaptiveTunerService
 from portfolio.allocation_engine import build_allocation_decision
 from portfolio.d015_smoothing import allocation_smoothing_snapshot, apply_allocation_smoothing
+from portfolio.d015_replacement_context import ReplacementContext
 from risk.engine import RiskEngine, RiskVerdict
 from risk.regime_state import compute_regime_state_async
 from signals.opportunity_engine import build_opportunities_async
@@ -315,6 +316,138 @@ async def _merge_live_broker_positions_into_portfolio_state(
     portfolio_state["current_gross_exposure"] = gross
     portfolio_state["symbol_exposure"] = symbol_exposure
     portfolio_state["asset_class_exposure"] = asset_class_exposure
+
+
+def _reserve_symbol_key(symbol: Any) -> str:
+    """Canonical portfolio key used when reserve orders net existing exposure."""
+    value = str(symbol or "").strip().upper()
+    if value.endswith("=X"):
+        return value[:-2]
+    return value
+
+
+def _reserve_existing_exposure(
+    portfolio_state: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+) -> tuple[Decimal, bool]:
+    """Return same-direction exposure and whether an opposing position exists."""
+    symbol_key = _reserve_symbol_key(symbol)
+    intended_sign = 1 if str(side or "").strip().lower() in {"buy", "long", "b"} else -1
+    matched_rows: list[dict[str, Any]] = []
+    opposing = False
+    fallback_exposure = Decimal("0")
+
+    for position_key, raw_row in (portfolio_state.get("positions") or {}).items():
+        row = raw_row if isinstance(raw_row, dict) else {}
+        row_symbol = row.get("symbol")
+        if not row_symbol:
+            row_symbol = str(position_key or "").split(":", 1)[-1]
+        if _reserve_symbol_key(row_symbol) != symbol_key:
+            continue
+        try:
+            quantity = Decimal(str(row.get("quantity", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            continue
+        if quantity == 0:
+            continue
+        matched_rows.append(row)
+        if (quantity > 0) != (intended_sign > 0):
+            opposing = True
+        try:
+            price = Decimal(str(row.get("current_price", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            price = Decimal("0")
+        if price > 0:
+            fallback_exposure += abs(quantity) * price
+
+    if opposing:
+        return Decimal("0"), True
+
+    exposure = Decimal("0")
+    for raw_symbol, raw_notional in (portfolio_state.get("symbol_exposure") or {}).items():
+        if _reserve_symbol_key(raw_symbol) != symbol_key:
+            continue
+        try:
+            notional = Decimal(str(raw_notional or "0"))
+        except Exception:  # noqa: BLE001
+            continue
+        if notional.is_finite() and notional > 0:
+            exposure += notional
+
+    if exposure <= 0 and matched_rows:
+        exposure = fallback_exposure
+    return exposure, False
+
+
+def _orchestrator_context_symbol(symbol: Any) -> str:
+    value = _reserve_symbol_key(symbol)
+    if value.endswith("=F"):
+        value = value[:-2]
+    if value.endswith("-USD") and len(value) > 4:
+        value = value[:-4]
+    return value
+
+
+def _record_orchestrator_context_event(
+    context: ReplacementContext | None,
+    *,
+    symbol: str,
+    kind: str,
+    is_cull: bool = False,
+    now: datetime | None = None,
+) -> None:
+    if context is None:
+        return
+    key = _orchestrator_context_symbol(symbol)
+    if not key:
+        return
+    at = now or datetime.now(timezone.utc)
+    context.last_event_at_by_symbol[key] = at
+    if is_cull:
+        context.last_cull_at_by_symbol[key] = at
+    context.recent_events.append(
+        {
+            "symbol": key,
+            "kind": str(kind or "unknown"),
+            "is_cull": bool(is_cull),
+            "at": at.isoformat(),
+        }
+    )
+    context.recent_events[:] = context.recent_events[-50:]
+
+
+def _orchestrator_recently_culled(
+    context: ReplacementContext | None,
+    *,
+    symbol: str,
+    config: dict[str, Any],
+    now: datetime | None = None,
+) -> bool:
+    if context is None:
+        return False
+    recycle_cfg = config.get("capital_recycle") or {}
+    rotation_cfg = config.get("rotation") or {}
+    try:
+        cooldown = float(
+            recycle_cfg.get(
+                "symbol_cooldown_sec",
+                rotation_cfg.get("symbol_cooldown_sec", 0),
+            )
+        )
+    except (TypeError, ValueError):
+        cooldown = 0.0
+    if cooldown <= 0:
+        return False
+    key = _orchestrator_context_symbol(symbol)
+    last = context.last_cull_at_by_symbol.get(key)
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return (current - last.astimezone(timezone.utc)).total_seconds() < cooldown
 
 
 class TradingLoop:
@@ -885,6 +1018,17 @@ class TradingLoop:
             )
             self.sig_engine = SignalEngine(_se_cfg, accumulator=_acc)
             self.risk_engine = RiskEngine(risk_cfg)
+            try:
+                labelled_at_start = await self.trade_admission.label_due(session_factory)
+                admission_health = await self.trade_admission.refresh_model(session_factory)
+                self._admission_model_refreshed_at = datetime.now(timezone.utc)
+                logger.info(
+                    "trade_admission | startup model ready | labelled={} health={}",
+                    labelled_at_start,
+                    admission_health,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._swallow("trade_admission_startup_refresh", exc)
             if self.risk_engine.is_killed:
                 logger.critical("trading_loop | risk kill switch is latched from persisted state; new orders remain blocked")
             # Apply persisted mode overrides (if user selected a mode before this start)
@@ -2562,6 +2706,7 @@ class TradingLoop:
                                         )
                                 except Exception as exc:  # noqa: BLE001
                                     self._swallow("edge_kelly_trust", exc)
+                                _orch_repl_ctx = await load_replacement_context_from_bus(bus)
                                 executed = await self._run_orchestrated_tick(
                                     batch_candidates=batch_candidates,
                                     portfolio_dict=portfolio_dict,
@@ -2575,7 +2720,9 @@ class TradingLoop:
                                     resolve_price=_resolve_price_for_symbol,
                                     edge_kelly_trust=_edge_kelly,
                                     ai_result=ai_result,
+                                    replacement_context=_orch_repl_ctx,
                                 )
+                                await save_replacement_context_to_bus(bus, _orch_repl_ctx)
                             elif zero_allocation or (self._use_global_edge and not use_legacy):
                                 executed, ge_dash_ok = await self._run_global_edge_tick(
                                     batch_candidates=[] if zero_allocation else batch_candidates,
@@ -3295,6 +3442,7 @@ class TradingLoop:
         resolve_price: Any = None,
         edge_kelly_trust: dict[str, Decimal] | None = None,
         ai_result: Any | None = None,
+        replacement_context: ReplacementContext | None = None,
     ) -> int:
         """D156 portfolio-orchestrator path.
 
@@ -3368,6 +3516,68 @@ class TradingLoop:
             ),
         )
         result = orchestrate(intents, book, nav=total_equity, mode=mode_raw, config=cfg)
+        book_notional_by_symbol = {
+            _reserve_symbol_key(position.symbol): position.signed_notional
+            for position in book
+        }
+        outcome_scaled_orders: list[Any] = []
+        outcome_target_diag: dict[str, str] = {}
+        learned_rebalance_band = total_equity * cfg.rebalance_band_pct_of_nav
+        for order in result.orders:
+            if order.close_only:
+                outcome_scaled_orders.append(order)
+                continue
+            multiplier = self.trade_admission.outcome_size_multiplier(
+                strategy="portfolio_orchestrator",
+                asset_class=order.asset_class,
+            )
+            if multiplier >= 1:
+                outcome_scaled_orders.append(order)
+                continue
+            desired = order.target_notional * multiplier
+            current = book_notional_by_symbol.get(
+                _reserve_symbol_key(order.symbol),
+                Decimal("0"),
+            )
+            delta_signed = desired - current
+            if delta_signed == 0:
+                continue
+            if (
+                current != 0
+                and learned_rebalance_band > 0
+                and abs(delta_signed) < learned_rebalance_band
+            ):
+                result.diagnostics["outcome_target_rebalances_suppressed"] = (
+                    int(
+                        result.diagnostics.get(
+                            "outcome_target_rebalances_suppressed",
+                            0,
+                        )
+                    )
+                    + 1
+                )
+                outcome_target_diag[order.symbol] = str(multiplier)
+                continue
+            current_direction = 1 if current > 0 else (-1 if current < 0 else 0)
+            desired_direction = 1 if desired > 0 else (-1 if desired < 0 else 0)
+            reducing = (
+                current_direction != 0
+                and desired_direction == current_direction
+                and abs(desired) < abs(current)
+            )
+            scaled_order = dataclass_replace(
+                order,
+                side="buy" if delta_signed > 0 else "sell",
+                delta_notional=abs(delta_signed),
+                reduce_only=reducing,
+                reason=f"{order.reason}:outcome_target",
+                target_notional=desired,
+            )
+            outcome_scaled_orders.append(scaled_order)
+            outcome_target_diag[order.symbol] = str(multiplier)
+        result.orders[:] = outcome_scaled_orders
+        if outcome_target_diag:
+            result.diagnostics["outcome_target_multipliers"] = outcome_target_diag
         logger.info(
             "orchestrator | intents={} book={} orders={} netted={} conflicts={} protected={} "
             "flips={} opens={} closes={} reduces={} increases={} suppressed={} net_target={}",
@@ -3416,7 +3626,131 @@ class TradingLoop:
         # rejected by the execution pre-check). Use the live book price where
         # we have it, else resolve the latest close.
         book_px = {p.symbol: p.current_price for p in book if p.current_price > 0}
+        candidate_context_by_symbol: dict[str, tuple[Decimal, dict[str, Any]]] = {}
+        for candidate in batch_candidates or []:
+            candidate_symbol = _reserve_symbol_key(getattr(candidate, "symbol", ""))
+            if not candidate_symbol:
+                continue
+            try:
+                strength = abs(
+                    Decimal(
+                        str(
+                            getattr(candidate, "confidence", None)
+                            or getattr(candidate, "adjusted_signal_strength", None)
+                            or getattr(candidate, "raw_signal_strength", 0)
+                            or 0
+                        )
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                strength = Decimal("0")
+            current = candidate_context_by_symbol.get(candidate_symbol)
+            if current is None or strength > current[0]:
+                candidate_context_by_symbol[candidate_symbol] = (
+                    strength,
+                    dict(getattr(candidate, "metadata", None) or {}),
+                )
         executed = 0
+        if not any(bool(od.reduce_only or od.close_only) for od in result.orders):
+            try:
+                ge_coord = GlobalEdgeCoordinator(self._global_edge_cfg or {}, logger=logger)
+                held_edges = held_positions_from_portfolio(
+                    portfolio_dict,
+                    nav=total_equity,
+                )
+                idle_loss_actions = ge_coord.propose_idle_loss_recycle_actions(
+                    held_edges,
+                    active_mode=mode_raw,
+                    replacement_context=replacement_context,
+                )
+                idle_loss_actions = self._suppress_reducing_actions_during_warmup(idle_loss_actions)
+            except Exception as exc:  # noqa: BLE001
+                idle_loss_actions = []
+                logger.debug("orchestrator | idle_loss_recycle unavailable | {}", exc)
+            if idle_loss_actions:
+                logger.info(
+                    "orchestrator | idle_loss_recycle | {} reduce-only action(s) | sample={}",
+                    len(idle_loss_actions),
+                    [
+                        (
+                            a.symbol,
+                            (a.metadata or {}).get("unrealised_return"),
+                            (a.metadata or {}).get("broker"),
+                        )
+                        for a in idle_loss_actions[:5]
+                    ],
+                )
+            for action in idle_loss_actions:
+                try:
+                    sig = process_coordinator_action(
+                        action,
+                        self.sig_engine,
+                        portfolio_value=tradable,
+                        news_score=_news_score_for_symbol(ai_result, action.symbol),
+                    )
+                    if sig is None:
+                        if sc_log_buffer is not None:
+                            sc_log_buffer.append(
+                                strategy_candidate_row(
+                                    symbol=str(action.symbol),
+                                    strategy=str(action.strategy_name),
+                                    status="execution_incomplete",
+                                    reason="signal_engine_returned_none",
+                                    loop_iteration=self.iterations,
+                                    metadata={
+                                        "kind": str(action.kind),
+                                        "orchestrator_path": "portfolio_orchestrator_idle_loss_recycle",
+                                    },
+                                )
+                            )
+                        continue
+                    block_reason, block_meta = await self._preflight_built_signal(
+                        sig,
+                        action,
+                        portfolio_dict=portfolio_dict,
+                        session_factory=session_factory,
+                    )
+                    if block_reason:
+                        if sc_log_buffer is not None:
+                            sc_log_buffer.append(
+                                strategy_candidate_row(
+                                    symbol=str(getattr(sig, "symbol", "") or ""),
+                                    strategy=str(getattr(sig, "strategy", "") or ""),
+                                    side=str(getattr(sig, "side", "") or ""),
+                                    confidence=float(getattr(sig, "confidence", 0) or 0),
+                                    status="filtered_preflight_viability",
+                                    reason=block_reason,
+                                    loop_iteration=self.iterations,
+                                    metadata={
+                                        "kind": str(action.kind),
+                                        "orchestrator_path": "portfolio_orchestrator_idle_loss_recycle",
+                                        **block_meta,
+                                    },
+                                )
+                            )
+                        continue
+                    ok = await self._process_signal_global(
+                        sig,
+                        session_factory,
+                        portfolio_dict,
+                        total_equity,
+                        tradable,
+                        sc_log_buffer=sc_log_buffer,
+                    )
+                    if ok:
+                        _record_orchestrator_context_event(
+                            replacement_context,
+                            symbol=action.symbol,
+                            kind="idle_loss_recycle",
+                            is_cull=True,
+                        )
+                        executed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "orchestrator | idle_loss_recycle routing failed for {} | {}",
+                        action.symbol,
+                        exc,
+                    )
         for od in result.orders:
             try:
                 px = book_px.get(od.symbol)
@@ -3429,7 +3763,12 @@ class TradingLoop:
                     logger.debug("orchestrator | no price for {} — skipping order", od.symbol)
                     continue
                 is_reduce = bool(od.reduce_only or od.close_only)
+                candidate_context = candidate_context_by_symbol.get(
+                    _reserve_symbol_key(od.symbol),
+                    (Decimal("0"), {}),
+                )[1]
                 md: dict[str, Any] = {
+                    **candidate_context,
                     "close": str(px),
                     "orchestrator": True,
                     "orchestrator_reason": od.reason,
@@ -3437,6 +3776,13 @@ class TradingLoop:
                     "contributing_strategies": ",".join(od.contributing[:12]),
                     "confidence": str(min(Decimal("0.95"), max(Decimal("0.3"), abs(od.net_conviction)))),
                     "asset_class": od.asset_class or "equity",
+                    "trade_admission_target_multiplier_applied": (
+                        od.symbol in outcome_target_diag
+                    ),
+                    "trade_admission_target_multiplier": outcome_target_diag.get(
+                        od.symbol,
+                        "1",
+                    ),
                 }
                 if od.broker:
                     md["broker"] = od.broker
@@ -3505,6 +3851,12 @@ class TradingLoop:
                     sc_log_buffer=sc_log_buffer,
                 )
                 if ok:
+                    _record_orchestrator_context_event(
+                        replacement_context,
+                        symbol=od.symbol,
+                        kind="orchestrator_reduce" if is_reduce else "orchestrator_open",
+                        is_cull=bool(od.close_only),
+                    )
                     executed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("orchestrator | order routing failed for {} | {}", od.symbol, exc)
@@ -3521,9 +3873,23 @@ class TradingLoop:
                 resolve_price=resolve_price,
                 sc_log_buffer=sc_log_buffer,
                 ai_result=ai_result,
+                mode_raw=mode_raw,
+                replacement_context=replacement_context,
             )
             executed += reserve_executed
         return executed
+
+    def _global_edge_action_budget_for_mode(self, mode_raw: str) -> int:
+        raw = (self._global_edge_cfg or {}).get("max_actions_per_tick", 3)
+        key = (mode_raw or "trader").strip().lower()
+        if key not in {"hunter", "trader", "defender"}:
+            key = "trader"
+        if isinstance(raw, dict):
+            raw = raw.get(key, raw.get("trader", 3))
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return 3
 
     async def _run_orchestrator_reserve_candidates(
         self,
@@ -3537,12 +3903,16 @@ class TradingLoop:
         resolve_price: Any,
         sc_log_buffer: list[dict[str, Any]] | None = None,
         ai_result: Any | None = None,
+        mode_raw: str = "trader",
+        replacement_context: ReplacementContext | None = None,
     ) -> int:
         """Try generated candidates when the allocator's top actions all fail.
 
-        The reserve path is deliberately narrow: it opens at most one candidate
-        per cycle, uses the candidate's own already-computed target notional,
-        and sends it through the same preflight/admission/risk/execution stack.
+        The reserve path uses each candidate's own already-computed target
+        notional and sends it through the same preflight/admission/risk/
+        execution stack. It shares the global-edge action budget so a flat book
+        can build a diversified set when several independent candidates clear
+        the live gates.
         """
         if self.sig_engine is None:
             return 0
@@ -3570,9 +3940,24 @@ class TradingLoop:
             return None
 
         reserves = sorted(batch_candidates or [], key=_candidate_strength, reverse=True)
+        action_budget = self._global_edge_action_budget_for_mode(mode_raw)
+        executed = 0
         for cand in reserves:
+            if executed >= action_budget:
+                break
             symbol = str(getattr(cand, "symbol", "") or "")
             if not symbol or symbol in attempted_symbols:
+                continue
+            attempted_symbols.add(symbol)
+            if _orchestrator_recently_culled(
+                replacement_context,
+                symbol=symbol,
+                config=self._global_edge_cfg or {},
+            ):
+                logger.info(
+                    "orchestrator | reserve deferred {} | recent loss recycle still in recovery window",
+                    symbol,
+                )
                 continue
             capital = _candidate_capital(cand)
             if capital is None or capital <= 0:
@@ -3609,6 +3994,69 @@ class TradingLoop:
             )
             if sig is None:
                 continue
+            try:
+                signal_quantity = abs(Decimal(str(getattr(sig, "suggested_quantity", "0") or "0")))
+                signal_price = Decimal(str(getattr(sig, "suggested_price", "0") or "0"))
+            except Exception:  # noqa: BLE001
+                continue
+            if signal_quantity <= 0 or signal_price <= 0:
+                continue
+            admitted_target = signal_quantity * signal_price
+            outcome_multiplier = self.trade_admission.outcome_size_multiplier(
+                strategy=str(getattr(cand, "strategy_name", "") or "unknown"),
+                asset_class=str(
+                    getattr(cand, "asset_class", "")
+                    or (getattr(sig, "metadata", None) or {}).get("asset_class")
+                    or ""
+                ),
+            )
+            admitted_target *= outcome_multiplier
+            existing_exposure, opposing_position = _reserve_existing_exposure(
+                portfolio_dict,
+                symbol=symbol,
+                side=str(getattr(sig, "side", side) or side),
+            )
+            if opposing_position:
+                logger.info(
+                    "orchestrator | reserve skipped {} | opposing position is allocator-owned",
+                    symbol,
+                )
+                continue
+            remaining_target = admitted_target - existing_exposure
+            if remaining_target <= 0:
+                logger.info(
+                    "orchestrator | reserve target already met {} | admitted={} existing={}",
+                    symbol,
+                    admitted_target,
+                    existing_exposure,
+                )
+                continue
+
+            remaining_ratio = min(Decimal("1"), remaining_target / admitted_target)
+            effective_quantity = signal_quantity * remaining_ratio
+            signal_md = dict(getattr(sig, "metadata", None) or {})
+            signal_md["reserve_candidate_target_notional"] = str(capital)
+            signal_md["reserve_admitted_target_notional"] = str(admitted_target)
+            signal_md["trade_admission_target_multiplier_applied"] = (
+                outcome_multiplier < 1
+            )
+            signal_md["trade_admission_target_multiplier"] = str(
+                outcome_multiplier
+            )
+            signal_md["reserve_existing_notional"] = str(existing_exposure)
+            signal_md["reserve_remaining_target_notional"] = str(remaining_target)
+            signal_md["target_notional"] = str(remaining_target)
+            signal_md["risk_notional_override"] = str(remaining_target)
+            signal_md["sizing_final_capital_required"] = str(remaining_target)
+            signal_md["sizing_final_action_capital"] = str(remaining_target)
+            signal_md["signal_engine_resolved_notional"] = str(remaining_target)
+            sig.suggested_quantity = effective_quantity
+            sig.metadata = signal_md
+            action = dataclass_replace(
+                action,
+                capital=remaining_target,
+                metadata=dict(signal_md),
+            )
             block_reason, block_meta = await self._preflight_built_signal(
                 sig,
                 action,
@@ -3645,8 +4093,13 @@ class TradingLoop:
             )
             if ok:
                 logger.info("orchestrator | reserve executed {} {}", sig.symbol, sig.side)
-                return 1
-        return 0
+                _record_orchestrator_context_event(
+                    replacement_context,
+                    symbol=sig.symbol,
+                    kind="reserve_open",
+                )
+                executed += 1
+        return executed
 
     async def _run_global_edge_tick(
         self,
@@ -4264,6 +4717,37 @@ class TradingLoop:
                     ],
                 )
                 actions = list(session_exit_actions) + list(actions)
+            try:
+                has_reduce_action = any(
+                    str(getattr(a, "kind", "") or "") == "trim_symbol"
+                    or bool((getattr(a, "metadata", None) or {}).get("reduce_only"))
+                    for a in actions
+                )
+                if held and not has_reduce_action:
+                    idle_loss_actions = coord.propose_idle_loss_recycle_actions(
+                        held,
+                        active_mode=mode_for_coord,
+                        replacement_context=repl_ctx,
+                    )
+                else:
+                    idle_loss_actions = []
+            except Exception as exc:  # noqa: BLE001
+                idle_loss_actions = []
+                logger.debug("trading_loop | idle_loss_recycle failed: {}", exc)
+            if idle_loss_actions:
+                logger.info(
+                    "trading_loop | idle_loss_recycle | freeing weakest losing capital via {} reduce-only action(s) | sample={}",
+                    len(idle_loss_actions),
+                    [
+                        (
+                            a.symbol,
+                            (a.metadata or {}).get("unrealised_return"),
+                            (a.metadata or {}).get("held_edge_basis"),
+                        )
+                        for a in idle_loss_actions[:5]
+                    ],
+                )
+                actions = list(idle_loss_actions) + list(actions)
             try:
                 if repl_ctx is not None and actions:
                     ts = datetime.now(timezone.utc)

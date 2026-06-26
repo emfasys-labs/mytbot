@@ -15,6 +15,7 @@ from control.runtime import get_risk_engine
 
 
 _NAV_CACHE_ATTR = "_portfolio_equity_value_cache"
+_SNAPSHOT_CACHE_ATTR = "_portfolio_equity_snapshot_cache"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,46 @@ def _extended_cache_ttl_seconds() -> float:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return 600.0
+
+
+def _poll_cache_ttl_seconds() -> float:
+    raw = os.getenv("LIVE_PORTFOLIO_VALUE_POLL_CACHE_TTL_SEC", "15")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def runtime_snapshot_cache_ttl_seconds() -> float:
+    """Configured coalescing window for concurrent runtime NAV readers."""
+    return _poll_cache_ttl_seconds()
+
+
+def _snapshot_cache_key(broker_manager: Any) -> tuple[Any, ...]:
+    allow = _nav_allowlist(broker_manager)
+    adapters = tuple(
+        sorted(str(name).strip().lower() for name in getattr(broker_manager, "adapters", {}))
+    )
+    disabled = tuple(sorted(_disabled_broker_names()))
+    return tuple(sorted(allow)) if allow is not None else adapters, disabled
+
+
+def _recent_snapshot(
+    broker_manager: Any,
+    *,
+    max_age_seconds: float,
+) -> PortfolioValueSnapshot | None:
+    if max_age_seconds <= 0:
+        return None
+    cached = getattr(broker_manager, _SNAPSHOT_CACHE_ATTR, None)
+    if not isinstance(cached, tuple) or len(cached) != 3:
+        return None
+    key, cached_at, snapshot = cached
+    if key != _snapshot_cache_key(broker_manager):
+        return None
+    if time.monotonic() - float(cached_at) > max_age_seconds:
+        return None
+    return snapshot if isinstance(snapshot, PortfolioValueSnapshot) else None
 
 
 def _cache_for(broker_manager: Any) -> dict[str, tuple[Decimal, float]]:
@@ -150,7 +191,11 @@ def _zero_balance_is_complete(name: str, balances: list[Any]) -> bool:
     return name != "ibkr" and balances is not None
 
 
-async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueSnapshot:
+async def live_portfolio_snapshot(
+    broker_manager: Any | None,
+    *,
+    max_age_seconds: float = 0.0,
+) -> PortfolioValueSnapshot:
     """
     Sum one equity figure per connected adapter (avoid double-counting duplicate CCY rows).
 
@@ -172,6 +217,9 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
     """
     if broker_manager is None:
         return PortfolioValueSnapshot(Decimal(0), False, tuple(), tuple())
+    recent = _recent_snapshot(broker_manager, max_age_seconds=max_age_seconds)
+    if recent is not None:
+        return recent
     allow = _nav_allowlist(broker_manager)
     disabled = _disabled_broker_names()
     cache = _cache_for(broker_manager)
@@ -235,15 +283,47 @@ async def live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueS
         for n in sorted(allow - disabled - known):
             missing.append(n)
     complete = bool(included) and not missing
-    return PortfolioValueSnapshot(
+    snapshot = PortfolioValueSnapshot(
         total if complete else Decimal(0),
         complete,
         tuple(included),
         tuple(missing),
         per_broker,
     )
+    try:
+        setattr(
+            broker_manager,
+            _SNAPSHOT_CACHE_ATTR,
+            (_snapshot_cache_key(broker_manager), time.monotonic(), snapshot),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return snapshot
 
 
-async def live_portfolio_value(broker_manager: Any | None) -> Decimal:
+async def live_portfolio_value(
+    broker_manager: Any | None,
+    *,
+    max_age_seconds: float = 0.0,
+) -> Decimal:
     """Return a complete live NAV, or zero when included broker coverage is incomplete."""
-    return (await live_portfolio_snapshot(broker_manager)).value
+    return (
+        await live_portfolio_snapshot(
+            broker_manager,
+            max_age_seconds=max_age_seconds,
+        )
+    ).value
+
+
+async def cached_live_portfolio_snapshot(
+    broker_manager: Any | None,
+) -> PortfolioValueSnapshot:
+    """Runtime monitor snapshot coalesced across concurrent readers."""
+    return await live_portfolio_snapshot(
+        broker_manager,
+        max_age_seconds=_poll_cache_ttl_seconds(),
+    )
+
+
+async def cached_live_portfolio_value(broker_manager: Any | None) -> Decimal:
+    return (await cached_live_portfolio_snapshot(broker_manager)).value

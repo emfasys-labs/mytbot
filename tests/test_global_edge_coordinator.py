@@ -413,6 +413,76 @@ def test_capital_recycle_respects_symbol_cooldown() -> None:
     assert coord.propose_capital_recycle_actions(held, replacement_context=ctx) == []
 
 
+def test_idle_loss_recycle_closes_weakest_losing_holding() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "idle_loss_recycle_enabled": True,
+                "idle_loss_max_actions_per_tick": 1,
+                "symbol_cooldown_sec": 900,
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="BETTER_LOSER",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.04"),
+            broker="ibkr",
+            metadata={"asset_class": "equity", "unrealised_return": "-0.01"},
+        ),
+        HeldPositionEdge(
+            symbol="WEAKEST_LOSER",
+            notional=Decimal("8000"),
+            expected_remaining_edge=Decimal("0.01"),
+            broker="ibkr",
+            metadata={"asset_class": "equity", "unrealised_return": "-0.001"},
+        ),
+        HeldPositionEdge(
+            symbol="WINNER",
+            notional=Decimal("12000"),
+            expected_remaining_edge=Decimal("0.00"),
+            broker="ibkr",
+            metadata={"asset_class": "equity", "unrealised_return": "0.001"},
+        ),
+    ]
+
+    actions = coord.propose_idle_loss_recycle_actions(held)
+
+    assert len(actions) == 1
+    assert actions[0].symbol == "WEAKEST_LOSER"
+    assert actions[0].kind == "trim_symbol"
+    assert actions[0].metadata["capital_recycle_reason"] == "idle_loss_recycle"
+    assert actions[0].metadata["close_only"] is True
+    assert actions[0].metadata["broker"] == "ibkr"
+
+
+def test_idle_loss_recycle_respects_symbol_cooldown() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "idle_loss_recycle_enabled": True,
+                "symbol_cooldown_sec": 900,
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="COOLDOWN",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.00"),
+            metadata={"asset_class": "equity", "unrealised_return": "-0.01"},
+        )
+    ]
+    ctx = ReplacementContext(
+        last_event_at_by_symbol={"COOLDOWN": datetime.now(timezone.utc) - timedelta(seconds=30)}
+    )
+
+    assert coord.propose_idle_loss_recycle_actions(held, replacement_context=ctx) == []
+
+
 def test_shed_respects_symbol_cooldown() -> None:
     coord = GlobalEdgeCoordinator({"shed": {"symbol_cooldown_sec": 900}})
     held = [
@@ -890,4 +960,3 @@ def test_propose_actions_adaptive_concentration_clamping() -> None:
     assert len(actions) == 1
     assert actions[0].symbol == "CCC"
     assert actions[0].capital == Decimal("4950.00")
-

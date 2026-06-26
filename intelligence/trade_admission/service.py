@@ -53,6 +53,25 @@ class TradeAdmissionService:
     def model(self) -> AdmissionModel:
         return self._model
 
+    def outcome_size_multiplier(
+        self,
+        *,
+        strategy: str,
+        asset_class: str | None,
+        score: Decimal | None = None,
+    ) -> Decimal:
+        """Continuous absolute-target multiplier learned from matured outcomes."""
+        if not self.cfg.enabled or not self.cfg.model_enabled:
+            return Decimal("1")
+        model_score = self._model.evaluate(
+            strategy=strategy,
+            asset_class=asset_class,
+            score=score,
+        )
+        if model_score.abstain or model_score.size_multiplier is None:
+            return Decimal("1")
+        return max(Decimal("0"), min(Decimal("1"), model_score.size_multiplier))
+
     async def refresh_model(self, session_factory: async_sessionmaker[AsyncSession] | None) -> dict[str, Any]:
         """Rebuild the calibrated model from matured historical outcomes."""
         if not self.cfg.enabled or not self.cfg.model_enabled:
@@ -134,8 +153,17 @@ class TradeAdmissionService:
             md["trade_admission_model_samples"] = decision.model_samples
         if decision.size_multiplier is not None:
             try:
-                signal.suggested_quantity = signal.suggested_quantity * decision.size_multiplier
+                target_scaled_upstream = bool(
+                    md.get("trade_admission_target_multiplier_applied")
+                )
+                if not target_scaled_upstream:
+                    signal.suggested_quantity = (
+                        signal.suggested_quantity * decision.size_multiplier
+                    )
                 signal.metadata["trade_admission_size_multiplier"] = str(decision.size_multiplier)
+                signal.metadata["trade_admission_size_applied_upstream"] = (
+                    target_scaled_upstream
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("trade_admission | size haircut skipped | {}", exc)
 

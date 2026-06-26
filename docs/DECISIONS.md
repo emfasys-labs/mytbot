@@ -18,6 +18,102 @@
 
 ---
 
+## D214 — Paper crypto consolidation reads the local ledger
+**Date:** 2026-06-26
+**Decision:** Same-symbol paper routing discovers synthetic positions from `PositionLog`, not native exchange adapter books.
+
+**Problem.** ADA split between Kraken and Binance because Binance/Kraken/Bybit paper fills exist only in myTbot's local ledger; adapter `get_positions()` could not see them.
+
+**Fix.** `ExecutionEngine._crypto_existing_symbol_expression()` now resolves the latest non-zero paper expression from `PositionLog`. Adds route to the dominant existing venue; reductions remain unrestricted.
+
+**Status:** Implemented and restarted via `python run.py` PID 51816. Execution tests: `48 passed`.
+
+---
+
+## D213 — Runtime NAV reads coalesced; paper dashboard reads stay local
+**Date:** 2026-06-26
+**Decision:** Concurrent monitors and UI polling share a recent broker-equity snapshot, while explicit fresh reads remain available.
+
+**Problem.** Stop-loss, derisk, harvest, dashboard, and P&L readers independently polled all ten brokers, causing request storms, rate limits, slow APIs, and longer trading cycles. Paper `/positions` also polled native brokers despite the local ledger being authoritative.
+
+**Fix.** Added a coverage-keyed runtime snapshot cache controlled by `LIVE_PORTFOLIO_VALUE_POLL_CACHE_TTL_SEC`. Runtime monitors and API reads share it; uncached calls remain the default for compatibility. Paper `/positions` and `/pnl` now use `PositionLog` and persisted marks without broker position/price fan-out.
+
+**Status:** Implemented. `/positions` measured about `186ms` after startup instead of multi-second responses/timeouts.
+
+---
+
+## D212 — Admission learning repaired and promoted to absolute target sizing
+**Date:** 2026-06-26
+**Decision:** Matured net-of-cost outcomes govern absolute portfolio targets continuously; negative buckets retain shrinking exploration size rather than a categorical rejection.
+
+**Problem.** 135 executed opens were `unpriced` because the learner searched intraday price tables while the active pipeline supplied daily bars. Relabelling exposed 200 matured outcomes: 26 positive and 174 negative; mean-reversion crypto was 17 positive versus 79 negative. Applying a haircut to each incremental order was also wrong because repeated top-ups converged to the full losing target.
+
+**Fix.** Outcome labelling now uses `PositionLog` marks. Historical unpriced rows were requeued. The model learns win rate and payoff magnitude, falls back from sparse score bands to pooled strategy/asset evidence, and emits a continuous multiplier. Negative expected-return buckets receive a sample-derived `1/sqrt(n)` exploration allocation. The model loads before the first cycle. Portfolio orchestration scales the absolute target before calculating order deltas; downstream admission does not apply it twice.
+
+**Status:** Implemented. XRP changed from a full-size add into staged reductions and converged from about `$49.8k` to `$21.7k` near its learned target. Post-learning adjustments now reuse the allocator's NAV-relative rebalance band to suppress immaterial follow-up trims. Combined focused verification: `192 passed`; final rebalance slice: `60 passed`.
+
+---
+
+## D211 — Orchestrator reserve netting and recycle memory
+**Date:** 2026-06-26
+**Decision:** Reserve actions fill only the remaining admitted target and share persisted recycle/re-entry context with the allocator.
+
+**Problem.** Reserve candidates submitted full targets each cycle, defeating sizing haircuts and accumulating fees. The portfolio-orchestrator path omitted replacement context and dropped deployment pressure when rebuilding order metadata.
+
+**Fix.** Reserve sizing applies both signal and outcome-learning multipliers to the absolute target, compares that target with canonical same-direction book exposure, and submits only the gap. Primary and reserve paths load/update/save one replacement context; recently recycled symbols use the configured recovery window. Orchestrated orders preserve the strongest contributing candidate's market/deployment context.
+
+**Status:** Implemented. Live validation logged `BTC-USD reserve target already met` rather than another add, and XRP's contextual path generated consistently.
+
+---
+
+## D210 — Reserve deployment and crypto venue-room routing repaired
+**Date:** 2026-06-26
+**Decision:** A flat or underdeployed paper book must be able to open more than one independent reserve candidate per loop, and synthetic crypto paper routing should use available venue room before clamping.
+
+**Problem.** After D207/D208 the system was alive again but deployment still crawled. The active reserve path returned after the first successful candidate even when several candidates cleared gates, so one loop could only add one reserve order. Separately, crypto execution clamped orders on the initially routed venue whenever that venue had any room, even when another synthetic-paper venue could fill more of the order. This caused avoidable Kraken clamps while Binance/Bybit room remained usable.
+
+**Fix.** `TradingLoop._run_orchestrator_reserve_candidates()` now shares `global_edge.max_actions_per_tick`, keeps attempted symbols in-loop, and continues through independent candidates until its action budget is used or candidates are exhausted. `ExecutionEngine._crypto_paper_fallback_broker()` now considers required notional and effective room; new-symbol crypto opens reroute to a better-room venue before clamping. Same-symbol consolidation remains stronger than room optimisation, so an existing ADA/ETH/BTC venue expression is not split across brokers.
+
+**Status:** Implemented and restarted via `python run.py` PID 14716. Verification: `pytest tests/test_execution_engine.py tests/test_trade_admission.py tests/test_global_edge_preflight.py -q` -> `70 passed`; `py_compile` clean. Live validation: post-fix loop `generated=4 executed=2`; BTC initially routed to Kraken, then rerouted `kraken -> binance` before fill because Binance had better effective paper room. Current paper book has ADA on Binance, BTC on Binance, ETH on Kraken; no AAPL.
+
+---
+
+## D209 — Profit-harvest young immaterial profit suppression
+**Date:** 2026-06-26
+**Decision:** Profit-harvest should not immediately trim fresh small winners while the system is trying to build a book.
+
+**Problem.** After orders resumed, profit-harvest sold pieces of a newly opened ADA position within minutes. Those were technically profitable gross marks but immaterial relative to NAV and created fee/churn pressure immediately after entry.
+
+**Fix.** `risk/profit_harvest.should_suppress_harvest_for_horizon()` now suppresses young voluntary harvests, including v2 dynamic trailing locks and partial take-profit decisions, unless the profit is material relative to NAV or the configured minimum hold has matured. Reduce-only risk exits are still allowed; this only blocks early voluntary harvesting of tiny wins.
+
+**Status:** Implemented and restarted. Verification: `pytest tests/test_profit_harvest.py tests/test_trade_admission.py tests/test_wave2_wiring.py -q` -> `49 passed`; `py_compile` clean. Live validation: repeated ADA/ETH profit-harvest ticks now log `SUPPRESSED (young_immaterial_profit)` instead of placing churn sells.
+
+---
+
+## D208 — Meta-label pressure relief and neutral-news sizing fix
+**Date:** 2026-06-26
+**Decision:** Active trained meta-labeling should not create a zero-deployment dead zone; neutral signed news should not shrink trade size.
+
+**Problem.** After D207 cleaned up weak losers, the book could become flat because active trained meta-label enforcement dropped all fresh opens below its dynamic threshold, leaving no live evidence for the learner. Separately, trade admission treated `ai_news_score=0` as a directional-news size penalty because neutral directional evidence (`0.5`) still produced a multiplier below one.
+
+**Fix.** `config/strategies.yaml::signal_engine.meta_label_pressure_relief` now allows deployment pressure to convert below-threshold model decisions into explicit size haircuts while preserving `meta_label_model_kept=false` audit metadata. `signals/engine.py` applies that multiplier to quantity and records the sizing path. `intelligence/trade_admission/policy.py` now applies directional-news size haircuts only when signed direct news is actually adverse to the proposed side; neutral/supportive news still contributes to scoring but does not reduce size by itself.
+
+**Status:** Implemented and restarted. Verification: focused reserve/admission/wave2 tests passed (`23` to `32` test slices during the run), and later combined execution/admission/preflight suite passed `70 passed`. Live validation: orders resumed; neutral-news ETH fills increased from roughly half-sized to materially larger fills, while adverse-news BTC still receives a continuous size haircut rather than a hard veto.
+
+---
+
+## D207 — Underdeployed loser dead-zone recycle wired into orchestrator
+**Date:** 2026-06-26
+**Decision:** A stable system that holds only weak losing positions while rejecting all fresh opens is not acceptable; capital recycle must run in the active orchestrator path, not only in the global-edge path.
+
+**Problem.** After D206, infra was healthy and bad new opens were gated, but the live paper book still sat underdeployed with AUDUSD and XRP-USD losing. The active `portfolio_orchestrator` path owned order generation and often emitted no reduce/close orders while marking current holdings protected. Existing global-edge capital recycle was bypassed in that path, so the system could be stable yet useless: reject new candidates, keep losers, and wait.
+
+**Fix.** Added `GlobalEdgeCoordinator.propose_idle_loss_recycle_actions()`, controlled by `config/global_edge.yaml::capital_recycle`. It selects only holdings with negative live unrealised return, ranks them by weakest expected remaining edge, then worse return/larger notional, and emits normal reduce-only `trim_symbol` actions with `capital_recycle_reason=idle_loss_recycle`. Wired this into both the global-edge tick and the active `portfolio_orchestrator` tick when no other reduce action exists, with boot-warmup suppression still applied. The action still passes through signal construction, preflight, risk, admission, routing, and execution; it is not a ledger shortcut.
+
+**Status:** Implemented and restarted via `python run.py` PID 47452. Verification: `pytest tests/test_global_edge_coordinator.py tests/test_portfolio_orchestrator.py tests/test_execution_engine.py tests/test_wave2_wiring.py tests/test_trade_admission.py -q` -> `139 passed`; `py_compile` clean. Live validation: iteration 2 closed stuck AUDUSD reduce-only (`sell 351901 @ 0.68961240`, realised about `-$780.83`, fee about `$182.01`); iteration 3 closed stuck XRP-USD reduce-only (`sell 47610.46789290 @ 1.04322699`, realised about `-$230.30`, fee about `$37.25`). `/positions` now returns no open rows; runtime remains `running`, paper, 10 brokers connected, pipeline running, no loop error.
+
+---
+
 ## D206 — Allocator-open meta gate and crypto dust-room routing
 **Date:** 2026-06-26
 **Decision:** Allocator-selected opens are still new risk and must not bypass active trained meta-label enforcement; synthetic crypto venue room that rounds to zero account currency must reroute or skip before quantity clamping.

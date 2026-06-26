@@ -51,7 +51,10 @@ from system.deployment import (
     build_deployment_readiness,
     set_stage_override,
 )
-from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
+from system.portfolio_equity import (
+    PortfolioValueSnapshot,
+    cached_live_portfolio_snapshot,
+)
 from portfolio.global_edge_coordinator import cash_factor_for_asset_class
 from control.runtime import get_execution_engine, get_risk_engine
 from control.startup_validation import validate_startup_env
@@ -1091,9 +1094,11 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         if not rows:
             return Decimal(0)
         feature_prices = await _latest_feature_prices(session, [r.symbol for r in rows])
-    # Broker lookups happen outside the DB session so we don't hold a
-    # connection while waiting on network round-trips.
-    live_prices = await _live_broker_prices(rows)
+    # In paper mode the local position ledger is authoritative and its marks
+    # are refreshed by the trading loop. Broker fan-out here mixes external
+    # demo books into paper accounting and makes every P&L read network-bound.
+    # Live mode still resolves broker prices outside the DB session.
+    live_prices = await _live_broker_prices(rows) if APP_ENV == "live" else {}
     total = Decimal(0)
     for r in rows:
         qty = Decimal(str(r.quantity or 0))
@@ -1236,16 +1241,14 @@ async def get_status():
 
 @app.get("/positions")
 async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=Depends(_session_factory)):
-    live_rows = await _live_broker_positions(limit)
+    # The local fill/position ledger is authoritative in paper mode. Polling
+    # every connected adapter here both mixes external demo books into myTbot's
+    # simulated book and turns each dashboard refresh into a broker API storm.
+    live_rows = await _live_broker_positions(limit) if APP_ENV == "live" else []
     live_rows = _filter_rows_to_current_nav_brokers(live_rows)
-    if APP_ENV != "live" and live_rows:
-        live_rows = await _merge_synthetic_paper_positions_from_log(
-            session_factory, live_rows, limit=limit
-        )
     if live_rows:
-        src = "live_broker" if APP_ENV == "live" else "live_broker+synthetic_paper_log"
         live_rows = await _enrich_position_instruments(session_factory, live_rows)
-        return {"positions": live_rows, "source": src}
+        return {"positions": live_rows, "source": "live_broker"}
 
     async with session_factory() as session:
         rows = await _latest_position_log_rows(session, limit=limit, open_only=True)
@@ -1253,7 +1256,7 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
         if not rows:
             return {"positions": [], "source": "position_log"}
         prices = await _latest_feature_prices(session, [r.symbol for r in rows])
-    live_prices = await _live_broker_prices(rows)
+    live_prices = await _live_broker_prices(rows) if APP_ENV == "live" else {}
     payload_rows = [
         _position_log_payload(
             r,
@@ -2200,6 +2203,55 @@ async def get_discovery_theses(limit: int = Query(50, ge=1, le=500), session_fac
     }
 
 
+def _api_broker_snapshot_ttl_seconds() -> float:
+    raw = os.getenv("API_BROKER_SNAPSHOT_CACHE_TTL_SEC", "10")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def _api_broker_snapshot_key(broker_manager: Any) -> tuple[Any, ...]:
+    report = getattr(broker_manager, "report", None)
+    included = tuple(
+        sorted(str(name).strip().lower() for name in getattr(report, "included_names", []) or [])
+    )
+    risk_engine = get_risk_engine()
+    disabled = tuple(
+        sorted(str(name).strip().lower() for name in getattr(risk_engine, "disabled_brokers", []) or [])
+    )
+    return id(broker_manager), included, disabled
+
+
+async def _api_live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueSnapshot:
+    """Coalesce dashboard NAV reads so UI polling cannot flood broker APIs."""
+    if broker_manager is None:
+        return PortfolioValueSnapshot(Decimal(0), False, tuple(), tuple())
+    ttl = _api_broker_snapshot_ttl_seconds()
+    key = _api_broker_snapshot_key(broker_manager)
+    now = _time.monotonic()
+    cached = getattr(app.state, "broker_snapshot_cache", None)
+    if isinstance(cached, tuple) and len(cached) == 3:
+        cached_key, cached_at, cached_snapshot = cached
+        if cached_key == key and now - cached_at <= ttl:
+            return cached_snapshot
+
+    lock = getattr(app.state, "broker_snapshot_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.broker_snapshot_lock = lock
+    async with lock:
+        now = _time.monotonic()
+        cached = getattr(app.state, "broker_snapshot_cache", None)
+        if isinstance(cached, tuple) and len(cached) == 3:
+            cached_key, cached_at, cached_snapshot = cached
+            if cached_key == key and now - cached_at <= ttl:
+                return cached_snapshot
+        snapshot = await cached_live_portfolio_snapshot(broker_manager)
+        app.state.broker_snapshot_cache = (key, now, snapshot)
+        return snapshot
+
+
 async def _live_portfolio_value() -> Decimal:
     """Sum net-liquidation for brokers in coverage (D031).
 
@@ -2214,7 +2266,7 @@ async def _live_portfolio_value() -> Decimal:
     bm = getattr(orch, "_broker_manager", None)
     if bm is None:
         return Decimal(0)
-    return await live_portfolio_value(bm)
+    return (await _api_live_portfolio_snapshot(bm)).value
 
 
 async def _live_portfolio_nav_status() -> dict[str, Any]:
@@ -2224,7 +2276,7 @@ async def _live_portfolio_nav_status() -> dict[str, Any]:
     bm = getattr(orch, "_broker_manager", None)
     if bm is None:
         return {"complete": False, "included": [], "missing": []}
-    snap = await live_portfolio_snapshot(bm)
+    snap = await _api_live_portfolio_snapshot(bm)
     return {
         "complete": bool(snap.complete),
         "included": list(snap.included),
@@ -2382,7 +2434,7 @@ async def get_pnl(
     last_persisted_value = pv_vals[-1] if pv_vals else Decimal(0)
     orch = _get_orchestrator()
     bm = getattr(orch, "_broker_manager", None) if orch is not None else None
-    live_snap = await live_portfolio_snapshot(bm) if bm is not None else None
+    live_snap = await _api_live_portfolio_snapshot(bm) if bm is not None else None
     nav_status = _nav_status_from_snapshot(live_snap) if live_snap is not None else {"complete": False, "included": [], "missing": []}
     live_value = live_snap.value if live_snap is not None else Decimal(0)
     coverage_full = bool(nav_status.get("coverage_full", nav_status.get("complete", False)))
@@ -2501,7 +2553,9 @@ async def get_dashboard_snapshot(
     if not isinstance(raw, dict):
         return {}
     out = dict(raw)
-    live_nav_snapshot = await live_portfolio_snapshot(getattr(_get_orchestrator(), "_broker_manager", None))
+    live_nav_snapshot = await _api_live_portfolio_snapshot(
+        getattr(_get_orchestrator(), "_broker_manager", None)
+    )
     nav = live_nav_snapshot.value
     coverage = _current_broker_coverage() or {}
     broker_filter = _current_nav_broker_filter()
@@ -3838,7 +3892,7 @@ async def diagnostics_balances(
     response.headers["Cache-Control"] = "no-store, max-age=0"
     orch = _get_orchestrator()
     bm = getattr(orch, "_broker_manager", None) if orch is not None else None
-    snap = await live_portfolio_snapshot(bm) if bm is not None else None
+    snap = await _api_live_portfolio_snapshot(bm) if bm is not None else None
 
     current_per_broker: dict[str, str] = (
         dict(getattr(snap, "per_broker", {}) or {}) if snap is not None else {}

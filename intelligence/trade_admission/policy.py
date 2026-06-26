@@ -107,8 +107,13 @@ def decide_admission(
     directional_multiplier = None
     if cfg.allow_size_haircuts and not cfg.shadow_only and directional_news is not None:
         weight = max(Decimal("0"), min(Decimal("1"), _d(cfg.directional_news_weight) or Decimal("0")))
-        directional_multiplier = Decimal("1") - (weight * (Decimal("1") - directional_news))
-        directional_multiplier = max(Decimal("0"), min(Decimal("1"), directional_multiplier))
+        # ``news_directional`` is centered at 0.5: below 0.5 means direct
+        # signed news is adverse to this side, 0.5 is neutral, above 0.5 is
+        # supportive. Size haircuts should only express adverse evidence; the
+        # score blend above already captures neutral/supportive context.
+        if directional_news < Decimal("0.5"):
+            directional_multiplier = Decimal("1") - (weight * (Decimal("1") - directional_news))
+            directional_multiplier = max(Decimal("0"), min(Decimal("1"), directional_multiplier))
 
     parts = [
         _d(vals.get("confidence")),
@@ -142,9 +147,10 @@ def decide_admission(
             features=features,
         )
 
-    # Calibrated-model overlay: if like candidates have a materially
-    # below-average win-rate (more than one standard error below the global
-    # base rate), reduce or refuse. The band is distribution-derived.
+    # Calibrated-model overlay: allocate capital continuously from the realised
+    # win/loss distribution and payoff sizes of like candidates. A bucket with
+    # non-positive expected return naturally receives zero incremental capital;
+    # it is not categorically rejected and can earn size back as outcomes improve.
     if model is not None and cfg.model_enabled:
         ms = model.evaluate(
             strategy=candidate.strategy,
@@ -152,34 +158,21 @@ def decide_admission(
             score=score,
         )
         if not ms.abstain:
-            floor = ms.base_rate - ms.margin
-            if ms.probability < floor:
-                action, applied = _enforce(cfg, AdmissionAction.REJECT)
-                if not applied and not cfg.shadow_only:
-                    action = AdmissionAction.DEFER
-                elif cfg.shadow_only:
-                    action = AdmissionAction.DEFER
-                return AdmissionDecision(
-                    action=action,
-                    reason=f"model_below_base|p={ms.probability:.3f}<{floor:.3f}|n={ms.samples}",
-                    score=score,
-                    uncertainty=uncertainty,
-                    active_applied=applied,
-                    model_probability=ms.probability,
-                    model_samples=ms.samples,
-                    features=features,
-                )
-            if ms.probability < ms.base_rate and cfg.allow_size_haircuts:
-                # Marginal: below average but within the noise band → haircut,
-                # sized by how far below the base rate it sits.
+            model_multiplier = ms.size_multiplier
+            if (
+                model_multiplier is not None
+                and model_multiplier < Decimal("1")
+            ):
                 action, applied = _enforce(cfg, AdmissionAction.ALLOW_SMALLER)
-                ratio = (ms.probability / ms.base_rate) if ms.base_rate > 0 else Decimal("1")
-                multiplier = max(Decimal("0"), min(Decimal("1"), ratio))
+                multiplier = max(Decimal("0"), min(Decimal("1"), model_multiplier))
                 if directional_multiplier is not None:
                     multiplier = min(multiplier, directional_multiplier)
                 return AdmissionDecision(
                     action=action,
-                    reason=f"model_marginal|p={ms.probability:.3f}<base={ms.base_rate:.3f}",
+                    reason=(
+                        f"model_outcome_size|p={ms.probability:.3f}|"
+                        f"expected={ms.expected_return or Decimal('0'):.6f}|n={ms.samples}"
+                    ),
                     score=score,
                     uncertainty=uncertainty,
                     active_applied=applied,

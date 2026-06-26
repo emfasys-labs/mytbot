@@ -110,6 +110,12 @@ capital_recycle:
   dead_edge_floor: "0.01"
   # Hard cap on recycle actions per iteration (prevents fee churn).
   max_actions_per_tick: 3
+  # Under-deployed dead-zone recycle: if the book has losing positions and the
+  # coordinator has no reduce/replacement action, close the weakest losing
+  # holding by rank instead of leaving capital trapped while new opens are
+  # gated out. Uses sign of live P&L + remaining-edge rank, not a fixed stop.
+  idle_loss_recycle_enabled: true
+  idle_loss_max_actions_per_tick: 1
   # Same anti-churn symbol cooldown as rotation/shed.
   symbol_cooldown_sec: 900
 

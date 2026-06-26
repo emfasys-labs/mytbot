@@ -19,7 +19,7 @@ from intelligence.trade_admission.schema import (
     AdmissionConfig,
 )
 from intelligence.trade_admission.service import TradeAdmissionService
-from storage.models import Base, FeatureSnapshot, FillLog, PriceHistory, TradeAdmissionLog
+from storage.models import Base, FeatureSnapshot, FillLog, PositionLog, PriceHistory, TradeAdmissionLog
 
 
 @pytest_asyncio.fixture
@@ -138,6 +138,31 @@ async def test_trade_admission_does_not_block_shadow_meta_label_for_allocator(sf
 
 
 @pytest.mark.asyncio
+async def test_trade_admission_allows_pressure_relief_meta_haircut(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=False, block_new_opens=True))
+    sig = _signal(
+        meta_label_kept=True,
+        meta_label_model_kept=False,
+        meta_label_reason="pressure_relief_size_haircut",
+        meta_label_pressure_relief=True,
+        meta_label_size_multiplier="0.25",
+        confidence="0.9",
+        accumulator_score="0.4",
+    )
+
+    decision = await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=2,
+        source_path="global",
+    )
+
+    assert decision.reason != "prior_trade_filter_drop"
+    assert not svc.should_block(decision)
+
+
+@pytest.mark.asyncio
 async def test_trade_admission_sizes_down_long_against_negative_direct_news(sf):
     svc = TradeAdmissionService(
         AdmissionConfig(
@@ -161,6 +186,50 @@ async def test_trade_admission_sizes_down_long_against_negative_direct_news(sf):
     assert decision.reason == "directional_news_size_adjustment"
     assert decision.size_multiplier == Decimal("0.60")
     assert not svc.should_block(decision)
+
+
+def test_trade_admission_does_not_size_down_neutral_direct_news():
+    candidate = AdmissionCandidate(
+        id="adm-neutral",
+        timestamp=datetime.now(timezone.utc),
+        loop_iteration=1,
+        signal_id="sig-neutral",
+        symbol="ETH-USD",
+        strategy="mean_reversion",
+        side="buy",
+        broker="kraken",
+        asset_class="crypto",
+        suggested_quantity=Decimal("1"),
+        suggested_price=Decimal("100"),
+        suggested_notional=Decimal("100"),
+        is_reduce_only=False,
+        metadata={
+            "confidence": "0.9",
+            "trade_quality_score": "0.7",
+            "accumulator_score": "0.4",
+            "ai_news_score": "0.0",
+            "volume_z_score": "1.0",
+        },
+        source_path="test",
+    )
+    features = build_features(candidate, {"portfolio_value": Decimal("100000"), "positions": {}})
+
+    decision = decide_admission(
+        candidate,
+        features,
+        AdmissionConfig(
+            enabled=True,
+            shadow_only=False,
+            block_new_opens=True,
+            allow_size_haircuts=True,
+            directional_news_weight=Decimal("1"),
+            model_enabled=False,
+        ),
+    )
+
+    assert decision.action == AdmissionAction.ALLOW
+    assert decision.reason == "admission_ok"
+    assert decision.size_multiplier is None
 
 
 @pytest.mark.asyncio
@@ -387,6 +456,63 @@ async def test_label_due_outcomes_marks_to_market_from_feature_snapshot(sf):
 
 
 @pytest.mark.asyncio
+async def test_label_due_outcomes_marks_to_market_from_position_log(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("10"),
+                fill_price=Decimal("100"),
+                notional=Decimal("1000"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("0"),
+                position_qty_after=Decimal("10"),
+                signal_id="sig-1",
+            )
+        )
+        session.add(
+            PositionLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=40),
+                broker="ibkr",
+                symbol="AAPL",
+                asset_class="equity",
+                quantity=Decimal("10"),
+                avg_entry_price=Decimal("100"),
+                current_price=Decimal("105"),
+                unrealised_pnl=Decimal("50"),
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60,))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "positive"
+    assert row.outcome_net_pnl == Decimal("49.0")
+    assert row.outcome_labels["mark_to_market_used"] is True
+    assert row.outcome_labels["horizon_price"] == 105.0
+
+
+@pytest.mark.asyncio
 async def test_label_due_outcomes_does_not_train_fee_only_open_without_price(sf):
     svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
     sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")
@@ -500,7 +626,98 @@ def test_admission_model_flags_below_base_bucket():
     cand = AdmissionCandidate(**{**cand.__dict__, "strategy": "mr", "asset_class": "crypto"})
     feats = build_features(cand, {"portfolio_value": Decimal("100000"), "positions": {}})
     decision = decide_admission(
-        cand, feats, AdmissionConfig(shadow_only=False, block_new_opens=True), model
+        cand,
+        feats,
+        AdmissionConfig(
+            shadow_only=False,
+            block_new_opens=True,
+            allow_size_haircuts=True,
+        ),
+        model,
     )
-    assert decision.action == AdmissionAction.REJECT
+    assert decision.action == AdmissionAction.ALLOW_SMALLER
+    assert decision.size_multiplier is not None
+    assert Decimal("0") < decision.size_multiplier < Decimal("1")
     assert decision.model_probability is not None
+
+
+def test_admission_model_uses_strategy_asset_pool_for_sparse_score_band():
+    rows = [
+        {
+            "strategy": "portfolio_orchestrator",
+            "asset_class": "crypto",
+            "score": Decimal("0.8"),
+            "win": i < 4,
+            "outcome_return": Decimal("0.01") if i < 4 else Decimal("-0.01"),
+        }
+        for i in range(30)
+    ]
+    rows.extend(
+        {
+            "strategy": "other",
+            "asset_class": "equity",
+            "score": Decimal("0.2"),
+            "win": True,
+            "outcome_return": Decimal("0.01"),
+        }
+        for _ in range(30)
+    )
+    model = AdmissionModel.from_outcomes(rows, min_samples=25)
+
+    score = model.evaluate(
+        strategy="portfolio_orchestrator",
+        asset_class="crypto",
+        score=Decimal("0.2"),
+    )
+
+    assert score.abstain is False
+    assert score.bucket == "portfolio_orchestrator|crypto|all"
+    assert score.samples == 30
+    assert score.size_multiplier is not None
+    assert Decimal("0") < score.size_multiplier < Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_upstream_outcome_target_is_not_haircut_twice(sf):
+    svc = TradeAdmissionService(
+        AdmissionConfig(
+            enabled=True,
+            shadow_only=False,
+            block_new_opens=True,
+            allow_size_haircuts=True,
+            model_min_bucket_samples=10,
+        )
+    )
+    svc._model = AdmissionModel.from_outcomes(  # noqa: SLF001 - focused wiring test
+        [
+            {
+                "strategy": "portfolio_orchestrator",
+                "asset_class": "crypto",
+                "score": Decimal("0.5"),
+                "win": False,
+                "outcome_return": Decimal("-0.01"),
+            }
+            for _ in range(20)
+        ],
+        min_samples=10,
+    )
+    sig = _signal(
+        trade_admission_target_multiplier_applied=True,
+        confidence="0.5",
+        trade_quality_score="0.5",
+    )
+    sig.strategy = "portfolio_orchestrator"
+    sig.asset_class = "crypto"
+    original_quantity = sig.suggested_quantity
+
+    decision = await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=1,
+        source_path="test",
+    )
+
+    assert decision.action == AdmissionAction.ALLOW_SMALLER
+    assert sig.suggested_quantity == original_quantity
+    assert sig.metadata["trade_admission_size_applied_upstream"] is True

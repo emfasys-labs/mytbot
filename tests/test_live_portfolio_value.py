@@ -18,7 +18,11 @@ import pytest
 
 from brokers.base import Balance
 from system.broker_manager import BrokerReport, BrokerStatus
-from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
+from system.portfolio_equity import (
+    cached_live_portfolio_snapshot,
+    live_portfolio_snapshot,
+    live_portfolio_value,
+)
 
 
 class _StubAdapter:
@@ -254,6 +258,31 @@ async def test_cached_adapter_value_respects_current_allowlist(monkeypatch: pyte
     assert await live_portfolio_value(bm) == Decimal("1050000")
     bm.report = _StubReport(["alpaca"])
     assert await live_portfolio_value(bm) == Decimal("50000")
+
+
+@pytest.mark.asyncio
+async def test_runtime_snapshot_cache_coalesces_monitor_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVE_PORTFOLIO_VALUE_POLL_CACHE_TTL_SEC", "60")
+
+    class _CountingAdapter(_StubAdapter):
+        def __init__(self, balances: list[Balance]) -> None:
+            super().__init__(balances)
+            self.calls = 0
+
+        async def get_balance(self) -> list[Balance]:
+            self.calls += 1
+            return await super().get_balance()
+
+    ibkr = _CountingAdapter([_bal("BASE", "1000000")])
+    bm = _StubBrokerManager({"ibkr": ibkr})
+
+    first = await cached_live_portfolio_snapshot(bm)
+    second = await cached_live_portfolio_snapshot(bm)
+
+    assert first.value == second.value == Decimal("1000000")
+    assert ibkr.calls == 1
 
 
 @pytest.mark.asyncio

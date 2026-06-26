@@ -195,6 +195,56 @@ def test_signal_engine_drops_allocator_open_below_threshold(monkeypatch):
     assert engine.process(raw, portfolio_value=Decimal("10000")) is None
 
 
+def test_signal_engine_pressure_relief_sizes_down_below_threshold(monkeypatch):
+    artefact, _ = _train_toy_artefact()
+    fc_hash = artefact.feature_contract_hash
+
+    cfg = TrainedMetaLabelerConfig(
+        enabled=True,
+        model_name="toy",
+        model_version="0.1",
+        thresholds=ThresholdConfig(default=0.95),
+    )
+    monkeypatch.setattr(
+        "signals.trained_meta_labeler.TrainedMetaLabelerConfig.load",
+        classmethod(lambda cls, path=None: cfg),
+    )
+    reg = _registry_with("toy", "0.1", ApprovalStatus.PAPER, fc_hash)
+    monkeypatch.setattr(
+        "signals.trained_meta_labeler.get_default_registry", lambda: reg
+    )
+    monkeypatch.setattr(
+        "signals.trained_meta_labeler._load_artefact",
+        lambda cfg, contract, loader: artefact,
+    )
+
+    raw = _basic_raw(side="sell")
+    raw.metadata["deployment_pressure"] = 1.0
+    engine = SignalEngine(
+        {
+            "use_trained_meta_labeler": True,
+            "default_position_pct": 0.10,
+            "quantity_decimals": 6,
+            "meta_label_pressure_relief": {
+                "enabled": True,
+                "pressure_weight": 1.0,
+                "probability_exponent": 1.0,
+                "min_size_multiplier": 0.05,
+                "max_size_multiplier": 0.60,
+            },
+        }
+    )
+
+    sig = engine.process(raw, portfolio_value=Decimal("10000"))
+
+    assert sig is not None
+    assert sig.metadata["meta_label_reason"] == "pressure_relief_size_haircut"
+    assert sig.metadata["meta_label_model_kept"] is False
+    assert sig.metadata["meta_label_kept"] is True
+    assert sig.metadata["meta_label_size_haircut_applied"] is True
+    assert Decimal("0") < sig.suggested_quantity < Decimal("10")
+
+
 def test_signal_engine_keeps_signal_when_above_threshold(monkeypatch):
     artefact, _ = _train_toy_artefact()
     fc_hash = artefact.feature_contract_hash
@@ -328,4 +378,3 @@ def test_build_opportunities_attaches_metadata_when_kept(monkeypatch):
     assert md.get("meta_label_reason") == "approved"
     assert md.get("meta_label_model_name") == "toy"
     assert isinstance(md.get("meta_label_probability"), float)
-

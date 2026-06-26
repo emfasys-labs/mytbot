@@ -893,9 +893,9 @@ class Orchestrator:
             if sf is None:
                 return
             from run_m3 import _load_portfolio_state, _upsert_daily_pnl
-            from system.portfolio_equity import live_portfolio_snapshot
+            from system.portfolio_equity import cached_live_portfolio_snapshot
 
-            snap = await live_portfolio_snapshot(self._broker_manager)
+            snap = await cached_live_portfolio_snapshot(self._broker_manager)
             total_equity = snap.value
             if total_equity <= 0:
                 # No broker reported a usable equity figure right now. Skip
@@ -1605,7 +1605,10 @@ class Orchestrator:
         try:
             from storage.db import init_async_database, dispose_engine as _dispose
             from run_m3 import _load_portfolio_state
-            from system.portfolio_equity import live_portfolio_value
+            from system.portfolio_equity import (
+                live_portfolio_value,
+                runtime_snapshot_cache_ttl_seconds,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | stop-loss tick imports unavailable: {}", exc)
             return
@@ -1616,7 +1619,10 @@ class Orchestrator:
             if sf is None:
                 return
 
-            nav = await live_portfolio_value(self._broker_manager)
+            nav = await live_portfolio_value(
+                self._broker_manager,
+                max_age_seconds=runtime_snapshot_cache_ttl_seconds(),
+            )
             if nav <= 0:
                 return
 
@@ -2012,7 +2018,10 @@ class Orchestrator:
         try:
             from storage.db import init_async_database, dispose_engine as _dispose
             from run_m3 import _load_portfolio_state
-            from system.portfolio_equity import live_portfolio_value
+            from system.portfolio_equity import (
+                live_portfolio_value,
+                runtime_snapshot_cache_ttl_seconds,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | agg de-risk imports unavailable: {}", exc)
             return
@@ -2026,7 +2035,10 @@ class Orchestrator:
             eng, sf = await init_async_database()
             if sf is None:
                 return
-            nav = await live_portfolio_value(self._broker_manager)
+            nav = await live_portfolio_value(
+                self._broker_manager,
+                max_age_seconds=runtime_snapshot_cache_ttl_seconds(),
+            )
             if nav <= 0:
                 return
 
@@ -2307,7 +2319,10 @@ class Orchestrator:
         try:
             from storage.db import init_async_database, dispose_engine as _dispose
             from run_m3 import _load_portfolio_state
-            from system.portfolio_equity import live_portfolio_value
+            from system.portfolio_equity import (
+                live_portfolio_value,
+                runtime_snapshot_cache_ttl_seconds,
+            )
             from data.feature_lookup import load_latest_feature_json
         except Exception as exc:  # noqa: BLE001
             logger.debug("orchestrator | profit-harvest tick imports unavailable: {}", exc)
@@ -2318,7 +2333,10 @@ class Orchestrator:
             eng, sf = await init_async_database()
             if sf is None:
                 return
-            nav = await live_portfolio_value(self._broker_manager)
+            nav = await live_portfolio_value(
+                self._broker_manager,
+                max_age_seconds=runtime_snapshot_cache_ttl_seconds(),
+            )
             if nav <= 0:
                 return
             portfolio_state = await _load_portfolio_state(
@@ -2970,7 +2988,10 @@ class Orchestrator:
             )
             from storage.db import init_async_database, dispose_engine as _dispose
             from run_m3 import _load_portfolio_state
-            from system.portfolio_equity import live_portfolio_value
+            from system.portfolio_equity import (
+                live_portfolio_value,
+                runtime_snapshot_cache_ttl_seconds,
+            )
             from signals.engine import Signal as RiskSignal
             from risk.engine import RiskVerdict
         except Exception as exc:  # noqa: BLE001
@@ -3004,7 +3025,10 @@ class Orchestrator:
             eng, sf = await init_async_database()
             if sf is None:
                 return
-            nav = await live_portfolio_value(self._broker_manager)
+            nav = await live_portfolio_value(
+                self._broker_manager,
+                max_age_seconds=runtime_snapshot_cache_ttl_seconds(),
+            )
             if nav <= 0:
                 return
             portfolio_state = await _load_portfolio_state(

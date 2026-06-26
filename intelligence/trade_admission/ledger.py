@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from intelligence.trade_admission.model import AdmissionModel
-from storage.models import FeatureSnapshot, FillLog, PriceHistory, TradeAdmissionLog
+from storage.models import FeatureSnapshot, FillLog, PositionLog, PriceHistory, TradeAdmissionLog
 
 _STOP_DERISK_SOURCES = {"stop_loss", "intraday_derisk", "aggregate_derisk"}
 _FAIL_TOKENS = ("fail", "error", "reject", "blocked")
@@ -136,6 +136,7 @@ async def _price_excursion(
     entry: Decimal | None,
     start: datetime,
     end: datetime,
+    broker: str | None = None,
 ) -> dict[str, Any]:
     """Max adverse / favorable move (as fractions of entry) over a window.
 
@@ -181,6 +182,24 @@ async def _price_excursion(
             ).all()
         except Exception:  # noqa: BLE001
             rows = []
+    # Paper trading persists broker/symbol marks in PositionLog every time the
+    # book is refreshed. Those marks are the most reliable intraday source
+    # when the feature pipeline is intentionally running on daily bars.
+    try:
+        mark_query = select(PositionLog.timestamp, PositionLog.current_price).where(
+            PositionLog.symbol == symbol,
+            PositionLog.timestamp > start,
+            PositionLog.timestamp <= end,
+        )
+        if broker:
+            mark_query = mark_query.where(PositionLog.broker == broker)
+        marks = (
+            await session.execute(mark_query.order_by(PositionLog.timestamp.asc()).limit(5000))
+        ).all()
+        rows.extend((ts, px, px, px) for ts, px in marks if _dec(px) is not None)
+        rows.sort(key=lambda row: row[0])
+    except Exception:  # noqa: BLE001
+        pass
     highs = [h for _ts, h, _l, _c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if h is not None]
     lows = [l for _ts, _h, l, _c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if l is not None]
     closes = [(ts, c) for ts, _h, _l, c in ((_ts, _dec(a), _dec(b), _dec(c)) for _ts, a, b, c in rows) if c is not None]
@@ -346,6 +365,7 @@ async def label_due_outcomes(
                         entry=_dec(row.suggested_price),
                         start=start,
                         end=end,
+                        broker=row.broker,
                     )
                 snap = _horizon_snapshot(fills, end, horizon_price=_dec(price_context.get("horizon_price")))
                 snap.update(
@@ -412,6 +432,7 @@ async def train_admission_model(
                 TradeAdmissionLog.asset_class,
                 TradeAdmissionLog.admission_score,
                 TradeAdmissionLog.outcome_label,
+                TradeAdmissionLog.outcome_return,
             ).where(
                 TradeAdmissionLog.timestamp >= since,
                 TradeAdmissionLog.outcome_label.in_(("positive", "negative")),
@@ -423,8 +444,9 @@ async def train_admission_model(
                 "asset_class": ac,
                 "score": _dec(score),
                 "win": str(label) == "positive",
+                "outcome_return": _dec(outcome_return),
             }
-            for strat, ac, score, label in q.all()
+            for strat, ac, score, label, outcome_return in q.all()
         ]
     return AdmissionModel.from_outcomes(rows, min_samples=min_samples)
 

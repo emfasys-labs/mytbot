@@ -53,6 +53,8 @@ class ModelScore:
     samples: int
     bucket: str
     abstain: bool
+    expected_return: Decimal | None = None
+    size_multiplier: Decimal | None = None
 
 
 @dataclass(frozen=True)

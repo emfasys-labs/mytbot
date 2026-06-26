@@ -353,6 +353,7 @@ class OrchestratedOrder:
     reason: str
     net_conviction: Decimal
     contributing: list[str]
+    target_notional: Decimal          # signed absolute portfolio target
     asset_class: str = ""
     broker: str = ""
 
@@ -696,6 +697,7 @@ def orchestrate(
                     delta_notional=delta, reduce_only=True, close_only=True,
                     reason="flip_close_to_flat",
                     net_conviction=tgt.net_conviction, contributing=tgt.contributing,
+                    target_notional=tgt.target_notional,
                     asset_class=tgt.asset_class, broker=tgt.broker,
                 )
             )
@@ -733,6 +735,7 @@ def orchestrate(
                 reduce_only=bool(is_reduction), close_only=bool(close_only),
                 reason=_order_reason(cur_dir, des_dir, abs(desired), abs(cur_notional)),
                 net_conviction=tgt.net_conviction, contributing=tgt.contributing,
+                target_notional=tgt.target_notional,
                 asset_class=tgt.asset_class, broker=tgt.broker,
             )
         )

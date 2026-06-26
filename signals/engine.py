@@ -245,10 +245,45 @@ class SignalEngine:
             md["meta_label_model_version"] = decision.model_version
         if decision.feature_hash:
             md["meta_label_feature_hash"] = decision.feature_hash
+        if decision.metadata:
+            for key, value in decision.metadata.items():
+                md[f"meta_label_{key}"] = value
 
         # Shadow (or operator-exempt): measure only, never drop.
         if not enforce:
             return True
+        if not decision.kept:
+            relief_cfg = self.config.get("meta_label_pressure_relief") or {}
+            if isinstance(relief_cfg, dict) and bool(relief_cfg.get("enabled", False)):
+                try:
+                    pressure = max(0.0, min(1.0, float(md.get("deployment_pressure", 0.0) or 0.0)))
+                    probability = float(decision.probability or 0.0)
+                    threshold = float(decision.threshold or 0.0)
+                    pressure_weight = max(0.0, float(relief_cfg.get("pressure_weight", 1.0)))
+                    exponent = max(0.0, float(relief_cfg.get("probability_exponent", 1.0)))
+                    min_mult = max(0.0, float(relief_cfg.get("min_size_multiplier", 0.0)))
+                    max_mult = max(min_mult, float(relief_cfg.get("max_size_multiplier", 1.0)))
+                except (TypeError, ValueError):
+                    pressure = 0.0
+                    probability = 0.0
+                    threshold = 0.0
+                    pressure_weight = 0.0
+                    exponent = 1.0
+                    min_mult = 0.0
+                    max_mult = 0.0
+                if pressure > 0 and probability > 0 and threshold > 0 and pressure_weight > 0:
+                    ratio = max(0.0, min(1.0, probability / threshold))
+                    raw_mult = (ratio ** exponent) * min(1.0, pressure * pressure_weight)
+                    multiplier = max(min_mult, min(max_mult, raw_mult))
+                    if multiplier > 0:
+                        md["meta_label_model_kept"] = False
+                        md["meta_label_model_reason"] = decision.reason
+                        md["meta_label_reason"] = "pressure_relief_size_haircut"
+                        md["meta_label_kept"] = True
+                        md["meta_label_pressure_relief"] = True
+                        md["meta_label_size_multiplier"] = multiplier
+                        md["meta_label_probability_ratio"] = ratio
+                        return True
         return bool(decision.kept)
 
     @staticmethod
@@ -628,14 +663,29 @@ class SignalEngine:
             enforce=_enforce_meta,
         ):
             logger.info(
-                "Signal SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s",
+                "Signal SKIPPED meta_label | %s %s | reason=%s prob=%s thr=%s "
+                "deployment_pressure=%s pressure_relief_enabled=%s",
                 raw.symbol,
                 raw.side,
                 md.get("meta_label_reason"),
                 md.get("meta_label_probability"),
                 md.get("meta_label_threshold"),
+                md.get("deployment_pressure"),
+                bool((self.config.get("meta_label_pressure_relief") or {}).get("enabled", False)),
             )
             return None
+        if "meta_label_size_multiplier" in md:
+            try:
+                meta_size_mult = Decimal(str(md.get("meta_label_size_multiplier")))
+            except (InvalidOperation, TypeError, ValueError):
+                meta_size_mult = Decimal("1")
+            if meta_size_mult < 0:
+                meta_size_mult = Decimal("0")
+            if meta_size_mult < 1:
+                suggested_quantity = (suggested_quantity * meta_size_mult).quantize(tick)
+                md["meta_label_size_haircut_applied"] = True
+                md["meta_label_sized_quantity"] = str(suggested_quantity)
+                sizing_path = f"{sizing_path}:meta_label_pressure_relief"
         md["signal_engine_sizing_path"] = sizing_path
         if last_price is not None and last_price > 0:
             md["signal_engine_resolved_notional"] = str(

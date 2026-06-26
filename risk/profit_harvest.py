@@ -132,15 +132,13 @@ def should_suppress_harvest_for_horizon(
     (+$3K→−$4K), but on a YOUNG daily-horizon position that same behaviour
     is pure churn tax.
 
-    This guard suppresses ONLY a trailing-lock close that would realise a
-    loss / immaterial gain on a position younger than ``min_hold_sec``.
-    Everything that genuinely banks edge is always allowed:
+    This guard suppresses young voluntary harvests that would realise a
+    loss / immaterial gain before the daily-horizon thesis has had time to
+    work. Everything that genuinely banks material edge is always allowed:
 
-      * ``full_take_profit`` / ``partial_take_profit`` (profit_abs > 0 above
-        a real threshold) — banking a winner, never suppressed.
-      * a ``trailing_profit_lock`` that still locks in a *materially positive*
-        profit (>= ``min_material_profit_nav_pct`` of NAV) — a real winner
-        being protected, never suppressed.
+      * any harvest that banks a *materially positive* profit
+        (>= ``min_material_profit_nav_pct`` of NAV) — a real winner, never
+        suppressed.
       * any harvest once the position has matured past ``min_hold_sec``.
 
     Returns ``(suppress, reason)``. ``suppress=False`` means "let the harvest
@@ -150,23 +148,23 @@ def should_suppress_harvest_for_horizon(
     """
     if not decision.should_reduce:
         return (False, "no_reduce")
-    # Only the trailing-lock path can fire into the red; the take-profit
-    # paths are positive-profit by construction.
-    if decision.reason != "trailing_profit_lock":
-        return (False, "not_trailing_lock")
-    # A trailing lock that still banks a materially positive profit is a real
-    # winner being protected — never churn.
+    if age_sec is None:
+        return (False, "age_unknown")
+    if min_hold_sec <= 0 or age_sec >= min_hold_sec:
+        return (False, "matured")
+
+    # A young harvest that still banks a materially positive profit is a real
+    # winner being protected. Anything below that is intraday churn on a
+    # daily-horizon thesis; leave it to stop-loss/derisk if safety is needed.
     material = (
         min_material_profit_nav_pct <= 0
         or (nav > 0 and decision.profit_pct_of_nav >= min_material_profit_nav_pct)
     )
     if decision.profit_absolute > 0 and material:
         return (False, "locks_material_profit")
-    if age_sec is None:
-        return (False, "age_unknown")
-    if min_hold_sec > 0 and age_sec < min_hold_sec:
+    if decision.reason == "trailing_profit_lock" and decision.profit_absolute <= 0:
         return (True, "young_loss_lock")
-    return (False, "matured")
+    return (True, "young_immaterial_profit")
 
 
 def _to_decimal(value: Any, default: Decimal) -> Decimal:

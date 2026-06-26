@@ -1732,6 +1732,101 @@ class GlobalEdgeCoordinator:
             )
         return out
 
+    def propose_idle_loss_recycle_actions(
+        self,
+        held: list[HeldPositionEdge],
+        *,
+        active_mode: str = DEFAULT_MODE,
+        replacement_context: ReplacementContext | None = None,
+    ) -> list[CoordinatorAction]:
+        """Free the weakest losing holding when the book is otherwise idle.
+
+        This covers the under-deployed dead zone: the build path wants more
+        positions, but every new open is gated out, so existing losers can sit
+        indefinitely. The selection is rank/evidence based rather than a fixed
+        stop distance: only holdings with negative live unrealised return are
+        eligible, then the lowest remaining-edge names are recycled first.
+        """
+        if not held:
+            return []
+        cfg = self._cfg.get("capital_recycle") or {}
+        if not bool(cfg.get("enabled", True)):
+            return []
+        if not bool(cfg.get("idle_loss_recycle_enabled", True)):
+            return []
+
+        try:
+            max_actions = int(cfg.get("idle_loss_max_actions_per_tick", cfg.get("max_actions_per_tick", 1)))
+        except (TypeError, ValueError):
+            max_actions = 1
+        if max_actions <= 0:
+            return []
+
+        rot_cfg = self._cfg.get("rotation") or {}
+        try:
+            symbol_cooldown_sec = int(cfg.get("symbol_cooldown_sec", rot_cfg.get("symbol_cooldown_sec", 900)))
+        except Exception:  # noqa: BLE001
+            symbol_cooldown_sec = 900
+
+        now = datetime.now(timezone.utc)
+
+        def _norm_sym(s: str) -> str:
+            x = s.strip().upper()
+            for suf in ("=X", "=F"):
+                if x.endswith(suf):
+                    return x[: -len(suf)]
+            if x.endswith("-USD") and len(x) > 4:
+                return x[:-4]
+            return x
+
+        def _recently_touched(sym: str) -> bool:
+            if replacement_context is None or symbol_cooldown_sec <= 0:
+                return False
+            last = replacement_context.last_event_at_by_symbol.get(_norm_sym(sym))
+            if last is None:
+                last = replacement_context.last_event_at_by_symbol.get(str(sym).strip().upper())
+            if last is None:
+                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (now - last.astimezone(timezone.utc)).total_seconds() < symbol_cooldown_sec
+
+        def _unrl(h: HeldPositionEdge) -> Decimal:
+            try:
+                return Decimal(str((h.metadata or {}).get("unrealised_return", "0") or "0"))
+            except (TypeError, ValueError):
+                return Decimal("0")
+
+        losers = [h for h in held if h.notional > 0 and _unrl(h) < 0 and not _recently_touched(h.symbol)]
+        losers.sort(key=lambda h: (h.expected_remaining_edge, _unrl(h), -h.notional))
+
+        out: list[CoordinatorAction] = []
+        for h in losers[:max_actions]:
+            meta = dict(h.metadata or {})
+            meta["coordinator_kind"] = "trim_symbol"
+            meta["reduce_only"] = True
+            meta["close_only"] = True
+            meta["partial_reduce_only"] = False
+            meta["target_notional"] = str(h.notional)
+            meta["risk_notional_override"] = str(h.notional)
+            meta["sizing_path"] = "idle_loss_recycle"
+            meta["sizing_final_capital_required"] = str(h.notional)
+            meta["capital_recycle_reason"] = "idle_loss_recycle"
+            meta["capital_recycle_symbol_cooldown_sec"] = str(symbol_cooldown_sec)
+            if h.broker:
+                meta["broker"] = h.broker
+            out.append(
+                CoordinatorAction(
+                    kind="trim_symbol",
+                    symbol=h.symbol,
+                    strategy_name="capital_recycle",
+                    capital=h.notional,
+                    priority_score=Decimal("0"),
+                    metadata=meta,
+                )
+            )
+        return out
+
     def propose_rotation_actions(
         self,
         held: list[HeldPositionEdge],

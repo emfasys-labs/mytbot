@@ -58,7 +58,20 @@ def test_harvest_guard_allows_full_take_profit_even_when_young() -> None:
         nav=_NAV,
     )
     assert suppress is False
-    assert why == "not_trailing_lock"
+    assert why == "locks_material_profit"
+
+
+def test_harvest_guard_suppresses_young_immaterial_take_profit() -> None:
+    # Tiny fresh winners should not be clipped immediately; give the
+    # daily-horizon thesis time to work unless the harvest is material.
+    suppress, why = should_suppress_harvest_for_horizon(
+        decision=_decision("partial_take_profit", "35", "0.000028"),
+        age_sec=Decimal("600"),
+        min_hold_sec=_MIN_HOLD,
+        nav=_NAV,
+    )
+    assert suppress is True
+    assert why == "young_immaterial_profit"
 
 
 def test_harvest_guard_allows_trailing_lock_banking_material_profit() -> None:

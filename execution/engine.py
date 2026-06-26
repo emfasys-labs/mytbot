@@ -223,10 +223,18 @@ class ExecutionEngine:
             effective = Decimal("0")
         return room, reserved, effective
 
-    def _crypto_paper_fallback_broker(self, current_broker: str, attempted: set[str]) -> str | None:
-        """Find another synthetic crypto venue with deployable room."""
+    def _crypto_paper_fallback_broker(
+        self,
+        current_broker: str,
+        attempted: set[str],
+        *,
+        required_notional: Decimal | None = None,
+        min_effective_room: Decimal | None = None,
+    ) -> str | None:
+        """Find another synthetic crypto venue with better deployable room."""
         current = (current_broker or "").strip().lower()
         allowed = set(self.allowed_brokers or [])
+        best_partial: tuple[Decimal, str] | None = None
         for candidate in ("binance", "bybit", "kraken"):
             if candidate == current or candidate in attempted:
                 continue
@@ -241,17 +249,69 @@ class ExecutionEngine:
                 except Exception:  # noqa: BLE001
                     pass
             _room, _reserved, effective = self._crypto_paper_effective_room(candidate)
-            if effective is None or effective > 0:
+            if effective is None:
                 return candidate
+            floor = min_effective_room if min_effective_room is not None else Decimal("0")
+            if effective <= floor:
+                continue
+            if required_notional is not None and effective >= required_notional:
+                return candidate
+            if best_partial is None or effective > best_partial[0]:
+                best_partial = (effective, candidate)
+        if best_partial is not None:
+            return best_partial[1]
         return None
 
-    async def _crypto_existing_symbol_expression(self, symbol: str) -> tuple[str | None, list[str]]:
+    async def _crypto_existing_symbol_expression(
+        self,
+        symbol: str,
+        *,
+        session_factory=None,
+    ) -> tuple[str | None, list[str]]:
         """Return the preferred already-held paper crypto venue for ``symbol``."""
         sym = (symbol or "").strip().upper()
         if not sym:
             return None, []
 
         candidates: dict[str, Decimal] = {}
+        if self.paper_mode and session_factory is not None:
+            try:
+                from sqlalchemy import select
+                from storage.models import PositionLog
+
+                async with session_factory() as session:
+                    result = await session.execute(
+                        select(PositionLog)
+                        .where(
+                            PositionLog.symbol == sym,
+                            PositionLog.broker.in_(("binance", "bybit", "kraken")),
+                        )
+                        .order_by(PositionLog.timestamp.desc())
+                    )
+                    latest_by_broker: dict[str, Any] = {}
+                    for row in result.scalars().all():
+                        broker_name = str(row.broker or "").strip().lower()
+                        if broker_name and broker_name not in latest_by_broker:
+                            latest_by_broker[broker_name] = row
+                    for broker_name, row in latest_by_broker.items():
+                        quantity = Decimal(str(row.quantity or "0"))
+                        price = Decimal(str(row.current_price or row.avg_entry_price or "0"))
+                        if quantity != 0:
+                            candidates[broker_name] = (
+                                abs(quantity) * price if price > 0 else abs(quantity)
+                            )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "same-symbol paper-ledger lookup skipped (non-fatal): %s",
+                    exc,
+                )
+            if candidates:
+                preferred = max(candidates.items(), key=lambda item: item[1])[0]
+                return preferred, sorted(candidates)
+            # A supplied paper ledger is authoritative. Native adapter books
+            # are unrelated real/demo holdings and must not be mixed into it.
+            return None, []
+
         bm = getattr(self, "_broker_manager", None)
         adapters = getattr(bm, "adapters", None) if bm is not None else None
         if not isinstance(adapters, dict):
@@ -546,7 +606,10 @@ class ExecutionEngine:
             )
             if not _is_close:
                 try:
-                    preferred_broker, held_brokers = await self._crypto_existing_symbol_expression(signal.symbol)
+                    preferred_broker, held_brokers = await self._crypto_existing_symbol_expression(
+                        signal.symbol,
+                        session_factory=session_factory,
+                    )
                     if preferred_broker and broker_name_l != preferred_broker:
                         if preferred_broker not in _attempted_crypto_venues:
                             new_md = dict(signal.metadata or {})
@@ -590,6 +653,36 @@ class ExecutionEngine:
                             room_below_accounting_min = (
                                 effective_room.quantize(Decimal("0.01"), rounding=ROUND_DOWN) <= 0
                             )
+                            same_symbol_locked = bool(
+                                _cap_md.get("same_symbol_consolidated_to")
+                                or _cap_md.get("same_symbol_existing_brokers")
+                            )
+                            fallback_broker = None
+                            if not same_symbol_locked:
+                                fallback_broker = self._crypto_paper_fallback_broker(
+                                    broker_name_l,
+                                    _attempted_crypto_venues,
+                                    required_notional=_notional,
+                                    min_effective_room=effective_room,
+                                )
+                            if fallback_broker:
+                                new_md = dict(signal.metadata or {})
+                                rerouted_from = list(new_md.get("crypto_venue_rerouted_from") or [])
+                                if broker_name_l not in rerouted_from:
+                                    rerouted_from.append(broker_name_l)
+                                new_md["crypto_venue_rerouted_from"] = rerouted_from
+                                new_md["crypto_venue_rerouted_reason"] = "paper_room_better_venue"
+                                logger.info(
+                                    "EXEC REROUTE (venue paper capital) | %s %s %s -> %s "
+                                    "notional=%.2f room=%.2f reserved=%.2f",
+                                    signal.symbol, signal.side, broker_name_l, fallback_broker,
+                                    float(_notional), float(room), float(reserved),
+                                )
+                                return await self.execute(
+                                    replace(signal, broker=fallback_broker, metadata=new_md),
+                                    risk_decision,
+                                    session_factory=session_factory,
+                                )
                             if effective_room <= 0 or room_below_accounting_min or _px <= 0:
                                 fallback_broker = self._crypto_paper_fallback_broker(
                                     broker_name_l,
