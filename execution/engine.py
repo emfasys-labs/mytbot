@@ -587,7 +587,10 @@ class ExecutionEngine:
                         _px = Decimal(str(_px or 0))
                         _notional = abs(Decimal(str(order.quantity or 0))) * Decimal(str(_px or 0))
                         if _notional > effective_room:
-                            if effective_room <= 0 or _px <= 0:
+                            room_below_accounting_min = (
+                                effective_room.quantize(Decimal("0.01"), rounding=ROUND_DOWN) <= 0
+                            )
+                            if effective_room <= 0 or room_below_accounting_min or _px <= 0:
                                 fallback_broker = self._crypto_paper_fallback_broker(
                                     broker_name_l,
                                     _attempted_crypto_venues,
@@ -610,7 +613,11 @@ class ExecutionEngine:
                                         risk_decision,
                                         session_factory=session_factory,
                                     )
-                                self.last_skip_reason = "crypto_venue_capital_exhausted"
+                                self.last_skip_reason = (
+                                    "crypto_venue_room_below_accounting_minimum"
+                                    if room_below_accounting_min and effective_room > 0
+                                    else "crypto_venue_capital_exhausted"
+                                )
                                 logger.warning(
                                     "EXEC SKIP (venue paper capital) | %s %s broker=%s "
                                     "notional=%.2f > room=%.2f reserved=%.2f — venue wallet bound",

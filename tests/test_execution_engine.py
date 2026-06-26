@@ -376,6 +376,51 @@ async def test_crypto_paper_wallet_exhausted_reservation_reroutes_to_next_venue(
 
 
 @pytest.mark.asyncio
+async def test_crypto_paper_dust_room_reroutes_before_accounting_rounding(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+
+    def _fake_get_broker(name, *args, **kwargs):
+        broker = _FakeCryptoBroker()
+        broker.broker_name = str(name).strip().lower()
+        return broker
+
+    monkeypatch.setattr("execution.engine.get_broker", _fake_get_broker)
+    monkeypatch.setattr(
+        "system.paper_wallet.venue_deploy_room",
+        lambda broker: {"binance": Decimal("0.001"), "bybit": Decimal("500"), "kraken": Decimal("0")}.get(broker),
+    )
+
+    engine = ExecutionEngine(
+        broker_configs={},
+        paper_mode=True,
+        allowed_brokers=["binance", "bybit", "kraken"],
+    )
+
+    sig = Signal(
+        signal_id="s-crypto-dust-reroute",
+        symbol="BTC-USD",
+        side="buy",
+        strategy="mean_reversion",
+        confidence=0.9,
+        suggested_quantity=Decimal("2"),
+        suggested_price=Decimal("100"),
+        broker="binance",
+        asset_class="crypto",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        metadata={},
+    )
+
+    result = await engine.execute(sig, _approved_decision())
+
+    assert result is not None
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_quantity == Decimal("2")
+    assert engine._crypto_paper_room_reserved["bybit"] == Decimal("200")
+    assert engine.last_skip_reason is None
+
+
+@pytest.mark.asyncio
 async def test_crypto_paper_same_symbol_add_stays_on_existing_venue(monkeypatch) -> None:
     risk = _FakeRiskEngine({})
     set_risk_engine(risk)
@@ -508,7 +553,7 @@ async def test_crypto_paper_zero_accounting_notional_is_skipped(monkeypatch) -> 
     result = await engine.execute(sig, _approved_decision())
 
     assert result is None
-    assert engine.last_skip_reason == "zero_notional_after_accounting_rounding"
+    assert engine.last_skip_reason == "crypto_venue_room_below_accounting_minimum"
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,18 @@
 
 ---
 
+## D206 — Allocator-open meta gate and crypto dust-room routing
+**Date:** 2026-06-26
+**Decision:** Allocator-selected opens are still new risk and must not bypass active trained meta-label enforcement; synthetic crypto venue room that rounds to zero account currency must reroute or skip before quantity clamping.
+
+**Problem.** Live audit after the poor-performance incident showed the system healthy but not placing new orders for two different reasons. Before the fix, allocator opens carried `meta_label_kept=false` while `meta_label_shadow=true`, so bad AAPL/BTC/ETH/XRP candidates leaked through admission/execution. AAPL was repeatedly bought and then churned by profit-harvest. Crypto candidates also hit Kraken with only dust deploy room left; because that room was greater than zero but rounded to zero cents, execution clamped the order into a guaranteed zero-notional skip instead of trying Binance/Bybit room.
+
+**Fix.** `signals/engine.py` now exempts only true operator/reduce exits from trained meta-label enforcement. Allocator `open_strategy` candidates are no longer shadow-only by construction. `execution/engine.py` now treats venue room below accounting precision as exhausted before clamping, allowing normal crypto fallback routing where another venue has room; if no fallback is valid it reports `crypto_venue_room_below_accounting_minimum`.
+
+**Status:** Implemented and restarted via `python run.py` PID 47236. Verification: `pytest tests/test_execution_engine.py tests/test_wave2_wiring.py tests/test_trade_admission.py -q` -> `70 passed`; `py_compile` clean. First post-fix loop completed with no error. Since restart: 110 `no_setup`, 2 short edge-gate blocks, 2 trained-meta blocks, no admission rows, no fills. AAPL was correctly blocked (`prob=0.2249 < threshold=0.228`); BTC/ETH were also blocked by trained meta (`0.1759` / `0.1344 < 0.228`). Current latest book: AUDUSD long unrealised about `-$419`, XRP-USD long about `+$2`; no AAPL.
+
+---
+
 ## D205 — Poor-performance incident: churn, fee leakage, and false learning
 **Date:** 2026-06-26
 **Decision:** Poor paper performance is treated as a control-system failure until proven otherwise; learning and profit-harvest paths must use executable, net-of-cost evidence.

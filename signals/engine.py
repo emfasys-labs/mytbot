@@ -246,7 +246,7 @@ class SignalEngine:
         if decision.feature_hash:
             md["meta_label_feature_hash"] = decision.feature_hash
 
-        # Shadow (or operator/allocator-exempt): measure only, never drop.
+        # Shadow (or operator-exempt): measure only, never drop.
         if not enforce:
             return True
         return bool(decision.kept)
@@ -614,13 +614,11 @@ class SignalEngine:
 
         md = dict(raw.metadata or {})
         self._enrich_metadata_with_net(md, net, news_score)
-        # D169 — always SCORE (so shadow measurement + the scoreboard see
-        # every signal, incl. allocator-selected/operator-close), but only
-        # ENFORCE a drop on a non-exempt signal when the labeller is in
-        # hard-enforce mode.
-        _enforce_meta = self._trained_meta_enforce and not (
-            is_operator_close or is_allocator_selected
-        )
+        # D169/D205 — always SCORE (so measurement + the scoreboard see every
+        # signal), but only exempt true operator/reduce exits from enforcement.
+        # Allocator-selected opens are still new risk; if the trained
+        # meta-labeler is active and says DROP, they must not bypass it.
+        _enforce_meta = self._trained_meta_enforce and not is_operator_close
         if not self._apply_trained_meta_label(
             raw,
             adjusted_confidence=adjusted_confidence,
