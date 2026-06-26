@@ -169,6 +169,33 @@ def _crypto_portfolio() -> dict:
     }
 
 
+def test_risk_does_not_hard_reject_long_against_negative_direct_news():
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(
+        symbol="AAPL",
+        side="buy",
+        metadata={"ai_news_score": "-0.70", "target_notional": "10000"},
+    )
+
+    decision = engine.evaluate(sig, {"portfolio_value": Decimal("100000"), "positions": {}})
+
+    assert decision.verdict == RiskVerdict.APPROVED
+    assert "negative_direct_news_long" not in decision.checks_failed
+
+
+def test_risk_allows_reduce_only_exit_with_negative_direct_news():
+    engine = RiskEngine(_risk_cfg())
+    sig = _signal(
+        symbol="AAPL",
+        side="sell",
+        metadata={"ai_news_score": "-0.70", "reduce_only": True},
+    )
+
+    decision = engine.evaluate(sig, {"portfolio_value": Decimal("100000"), "positions": {"AAPL": {"quantity": 10}}})
+
+    assert decision.verdict == RiskVerdict.APPROVED
+
+
 def test_crypto_momentum_rejects_shadow_meta_label_drop() -> None:
     engine = RiskEngine(_crypto_quality_cfg())
     sig = _signal(

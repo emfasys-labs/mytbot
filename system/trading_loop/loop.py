@@ -2532,6 +2532,13 @@ class TradingLoop:
                                         _po_block[_name] = float(_val)
                             except Exception as exc:  # noqa: BLE001
                                 self._swallow("adaptive_tuner_overrides", exc)
+                            try:
+                                _ta_ovr = self.adaptive_tuner.overrides_for(
+                                    "trade_admission", _tuner_regime
+                                )
+                                self.trade_admission.apply_live_overrides(_ta_ovr)
+                            except Exception as exc:  # noqa: BLE001
+                                self._swallow("adaptive_tuner_trade_admission_overrides", exc)
                             # D156 — portfolio orchestrator. When enabled it
                             # owns rebalancing: net strategy candidates into one
                             # conviction-weighted target per symbol, protect
@@ -3502,7 +3509,144 @@ class TradingLoop:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("orchestrator | order routing failed for {} | {}", od.symbol, exc)
                 continue
+        if executed == 0:
+            attempted = {str(getattr(od, "symbol", "") or "") for od in result.orders}
+            reserve_executed = await self._run_orchestrator_reserve_candidates(
+                batch_candidates=batch_candidates,
+                attempted_symbols=attempted,
+                portfolio_dict=portfolio_dict,
+                tradable=tradable,
+                total_equity=total_equity,
+                session_factory=session_factory,
+                resolve_price=resolve_price,
+                sc_log_buffer=sc_log_buffer,
+                ai_result=ai_result,
+            )
+            executed += reserve_executed
         return executed
+
+    async def _run_orchestrator_reserve_candidates(
+        self,
+        *,
+        batch_candidates: list[Any],
+        attempted_symbols: set[str],
+        portfolio_dict: dict[str, Any],
+        tradable: Decimal,
+        total_equity: Decimal,
+        session_factory: Any,
+        resolve_price: Any,
+        sc_log_buffer: list[dict[str, Any]] | None = None,
+        ai_result: Any | None = None,
+    ) -> int:
+        """Try generated candidates when the allocator's top actions all fail.
+
+        The reserve path is deliberately narrow: it opens at most one candidate
+        per cycle, uses the candidate's own already-computed target notional,
+        and sends it through the same preflight/admission/risk/execution stack.
+        """
+        if self.sig_engine is None:
+            return 0
+
+        def _candidate_strength(c: Any) -> Decimal:
+            for attr in ("confidence", "adjusted_signal_strength", "raw_signal_strength"):
+                try:
+                    v = Decimal(str(getattr(c, attr, "0") or "0"))
+                    if v.is_finite():
+                        return abs(v)
+                except Exception:  # noqa: BLE001
+                    continue
+            return Decimal("0")
+
+        def _candidate_capital(c: Any) -> Decimal | None:
+            md = getattr(c, "metadata", None)
+            md = md if isinstance(md, dict) else {}
+            for key in ("risk_notional_override", "target_notional", "sizing_final_capital_required"):
+                try:
+                    v = Decimal(str(md.get(key, "0") or "0"))
+                    if v.is_finite() and v > 0:
+                        return v
+                except Exception:  # noqa: BLE001
+                    continue
+            return None
+
+        reserves = sorted(batch_candidates or [], key=_candidate_strength, reverse=True)
+        for cand in reserves:
+            symbol = str(getattr(cand, "symbol", "") or "")
+            if not symbol or symbol in attempted_symbols:
+                continue
+            capital = _candidate_capital(cand)
+            if capital is None or capital <= 0:
+                continue
+            try:
+                px = await resolve_price(symbol) if resolve_price is not None else None
+            except Exception:  # noqa: BLE001
+                px = None
+            if px is None or Decimal(str(px)) <= 0:
+                continue
+            md = dict(getattr(cand, "metadata", None) or {})
+            side = str(getattr(cand, "side", "long") or "long").strip().lower()
+            md["close"] = str(px)
+            md["side"] = "short" if side in {"short", "sell", "s"} else "long"
+            md["asset_class"] = str(getattr(cand, "asset_class", "") or md.get("asset_class") or "equity")
+            md["confidence"] = str(getattr(cand, "confidence", md.get("confidence", "0.6")) or "0.6")
+            md["orchestrator_reserve"] = True
+            md["target_notional"] = str(capital)
+            md["risk_notional_override"] = str(capital)
+            md["sizing_final_capital_required"] = str(capital)
+            action = CoordinatorAction(
+                kind="open_strategy",
+                symbol=symbol,
+                strategy_name=str(getattr(cand, "strategy_name", "") or "portfolio_orchestrator_reserve"),
+                capital=capital,
+                priority_score=_candidate_strength(cand),
+                metadata=md,
+            )
+            sig = process_coordinator_action(
+                action,
+                self.sig_engine,
+                portfolio_value=tradable,
+                news_score=_news_score_for_symbol(ai_result, symbol),
+            )
+            if sig is None:
+                continue
+            block_reason, block_meta = await self._preflight_built_signal(
+                sig,
+                action,
+                portfolio_dict=portfolio_dict,
+                session_factory=session_factory,
+            )
+            if block_reason:
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=str(getattr(sig, "symbol", "") or symbol),
+                            strategy=str(getattr(sig, "strategy", "") or ""),
+                            side=str(getattr(sig, "side", "") or ""),
+                            confidence=float(getattr(sig, "confidence", 0) or 0),
+                            status="filtered_preflight_viability",
+                            reason=block_reason,
+                            loop_iteration=self.iterations,
+                            metadata={
+                                "kind": "open_strategy",
+                                "orchestrator_path": "portfolio_orchestrator_reserve",
+                                "priority_score": str(action.priority_score),
+                                **block_meta,
+                            },
+                        )
+                    )
+                continue
+            ok = await self._process_signal_global(
+                sig,
+                session_factory,
+                portfolio_dict,
+                total_equity,
+                tradable,
+                sc_log_buffer=sc_log_buffer,
+            )
+            if ok:
+                logger.info("orchestrator | reserve executed {} {}", sig.symbol, sig.side)
+                return 1
+        return 0
 
     async def _run_global_edge_tick(
         self,
@@ -4434,6 +4578,7 @@ class TradingLoop:
             signal.symbol = native
             md = signal.metadata
 
+        signal_for_execution_preflight = signal
         if self.risk_engine is not None:
             try:
                 pre = self.risk_engine.preflight_capacity(signal, portfolio_dict)
@@ -4475,6 +4620,25 @@ class TradingLoop:
         )
         if exec_block_reason:
             if exec_block_reason == "execution_precheck_rejected":
+                resized = self._signal_with_execution_liquidity_capacity(signal_for_execution_preflight, exec_meta)
+                if resized is not None:
+                    resized_cost_reason, resized_cost_meta = self._preflight_wave9_cost(resized)
+                    if resized_cost_reason is None:
+                        resized_exec_reason, resized_exec_meta = await self._preflight_execution_limits(
+                            resized,
+                            session_factory=session_factory,
+                        )
+                        if resized_exec_reason is None:
+                            self._apply_signal_liquidity_capacity(signal, resized)
+                            if getattr(action, "metadata", None) is not None:
+                                action.metadata.update(dict(getattr(resized, "metadata", None) or {}))
+                            return None, {
+                                "broker": str(routed),
+                                "execution_liquidity_resized": True,
+                                **resized_exec_meta,
+                            }
+                    elif resized_cost_meta:
+                        exec_meta = {**exec_meta, "resized_cost_block": resized_cost_reason, **resized_cost_meta}
                 original_symbol = str(getattr(signal, "symbol", "") or "")
                 original_md = dict(md)
                 for alt in self._alternate_brokers_for_signal(signal, routed, metadata=original_md):
@@ -4528,6 +4692,30 @@ class TradingLoop:
                             "execution_preflight_fallback_from": str(routed),
                             **alt_exec_meta,
                         }
+                    if alt_exec_reason == "execution_precheck_rejected":
+                        alt_resized = self._signal_with_execution_liquidity_capacity(alt_for_execution, alt_exec_meta)
+                        if alt_resized is None:
+                            continue
+                        alt_resized_cost_reason, _alt_resized_cost_meta = self._preflight_wave9_cost(alt_resized)
+                        if alt_resized_cost_reason:
+                            continue
+                        alt_resized_exec_reason, alt_resized_exec_meta = await self._preflight_execution_limits(
+                            alt_resized,
+                            session_factory=session_factory,
+                        )
+                        if alt_resized_exec_reason is None:
+                            self._apply_signal_liquidity_capacity(signal, alt_resized)
+                            signal.broker = alt
+                            signal.metadata["broker"] = alt
+                            signal.metadata["execution_preflight_fallback_from"] = str(routed)
+                            if getattr(action, "metadata", None) is not None:
+                                action.metadata.update(signal.metadata)
+                            return None, {
+                                "broker": alt,
+                                "execution_preflight_fallback_from": str(routed),
+                                "execution_liquidity_resized": True,
+                                **alt_resized_exec_meta,
+                            }
             return exec_block_reason, {"broker": str(routed), **exec_meta}
 
         return None, {"broker": str(routed)}
@@ -4730,6 +4918,24 @@ class TradingLoop:
             if exec_block_reason:
                 fallback_broker = ""
                 if exec_block_reason == "execution_precheck_rejected":
+                    liquidity_action = self._coordinator_action_with_execution_liquidity_capacity(
+                        selected_action,
+                        exec_meta,
+                    )
+                    liquidity_sig = self._signal_with_execution_liquidity_capacity(
+                        sig_for_execution_preflight,
+                        exec_meta,
+                    )
+                    if liquidity_action is not None and liquidity_sig is not None:
+                        liquidity_cost_reason, _liquidity_cost_meta = self._preflight_wave9_cost(liquidity_sig)
+                        if liquidity_cost_reason is None:
+                            liquidity_exec_reason, _liquidity_exec_meta = await self._preflight_execution_limits(
+                                liquidity_sig,
+                                session_factory=session_factory,
+                            )
+                            if liquidity_exec_reason is None:
+                                viable.append(liquidity_action)
+                                continue
                     original_symbol = str(getattr(sig, "symbol", "") or "")
                     original_md = dict(md)
                     for alt in self._alternate_brokers_for_signal(sig, routed, metadata=original_md):
@@ -4777,6 +4983,37 @@ class TradingLoop:
                             selected_action = self._coordinator_action_with_metadata(selected_action, selected_meta)
                             fallback_broker = alt
                             break
+                        if alt_exec_reason == "execution_precheck_rejected":
+                            alt_liquidity_action = self._coordinator_action_with_execution_liquidity_capacity(
+                                selected_action,
+                                _alt_exec_meta,
+                            )
+                            alt_liquidity_sig = self._signal_with_execution_liquidity_capacity(
+                                alt_for_execution,
+                                _alt_exec_meta,
+                            )
+                            if alt_liquidity_action is None or alt_liquidity_sig is None:
+                                continue
+                            alt_liquidity_cost_reason, _alt_liquidity_cost_meta = self._preflight_wave9_cost(
+                                alt_liquidity_sig
+                            )
+                            if alt_liquidity_cost_reason:
+                                continue
+                            alt_liquidity_exec_reason, _alt_liquidity_exec_meta = await self._preflight_execution_limits(
+                                alt_liquidity_sig,
+                                session_factory=session_factory,
+                            )
+                            if alt_liquidity_exec_reason is None:
+                                selected_meta = dict(getattr(alt_liquidity_action, "metadata", {}) or {})
+                                selected_meta["broker"] = alt
+                                selected_meta["execution_preflight_fallback_from"] = str(routed)
+                                selected_meta["execution_liquidity_resized"] = True
+                                selected_action = self._coordinator_action_with_metadata(
+                                    alt_liquidity_action,
+                                    selected_meta,
+                                )
+                                fallback_broker = alt
+                                break
                 if fallback_broker:
                     viable.append(selected_action)
                     continue
@@ -4858,6 +5095,95 @@ class TradingLoop:
         except Exception:  # noqa: BLE001
             pass
         return action
+
+    def _liquidity_capacity_from_execution_meta(
+        self,
+        meta: dict[str, Any],
+    ) -> tuple[Decimal, Decimal] | None:
+        """Infer the largest order size allowed by the visible-book check.
+
+        Execution already resolved the active liquidity requirement into
+        metadata. If the only failed execution limit is book depth, use the
+        observed book/min ratio to scale the candidate instead of discarding it.
+        """
+        if str(meta.get("execution_limit_reason", "")).lower() != "liquidity_limit":
+            return None
+        try:
+            order_notional = Decimal(str(meta.get("order_notional", "0") or "0"))
+            book_liquidity = Decimal(str(meta.get("book_liquidity_usd", "0") or "0"))
+            min_liquidity = Decimal(str(meta.get("min_liquidity_usd", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            return None
+        if order_notional <= 0 or book_liquidity <= 0 or min_liquidity <= 0:
+            return None
+        if book_liquidity >= min_liquidity:
+            return None
+        ratio = book_liquidity / min_liquidity
+        if ratio <= 0:
+            return None
+        try:
+            current_qty = Decimal(str(meta.get("post_normalized_quantity") or meta.get("pre_normalized_quantity") or "0"))
+        except Exception:  # noqa: BLE001
+            current_qty = Decimal("0")
+        if current_qty <= 0:
+            return None
+        return current_qty * ratio, order_notional * ratio
+
+    def _signal_with_execution_liquidity_capacity(
+        self,
+        signal: Any,
+        meta: dict[str, Any],
+    ) -> Any | None:
+        capacity = self._liquidity_capacity_from_execution_meta(meta)
+        if capacity is None:
+            return None
+        effective_qty, effective_notional = capacity
+        try:
+            current_qty = Decimal(str(getattr(signal, "suggested_quantity", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            current_qty = Decimal("0")
+        if effective_qty <= 0 or current_qty <= 0 or effective_qty >= current_qty:
+            return None
+        resized = deepcopy(signal)
+        resized.suggested_quantity = effective_qty
+        resized_md = dict(getattr(resized, "metadata", None) or {})
+        resized_md["execution_liquidity_resized"] = True
+        resized_md["execution_liquidity_original_quantity"] = str(current_qty)
+        resized_md["execution_liquidity_effective_quantity"] = str(effective_qty)
+        resized_md["execution_liquidity_effective_notional"] = str(effective_notional)
+        resized_md["target_notional"] = str(effective_notional)
+        resized_md["risk_notional_override"] = str(effective_notional)
+        resized_md["sizing_final_capital_required"] = str(effective_notional)
+        resized_md["sizing_final_action_capital"] = str(effective_notional)
+        resized.metadata = resized_md
+        return resized
+
+    def _apply_signal_liquidity_capacity(self, signal: Any, resized: Any) -> None:
+        try:
+            signal.suggested_quantity = Decimal(str(getattr(resized, "suggested_quantity", "0") or "0"))
+            signal.metadata = dict(getattr(resized, "metadata", None) or {})
+        except Exception:  # noqa: BLE001
+            return
+
+    def _coordinator_action_with_execution_liquidity_capacity(
+        self,
+        action: Any,
+        meta: dict[str, Any],
+    ) -> Any | None:
+        capacity = self._liquidity_capacity_from_execution_meta(meta)
+        if capacity is None:
+            return None
+        effective_qty, effective_notional = capacity
+        resized = self._coordinator_action_with_effective_capacity(
+            action,
+            effective_notional=effective_notional,
+            effective_quantity=effective_qty,
+        )
+        resized_meta = dict(getattr(resized, "metadata", {}) or {})
+        resized_meta["execution_liquidity_resized"] = True
+        resized_meta["execution_liquidity_effective_quantity"] = str(effective_qty)
+        resized_meta["execution_liquidity_effective_notional"] = str(effective_notional)
+        return self._coordinator_action_with_metadata(resized, resized_meta)
 
     def _preflight_wave9_cost(self, signal: Any) -> tuple[str | None, dict[str, Any]]:
         """Run the same Wave 9 edge/cost gate used by execution, if loaded."""
@@ -4945,6 +5271,7 @@ class TradingLoop:
                 broker,
                 order,
                 broker_name=str(getattr(signal, "broker", "") or "").strip().lower(),
+                allow_auto_kill=False,
             )
             if not ok:
                 limit_meta = getattr(self.execution_engine, "_last_execution_limit_meta", {}) or {}

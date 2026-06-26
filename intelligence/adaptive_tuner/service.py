@@ -33,15 +33,26 @@ def _resolve_dotted(block: dict[str, Any], dotted: str) -> Any:
     return cur
 
 
-def _load_param_defaults(params: tuple, strategies_path: str = "config/strategies.yaml") -> dict[str, Decimal]:
+def _load_param_defaults(
+    params: tuple,
+    strategies_path: str = "config/strategies.yaml",
+    trade_admission_path: str = "config/trade_admission.yaml",
+) -> dict[str, Decimal]:
     """Seed defaults from the live YAML so the optimizer starts at config values."""
     out: dict[str, Decimal] = {}
     try:
-        raw = yaml.safe_load(Path(strategies_path).read_text(encoding="utf-8")) or {}
+        strategies_raw = yaml.safe_load(Path(strategies_path).read_text(encoding="utf-8")) or {}
     except Exception:  # noqa: BLE001
-        raw = {}
+        strategies_raw = {}
+    try:
+        admission_raw = yaml.safe_load(Path(str(trade_admission_path)).read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        admission_raw = {}
     for p in params:
-        block = raw.get(p.namespace) or {}
+        if p.namespace == "trade_admission":
+            block = admission_raw
+        else:
+            block = strategies_raw.get(p.namespace) or {}
         val = _resolve_dotted(block, p.name)
         if val is not None:
             try:

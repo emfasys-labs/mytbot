@@ -75,7 +75,14 @@ async def test_trade_admission_shadow_logs_without_blocking(sf):
 
 @pytest.mark.asyncio
 async def test_trade_admission_preserves_reduce_only(sf):
-    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=False, block_new_opens=True))
+    svc = TradeAdmissionService(
+        AdmissionConfig(
+            enabled=True,
+            shadow_only=False,
+            block_new_opens=True,
+            allow_size_haircuts=True,
+        )
+    )
     sig = _signal(reduce_only=True, meta_label_kept=False)
 
     decision = await svc.evaluate_signal(
@@ -106,6 +113,71 @@ async def test_trade_admission_can_block_bad_new_open_when_active(sf):
 
     assert decision.action == AdmissionAction.REJECT
     assert svc.should_block(decision)
+
+
+@pytest.mark.asyncio
+async def test_trade_admission_does_not_block_shadow_meta_label_for_allocator(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=False, block_new_opens=True))
+    sig = _signal(
+        meta_label_kept=False,
+        meta_label_shadow=True,
+        confidence="0.9",
+        accumulator_score="0.4",
+    )
+
+    decision = await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=2,
+        source_path="global",
+    )
+
+    assert decision.reason != "prior_trade_filter_drop"
+    assert not svc.should_block(decision)
+
+
+@pytest.mark.asyncio
+async def test_trade_admission_sizes_down_long_against_negative_direct_news(sf):
+    svc = TradeAdmissionService(
+        AdmissionConfig(
+            enabled=True,
+            shadow_only=False,
+            block_new_opens=True,
+            allow_size_haircuts=True,
+        )
+    )
+    sig = _signal(ai_news_score="-0.60", news_score="0.95", confidence="0.95")
+
+    decision = await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=2,
+        source_path="test",
+    )
+
+    assert decision.action == AdmissionAction.ALLOW_SMALLER
+    assert decision.reason == "directional_news_size_adjustment"
+    assert decision.size_multiplier == Decimal("0.60")
+    assert not svc.should_block(decision)
+
+
+@pytest.mark.asyncio
+async def test_trade_admission_preserves_negative_news_reduce_only_exit(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=False, block_new_opens=True))
+    sig = _signal(reduce_only=True, ai_news_score="-0.60", news_score="0.95")
+
+    decision = await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {"AAPL": {"quantity": 10}}},
+        loop_iteration=2,
+        source_path="test",
+    )
+
+    assert decision.action == AdmissionAction.ALLOW
+    assert decision.reason == "reduce_only_preserved"
 
 
 @pytest.mark.asyncio

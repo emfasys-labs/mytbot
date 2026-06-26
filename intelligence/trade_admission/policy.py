@@ -73,7 +73,7 @@ def decide_admission(
         )
 
     explicit_bad = []
-    if vals.get("meta_label_kept") is False:
+    if vals.get("meta_label_kept") is False and vals.get("meta_label_shadow") is not True:
         explicit_bad.append("prior_trade_filter_drop")
     micro = str(vals.get("microstructure_label") or "").strip().lower()
     if micro in {"high_risk", "broken", "unavailable"}:
@@ -96,11 +96,25 @@ def decide_admission(
             features=features,
         )
 
+    news_component = _d(vals.get("news_abs"))
+    directional_news = _d(vals.get("news_directional"))
+    if directional_news is not None:
+        weight = max(Decimal("0"), min(Decimal("1"), _d(cfg.directional_news_weight) or Decimal("0")))
+        if news_component is None:
+            news_component = directional_news
+        else:
+            news_component = ((Decimal("1") - weight) * news_component) + (weight * directional_news)
+    directional_multiplier = None
+    if cfg.allow_size_haircuts and not cfg.shadow_only and directional_news is not None:
+        weight = max(Decimal("0"), min(Decimal("1"), _d(cfg.directional_news_weight) or Decimal("0")))
+        directional_multiplier = Decimal("1") - (weight * (Decimal("1") - directional_news))
+        directional_multiplier = max(Decimal("0"), min(Decimal("1"), directional_multiplier))
+
     parts = [
         _d(vals.get("confidence")),
         _d(vals.get("quality")),
         _d(vals.get("accumulator")),
-        _d(vals.get("news_abs")),
+        news_component,
         _d(vals.get("volume_component")),
     ]
     present = [p for p in parts if p is not None]
@@ -160,7 +174,9 @@ def decide_admission(
                 # sized by how far below the base rate it sits.
                 action, applied = _enforce(cfg, AdmissionAction.ALLOW_SMALLER)
                 ratio = (ms.probability / ms.base_rate) if ms.base_rate > 0 else Decimal("1")
-                multiplier = max(Decimal("0.25"), min(Decimal("1"), ratio))
+                multiplier = max(Decimal("0"), min(Decimal("1"), ratio))
+                if directional_multiplier is not None:
+                    multiplier = min(multiplier, directional_multiplier)
                 return AdmissionDecision(
                     action=action,
                     reason=f"model_marginal|p={ms.probability:.3f}<base={ms.base_rate:.3f}",
@@ -168,6 +184,18 @@ def decide_admission(
                     uncertainty=uncertainty,
                     active_applied=applied,
                     size_multiplier=multiplier if applied else None,
+                    model_probability=ms.probability,
+                    model_samples=ms.samples,
+                    features=features,
+                )
+            if directional_multiplier is not None and directional_multiplier < Decimal("1"):
+                return AdmissionDecision(
+                    action=AdmissionAction.ALLOW_SMALLER,
+                    reason="directional_news_size_adjustment",
+                    score=score,
+                    uncertainty=uncertainty,
+                    active_applied=True,
+                    size_multiplier=directional_multiplier,
                     model_probability=ms.probability,
                     model_samples=ms.samples,
                     features=features,
@@ -195,6 +223,18 @@ def decide_admission(
             size_multiplier=max(min_multiplier, Decimal("1") - uncertainty),
             features=features,
         )
+
+    if directional_multiplier is not None:
+        if directional_multiplier < Decimal("1"):
+            return AdmissionDecision(
+                action=AdmissionAction.ALLOW_SMALLER,
+                reason="directional_news_size_adjustment",
+                score=score,
+                uncertainty=uncertainty,
+                active_applied=True,
+                size_multiplier=directional_multiplier,
+                features=features,
+            )
 
     return AdmissionDecision(
         action=AdmissionAction.ALLOW,

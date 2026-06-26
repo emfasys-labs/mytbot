@@ -2609,7 +2609,14 @@ class ExecutionEngine:
             )
         return True
 
-    async def _passes_execution_limits(self, broker, order: Order, *, broker_name: str) -> bool:
+    async def _passes_execution_limits(
+        self,
+        broker,
+        order: Order,
+        *,
+        broker_name: str,
+        allow_auto_kill: bool = True,
+    ) -> bool:
         self._last_execution_limit_meta = {}
         limits = self._execution_limits()
         try:
@@ -2620,7 +2627,8 @@ class ExecutionEngine:
                 "execution_limit_reason": "order_book_fetch_failed",
                 "execution_limit_error": str(exc),
             }
-            self._maybe_auto_kill("order book fetch failure", broker=broker_name or None)
+            if allow_auto_kill:
+                self._maybe_auto_kill("order book fetch failure", broker=broker_name or None)
             return False
 
         best_bid = ob.bids[0][0] if ob.bids else Decimal("0")

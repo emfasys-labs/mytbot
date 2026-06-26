@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -173,6 +174,17 @@ class TradeAdmissionService:
             return True
         return False
 
+    def apply_live_overrides(self, overrides: dict[str, Any]) -> None:
+        if not overrides:
+            return
+        updates: dict[str, Any] = {}
+        if "directional_news_weight" in overrides:
+            v = _dec(overrides.get("directional_news_weight"))
+            if v is not None:
+                updates["directional_news_weight"] = max(Decimal("0"), min(Decimal("1"), v))
+        if updates:
+            self.cfg = dataclass_replace(self.cfg, **updates)
+
     async def mark_status(
         self,
         session_factory: async_sessionmaker[AsyncSession] | None,
@@ -201,4 +213,3 @@ class TradeAdmissionService:
             horizons_minutes=horizons,
             limit=self.cfg.max_rows_per_cycle,
         )
-

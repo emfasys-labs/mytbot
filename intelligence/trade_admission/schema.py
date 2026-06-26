@@ -33,6 +33,7 @@ class AdmissionConfig:
     model_min_bucket_samples: int = 25
     model_refresh_minutes: int = 30
     model_lookback_days: int = 30
+    directional_news_weight: Decimal = Decimal("0.50")
 
 
 @dataclass(frozen=True)
@@ -90,4 +91,3 @@ class AdmissionDecision:
     features: AdmissionFeatures | None = None
     model_probability: Decimal | None = None
     model_samples: int | None = None
-

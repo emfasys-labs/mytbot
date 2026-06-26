@@ -40,6 +40,12 @@ def build_features(candidate: AdmissionCandidate, portfolio_state: dict[str, Any
     accumulator = _dec(md.get("accumulator_score") or md.get("accumulated_score"))
     if accumulator is not None:
         accumulator = _clamp01((accumulator + Decimal("1")) / Decimal("2"))
+    direct_news = _dec(md.get("ai_news_score"))
+    directional_news = None
+    if direct_news is not None:
+        side = str(candidate.side or md.get("side") or "").strip().lower()
+        aligned = -direct_news if side in {"sell", "short"} else direct_news
+        directional_news = _clamp01((aligned + Decimal("1")) / Decimal("2"))
     news = _dec(md.get("news_score"))
     if news is not None:
         news = _clamp01(abs(news))
@@ -97,15 +103,19 @@ def build_features(candidate: AdmissionCandidate, portfolio_state: dict[str, Any
         "close_only_book": close_only_book,
         "drawdown_fraction": str(drawdown_fraction) if drawdown_fraction is not None else None,
         "is_reduce_only": bool(candidate.is_reduce_only),
+        "side": candidate.side,
         "asset_class": candidate.asset_class,
         "broker": candidate.broker,
         "strategy": candidate.strategy,
         "source_path": candidate.source_path,
+        "ai_news_score": str(direct_news) if direct_news is not None else None,
+        "news_directional": str(directional_news) if directional_news is not None else None,
         "meta_label_kept": md.get("meta_label_kept"),
+        "meta_label_shadow": md.get("meta_label_shadow"),
         "microstructure_label": md.get("microstructure_label") or md.get("microstructure_shadow_label"),
         "execution_gated": md.get("execution_gated"),
     }
-    evidence_keys = ["confidence", "quality", "accumulator", "news_abs", "volume_component"]
+    evidence_keys = ["confidence", "quality", "accumulator", "news_directional", "volume_component"]
     present = sum(1 for k in evidence_keys if values.get(k) is not None)
     coverage = Decimal(present) / Decimal(len(evidence_keys))
     return AdmissionFeatures(values=values, coverage=coverage)

@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from system.local_paper_flatten import (  # noqa: E402
     flatten_local_paper_book,
     normalize_broker_filter,
+    normalize_symbol_filter,
     refuse_live_local_paper_flatten,
 )
 
@@ -37,7 +38,11 @@ def _wanted(raw: str) -> set[str]:
     return normalize_broker_filter(raw)
 
 
-async def _flatten(*, apply: bool, brokers: set[str]) -> int:
+def _wanted_symbols(raw: str) -> set[str]:
+    return normalize_symbol_filter(raw)
+
+
+async def _flatten(*, apply: bool, brokers: set[str], symbols: set[str]) -> int:
     try:
         refuse_live_local_paper_flatten()
     except RuntimeError as exc:
@@ -45,6 +50,7 @@ async def _flatten(*, apply: bool, brokers: set[str]) -> int:
     result = await flatten_local_paper_book(
         apply=apply,
         brokers=brokers,
+        symbols=symbols,
         reason="local_paper_book_repair",
     )
     if not result.previews:
@@ -68,9 +74,14 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Flatten local paper PositionLog book")
     p.add_argument("--apply", action="store_true", help="write close rows and tombstones")
     p.add_argument("--brokers", default="", help="comma-separated broker filter")
+    p.add_argument("--symbols", default="", help="comma-separated symbol filter")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    raise SystemExit(asyncio.run(_flatten(apply=args.apply, brokers=_wanted(args.brokers))))
+    raise SystemExit(asyncio.run(_flatten(
+        apply=args.apply,
+        brokers=_wanted(args.brokers),
+        symbols=_wanted_symbols(args.symbols),
+    )))

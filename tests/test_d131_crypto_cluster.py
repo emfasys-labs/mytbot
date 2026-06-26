@@ -87,7 +87,8 @@ def test_first_crypto_within_cap_allowed():
 def test_cluster_aggregates_across_venues():
     """The bug we are fixing: BTC long on kraken + ETH long on binance +
     SOL long on bybit each look small per-name but together exceed the
-    aggregate cluster cap."""
+    aggregate cluster cap. The cap is a capacity rail: if room remains,
+    the order is clamped to that room instead of rejected outright."""
     eng = _engine()
     positions = {
         # asset_class on the position is what production reconciliation writes.
@@ -99,8 +100,10 @@ def test_cluster_aggregates_across_venues():
     # Already +90k. Add SOL-USD long $20k on bybit → projected +110k > $100k cap.
     sig = _sig(symbol="SOL-USD", side="buy", qty="250", price="80", broker="bybit")
     decision = eng.evaluate(sig, _port(nav="1000000", positions=positions))
-    assert decision.verdict.value == "rejected"
-    assert "crypto_cluster" in (decision.reason or "")
+    assert decision.verdict.value == "approved"
+    assert sig.suggested_quantity == Decimal("125")
+    assert sig.metadata["risk_crypto_cluster_clamped"] is True
+    assert sig.metadata["risk_crypto_cluster_effective_notional"] == "10000.00"
 
 
 def test_neutralising_leg_reduces_cluster_and_is_allowed():
@@ -171,6 +174,20 @@ def test_crypto_cluster_cap_scales_down_with_market_state():
     port["metadata"] = {"market_state_score": 0.20}
 
     decision = eng.evaluate(sig, port)
+
+    assert decision.verdict.value == "rejected"
+    assert "crypto_cluster" in (decision.reason or "")
+
+
+def test_crypto_cluster_rejects_when_already_over_cap_and_increasing():
+    eng = _engine()
+    positions = {
+        "binance:BTC-USD": {"symbol": "BTC-USD", "asset_class": "crypto",
+                            "quantity": "3.0", "current_price": "75000"},
+    }
+    sig = _sig(symbol="ETH-USD", side="buy", qty="1", price="2000")
+
+    decision = eng.evaluate(sig, _port(nav="1000000", positions=positions))
 
     assert decision.verdict.value == "rejected"
     assert "crypto_cluster" in (decision.reason or "")

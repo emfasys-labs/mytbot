@@ -18,6 +18,40 @@
 
 ---
 
+## D204 — Replace direct-news hard veto with tunable learning penalty
+**Date:** 2026-06-26
+**Decision:** Direct symbol/company news should influence score and size through parameters, not hard-coded rejection.
+
+**Problem.** D203 stopped the repeated AAPL paper loss by adding hard admission/risk vetoes for `negative_direct_news_long` / `positive_direct_news_short`. That was operationally useful but architecturally wrong: whether to fight direct news should be a parameterized, learnable trading behaviour, not an unconditional `if` gate.
+
+**Fix.** Removed the direct-news hard veto from `risk/engine.py` and removed explicit direct-news reject reasons from `intelligence/trade_admission/policy.py`. `feature_builder.py` now derives `news_directional` from signed `ai_news_score` and trade side: aligned direct news scores high, opposing direct news scores low. `policy.py` blends absolute news evidence with directional evidence using `AdmissionConfig.directional_news_weight`, and applies a continuous `directional_news_size_adjustment` haircut when size haircuts are enabled. This does not block the trade; it changes score/size. Added `directional_news_weight` to `config/trade_admission.yaml` and to the Adaptive Tuner surface as `trade_admission.directional_news_weight`, with live injection via `TradingLoop` into `TradeAdmissionService.apply_live_overrides()`. Adaptive tuner defaults now load `trade_admission` parameters from `config/trade_admission.yaml`.
+
+**Status:** Implemented and restarted via `python run.py` PID 25256. Runtime is `running`, 10/10 brokers connected, pipeline running. Verification: `directional_news_weight=0.5`; tuner config contains `trade_admission.directional_news_weight`; focused tests `tests/test_trade_admission.py`, `tests/test_risk_engine.py`, `tests/test_adaptive_tuner.py` -> `54 passed, 1 skipped`; `py_compile` clean.
+
+---
+
+## D203 — Direct negative news veto for new directional opens
+**Date:** 2026-06-25
+**Decision:** A new directional open must not fight direct symbol/company news evidence.
+
+**Problem.** AAPL was repeatedly opened long while the UI showed negative direct company/news impact. The bug was semantic: `ai_news_score` carried the signed direct news value, but trade admission treated absolute news magnitude as generic evidence, so a negative company score could still help the admission score instead of blocking the long. Older AAPL top-ups also show `ai_news_score=0.0`, so the direct-news guard must be paired with the existing active meta-label and admission gates rather than replace them.
+
+**Fix.** `intelligence/trade_admission` now preserves signed `ai_news_score` and rejects new longs when direct news is negative, and rejects new shorts when direct news is positive. `risk/engine.py` has the same final hard veto (`negative_direct_news_long` / `positive_direct_news_short`) so the block still holds if admission is disabled or bypassed. Reduce-only exits stay allowed. Added `--symbols` to the local paper flatten script and flattened only `ibkr:AAPL` from the local paper book with a reduce-only sell/tombstone.
+
+**Status:** Implemented and restarted via `python run.py` PID 45400. Verification: local paper AAPL flatten wrote `sell 893 @ 275.21`; `/positions` and dashboard snapshot show no AAPL, only AUDUSD and two XRP rows; runtime is `running`, 10/10 brokers connected, pipeline running. Tests: `tests/test_trade_admission.py`, `tests/test_risk_engine.py`, `tests/test_global_edge_preflight.py`, `tests/test_d131_crypto_cluster.py`, and `tests/test_execution_engine.py::test_paper_mode_enforces_execution_prechecks` -> `64 passed, 1 skipped`; `py_compile` clean.
+
+---
+
+## D202 — Paper book and P&L reset after active-gate promotion
+**Date:** 2026-06-25
+**Decision:** Reset all paper trading state after D201 so the active gates are evaluated from a clean book.
+
+**Action.** Stopped the system, waited for `state=off`, then ran `python scripts/reset_trading_data.py --execute`. The reset wiped local paper trading tables (`orders`, `positions`, `fills`, `daily_pnl`, `signals`, `risk_decisions`, `strategy_candidate_log`, `thesis_log`, `anomaly_log`), deleted trading-derived `control_state` keys, and removed runtime paper/risk files.
+
+**Status:** Restarted via `/system/start`. Runtime is `running`, 10/10 brokers included, coverage full, pipeline running, and first clean iteration completed. Verification: `/positions` is empty; `/pnl` is zero; DB has `positions=0`, `fills=0`, `orders=0`, and one zero `daily_pnl` baseline row for today.
+
+---
+
 ## D201 — Shadow governance promoted to active paper gates
 **Date:** 2026-06-25
 **Decision:** Developed governance layers should influence paper order flow unless they are purely diagnostic and have no active trading hook.

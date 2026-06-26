@@ -76,6 +76,14 @@ async def latest_open_local_paper_rows(session_factory, *, brokers: set[str] | N
         return list((await session.execute(stmt)).scalars().all())
 
 
+def normalize_symbol_filter(raw: str | set[str] | None) -> set[str]:
+    if raw is None:
+        return set()
+    if isinstance(raw, set):
+        return {str(x).strip().upper() for x in raw if str(x).strip()}
+    return {x.strip().upper() for x in str(raw).split(",") if x.strip()}
+
+
 def _preview(row) -> LocalPaperFlattenPreview:
     qty = Decimal(str(row.quantity or "0"))
     px = Decimal(str(row.current_price or row.avg_entry_price or "0"))
@@ -94,6 +102,7 @@ async def flatten_local_paper_book(
     *,
     apply: bool,
     brokers: set[str] | str | None = None,
+    symbols: set[str] | str | None = None,
     reason: str = "local_paper_book_repair",
 ) -> LocalPaperFlattenResult:
     """Flatten the append-only local paper book with close rows and tombstones.
@@ -115,6 +124,12 @@ async def flatten_local_paper_book(
             session_factory,
             brokers=normalize_broker_filter(brokers),
         )
+        symbol_filter = normalize_symbol_filter(symbols)
+        if symbol_filter:
+            rows = [
+                row for row in rows
+                if str(getattr(row, "symbol", "") or "").strip().upper() in symbol_filter
+            ]
         previews = [_preview(row) for row in rows]
         if not apply or not rows:
             return LocalPaperFlattenResult(previews=previews, applied=False)

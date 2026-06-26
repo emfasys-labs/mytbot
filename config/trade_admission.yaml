@@ -38,3 +38,9 @@ model_enabled: true
 model_min_bucket_samples: 25
 model_refresh_minutes: 30
 model_lookback_days: 30
+
+# Tunable directional-news influence. This is not a veto: signed direct
+# symbol/company news changes admission score and size continuously. The
+# Adaptive Tuner may move this value within its configured bounds after
+# realized outcomes show whether fighting direct news is helping or hurting.
+directional_news_weight: 0.50

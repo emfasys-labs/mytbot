@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,16 @@ def _bool(v: Any, default: bool) -> bool:
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dec01(v: Any, default: str) -> Decimal:
+    try:
+        d = Decimal(str(v))
+    except (InvalidOperation, ValueError, TypeError):
+        d = Decimal(default)
+    if not d.is_finite():
+        d = Decimal(default)
+    return max(Decimal("0"), min(Decimal("1"), d))
 
 
 def load_admission_config(path: str | Path = "config/trade_admission.yaml") -> AdmissionConfig:
@@ -60,5 +71,5 @@ def load_admission_config(path: str | Path = "config/trade_admission.yaml") -> A
         model_min_bucket_samples=_int("model_min_bucket_samples", 25),
         model_refresh_minutes=_int("model_refresh_minutes", 30),
         model_lookback_days=_int("model_lookback_days", 30),
+        directional_news_weight=_dec01(raw.get("directional_news_weight"), "0.50"),
     )
-

@@ -1359,6 +1359,28 @@ class RiskEngine:
             return (True, "crypto_cluster")
         if abs(projected) <= cap_notional:
             return (True, "crypto_cluster")
+        remaining = cap_notional - abs(current)
+        if remaining > 0 and abs(proposed) > remaining and price > 0:
+            clamped_qty = remaining / price
+            if clamped_qty > 0:
+                if not isinstance(getattr(signal, "metadata", None), dict):
+                    signal.metadata = {}
+                signal.suggested_quantity = clamped_qty
+                signal.metadata["risk_crypto_cluster_clamped"] = True
+                signal.metadata["risk_crypto_cluster_existing_notional"] = str(current)
+                signal.metadata["risk_crypto_cluster_cap_notional"] = str(cap_notional)
+                signal.metadata["risk_crypto_cluster_requested_notional"] = str(abs(proposed))
+                signal.metadata["risk_crypto_cluster_effective_notional"] = str(remaining)
+                logger.info(
+                    "RISK crypto_cluster CLAMP | %s %s | proposed=%s -> %s current_cluster=%s cap=%s",
+                    sig_sym,
+                    side,
+                    str(abs(proposed)),
+                    str(remaining),
+                    str(current),
+                    str(cap_notional),
+                )
+                return (True, "crypto_cluster")
         logger.warning(
             "RISK crypto_cluster REJECT | %s %s | proposed=%s current_cluster=%s "
             "projected=%s cap=%s",
