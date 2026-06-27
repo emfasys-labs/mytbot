@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, AsyncIterator
@@ -112,6 +113,15 @@ class Trading212Adapter(BrokerAdapter):
         self._ticker_by_canonical: dict[str, str] = {}
         self._canonical_by_ticker: dict[str, str] = {}
         self._last_prices: dict[str, Decimal] = {}
+        self._balance_cache: tuple[float, list[Balance]] | None = None
+        self._balance_lock = asyncio.Lock()
+        try:
+            self._balance_cache_ttl_sec = max(
+                5.0,
+                float(os.getenv("TRADING212_BALANCE_CACHE_TTL_SEC", "60")),
+            )
+        except ValueError:
+            self._balance_cache_ttl_sec = 60.0
 
     def _resolve_base_url(self) -> str:
         if self.base_url:
@@ -192,6 +202,10 @@ class Trading212Adapter(BrokerAdapter):
             summary = await self._request("GET", "/equity/account/summary")
             if isinstance(summary, dict):
                 self._currency = str(summary.get("currency") or self._currency).upper()
+                self._balance_cache = (
+                    time.monotonic(),
+                    self._balances_from_summary(summary),
+                )
             self._connected = True
             logger.info(
                 "connect | Trading 212 | ok | env={} currency={}",
@@ -218,9 +232,32 @@ class Trading212Adapter(BrokerAdapter):
         return self._connected and self._client is not None
 
     async def get_balance(self) -> list[Balance]:
-        summary = await self._request("GET", "/equity/account/summary")
-        if not isinstance(summary, dict):
-            return []
+        now = time.monotonic()
+        cached = self._balance_cache
+        if cached is not None and now - cached[0] <= self._balance_cache_ttl_sec:
+            return list(cached[1])
+        async with self._balance_lock:
+            now = time.monotonic()
+            cached = self._balance_cache
+            if cached is not None and now - cached[0] <= self._balance_cache_ttl_sec:
+                return list(cached[1])
+            try:
+                summary = await self._request("GET", "/equity/account/summary")
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429 and cached is not None:
+                    logger.warning(
+                        "trading212 | balance rate limited; reusing last coherent snapshot"
+                    )
+                    self._balance_cache = (now, cached[1])
+                    return list(cached[1])
+                raise
+            if not isinstance(summary, dict):
+                return list(cached[1]) if cached is not None else []
+            balances = self._balances_from_summary(summary)
+            self._balance_cache = (now, balances)
+            return list(balances)
+
+    def _balances_from_summary(self, summary: dict[str, Any]) -> list[Balance]:
         cash = summary.get("cash") if isinstance(summary.get("cash"), dict) else {}
         available = _d(cash.get("availableToTrade") or cash.get("available") or summary.get("free"))
         total = _d(summary.get("totalValue") or summary.get("total") or available)

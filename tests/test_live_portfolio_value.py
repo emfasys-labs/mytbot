@@ -9,6 +9,7 @@ UI NAV card to show ~£884k while the true aggregated NAV was ~£1.05M.
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ import pytest
 from brokers.base import Balance
 from system.broker_manager import BrokerReport, BrokerStatus
 from system.portfolio_equity import (
+    PortfolioValueSnapshot,
     cached_live_portfolio_snapshot,
     live_portfolio_snapshot,
     live_portfolio_value,
@@ -340,6 +342,39 @@ async def test_pnl_and_dashboard_agree_on_same_data() -> None:
 
     loop_value = await live_portfolio_value(orch._broker_manager)
     assert api_value == loop_value == Decimal("1105000")
+
+
+@pytest.mark.asyncio
+async def test_api_snapshot_expiry_returns_stale_while_refreshing(monkeypatch) -> None:
+    from api import server as api_server
+
+    broker_manager = _StubBrokerManager(
+        {"alpaca": _StubAdapter([_bal("USD", "50000")])}
+    )
+    key = api_server._api_broker_snapshot_key(broker_manager)
+    stale = PortfolioValueSnapshot(Decimal("49000"), True, ("alpaca",), ())
+    fresh = PortfolioValueSnapshot(Decimal("50000"), True, ("alpaca",), ())
+    refresh_started = asyncio.Event()
+    allow_refresh = asyncio.Event()
+
+    async def _refresh(_broker_manager):
+        refresh_started.set()
+        await allow_refresh.wait()
+        return fresh
+
+    monkeypatch.setattr(api_server, "_api_broker_snapshot_ttl_seconds", lambda: 0.0)
+    monkeypatch.setattr(api_server, "cached_live_portfolio_snapshot", _refresh)
+    api_server.app.state.broker_snapshot_cache = (key, 0.0, stale)
+    api_server.app.state.broker_snapshot_refresh_task = None
+
+    result = await api_server._api_live_portfolio_snapshot(broker_manager)
+    assert result is stale
+    await refresh_started.wait()
+    allow_refresh.set()
+    task = api_server.app.state.broker_snapshot_refresh_task
+    await task
+
+    assert api_server.app.state.broker_snapshot_cache[2] is fresh
 
 
 def test_api_filters_position_rows_to_connected_nav_brokers_when_coverage_partial() -> None:

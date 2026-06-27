@@ -463,6 +463,19 @@ def test_rejects_when_broker_disabled() -> None:
     assert decision.checks_failed == ["broker_disabled"]
 
 
+def test_broker_disable_reasons_are_independent() -> None:
+    engine = RiskEngine(_risk_cfg())
+    engine.disable_broker("oanda", reason="manual")
+    engine.disable_broker("oanda", reason="coverage")
+
+    engine.enable_broker("oanda", reason="coverage")
+
+    assert engine.is_broker_disabled("oanda") is True
+    assert engine.broker_disable_reasons("oanda") == frozenset({"manual"})
+    engine.enable_broker("oanda")
+    assert engine.is_broker_disabled("oanda") is False
+
+
 def test_kill_switch_persists_across_engine_restart(tmp_path) -> None:
     state_path = tmp_path / "risk_state.json"
     cfg = _risk_cfg()

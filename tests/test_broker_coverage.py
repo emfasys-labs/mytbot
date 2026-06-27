@@ -171,7 +171,7 @@ class TestCoverageSync:
         finally:
             rt.set_risk_engine(None)
 
-        risk.disable_broker.assert_called_with("ibkr")
+        risk.disable_broker.assert_called_with("ibkr", reason="coverage")
         risk.enable_broker.assert_not_called()
 
     @pytest.mark.asyncio
@@ -214,8 +214,43 @@ class TestCoverageSync:
         finally:
             rt.set_risk_engine(None)
 
-        risk.disable_broker.assert_called_with("ibkr")
-        risk.enable_broker.assert_called_with("ibkr")
+        risk.disable_broker.assert_called_with("ibkr", reason="coverage")
+        risk.enable_broker.assert_called_with("ibkr", reason="coverage")
+
+    @pytest.mark.asyncio
+    async def test_persisted_coverage_disable_is_cleared_after_restart(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "system.orchestrator.Orchestrator._sleep_cancellable",
+            staticmethod(lambda total_sec, **_: asyncio.sleep(0.01)),
+        )
+        orch = Orchestrator()
+        orch.state = SystemState.RUNNING
+        orch._broker_report = _mk_report(
+            ("oanda", True, True, True, None),
+        )
+        risk = MagicMock()
+        risk.disabled_brokers = frozenset({"oanda"})
+        risk.broker_disable_reasons.side_effect = (
+            lambda name: frozenset({"coverage"}) if name == "oanda" else frozenset()
+        )
+
+        import control.runtime as rt
+
+        rt.set_risk_engine(risk)
+        try:
+            task = asyncio.create_task(orch._coverage_sync_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            rt.set_risk_engine(None)
+
+        risk.enable_broker.assert_called_with("oanda", reason="coverage")
 
     @pytest.mark.asyncio
     async def test_sync_loop_is_a_noop_when_no_risk_engine(self) -> None:

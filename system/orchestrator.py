@@ -774,14 +774,19 @@ class Orchestrator:
                 included = {str(n or "").strip().lower() for n in cov.get("included", [])}
                 included.discard("")
 
-                for name in excluded - last_disabled:
-                    risk.disable_broker(name)
+                coverage_disabled = last_disabled | {
+                    name
+                    for name in getattr(risk, "disabled_brokers", frozenset())
+                    if "coverage" in risk.broker_disable_reasons(name)
+                }
+                for name in excluded - coverage_disabled:
+                    risk.disable_broker(name, reason="coverage")
                     logger.warning(
                         "orchestrator | coverage | disabled '{}' at risk engine (excluded from NAV)",
                         name,
                     )
-                for name in last_disabled & included:
-                    risk.enable_broker(name)
+                for name in coverage_disabled & included:
+                    risk.enable_broker(name, reason="coverage")
                     logger.info(
                         "orchestrator | coverage | re-enabled '{}' at risk engine (back in NAV)",
                         name,

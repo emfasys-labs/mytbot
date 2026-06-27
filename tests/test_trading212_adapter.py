@@ -89,3 +89,29 @@ async def test_get_positions_maps_tickers() -> None:
     assert positions[0].symbol == "AAPL"
     assert positions[0].quantity == Decimal("3")
     assert positions[0].broker == "trading212"
+
+
+@pytest.mark.asyncio
+async def test_get_balance_reuses_endpoint_specific_cache() -> None:
+    adapter = Trading212Adapter(api_key="k", api_secret="s")
+    adapter._connected = True
+    adapter._client = object()
+    calls = 0
+
+    async def fake_request(method: str, path: str, **kwargs):  # noqa: ANN003
+        nonlocal calls
+        _ = (method, path, kwargs)
+        calls += 1
+        return {
+            "currency": "GBP",
+            "totalValue": 1250,
+            "cash": {"availableToTrade": 1000},
+        }
+
+    adapter._request = fake_request  # type: ignore[method-assign]
+    first = await adapter.get_balance()
+    second = await adapter.get_balance()
+
+    assert calls == 1
+    assert first == second
+    assert first[0].total == Decimal("1250")

@@ -18,6 +18,28 @@
 
 ---
 
+## D219 — Stability requires consecutive clean live rounds
+**Date:** 2026-06-28
+**Decision:** A stability audit does not end after one repair. Any newly found defect resets the clean count; completion requires three consecutive live rounds with no new defects across runtime, accounting, broker coverage, logs, and API responsiveness.
+
+**Fixes discovered before the clean streak.**
+- Availability resolution used quadratic catalogue normalization and one database statement per instrument. Broker catalogues are now normalized once, queried by direct set membership, and persisted in bounded bulk upserts.
+- Expired API NAV cache entries made `/pnl` wait for ten broker balance calls. The API now returns the last coherent snapshot immediately and refreshes once in the background.
+- Broker disables had no provenance. A coverage disable restored after restart could remain active after the broker recovered. Risk state now stores independent disable reasons; coverage reconciliation removes only the `coverage` reason and preserves manual gates.
+- Trading 212 account-summary polling could exceed its endpoint allowance. The adapter now coalesces balance reads with a configurable cache and reuses the last coherent balance on HTTP 429.
+
+**Clean-round evidence.**
+- Three consecutive post-fix rounds completed across seven displayed trading iterations.
+- Full suite: **2,119 passed, 3 skipped**.
+- Ten configured brokers included in NAV; no excluded or disabled broker.
+- Scheduled and on-demand runtime invariants healthy: zero fill/position mismatches, filled orders without fills, stale working orders, or recent unpriced outcomes.
+- All 372 filled orders have linked fills; no duplicate same-symbol venue exposure and no cash-equivalent position.
+- No post-fix loop error, defect log signature, broker 429, new fee, or unexpected fill.
+- Endpoint stress produced no failures. Final medians/maxima were below 70ms for `/healthz`, `/system/status`, `/pnl`, `/positions`, and `/dashboard/snapshot`.
+- Saturday inactivity is accounted for by explicit session closure, crypto edge evidence, and same-feature-bar anti-churn decisions rather than a broken execution path.
+
+---
+
 ## D218 — Proactive money-path audit closes learning, routing, and paper-realism gaps
 **Date:** 2026-06-27
 **Decision:** Stability claims require ledger invariants, complete regression tests, and a multi-cycle live soak. Paper execution must never invent venue support, and learning outcomes must follow the actual execution venue.

@@ -32,6 +32,7 @@ from storage.models import (
 AVAILABILITY_STATES = frozenset(
     ("unknown", "available", "unavailable", "requires_qualification", "blocked")
 )
+AVAILABILITY_UPSERT_BATCH_SIZE = 1_000
 
 
 @dataclass(frozen=True)
@@ -390,47 +391,62 @@ async def upsert_broker_availability(
     if not rows:
         return 0
     now = _now()
+    available_values: list[dict[str, Any]] = []
+    other_values: list[dict[str, Any]] = []
+    for r in rows:
+        if r.status not in AVAILABILITY_STATES:
+            logger.debug(
+                "instruments.registry | invalid status '{}' skipped for {}/{}",
+                r.status,
+                broker,
+                r.canonical_symbol,
+            )
+            continue
+        values = {
+            "canonical_symbol": r.canonical_symbol,
+            "broker": broker,
+            "broker_symbol": r.broker_symbol,
+            "status": r.status,
+            "last_checked_at": now,
+            "last_available_at": (
+                now if r.status == "available" else r.last_available_at
+            ),
+            "qualification_payload": (
+                dict(r.qualification_payload) if r.qualification_payload else None
+            ),
+            "last_error": r.last_error,
+        }
+        (available_values if r.status == "available" else other_values).append(values)
+
     async with session_factory() as session:
         async with session.begin():
-            for r in rows:
-                if r.status not in AVAILABILITY_STATES:
-                    logger.debug(
-                        "instruments.registry | invalid status '{}' skipped for {}/{}",
-                        r.status, broker, r.canonical_symbol,
+            for values_group, update_last_available in (
+                (available_values, True),
+                (other_values, False),
+            ):
+                for offset in range(0, len(values_group), AVAILABILITY_UPSERT_BATCH_SIZE):
+                    batch = values_group[
+                        offset : offset + AVAILABILITY_UPSERT_BATCH_SIZE
+                    ]
+                    # Split available/non-available rows so a bulk conflict
+                    # update never erases a symbol's last known good timestamp.
+                    stmt = pg_insert(InstrumentBrokerAvailability.__table__).values(batch)
+                    excluded = stmt.excluded
+                    set_update = {
+                        "broker_symbol": excluded.broker_symbol,
+                        "status": excluded.status,
+                        "last_checked_at": excluded.last_checked_at,
+                        "qualification_payload": excluded.qualification_payload,
+                        "last_error": excluded.last_error,
+                    }
+                    if update_last_available:
+                        set_update["last_available_at"] = excluded.last_available_at
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["canonical_symbol", "broker"],
+                        set_=set_update,
                     )
-                    continue
-                values = {
-                    "canonical_symbol": r.canonical_symbol,
-                    "broker": broker,
-                    "broker_symbol": r.broker_symbol,
-                    "status": r.status,
-                    "last_checked_at": now,
-                    "last_available_at": (
-                        now if r.status == "available" else r.last_available_at
-                    ),
-                    "qualification_payload": dict(r.qualification_payload)
-                    if r.qualification_payload
-                    else None,
-                    "last_error": r.last_error,
-                }
-                # Use ``__table__`` for consistency with the other registry
-                # upserts; tolerates ORM attribute-vs-column aliasing safely.
-                stmt = pg_insert(InstrumentBrokerAvailability.__table__).values(**values)
-                set_update = {
-                    "broker_symbol": values["broker_symbol"],
-                    "status": values["status"],
-                    "last_checked_at": now,
-                    "qualification_payload": values["qualification_payload"],
-                    "last_error": values["last_error"],
-                }
-                if r.status == "available":
-                    set_update["last_available_at"] = now
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["canonical_symbol", "broker"],
-                    set_=set_update,
-                )
-                await session.execute(stmt)
-    return len(rows)
+                    await session.execute(stmt)
+    return len(available_values) + len(other_values)
 
 
 async def list_active_registry(

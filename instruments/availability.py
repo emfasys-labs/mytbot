@@ -133,7 +133,7 @@ def _resolve_one(
     # qualifies via contract qualification is also tradable. If the symbol
     # is in either set, mark available; otherwise mark requires_qualification.
     if broker.lower() == "ibkr":
-        if catalog and broker_sym.upper() in {s.upper() for s in catalog}:
+        if catalog and broker_sym.upper() in catalog:
             return AvailabilityRow(
                 canonical_symbol=sym,
                 broker=broker,
@@ -174,7 +174,7 @@ def _resolve_one(
             last_error="catalog unavailable",
         )
 
-    if broker_sym.upper() in {s.upper() for s in catalog}:
+    if broker_sym.upper() in catalog:
         return AvailabilityRow(
             canonical_symbol=sym,
             broker=broker,

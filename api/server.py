@@ -2232,7 +2232,12 @@ def _api_broker_snapshot_key(broker_manager: Any) -> tuple[Any, ...]:
 
 
 async def _api_live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioValueSnapshot:
-    """Coalesce dashboard NAV reads so UI polling cannot flood broker APIs."""
+    """Coalesce dashboard NAV reads so UI polling cannot flood broker APIs.
+
+    Once a coherent snapshot exists, expiry starts one background refresh and
+    serves the stale snapshot meanwhile. Broker latency must never become HTTP
+    latency for every dashboard poll.
+    """
     if broker_manager is None:
         return PortfolioValueSnapshot(Decimal(0), False, tuple(), tuple())
     ttl = _api_broker_snapshot_ttl_seconds()
@@ -2241,7 +2246,15 @@ async def _api_live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioV
     cached = getattr(app.state, "broker_snapshot_cache", None)
     if isinstance(cached, tuple) and len(cached) == 3:
         cached_key, cached_at, cached_snapshot = cached
-        if cached_key == key and now - cached_at <= ttl:
+        if cached_key == key:
+            if now - cached_at <= ttl:
+                return cached_snapshot
+            refresh = getattr(app.state, "broker_snapshot_refresh_task", None)
+            if refresh is None or refresh.done():
+                app.state.broker_snapshot_refresh_task = asyncio.create_task(
+                    _refresh_api_broker_snapshot(broker_manager, key),
+                    name="api-broker-snapshot-refresh",
+                )
             return cached_snapshot
 
     lock = getattr(app.state, "broker_snapshot_lock", None)
@@ -2258,6 +2271,18 @@ async def _api_live_portfolio_snapshot(broker_manager: Any | None) -> PortfolioV
         snapshot = await cached_live_portfolio_snapshot(broker_manager)
         app.state.broker_snapshot_cache = (key, now, snapshot)
         return snapshot
+
+
+async def _refresh_api_broker_snapshot(
+    broker_manager: Any,
+    key: tuple[Any, ...],
+) -> None:
+    try:
+        snapshot = await cached_live_portfolio_snapshot(broker_manager)
+        if _api_broker_snapshot_key(broker_manager) == key:
+            app.state.broker_snapshot_cache = (key, _time.monotonic(), snapshot)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api | background broker snapshot refresh failed: {}", exc)
 
 
 async def _live_portfolio_value() -> Decimal:

@@ -14,6 +14,14 @@ from instruments.availability import (
     _resolve_one,
     resolve_broker_availability,
 )
+from instruments.registry import AvailabilityRow, upsert_broker_availability
+
+
+class _NoIterationCatalog(set[str]):
+    """Broker catalogues must be queried directly, never rebuilt per instrument."""
+
+    def __iter__(self):
+        raise AssertionError("catalog was iterated during a single-symbol lookup")
 from instruments.registry import RegistryRow
 
 
@@ -47,6 +55,71 @@ def test_resolve_one_alpaca_available_when_in_catalog() -> None:
     )
     assert res.status == "available"
     assert res.broker_symbol == "AAPL"
+
+
+def test_resolve_one_uses_constant_time_catalog_membership() -> None:
+    res = _resolve_one(
+        _row("AAPL"),
+        broker="alpaca",
+        catalog=_NoIterationCatalog({"AAPL"}),
+        ibkr_qualified=set(),
+        config=AvailabilityResolverConfig(),
+    )
+
+    assert res.status == "available"
+
+
+@pytest.mark.asyncio
+async def test_availability_persistence_batches_large_registries() -> None:
+    class _Context:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _Session(_Context):
+        def __init__(self) -> None:
+            self.statements = []
+
+        def begin(self):
+            return _Context()
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+
+    session = _Session()
+    now = datetime.now(timezone.utc)
+    rows = [
+        AvailabilityRow(
+            canonical_symbol=f"SYM{i}",
+            broker="alpaca",
+            broker_symbol=f"SYM{i}",
+            status="available",
+            last_checked_at=now,
+            last_available_at=now,
+        )
+        for i in range(2_501)
+    ]
+    rows.append(
+        AvailabilityRow(
+            canonical_symbol="MISSING",
+            broker="alpaca",
+            broker_symbol="MISSING",
+            status="unavailable",
+            last_checked_at=now,
+            last_available_at=None,
+        )
+    )
+
+    count = await upsert_broker_availability(
+        lambda: session,
+        broker="alpaca",
+        rows=rows,
+    )
+
+    assert count == 2_502
+    assert len(session.statements) == 4
 
 
 def test_resolve_one_alpaca_unavailable_when_missing() -> None:

@@ -100,6 +100,7 @@ class RiskEngine:
         self._open_lock_reason: str = ""
         self._is_killed = False
         self._disabled_brokers: set[str] = set()
+        self._disabled_broker_reasons: dict[str, set[str]] = {}
         self._high_watermark = Decimal("0")
         # D125 fix #5 — per-UTC-day cumulative-add tracker. Optimistic
         # (incremented at signal approval, not at fill). Reset on first
@@ -302,24 +303,47 @@ class RiskEngine:
         """Deactivate kill switch. Must be deliberate manual action."""
         self._is_killed = False
         self._disabled_brokers.clear()
+        self._disabled_broker_reasons.clear()
         self._persist_runtime_state()
         logger.warning("Kill switch deactivated")
 
-    def disable_broker(self, name: str) -> None:
+    def disable_broker(self, name: str, *, reason: str = "manual") -> None:
         """Stop new orders routed to this broker (execution auto-fail / targeted control)."""
         n = (name or "").strip().lower()
         if not n:
             return
+        source = str(reason or "manual").strip().lower()
         self._disabled_brokers.add(n)
+        self._disabled_broker_reasons.setdefault(n, set()).add(source)
         self._persist_runtime_state()
-        logger.critical("RISK | broker disabled for new orders | broker=%s", n)
+        logger.critical(
+            "RISK | broker disabled for new orders | broker=%s | reason=%s",
+            n,
+            source,
+        )
 
-    def enable_broker(self, name: str) -> None:
+    def enable_broker(self, name: str, *, reason: str | None = None) -> None:
         n = (name or "").strip().lower()
-        if n:
+        if not n:
+            return
+        if reason is None:
             self._disabled_brokers.discard(n)
-            self._persist_runtime_state()
-            logger.warning("RISK | broker re-enabled | broker=%s", n)
+            self._disabled_broker_reasons.pop(n, None)
+        else:
+            source = str(reason).strip().lower()
+            reasons = self._disabled_broker_reasons.get(n, set())
+            reasons.discard(source)
+            if reasons:
+                self._disabled_broker_reasons[n] = reasons
+            else:
+                self._disabled_broker_reasons.pop(n, None)
+                self._disabled_brokers.discard(n)
+        self._persist_runtime_state()
+        logger.warning("RISK | broker re-enabled | broker=%s | reason=%s", n, reason)
+
+    def broker_disable_reasons(self, name: str) -> frozenset[str]:
+        n = (name or "").strip().lower()
+        return frozenset(self._disabled_broker_reasons.get(n, set()))
 
     def is_broker_disabled(self, name: str) -> bool:
         return (name or "").strip().lower() in self._disabled_brokers
@@ -390,12 +414,32 @@ class RiskEngine:
         if bool(portfolio_state.get("is_killed")):
             self._is_killed = True
         raw_disabled = portfolio_state.get("disabled_brokers")
+        raw_reasons = portfolio_state.get("disabled_broker_reasons")
+        if isinstance(raw_reasons, dict):
+            for name, reasons in raw_reasons.items():
+                n = str(name).strip().lower()
+                if not n:
+                    continue
+                if isinstance(reasons, str):
+                    sources = {reasons.strip().lower()} if reasons.strip() else set()
+                elif isinstance(reasons, (list, tuple, set)):
+                    sources = {
+                        str(reason).strip().lower()
+                        for reason in reasons
+                        if str(reason).strip()
+                    }
+                else:
+                    sources = set()
+                if sources:
+                    self._disabled_brokers.add(n)
+                    self._disabled_broker_reasons.setdefault(n, set()).update(sources)
         if isinstance(raw_disabled, (list, tuple, set)):
-            self._disabled_brokers.update({
-                str(name).strip().lower()
-                for name in raw_disabled
-                if str(name).strip()
-            })
+            for name in raw_disabled:
+                n = str(name).strip().lower()
+                if not n:
+                    continue
+                self._disabled_brokers.add(n)
+                self._disabled_broker_reasons.setdefault(n, {"legacy"})
         self._persist_runtime_state()
 
     def snapshot_runtime_state(self) -> dict:
@@ -407,6 +451,10 @@ class RiskEngine:
             "open_lock_reason": self._open_lock_reason,
             "is_killed": bool(self._is_killed),
             "disabled_brokers": sorted(self._disabled_brokers),
+            "disabled_broker_reasons": {
+                name: sorted(reasons)
+                for name, reasons in sorted(self._disabled_broker_reasons.items())
+            },
         }
 
     def activate_open_lock(self, *, seconds: float, reason: str) -> None:
