@@ -170,6 +170,11 @@ class _FakeCryptoBroker(_FakeBroker):
         return await super().get_positions()
 
 
+class _UnsupportedCryptoBroker(_FakeCryptoBroker):
+    async def get_last_price(self, symbol: str) -> Decimal:
+        raise RuntimeError(f"unknown product: {symbol}")
+
+
 class _FakeBrokerManager:
     def __init__(self, adapters: dict[str, _FakeCryptoBroker]) -> None:
         self.adapters = adapters
@@ -257,6 +262,26 @@ async def test_places_order_when_execution_checks_pass(monkeypatch) -> None:
     assert result.status == OrderStatus.FILLED
     assert broker.place_calls == 0
     assert risk.killed is False
+
+
+@pytest.mark.asyncio
+async def test_synthetic_crypto_paper_open_requires_live_venue_price(monkeypatch) -> None:
+    risk = _FakeRiskEngine({})
+    set_risk_engine(risk)
+    broker = _UnsupportedCryptoBroker("kraken")
+    monkeypatch.setattr("execution.engine.get_broker", lambda *args, **kwargs: broker)
+
+    engine = ExecutionEngine(broker_configs={}, paper_mode=True, allowed_brokers=["kraken"])
+    signal = _signal()
+    signal.symbol = "UNKNOWN-USD"
+    signal.broker = "kraken"
+    signal.asset_class = "crypto"
+    result = await engine.execute(signal, _approved_decision())
+
+    assert result is not None
+    assert result.status == OrderStatus.REJECTED
+    assert result.filled_quantity == 0
+    assert engine.last_skip_reason == "paper_market_price_unavailable"
 
 
 @pytest.mark.asyncio

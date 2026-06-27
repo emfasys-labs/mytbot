@@ -85,13 +85,29 @@ async def _load_recent_features(
                 FeatureSnapshot.timeframe == timeframe,
             )
             .order_by(FeatureSnapshot.bar_timestamp.desc())
-            .limit(lookback_bars)
+            .limit(lookback_bars + max(8, lookback_bars // 10))
         )
         rows = list(q.scalars().all())
     rows.reverse()
     if not rows:
         return pd.DataFrame(), None
-    return _rows_to_features_frame(rows), rows[-1].bar_timestamp
+    frame = _rows_to_features_frame(rows)
+    numeric = frame[["open", "high", "low", "close"]].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    valid = (
+        numeric.replace([float("inf"), float("-inf")], pd.NA)
+        .notna()
+        .all(axis=1)
+    )
+    frame = frame.loc[valid].tail(lookback_bars)
+    if frame.empty:
+        return frame, None
+    feature_ts = frame.index[-1]
+    if hasattr(feature_ts, "to_pydatetime"):
+        feature_ts = feature_ts.to_pydatetime()
+    return frame, feature_ts
 
 
 def _coerce_decimal(value) -> "Decimal | None":
@@ -865,12 +881,16 @@ async def _refresh_position_marks_and_persist(
                         sym,
                         broker=str(row.broker or ""),
                         avg_entry_price=avg if avg > 0 else None,
+                        asset_class=str(row.asset_class or ""),
                     )
                 except TypeError:
                     px = await price_oracle(sym)
                 except Exception:  # noqa: BLE001
                     px = Decimal("0")
-            if px <= 0:
+            from core.market_session import is_market_open
+
+            venue_open = is_market_open(str(row.asset_class or ""), sym)
+            if px <= 0 and venue_open:
                 try:
                     px = await _fallback_price(sym)
                 except Exception:  # noqa: BLE001

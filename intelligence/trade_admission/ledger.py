@@ -334,9 +334,20 @@ async def label_due_outcomes(
                         FillLog.fill_price,
                         FillLog.derisk_source,
                         FillLog.position_qty_after,
+                        FillLog.broker,
                     ).where(FillLog.signal_id == row.signal_id)
                 )
-                for ts, rpnl, fee, notional, signed_qty, fill_price, derisk, qty_after in fq.all():
+                for (
+                    ts,
+                    rpnl,
+                    fee,
+                    notional,
+                    signed_qty,
+                    fill_price,
+                    derisk,
+                    qty_after,
+                    fill_broker,
+                ) in fq.all():
                     if ts is not None and ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
                     fills.append(
@@ -350,6 +361,7 @@ async def label_due_outcomes(
                             "fill_price": _dec(fill_price),
                             "derisk": str(derisk or "").strip().lower(),
                             "qty_after": _dec(qty_after) or Decimal("0"),
+                            "broker": str(fill_broker or "").strip().lower(),
                         }
                     )
 
@@ -358,6 +370,18 @@ async def label_due_outcomes(
                 end = start + timedelta(minutes=h)
                 if end > now:
                     continue
+                actual_fill_brokers = {
+                    str(f.get("broker") or "").strip().lower()
+                    for f in fills
+                    if f.get("ts") is not None
+                    and f["ts"] <= end
+                    and str(f.get("broker") or "").strip()
+                }
+                mark_broker = (
+                    next(iter(actual_fill_brokers))
+                    if len(actual_fill_brokers) == 1
+                    else row.broker
+                )
                 price_context = await _price_excursion(
                         session,
                         symbol=row.symbol,
@@ -365,7 +389,7 @@ async def label_due_outcomes(
                         entry=_dec(row.suggested_price),
                         start=start,
                         end=end,
-                        broker=row.broker,
+                        broker=mark_broker,
                     )
                 snap = _horizon_snapshot(fills, end, horizon_price=_dec(price_context.get("horizon_price")))
                 snap.update(

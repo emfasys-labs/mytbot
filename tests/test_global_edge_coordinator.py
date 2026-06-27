@@ -421,7 +421,11 @@ def test_idle_loss_recycle_closes_weakest_losing_holding() -> None:
                 "idle_loss_recycle_enabled": True,
                 "idle_loss_max_actions_per_tick": 1,
                 "symbol_cooldown_sec": 900,
-            }
+            },
+            "rotation": {
+                "estimated_round_trip_fee_bps": "40",
+                "fee_edge_multiplier": "1.5",
+            },
         }
     )
     held = [
@@ -435,7 +439,7 @@ def test_idle_loss_recycle_closes_weakest_losing_holding() -> None:
         HeldPositionEdge(
             symbol="WEAKEST_LOSER",
             notional=Decimal("8000"),
-            expected_remaining_edge=Decimal("0.01"),
+            expected_remaining_edge=Decimal("0.001"),
             broker="ibkr",
             metadata={"asset_class": "equity", "unrealised_return": "-0.001"},
         ),
@@ -448,7 +452,15 @@ def test_idle_loss_recycle_closes_weakest_losing_holding() -> None:
         ),
     ]
 
-    actions = coord.propose_idle_loss_recycle_actions(held)
+    actions = coord.propose_idle_loss_recycle_actions(
+        held,
+        replacement_evidence={
+            "symbol": "SUCCESSOR",
+            "strategy": "trend_following",
+            "asset_class": "equity",
+            "expected_return": "0.05",
+        },
+    )
 
     assert len(actions) == 1
     assert actions[0].symbol == "WEAKEST_LOSER"
@@ -456,6 +468,71 @@ def test_idle_loss_recycle_closes_weakest_losing_holding() -> None:
     assert actions[0].metadata["capital_recycle_reason"] == "idle_loss_recycle"
     assert actions[0].metadata["close_only"] is True
     assert actions[0].metadata["broker"] == "ibkr"
+    assert actions[0].metadata["capital_recycle_switching_cost_edge"] == "0.0060"
+    assert actions[0].metadata["capital_recycle_replacement_symbol"] == "SUCCESSOR"
+
+
+def test_idle_loss_recycle_requires_positive_learned_replacement() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "idle_loss_recycle_enabled": True,
+            }
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="LOSER",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0"),
+            metadata={"asset_class": "crypto", "unrealised_return": "-0.01"},
+        )
+    ]
+
+    assert coord.propose_idle_loss_recycle_actions(held) == []
+    assert coord.propose_idle_loss_recycle_actions(
+        held,
+        replacement_evidence={
+            "symbol": "NEW",
+            "strategy": "mean_reversion",
+            "asset_class": "crypto",
+            "expected_return": "-0.001",
+        },
+    ) == []
+
+
+def test_idle_loss_recycle_keeps_loser_whose_edge_exceeds_switching_cost() -> None:
+    coord = GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "idle_loss_recycle_enabled": True,
+            },
+            "rotation": {
+                "estimated_round_trip_fee_bps": "40",
+                "fee_edge_multiplier": "1.5",
+            },
+        }
+    )
+    held = [
+        HeldPositionEdge(
+            symbol="NOISE_LOSS",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.03"),
+            metadata={"asset_class": "crypto", "unrealised_return": "-0.001"},
+        )
+    ]
+
+    assert coord.propose_idle_loss_recycle_actions(
+        held,
+        replacement_evidence={
+            "symbol": "SUCCESSOR",
+            "strategy": "trend_following",
+            "asset_class": "crypto",
+            "expected_return": "0.035",
+        },
+    ) == []
 
 
 def test_idle_loss_recycle_respects_symbol_cooldown() -> None:
@@ -480,7 +557,16 @@ def test_idle_loss_recycle_respects_symbol_cooldown() -> None:
         last_event_at_by_symbol={"COOLDOWN": datetime.now(timezone.utc) - timedelta(seconds=30)}
     )
 
-    assert coord.propose_idle_loss_recycle_actions(held, replacement_context=ctx) == []
+    assert coord.propose_idle_loss_recycle_actions(
+        held,
+        replacement_context=ctx,
+        replacement_evidence={
+            "symbol": "SUCCESSOR",
+            "strategy": "trend_following",
+            "asset_class": "equity",
+            "expected_return": "0.05",
+        },
+    ) == []
 
 
 def test_shed_respects_symbol_cooldown() -> None:

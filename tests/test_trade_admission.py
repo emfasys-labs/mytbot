@@ -513,6 +513,67 @@ async def test_label_due_outcomes_marks_to_market_from_position_log(sf):
 
 
 @pytest.mark.asyncio
+async def test_label_due_outcomes_uses_actual_fill_broker_after_reroute(sf):
+    svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
+    sig = _signal()
+    sig.symbol = "BTC-USD"
+    sig.broker = "kraken"
+    sig.asset_class = "crypto"
+    await svc.evaluate_signal(
+        sig,
+        session_factory=sf,
+        portfolio_state={"portfolio_value": Decimal("100000"), "positions": {}},
+        loop_iteration=3,
+        source_path="test",
+    )
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+        row.timestamp = datetime.now(timezone.utc) - timedelta(minutes=90)
+        row.signal_id = "sig-rerouted"
+        session.add(
+            FillLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=80),
+                broker="binance",
+                symbol="BTC-USD",
+                asset_class="crypto",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("10"),
+                signed_quantity=Decimal("10"),
+                fill_price=Decimal("100"),
+                notional=Decimal("1000"),
+                fee=Decimal("1"),
+                realised_pnl=Decimal("0"),
+                position_qty_after=Decimal("10"),
+                signal_id="sig-rerouted",
+            )
+        )
+        session.add(
+            PositionLog(
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=40),
+                broker="binance",
+                symbol="BTC-USD",
+                asset_class="crypto",
+                quantity=Decimal("10"),
+                avg_entry_price=Decimal("100"),
+                current_price=Decimal("105"),
+                unrealised_pnl=Decimal("50"),
+            )
+        )
+        await session.commit()
+
+    updated = await label_due_outcomes(sf, horizons_minutes=(60,))
+
+    assert updated == 1
+    async with sf() as session:
+        row = (await session.execute(select(TradeAdmissionLog))).scalar_one()
+    assert row.outcome_label == "positive"
+    assert row.outcome_net_pnl == Decimal("49.0")
+    assert row.outcome_labels["mark_to_market_used"] is True
+    assert row.outcome_labels["horizon_price"] == 105.0
+
+
+@pytest.mark.asyncio
 async def test_label_due_outcomes_does_not_train_fee_only_open_without_price(sf):
     svc = TradeAdmissionService(AdmissionConfig(enabled=True, shadow_only=True))
     sig = _signal(trade_quality_score="0.7", volume_z_score="1.0")

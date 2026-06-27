@@ -18,6 +18,80 @@
 
 ---
 
+## D218 — Proactive money-path audit closes learning, routing, and paper-realism gaps
+**Date:** 2026-06-27
+**Decision:** Stability claims require ledger invariants, complete regression tests, and a multi-cycle live soak. Paper execution must never invent venue support, and learning outcomes must follow the actual execution venue.
+
+**Audit scope.** Checked runtime and broker health, fills-to-position equality, filled-order/fill correspondence, stale orders, rapid round trips, realised P&L and fee attribution, admission outcome coverage, unsupported-product logs, configuration isolation, and all automated tests.
+
+**Fixes.**
+- Trade-admission outcome pricing now derives the mark venue from the matched fill instead of the pre-route broker. Repriced 32 historical rows; no recent executed outcome remains `unpriced`.
+- Crypto routing alternatives honor symbol-specific broker translation. Synthetic no-native-paper crypto opens reject when the venue cannot supply a current market price; reduce-only cleanup remains available.
+- Explicit OANDA constructor credentials no longer inherit a token for the other environment.
+- `USAT` is treated as cash-equivalent and `WBETH` as wrapped ETH; both existing paper positions were flattened.
+- Wave 13 coverage regression now reflects D201's active trained meta-labeler.
+- `system/runtime_invariants.py` now continuously checks fill/position equality, filled orders without fills, stale working orders, and recent unpriced outcomes. Reports persist under `ControlState(runtime.invariants)`, join heartbeat telemetry, and log at error level when unhealthy.
+
+**Verification.** Full suite: 2,114 passed, 3 skipped. Three post-restart live cycles completed without error or new strategy fills/fees. Fills and positions reconcile exactly; no stale orders, idle-loss recycle fills, recent unpriced outcomes, or post-restart unsupported-symbol errors remain. Final live invariant heartbeat published `healthy=true` with every violation count at zero.
+
+---
+
+## D217 — Idle-loss recycling requires a learned profitable successor
+**Date:** 2026-06-27
+**Decision:** Deployment pressure cannot, by itself, justify crystallising a losing position. Discretionary idle-loss recycling requires a concrete same-sleeve successor whose matured learned expected return is positive and exceeds the held position's remaining edge plus switching cost.
+
+**Incident.** Eight idle-loss recycle fills in six hours closed `INJ`, `WLD`, `ZEC`, `XTZ`, `KSM`, `LDO`, `MAV`, and `KITE`, realising about -$1,006 and charging another $31 of closing fees. Released venue room was subsequently consumed by small weak candidates. The prior remaining-edge-versus-fee check was insufficient because it evaluated only the holding; it did not prove that any superior executable successor existed.
+
+**Implementation.** `GlobalEdgeCoordinator.propose_idle_loss_recycle_actions()` now accepts explicit replacement evidence and emits no action when evidence is missing, abstaining, non-positive, from another capital sleeve, or insufficient after switching costs. Both trading-loop allocator paths select replacement evidence from the active trade-admission outcome model. Normal risk exits and the existing evidence-backed rotation path are unaffected.
+
+**Verification.** Focused allocation, execution, admission, and coordinator tests: 141 passed. After restart, two complete live iterations produced zero idle recycle fills, no additional fees, no realised-loss change, and no loop error.
+
+---
+
+## D216 — Learned reserve sizing, recycle churn, and paper marks repaired
+**Date:** 2026-06-27
+**Decision:** Executed quantity must equal the learned target gap; cash equivalents are treasury instruments; recycled daily signals require a new feature bar; paper APIs trust persisted venue marks.
+
+**Problem.** The dashboard appeared to show only losses despite active learning. Four independent defects combined:
+1. Reserve admission multiplied the target by the learned outcome factor, then calculated quantity with a ratio that cancelled that factor. Negative-expectancy candidates filled at full size: USDT requested about $5.8k but filled $33.1k; WBTC requested about $2.0k but filled $11.8k.
+2. Idle-loss recycling closed every red position, even when remaining edge exceeded switching costs. LINK/WBTC/BNB were sold for small losses and fees, then reopened from the same daily feature.
+3. USD-anchored stablecoins and wrapped assets were treated as independent directional alpha and exposure.
+4. The loop persisted ACGL at the last executable venue quote ($97.555, about -$35), but paper `/positions` and `/pnl` overrode it with an older daily close ($94.33, about -$1,993).
+
+**Fix.**
+- Reserve quantity is now `remaining_target / signal_price`.
+- `core/instrument_semantics.py` classifies USD cash equivalents and canonicalises wrapped exposure (WBTC→BTC, WETH→ETH).
+- Directional candidate collection, primary orchestration, and reserve orchestration exclude cash equivalents.
+- Primary and reserve re-entry use the larger of configured cooldown and the live feature interval; a daily signal cannot re-enter until a new daily bar.
+- Idle-loss recycling requires expected remaining edge to be at or below fee-adjusted switching cost.
+- Closed-market marks preserve the last executable quote, and paper APIs use the loop's persisted mark rather than overriding it with feature data.
+- Removed existing USDT/RLUSD/WBTC paper positions through the reduce-only local repair path.
+
+**Live proof.** Corrected RLUSD filled exactly its learned $5,738 target before the expanded cash-equivalent catalogue blocked subsequent stablecoin candidates. After final restart, six cycles completed without loop errors; stablecoins logged `ineligible_instrument_role`, same-bar recycled signals logged `culled_without_new_feature_bar`, and no repeated recycle/reopen fills occurred. ACGL now displays about -$35. Current open unrealised P&L is about +$1,010; current-day realised + unrealised - fees is about +$950. Historical TWR remains about -0.59% because prior losses are intentionally not erased.
+
+**Status:** Running paper mode as `python run.py` PID 12104, nine brokers active. Verification: `162 passed, 1 skipped`.
+
+---
+
+## D215 — Ranked-universe deployment starvation repaired
+**Date:** 2026-06-27
+**Decision:** Feature availability is joined against the ranked universe directly, and feature history expands and warms from enabled strategy dependencies.
+
+**Problem.** Gross deployment stalled around 9%. The trading loop selected the first 500 feature symbols alphabetically before intersecting them with ranked tiers, hiding almost every core/scan name. The trend follower required 201 rows but the loop fetched 200, so it could never emit. Newly ranked names received only one month of daily history. Yahoo also returned provisional volume-only equity rows with non-finite OHLC; persisting one as the latest row disabled every strategy on that symbol.
+
+**Fix.**
+- Query feature availability for the actual core/scan symbols.
+- Resolve the feature window from enabled strategy configuration (`strategies/history_requirements.py`); the current requirement is 201 rows.
+- Give newly selected, insufficient-history names one backfill attempt per process while keeping normal updates incremental.
+- Drop non-finite OHLC before persistence, reject it in validation, over-fetch/filter defensively on strategy reads, and clean 3,826 malformed stored rows.
+- Apply the existing market-session authority before portfolio and reserve price/preflight calls, preserving candidate audit data without wasting closed-market broker calls.
+
+**Live proof.** The core universe produced 44 raw candidates instead of zero. After the final restart, five cycles completed with 43, 43, 16, 43, and 43 candidates, no loop error, no fills, and no new fees. History-ready symbols rose from 255 to 323 while the rotating warm-up continued; malformed rows remained at zero through subsequent pipeline cycles. The allocator saw 37 net intents and 33 orders with about $1.15M aggregate target demand; equity/FX orders were correctly deferred because 2026-06-27 is Saturday. Existing BTC/ETH/LINK exposure exceeded their learned targets, so the bot did not force more capital into a negative observed crypto bucket.
+
+**Status:** Running in paper mode as `python run.py` PID 20700; nine brokers active, Capital.com excluded for an invalid API key. Focused verification: 93 passed/1 skipped, 80 passed, 73 passed, and reserve preflight 9 passed.
+
+---
+
 ## D214 — Paper crypto consolidation reads the local ledger
 **Date:** 2026-06-26
 **Decision:** Same-symbol paper routing discovers synthetic positions from `PositionLog`, not native exchange adapter books.

@@ -1738,14 +1738,14 @@ class GlobalEdgeCoordinator:
         *,
         active_mode: str = DEFAULT_MODE,
         replacement_context: ReplacementContext | None = None,
+        replacement_evidence: dict[str, Any] | None = None,
     ) -> list[CoordinatorAction]:
-        """Free the weakest losing holding when the book is otherwise idle.
+        """Replace a weak losing holding only when learned evidence supports it.
 
-        This covers the under-deployed dead zone: the build path wants more
-        positions, but every new open is gated out, so existing losers can sit
-        indefinitely. The selection is rank/evidence based rather than a fixed
-        stop distance: only holdings with negative live unrealised return are
-        eligible, then the lowest remaining-edge names are recycled first.
+        Idle deployment pressure is not itself a reason to crystallise a loss.
+        The caller must provide a concrete successor with positive learned
+        expected return. Its edge must exceed the holding's remaining edge plus
+        switching cost, and it must consume the same asset-class capital sleeve.
         """
         if not held:
             return []
@@ -1762,11 +1762,44 @@ class GlobalEdgeCoordinator:
         if max_actions <= 0:
             return []
 
+        replacement_evidence = replacement_evidence or {}
+        replacement_symbol = str(replacement_evidence.get("symbol") or "").strip()
+        replacement_strategy = str(replacement_evidence.get("strategy") or "").strip()
+        replacement_asset_class = str(
+            replacement_evidence.get("asset_class") or ""
+        ).strip().lower()
+        try:
+            replacement_expected_return = Decimal(
+                str(replacement_evidence.get("expected_return"))
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        if (
+            not replacement_symbol
+            or not replacement_strategy
+            or replacement_expected_return <= 0
+        ):
+            return []
+
         rot_cfg = self._cfg.get("rotation") or {}
         try:
             symbol_cooldown_sec = int(cfg.get("symbol_cooldown_sec", rot_cfg.get("symbol_cooldown_sec", 900)))
         except Exception:  # noqa: BLE001
             symbol_cooldown_sec = 900
+        try:
+            round_trip_fee_edge = (
+                Decimal(str(rot_cfg.get("estimated_round_trip_fee_bps", "0")))
+                / Decimal("10000")
+            )
+            fee_edge_multiplier = Decimal(
+                str(rot_cfg.get("fee_edge_multiplier", "1"))
+            )
+            switching_cost_edge = max(
+                Decimal("0"),
+                round_trip_fee_edge * max(Decimal("0"), fee_edge_multiplier),
+            )
+        except Exception:  # noqa: BLE001
+            switching_cost_edge = Decimal("0")
 
         now = datetime.now(timezone.utc)
 
@@ -1797,7 +1830,21 @@ class GlobalEdgeCoordinator:
             except (TypeError, ValueError):
                 return Decimal("0")
 
-        losers = [h for h in held if h.notional > 0 and _unrl(h) < 0 and not _recently_touched(h.symbol)]
+        losers = [
+            h
+            for h in held
+            if h.notional > 0
+            and _unrl(h) < 0
+            and replacement_expected_return
+            > h.expected_remaining_edge + switching_cost_edge
+            and _norm_sym(h.symbol) != _norm_sym(replacement_symbol)
+            and (
+                not replacement_asset_class
+                or str((h.metadata or {}).get("asset_class") or "").strip().lower()
+                == replacement_asset_class
+            )
+            and not _recently_touched(h.symbol)
+        ]
         losers.sort(key=lambda h: (h.expected_remaining_edge, _unrl(h), -h.notional))
 
         out: list[CoordinatorAction] = []
@@ -1813,6 +1860,17 @@ class GlobalEdgeCoordinator:
             meta["sizing_final_capital_required"] = str(h.notional)
             meta["capital_recycle_reason"] = "idle_loss_recycle"
             meta["capital_recycle_symbol_cooldown_sec"] = str(symbol_cooldown_sec)
+            meta["capital_recycle_switching_cost_edge"] = str(switching_cost_edge)
+            meta["capital_recycle_replacement_symbol"] = replacement_symbol
+            meta["capital_recycle_replacement_strategy"] = replacement_strategy
+            meta["capital_recycle_replacement_expected_return"] = str(
+                replacement_expected_return
+            )
+            meta["capital_recycle_replacement_advantage"] = str(
+                replacement_expected_return
+                - h.expected_remaining_edge
+                - switching_cost_edge
+            )
             if h.broker:
                 meta["broker"] = h.broker
             out.append(

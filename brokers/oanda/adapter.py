@@ -109,23 +109,35 @@ def resolve_oanda_paper_mode(*, paper_mode: bool = True) -> bool:
 def resolve_oanda_credentials(
     *,
     paper_mode: bool = True,
-    api_token: str = "",
-    api_token_paper: str = "",
-    account_id: str = "",
-    account_id_paper: str = "",
+    api_token: str | None = None,
+    api_token_paper: str | None = None,
+    account_id: str | None = None,
+    account_id_paper: str | None = None,
 ) -> tuple[bool, str, str]:
     """Return ``(paper_mode, token, account_id)`` for the active environment."""
     use_paper = resolve_oanda_paper_mode(paper_mode=paper_mode)
     live_token = (
-        (api_token or os.getenv("OANDA_API_TOKEN", "")).strip()
-        or os.getenv("OANDA_API_KEY", "").strip()
+        (
+            os.getenv("OANDA_API_TOKEN", "").strip()
+            or os.getenv("OANDA_API_KEY", "").strip()
+        )
+        if api_token is None
+        else str(api_token).strip()
     )
     practice_token = (
-        (api_token_paper or os.getenv("OANDA_API_TOKEN_PAPER", "")).strip()
+        os.getenv("OANDA_API_TOKEN_PAPER", "").strip()
+        if api_token_paper is None
+        else str(api_token_paper).strip()
     )
-    live_account = (account_id or os.getenv("OANDA_ACCOUNT_ID", "")).strip()
+    live_account = (
+        os.getenv("OANDA_ACCOUNT_ID", "").strip()
+        if account_id is None
+        else str(account_id).strip()
+    )
     practice_account = (
-        (account_id_paper or os.getenv("OANDA_ACCOUNT_ID_PAPER", "")).strip()
+        os.getenv("OANDA_ACCOUNT_ID_PAPER", "").strip()
+        if account_id_paper is None
+        else str(account_id_paper).strip()
     )
     if use_paper:
         token = practice_token or live_token
@@ -143,15 +155,23 @@ class OandaAdapter(BrokerAdapter):
 
     def __init__(
         self,
-        api_token: str = "",
-        api_token_paper: str = "",
-        account_id: str = "",
-        account_id_paper: str = "",
+        api_token: str | None = None,
+        api_token_paper: str | None = None,
+        account_id: str | None = None,
+        account_id_paper: str | None = None,
         paper_mode: bool = True,
         base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         _ = kwargs
+        # Supplying either token explicitly opts this adapter instance out of
+        # ambient-token inheritance for the other environment. This makes an
+        # explicit empty token a reliable way to validate/disable credentials
+        # even when the long-lived process has OANDA_* variables populated.
+        if api_token is not None and api_token_paper is None:
+            api_token_paper = ""
+        elif api_token_paper is not None and api_token is None:
+            api_token = ""
         self.paper_mode, self.api_token, self.account_id = resolve_oanda_credentials(
             paper_mode=paper_mode,
             api_token=api_token,

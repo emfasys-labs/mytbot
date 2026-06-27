@@ -512,3 +512,65 @@ async def test_orchestrator_reserve_applies_outcome_learning_to_absolute_target(
 
     assert executed == 0
     assert processed == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reserve_scales_quantity_to_learned_target(monkeypatch):
+    loop = TradingLoop({}, ["kraken"], paper_mode=True)
+    loop.sig_engine = object()
+    loop._global_edge_cfg = {"max_actions_per_tick": {"hunter": 1}}
+    monkeypatch.setattr(
+        loop.trade_admission,
+        "outcome_size_multiplier",
+        lambda **_kwargs: Decimal("0.2"),
+    )
+    processed: list[tuple[Decimal, Decimal]] = []
+
+    async def _resolve_price(_symbol):
+        return Decimal("10")
+
+    async def _preflight(signal, action, *, portfolio_dict, session_factory):
+        processed.append((signal.suggested_quantity, action.capital))
+        return None, {}
+
+    async def _process(*_args, **_kwargs):
+        return True
+
+    def _build_signal(action, sig_engine, *, portfolio_value, news_score):
+        return SimpleNamespace(
+            signal_id="s-eth",
+            symbol=action.symbol,
+            side="buy",
+            strategy=action.strategy_name,
+            confidence=Decimal("0.9"),
+            suggested_quantity=Decimal("10"),
+            suggested_price=Decimal("10"),
+            asset_class="crypto",
+            metadata=dict(action.metadata or {}),
+        )
+
+    monkeypatch.setattr(loop, "_preflight_built_signal", _preflight)
+    monkeypatch.setattr(loop, "_process_signal_global", _process)
+    monkeypatch.setattr("system.trading_loop.loop.process_coordinator_action", _build_signal)
+    candidate = SimpleNamespace(
+        symbol="ETH-USD",
+        side="long",
+        strategy_name="mean_reversion",
+        asset_class="crypto",
+        confidence=Decimal("0.95"),
+        metadata={"target_notional": "100"},
+    )
+
+    executed = await loop._run_orchestrator_reserve_candidates(
+        batch_candidates=[candidate],
+        attempted_symbols=set(),
+        portfolio_dict={},
+        tradable=Decimal("100000"),
+        total_equity=Decimal("100000"),
+        session_factory=None,
+        resolve_price=_resolve_price,
+        mode_raw="hunter",
+    )
+
+    assert executed == 1
+    assert processed == [(Decimal("2"), Decimal("20"))]

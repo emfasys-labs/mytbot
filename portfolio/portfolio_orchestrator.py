@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable
 
+from core.instrument_semantics import canonical_economic_symbol
 from portfolio.cluster_map import theme_for, theme_sign_if_bought
 
 D0 = Decimal("0")
@@ -84,7 +85,7 @@ def _symbol_key(symbol: Any) -> str:
     allocator repeatedly tries to open a duplicate position that final risk
     rejects as already capped.
     """
-    s = str(symbol or "").strip().upper()
+    s = canonical_economic_symbol(symbol)
     if s.endswith("=X"):
         return s[:-2]
     return s

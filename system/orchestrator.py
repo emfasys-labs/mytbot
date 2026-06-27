@@ -40,6 +40,7 @@ from risk.profit_harvest import (
     should_defer_profit_harvest_for_redeployment,
 )
 from risk.stop_loss import evaluate_stop_loss
+from strategies.history_requirements import enabled_strategy_history_bars
 from system.local_paper_flatten import flatten_local_paper_book
 from system.broker_manager import BrokerManager, BrokerReport
 from system.dependency_manager import DependencyManager, DependencyReport
@@ -3265,7 +3266,7 @@ class Orchestrator:
         """Periodically run the data pipeline (feature ingestion)."""
         try:
             from data.universe_builder import BuildTelemetry, UniverseBuilder
-            from data.pipeline import run_once
+            from data.pipeline import feature_history_counts, run_once
             from storage.db import init_async_database, dispose_engine as _dispose
             from universe.intelligence_builder import build_and_save_universe_intelligence
             from universe.snapshot_service import load_universe_selection_config
@@ -3326,6 +3327,19 @@ class Orchestrator:
         universe_mode = str(pipeline_cfg.get("universe_mode", "static")).strip().lower()
         base_symbols_cfg = pipeline_cfg.get("symbols") if isinstance(pipeline_cfg.get("symbols"), list) else []
         base_symbols = list(dict.fromkeys([str(s).strip() for s in base_symbols_cfg if str(s).strip()]))
+        strategies_cfg: dict[str, Any] = {}
+        try:
+            strategies_path = Path("config/strategies.yaml")
+            if strategies_path.exists():
+                with strategies_path.open(encoding="utf-8") as f:
+                    strategies_cfg = yaml.safe_load(f) or {}
+        except Exception as exc:
+            logger.warning("orchestrator | strategy history config load error: {}", exc)
+        required_history_bars = enabled_strategy_history_bars(strategies_cfg)
+        incremental_timeframe = str(
+            (pipeline_cfg.get("incremental") or {}).get("interval", "1d")
+        )
+        history_warmup_attempted: set[str] = set()
         dynamic_cfg = pipeline_cfg.get("dynamic_universe", {}) or {}
         ranking_cfg = dynamic_cfg.get("ranking", {}) or {}
         ranking_on = universe_mode == "dynamic" and bool(ranking_cfg.get("enabled", False))
@@ -3757,10 +3771,44 @@ class Orchestrator:
                                     "orchestrator | pipeline dynamic universe | symbols={}",
                                     len(pipeline_cfg["symbols"]),
                                 )
+                    warmup_symbols: set[str] = set()
+                    selected_symbols = [
+                        str(symbol).strip()
+                        for symbol in (pipeline_cfg.get("symbols") or [])
+                        if str(symbol).strip()
+                    ]
+                    if selected_symbols and required_history_bars > 1:
+                        history_counts = await feature_history_counts(
+                            sf,
+                            selected_symbols,
+                            timeframe=incremental_timeframe,
+                        )
+                        warmup_budget = max(
+                            1,
+                            int(ranking_cfg.get("scan_batch_size", 50) or 50),
+                        )
+                        warmup_candidates = [
+                            symbol
+                            for symbol in selected_symbols
+                            if history_counts.get(symbol, 0) < required_history_bars
+                            and symbol.upper() not in history_warmup_attempted
+                        ]
+                        warmup_symbols = set(warmup_candidates[:warmup_budget])
+                        history_warmup_attempted.update(
+                            symbol.upper() for symbol in warmup_symbols
+                        )
+                        if warmup_symbols:
+                            logger.info(
+                                "orchestrator | pipeline history warmup | symbols={} required_bars={} timeframe={}",
+                                len(warmup_symbols),
+                                required_history_bars,
+                                incremental_timeframe,
+                            )
                     await run_once(
                         sf,
                         pipeline_cfg,
                         backfill=False,
+                        backfill_symbols=warmup_symbols,
                         include_news=not forced_discovery_cycle,
                         include_fred=not forced_discovery_cycle,
                     )

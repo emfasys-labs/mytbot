@@ -14,8 +14,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 from loguru import logger
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from data.features import compute_feature_columns, row_features_to_json_dict
@@ -32,6 +34,7 @@ from data.persist import (
 from data.validation import validate_ohlcv_frame
 from data.yfinance_fetch import fetch_history
 from data.ingest_telemetry import record_provider_ingest
+from storage.models import FeatureSnapshot
 
 
 def _clean_api_key(raw: str | None) -> str:
@@ -179,6 +182,36 @@ async def ingest_symbol_yfinance(
             "rows_with_full_features": 0,
         }
 
+    required_ohlc = {
+        str(column).lower(): column
+        for column in df.columns
+        if str(column).lower() in {"open", "high", "low", "close"}
+    }
+    if len(required_ohlc) != 4:
+        raise ValueError(f"incomplete OHLC columns for {symbol}: {list(df.columns)}")
+    numeric_ohlc = df[
+        [required_ohlc[name] for name in ("open", "high", "low", "close")]
+    ].apply(lambda column: column.astype(float))
+    valid_ohlc = np.isfinite(numeric_ohlc.to_numpy(dtype=float)).all(axis=1)
+    dropped = int((~valid_ohlc).sum())
+    if dropped:
+        logger.warning(
+            "data | yfinance | dropped incomplete OHLC | {} | {} | rows={}",
+            symbol,
+            interval,
+            dropped,
+        )
+        df = df.loc[valid_ohlc]
+    if df.empty:
+        logger.warning("data | yfinance | no complete OHLC rows | {} | {}", symbol, interval)
+        return {
+            "symbol": symbol,
+            "timeframe": interval,
+            "upserted": 0,
+            "bars_total": 0,
+            "rows_with_full_features": 0,
+        }
+
     feat = compute_feature_columns(df, cfg)
     v = validate_ohlcv_frame(
         feat,
@@ -249,6 +282,28 @@ async def ingest_symbol_yfinance(
         "bars_total": total,
         "rows_with_full_features": full_rows,
     }
+
+
+async def feature_history_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+    symbols: list[str],
+    *,
+    timeframe: str,
+) -> dict[str, int]:
+    """Return persisted bar counts for the requested symbols only."""
+    normalized = list(dict.fromkeys(str(s).strip() for s in symbols if str(s).strip()))
+    if not normalized:
+        return {}
+    async with session_factory() as session:
+        result = await session.execute(
+            select(FeatureSnapshot.symbol, func.count(FeatureSnapshot.id))
+            .where(
+                FeatureSnapshot.timeframe == str(timeframe),
+                FeatureSnapshot.symbol.in_(normalized),
+            )
+            .group_by(FeatureSnapshot.symbol)
+        )
+    return {str(symbol): int(count) for symbol, count in result.all()}
 
 
 async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: dict[str, Any]) -> None:
@@ -433,18 +488,28 @@ async def run_once(
     cfg: dict[str, Any],
     *,
     backfill: bool,
+    backfill_symbols: set[str] | None = None,
     include_news: bool = True,
     include_fred: bool = True,
 ) -> None:
     stats: list[dict[str, Any]] = []
+    warmup = {str(s).strip().upper() for s in (backfill_symbols or set()) if str(s).strip()}
     for sym in cfg.get("symbols") or []:
         sym = str(sym).strip()
         if not sym:
             continue
-        stat = await ingest_symbol_yfinance(session_factory, cfg, sym, backfill=backfill)
+        symbol_backfill = backfill or sym.upper() in warmup
+        stat = await ingest_symbol_yfinance(
+            session_factory,
+            cfg,
+            sym,
+            backfill=symbol_backfill,
+        )
         stats.append(stat)
-    if backfill and stats:
+    if (backfill or warmup) and stats:
         for s in stats:
+            if not backfill and str(s["symbol"]).upper() not in warmup:
+                continue
             total = int(s["bars_total"])
             full = int(s["rows_with_full_features"])
             logger.info(

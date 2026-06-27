@@ -46,6 +46,25 @@ def test_validate_ohlcv_high_below_low():
     assert any("high_less_than_low" in x for x in r.issues)
 
 
+def test_validate_ohlcv_non_finite_prices():
+    idx = pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [100.0, float("nan")],
+            "high": [101.0, float("nan")],
+            "low": [99.0, float("nan")],
+            "close": [100.5, float("nan")],
+            "volume": [1.0, 2.0],
+        },
+        index=idx,
+    )
+
+    r = validate_ohlcv_frame(df, expected_interval=None)
+
+    assert not r.ok
+    assert "non_finite_ohlcv_rows:1" in r.issues
+
+
 def test_validate_future_timestamp_rejected():
     now = datetime(2024, 6, 1, tzinfo=timezone.utc)
     future = datetime(2099, 1, 1, tzinfo=timezone.utc)

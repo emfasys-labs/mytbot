@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from ai.regime import filter_by_allowed_strategies
+from core.instrument_semantics import is_cash_equivalent_pair
 from signals.engine import RawSignal
 from system.adaptive_regime_weights import (
     compute_multiplier as compute_regime_multiplier,
@@ -178,6 +179,31 @@ def collect_raw_signals_for_symbol(
     """Build ``raw_candidates`` and pre-regime strategy_candidate_log rows (no_setup / skipped)."""
     sc_rows: list[dict[str, Any]] = []
     raw_candidates: list[RawSignal] = []
+
+    if is_cash_equivalent_pair(symbol):
+        for strategy in (
+            momentum,
+            mean_rev,
+            volume_flow,
+            volatility_regime,
+            trend_breakout,
+            trend_following,
+        ):
+            if (
+                strategy is not None
+                and getattr(strategy, "enabled", False)
+                and strategy.supports_asset_class(sym_ac)
+            ):
+                sc_rows.append(
+                    strategy_candidate_row(
+                        symbol=symbol,
+                        strategy=str(strategy.name),
+                        status="ineligible_instrument_role",
+                        reason="cash_equivalent_not_directional_alpha",
+                        loop_iteration=loop_iteration,
+                    )
+                )
+        return raw_candidates, sc_rows
 
     if momentum.enabled and momentum.supports_asset_class(sym_ac):
         m_sig = momentum.generate_signal(symbol, df)

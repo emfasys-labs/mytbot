@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -73,6 +74,15 @@ def validate_ohlcv_frame(
 
     def _dcol(name: str) -> pd.Series:
         return work[colmap[name]].map(lambda x: Decimal(str(x)))
+
+    numeric_ohlcv = work[
+        [colmap[name] for name in ("open", "high", "low", "close", "volume")]
+    ].apply(pd.to_numeric, errors="coerce")
+    non_finite = int(
+        (~np.isfinite(numeric_ohlcv.to_numpy(dtype=float))).any(axis=1).sum()
+    )
+    if non_finite:
+        issues.append(f"non_finite_ohlcv_rows:{non_finite}")
 
     o = _dcol("open")
     h = _dcol("high")

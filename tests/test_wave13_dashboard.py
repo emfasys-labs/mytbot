@@ -163,10 +163,8 @@ def test_payload_strategy_coverage_reflects_yaml_state() -> None:
     families = {f["name"]: f for f in coverage["families"]}
     # Paper mode exercises all paper-safe advanced sleeves; live activation
     # remains governed by paper_only flags and model/strategy gates.
-    # D163 — the TRAINED meta-labeler is deliberately SHADOWED (disabled)
-    # pending re-validation against the clean profitability baseline; the
-    # heuristic meta-labeler stays active. Reflect that deliberate state.
-    assert families["trained_meta_labeler"]["enabled"] is False
+    # D201 promoted the trained meta-labeler to active paper enforcement.
+    assert families["trained_meta_labeler"]["enabled"] is True
     assert families["factor_sleeve"]["enabled"] is True
     assert families["stat_arb_pairs"]["enabled"] is True
     assert families["options_directional"]["enabled"] is True

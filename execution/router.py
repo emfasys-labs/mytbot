@@ -24,6 +24,7 @@ from typing import Optional
 
 from brokers.permissions import get_permissions
 from core.instruments import futures_spec_for
+from instruments.canonical import canonical_to_broker
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,10 @@ class SmartOrderRouter:
         eligible = [
             b for b in self.available_brokers
             if asset_class in BROKER_ASSET_MAP.get(b, set())
+            and (
+                asset_class != "crypto"
+                or canonical_to_broker(symbol, b) is not None
+            )
         ]
 
         if not eligible:

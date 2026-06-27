@@ -1093,7 +1093,11 @@ async def _compute_live_unrealised_mtm(session_factory) -> Decimal:
         rows = _filter_position_logs_to_current_nav_brokers(rows)
         if not rows:
             return Decimal(0)
-        feature_prices = await _latest_feature_prices(session, [r.symbol for r in rows])
+        feature_prices = (
+            await _latest_feature_prices(session, [r.symbol for r in rows])
+            if APP_ENV == "live"
+            else {}
+        )
     # In paper mode the local position ledger is authoritative and its marks
     # are refreshed by the trading loop. Broker fan-out here mixes external
     # demo books into paper accounting and makes every P&L read network-bound.
@@ -1255,7 +1259,11 @@ async def get_positions(limit: int = Query(200, ge=1, le=500), session_factory=D
         rows = _filter_position_logs_to_current_nav_brokers(rows)
         if not rows:
             return {"positions": [], "source": "position_log"}
-        prices = await _latest_feature_prices(session, [r.symbol for r in rows])
+        prices = (
+            await _latest_feature_prices(session, [r.symbol for r in rows])
+            if APP_ENV == "live"
+            else {}
+        )
     live_prices = await _live_broker_prices(rows) if APP_ENV == "live" else {}
     payload_rows = [
         _position_log_payload(

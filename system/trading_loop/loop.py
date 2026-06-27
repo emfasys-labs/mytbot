@@ -73,6 +73,7 @@ from system.funnel_telemetry import (
     record_strategy_candidate_rows,
 )
 from system.portfolio_equity import live_portfolio_snapshot, live_portfolio_value
+from system.runtime_invariants import audit_runtime_invariants
 from portfolio.broker_budget import (
     cap_orders_to_broker_budgets,
     compute_broker_budgets,
@@ -81,6 +82,7 @@ from portfolio.broker_budget import (
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
+from core.instrument_semantics import canonical_economic_symbol, is_cash_equivalent_pair
 from core.pnl import unrealised_pnl_account_currency
 from run_m3 import (
     _apply_signal_to_portfolio_state,
@@ -106,6 +108,7 @@ from strategies.volatility_regime import VolatilityRegimeStrategy
 from strategies.regime_rotation import RegimeRotationStrategy
 from strategies.trend_breakout import TrendBreakoutStrategy
 from strategies.trend_following import TrendFollowingStrategy
+from strategies.history_requirements import enabled_strategy_history_bars
 from system.demand_engine import DemandEngine
 from signals.meta_labeler import filter_candidates as meta_filter_candidates, keep_raw_signal as meta_keep_raw_signal
 from signals.meta_adaptation import compute_dynamic_strategy_bias
@@ -320,7 +323,7 @@ async def _merge_live_broker_positions_into_portfolio_state(
 
 def _reserve_symbol_key(symbol: Any) -> str:
     """Canonical portfolio key used when reserve orders net existing exposure."""
-    value = str(symbol or "").strip().upper()
+    value = canonical_economic_symbol(symbol)
     if value.endswith("=X"):
         return value[:-2]
     return value
@@ -423,6 +426,7 @@ def _orchestrator_recently_culled(
     *,
     symbol: str,
     config: dict[str, Any],
+    minimum_cooldown_sec: float = 0.0,
     now: datetime | None = None,
 ) -> bool:
     if context is None:
@@ -438,6 +442,7 @@ def _orchestrator_recently_culled(
         )
     except (TypeError, ValueError):
         cooldown = 0.0
+    cooldown = max(cooldown, float(minimum_cooldown_sec or 0.0))
     if cooldown <= 0:
         return False
     key = _orchestrator_context_symbol(symbol)
@@ -531,6 +536,7 @@ class TradingLoop:
         # for forex/futures/crypto symbols that have no M2 feature bars,
         # which otherwise carried their entry price forever.
         self._mark_px_cache: dict[tuple[str, str] | str, tuple[Decimal, float]] = {}
+        self._feature_interval_seconds: float = 0.0
         self._loop_started_monotonic: float | None = None
         try:
             self._warmup_min_sec: float = max(
@@ -553,6 +559,7 @@ class TradingLoop:
         # total is logged with the iteration summary.
         self._swallow_counts: dict[str, int] = {}
         self._swallow_iter_total: int = 0
+        self._last_invariant_report: dict[str, Any] | None = None
 
         self._global_edge_cfg: dict[str, Any] = {}
         self._enable_arbitrage: bool = False
@@ -586,6 +593,58 @@ class TradingLoop:
             Decimal("0"),
         )
         return held_cash_used
+
+    def _best_learned_replacement_evidence(
+        self,
+        candidates: list[Any],
+        *,
+        fallback_strategy: str | None = None,
+    ) -> dict[str, str] | None:
+        """Return the strongest successor with positive matured expectancy."""
+        best: tuple[Decimal, dict[str, str]] | None = None
+        for candidate in candidates:
+            md = dict(getattr(candidate, "metadata", None) or {})
+            strategy = str(
+                getattr(candidate, "strategy_name", None)
+                or fallback_strategy
+                or ""
+            ).strip()
+            symbol = str(getattr(candidate, "symbol", "") or "").strip()
+            asset_class = str(
+                getattr(candidate, "asset_class", None)
+                or md.get("asset_class")
+                or ""
+            ).strip().lower()
+            if not strategy or not symbol or not asset_class:
+                continue
+            raw_score = getattr(candidate, "expected_edge", None)
+            try:
+                if raw_score is None:
+                    raw_score = abs(
+                        Decimal(str(getattr(candidate, "net_conviction", 0) or 0))
+                    )
+                score = Decimal(str(raw_score))
+            except Exception:  # noqa: BLE001
+                score = None
+            model_score = self.trade_admission.model.evaluate(
+                strategy=strategy,
+                asset_class=asset_class,
+                score=score,
+            )
+            expected_return = model_score.expected_return
+            if model_score.abstain or expected_return is None or expected_return <= 0:
+                continue
+            evidence = {
+                "symbol": symbol,
+                "strategy": strategy,
+                "asset_class": asset_class,
+                "expected_return": str(expected_return),
+                "samples": str(model_score.samples),
+                "bucket": str(model_score.bucket),
+            }
+            if best is None or expected_return > best[0]:
+                best = (expected_return, evidence)
+        return best[1] if best is not None else None
 
     async def _check_and_trigger_unallocated_capital_discovery(
         self,
@@ -845,6 +904,7 @@ class TradingLoop:
         *,
         broker: str = "",
         avg_entry_price: Decimal | None = None,
+        asset_class: str = "",
     ) -> Decimal:
         """Venue-native last price for the mark-to-market sweep.
 
@@ -865,6 +925,31 @@ class TradingLoop:
 
         async def _probe(name: str, adapter) -> Decimal:
             try:
+                book = await asyncio.wait_for(
+                    adapter.get_order_book(s, depth=1),
+                    timeout=1.0,
+                )
+                bids = list(getattr(book, "bids", None) or [])
+                asks = list(getattr(book, "asks", None) or [])
+                if bids and asks:
+                    bid = Decimal(str(bids[0][0]))
+                    ask = Decimal(str(asks[0][0]))
+                    if bid > 0 and ask >= bid:
+                        px = (bid + ask) / Decimal("2")
+                        if futures_multiplier(s) is not None:
+                            return normalize_futures_mark_price(
+                                s,
+                                px,
+                                avg_entry_price=ref,
+                            )
+                        return px
+            except Exception:  # noqa: BLE001
+                pass
+            from core.market_session import is_market_open
+
+            if not is_market_open(asset_class, s):
+                return Decimal("0")
+            try:
                 raw = await asyncio.wait_for(adapter.get_last_price(s), timeout=1.0)
             except Exception:  # noqa: BLE001
                 return Decimal("0")
@@ -880,8 +965,6 @@ class TradingLoop:
 
         ordered = list(adapters.items())
         if b and b in adapters:
-            ordered = [(b, adapters[b])] + [(n, a) for n, a in adapters.items() if n != b]
-        if futures_multiplier(s) is not None and b and b in adapters:
             ordered = [(b, adapters[b])]
 
         for name, adapter in ordered:
@@ -961,7 +1044,28 @@ class TradingLoop:
         owns_engine = False
         try:
             strategies_cfg = load_yaml("config/strategies.yaml")
+            required_history_bars = enabled_strategy_history_bars(strategies_cfg)
+            if required_history_bars > self.lookback_bars:
+                logger.info(
+                    "trading_loop | feature window expanded | configured={} required={}",
+                    self.lookback_bars,
+                    required_history_bars,
+                )
+                self.lookback_bars = required_history_bars
             pipeline_cfg = load_yaml("config/data_pipeline.yaml")
+            try:
+                self._feature_interval_seconds = max(
+                    0.0,
+                    float(
+                        (pipeline_cfg.get("incremental") or {}).get(
+                            "expected_interval_seconds",
+                            0,
+                        )
+                        or 0
+                    ),
+                )
+            except (TypeError, ValueError):
+                self._feature_interval_seconds = 0.0
             risk_cfg = load_yaml("config/risk_limits.yaml")
             merge_m8_into_risk_cfg(risk_cfg, "config/m8_micro_live.yaml")
             merge_options_env_into_risk_cfg(risk_cfg)
@@ -1140,11 +1244,24 @@ class TradingLoop:
             max_symbols_per_iteration = max(10, int(rank_cfg.get("max_symbols_per_iteration", 120)))
             db_symbol_cache: list[str] = []
 
-            async def _refresh_symbols_from_db(limit: int = 300) -> list[str]:
+            async def _refresh_symbols_from_db(
+                limit: int = 300,
+                preferred_symbols: list[str] | None = None,
+            ) -> list[str]:
                 async with session_factory() as session:
-                    q = await session.execute(
-                        select(FeatureSnapshot.symbol).distinct().order_by(FeatureSnapshot.symbol.asc()).limit(limit)
+                    stmt = select(FeatureSnapshot.symbol).distinct()
+                    preferred = list(
+                        dict.fromkeys(
+                            str(symbol).strip()
+                            for symbol in (preferred_symbols or [])
+                            if str(symbol).strip()
+                        )
                     )
+                    if preferred:
+                        stmt = stmt.where(FeatureSnapshot.symbol.in_(preferred))
+                    else:
+                        stmt = stmt.order_by(FeatureSnapshot.symbol.asc()).limit(limit)
+                    q = await session.execute(stmt)
                     rows = [str(r[0]).strip() for r in q.all() if r and str(r[0]).strip()]
                 return rows
 
@@ -1633,11 +1750,19 @@ class TradingLoop:
                     self._last_capital_pct_seen = self.capital_pct
                 if universe_mode == "dynamic" and (self.iterations % 5 == 0):
                     try:
-                        db_symbols = await _refresh_symbols_from_db(limit=500)
+                        tiered = load_universe_tiers(tiers_path) if ranking_on else None
+                        preferred_symbols = (
+                            list(dict.fromkeys(base_symbols + list(tiered.core) + list(tiered.scan)))
+                            if tiered is not None
+                            else None
+                        )
+                        db_symbols = await _refresh_symbols_from_db(
+                            limit=500,
+                            preferred_symbols=preferred_symbols,
+                        )
                         if db_symbols:
                             db_symbol_cache = db_symbols
                             if ranking_on:
-                                tiered = load_universe_tiers(tiers_path)
                                 picked = _symbols_for_tiered_iteration(tiered, db_symbols, self.iterations)
                                 picked_or_db = picked if picked is not None else db_symbols
                                 symbols = list(dict.fromkeys(base_symbols + picked_or_db))
@@ -3046,6 +3171,35 @@ class TradingLoop:
                     else:
                         hb_extra["ai"] = {"kind": "off", "ai_degraded": False}
 
+                    if self.iterations % 5 == 0:
+                        try:
+                            self._last_invariant_report = await audit_runtime_invariants(
+                                session_factory,
+                                stale_order_seconds=max(
+                                    1200.0,
+                                    float(self.loop_interval_sec) * 4.0,
+                                ),
+                            )
+                            await bus.set_state(
+                                "runtime.invariants",
+                                self._last_invariant_report,
+                            )
+                            if not self._last_invariant_report.get("healthy", False):
+                                logger.error(
+                                    "runtime_invariants | FAILED | {}",
+                                    self._last_invariant_report,
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            self._swallow("runtime_invariants", exc)
+                            self._last_invariant_report = {
+                                "healthy": False,
+                                "error": str(exc)[:240],
+                            }
+                    if self._last_invariant_report is not None:
+                        hb_extra["runtime_invariants"] = dict(
+                            self._last_invariant_report
+                        )
+
                     await publish_runner_heartbeat(
                         bus, runner_name="orchestrator",
                         symbols=symbols, generated=generated, executed=executed,
@@ -3457,6 +3611,28 @@ class TradingLoop:
         """
         if self.sig_engine is None or self.risk_engine is None or self.execution_engine is None:
             return 0
+        eligible_candidates: list[Any] = []
+        for candidate in batch_candidates or []:
+            symbol = str(getattr(candidate, "symbol", "") or "")
+            if is_cash_equivalent_pair(symbol):
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=symbol,
+                            strategy=str(
+                                getattr(candidate, "strategy_name", "")
+                                or "portfolio_orchestrator"
+                            ),
+                            side=str(getattr(candidate, "side", "") or ""),
+                            confidence=float(getattr(candidate, "confidence", 0) or 0),
+                            status="ineligible_instrument_role",
+                            reason="cash_equivalent_not_directional_alpha",
+                            loop_iteration=self.iterations,
+                        )
+                    )
+                continue
+            eligible_candidates.append(candidate)
+        batch_candidates = eligible_candidates
         # Refresh the book with live broker positions so edge-protection and
         # netting diff against reality, not a stale snapshot.
         if self._broker_manager:
@@ -3589,6 +3765,14 @@ class TradingLoop:
             result.diagnostics.get("increases"), result.diagnostics.get("suppressed_rebalances"),
             result.diagnostics.get("net_target"),
         )
+        replacement_evidence = self._best_learned_replacement_evidence(
+            [
+                od
+                for od in result.orders
+                if not bool(od.reduce_only or od.close_only)
+            ],
+            fallback_strategy="portfolio_orchestrator",
+        )
 
         # Per-broker buying-power cap: the orchestrator sized against ONE global
         # NAV pool (capital_pct of total equity), but capital is not fungible
@@ -3662,6 +3846,7 @@ class TradingLoop:
                     held_edges,
                     active_mode=mode_raw,
                     replacement_context=replacement_context,
+                    replacement_evidence=replacement_evidence,
                 )
                 idle_loss_actions = self._suppress_reducing_actions_during_warmup(idle_loss_actions)
             except Exception as exc:  # noqa: BLE001
@@ -3753,6 +3938,62 @@ class TradingLoop:
                     )
         for od in result.orders:
             try:
+                is_reduce = bool(od.reduce_only or od.close_only)
+                if not is_reduce and _orchestrator_recently_culled(
+                    replacement_context,
+                    symbol=od.symbol,
+                    config=self._global_edge_cfg or {},
+                    minimum_cooldown_sec=self._feature_interval_seconds,
+                ):
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=od.symbol,
+                                strategy="portfolio_orchestrator",
+                                side=od.side,
+                                status="execution_incomplete",
+                                reason="culled_without_new_feature_bar",
+                                loop_iteration=self.iterations,
+                                metadata={
+                                    "execution_stage": "pre_price_reentry_gate",
+                                    "feature_interval_seconds": str(
+                                        self._feature_interval_seconds
+                                    ),
+                                },
+                            )
+                        )
+                    continue
+                try:
+                    from core.market_session import is_tradeable, not_tradeable_reason
+
+                    if not is_tradeable(
+                        od.broker or "",
+                        od.asset_class,
+                        od.symbol,
+                    ):
+                        closed_reason = not_tradeable_reason(
+                            od.broker or "",
+                            od.asset_class,
+                            od.symbol,
+                        ) or "market_closed"
+                        if sc_log_buffer is not None:
+                            sc_log_buffer.append(
+                                strategy_candidate_row(
+                                    symbol=od.symbol,
+                                    strategy="portfolio_orchestrator",
+                                    side=od.side,
+                                    status="execution_incomplete",
+                                    reason=closed_reason,
+                                    loop_iteration=self.iterations,
+                                    metadata={
+                                        "execution_stage": "pre_price_session_gate",
+                                        "broker": od.broker,
+                                    },
+                                )
+                            )
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    self._swallow("orchestrator_pre_price_session_gate", exc)
                 px = book_px.get(od.symbol)
                 if (px is None or px <= 0) and resolve_price is not None:
                     try:
@@ -3762,7 +4003,6 @@ class TradingLoop:
                 if px is None or px <= 0:
                     logger.debug("orchestrator | no price for {} — skipping order", od.symbol)
                     continue
-                is_reduce = bool(od.reduce_only or od.close_only)
                 candidate_context = candidate_context_by_symbol.get(
                     _reserve_symbol_key(od.symbol),
                     (Decimal("0"), {}),
@@ -3949,10 +4189,62 @@ class TradingLoop:
             if not symbol or symbol in attempted_symbols:
                 continue
             attempted_symbols.add(symbol)
+            if is_cash_equivalent_pair(symbol):
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=symbol,
+                            strategy=str(
+                                getattr(cand, "strategy_name", "")
+                                or "portfolio_orchestrator_reserve"
+                            ),
+                            side=str(getattr(cand, "side", "") or ""),
+                            confidence=float(getattr(cand, "confidence", 0) or 0),
+                            status="ineligible_instrument_role",
+                            reason="cash_equivalent_not_directional_alpha",
+                            loop_iteration=self.iterations,
+                        )
+                    )
+                continue
+            candidate_asset_class = str(
+                getattr(cand, "asset_class", "")
+                or (getattr(cand, "metadata", None) or {}).get("asset_class")
+                or ""
+            )
+            try:
+                from core.market_session import is_market_open, market_closed_reason
+
+                if not is_market_open(candidate_asset_class, symbol):
+                    if sc_log_buffer is not None:
+                        sc_log_buffer.append(
+                            strategy_candidate_row(
+                                symbol=symbol,
+                                strategy=str(
+                                    getattr(cand, "strategy_name", "")
+                                    or "portfolio_orchestrator_reserve"
+                                ),
+                                side=str(getattr(cand, "side", "") or ""),
+                                confidence=float(getattr(cand, "confidence", 0) or 0),
+                                status="execution_incomplete",
+                                reason=market_closed_reason(
+                                    candidate_asset_class,
+                                    symbol,
+                                )
+                                or "market_closed",
+                                loop_iteration=self.iterations,
+                                metadata={
+                                    "execution_stage": "reserve_pre_price_session_gate",
+                                },
+                            )
+                        )
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                self._swallow("orchestrator_reserve_pre_price_session_gate", exc)
             if _orchestrator_recently_culled(
                 replacement_context,
                 symbol=symbol,
                 config=self._global_edge_cfg or {},
+                minimum_cooldown_sec=self._feature_interval_seconds,
             ):
                 logger.info(
                     "orchestrator | reserve deferred {} | recent loss recycle still in recovery window",
@@ -4032,8 +4324,7 @@ class TradingLoop:
                 )
                 continue
 
-            remaining_ratio = min(Decimal("1"), remaining_target / admitted_target)
-            effective_quantity = signal_quantity * remaining_ratio
+            effective_quantity = remaining_target / signal_price
             signal_md = dict(getattr(sig, "metadata", None) or {})
             signal_md["reserve_candidate_target_notional"] = str(capital)
             signal_md["reserve_admitted_target_notional"] = str(admitted_target)
@@ -4724,10 +5015,14 @@ class TradingLoop:
                     for a in actions
                 )
                 if held and not has_reduce_action:
+                    replacement_evidence = self._best_learned_replacement_evidence(
+                        list(new_opps_dedup)
+                    )
                     idle_loss_actions = coord.propose_idle_loss_recycle_actions(
                         held,
                         active_mode=mode_for_coord,
                         replacement_context=repl_ctx,
+                        replacement_evidence=replacement_evidence,
                     )
                 else:
                     idle_loss_actions = []
@@ -5231,6 +5526,14 @@ class TradingLoop:
             b = str(broker or "").strip().lower()
             if not b or b == current or not self._can_route_broker(b, asset_class):
                 continue
+            if asset_class == "crypto":
+                try:
+                    from instruments.canonical import canonical_to_broker
+
+                    if canonical_to_broker(str(getattr(signal, "symbol", "") or ""), b) is None:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
             if asset_class == "crypto" and b == "alpaca" and not md.get("allow_alpaca_crypto"):
                 continue
             out.append(b)

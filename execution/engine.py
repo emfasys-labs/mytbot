@@ -1232,8 +1232,39 @@ class ExecutionEngine:
         )
         if reduce_only:
             return None, {}
+        asset_class = str(
+            getattr(getattr(signal, "asset_class", None), "value", None)
+            or getattr(signal, "asset_class", "")
+            or ""
+        ).strip().lower()
+        broker_name = str(
+            getattr(broker, "broker_name", None)
+            or getattr(signal, "broker", "")
+            or ""
+        ).strip().lower()
+        strict_crypto_paper_market = (
+            asset_class == "crypto"
+            and broker_name in NO_NATIVE_PAPER_POSITION_BROKERS
+        )
         suggested = getattr(signal, "suggested_price", None)
         if suggested is None:
+            if strict_crypto_paper_market:
+                try:
+                    market_now = Decimal(str(await broker.get_last_price(order.symbol)))
+                except Exception as exc:  # noqa: BLE001
+                    return "paper_market_price_unavailable", {
+                        "execution_preflight_stage": "paper_symbol_availability",
+                        "broker": broker_name,
+                        "symbol": str(order.symbol or ""),
+                        "error": str(exc)[:240],
+                    }
+                if market_now <= 0:
+                    return "paper_market_price_unavailable", {
+                        "execution_preflight_stage": "paper_symbol_availability",
+                        "broker": broker_name,
+                        "symbol": str(order.symbol or ""),
+                        "error": "non_positive_market_price",
+                    }
             return None, {}
         try:
             suggested = Decimal(str(suggested))
@@ -1256,6 +1287,13 @@ class ExecutionEngine:
                 order.symbol,
                 exc,
             )
+            if strict_crypto_paper_market:
+                return "paper_market_price_unavailable", {
+                    "execution_preflight_stage": "paper_symbol_availability",
+                    "broker": broker_name,
+                    "symbol": str(order.symbol or ""),
+                    "error": str(exc)[:240],
+                }
             return None, {}
         if market_now <= 0:
             return None, {}
