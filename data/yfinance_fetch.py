@@ -4,10 +4,35 @@ Download OHLCV from yfinance (blocking); call via asyncio.to_thread from async c
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import pandas as pd
 import yfinance as yf
+
+
+_EXPECTED_NO_DATA_MESSAGES = (
+    "possibly delisted; no price data found",
+    "no timezone found, symbol may be delisted",
+)
+
+
+class _ExpectedNoDataFilter(logging.Filter):
+    """Keep normal discovery misses out of the application error stream."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage().lower()
+        return not any(fragment in message for fragment in _EXPECTED_NO_DATA_MESSAGES)
+
+
+def _install_expected_no_data_filter() -> None:
+    for logger_name in ("yfinance", "yfinance.scrapers.history"):
+        yf_logger = logging.getLogger(logger_name)
+        if not any(isinstance(item, _ExpectedNoDataFilter) for item in yf_logger.filters):
+            yf_logger.addFilter(_ExpectedNoDataFilter())
+
+
+_install_expected_no_data_filter()
 
 
 def fetch_history(

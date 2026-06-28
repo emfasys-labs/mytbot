@@ -18,6 +18,20 @@
 
 ---
 
+## D220 — Expected discovery misses are not application errors
+**Date:** 2026-06-28
+**Decision:** Broker-catalogue discovery may legitimately probe symbols that Yahoo does not cover. Empty history remains a zero-score exclusion, but Yahoo's known no-data/delisted diagnostic must not pollute the application error stream. Unexpected provider errors remain visible.
+
+The first attempt at a fourth clean round found repeated error-level Yahoo records for unsupported catalogue symbols. `data/yfinance_fetch.py` now installs a narrow filter matching only the provider's known `possibly delisted; no price data found` and `no timezone found, symbol may be delisted` diagnostics. It does not suppress HTTP errors, exceptions, or other provider failures.
+
+**Verification.**
+- Focused universe/pipeline slice: **26 passed, 1 skipped**.
+- Full suite: **2,122 passed, 3 skipped**.
+- Repeated fourth round after restart: three live cycles, zero post-fix defect signatures, zero endpoint failures, full ten-broker coverage, no disabled broker or loop error, and all runtime invariants healthy.
+- Ledger remained exact: 384 filled orders, 384 linked fill order IDs, 384 fills, zero working orders, no duplicate same-symbol venue exposure, and no cash-equivalent position.
+
+---
+
 ## D219 — Stability requires consecutive clean live rounds
 **Date:** 2026-06-28
 **Decision:** A stability audit does not end after one repair. Any newly found defect resets the clean count; completion requires three consecutive live rounds with no new defects across runtime, accounting, broker coverage, logs, and API responsiveness.
