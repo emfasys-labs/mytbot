@@ -18,6 +18,20 @@
 
 ---
 
+## D221 — Fifth consecutive post-repair live audit is clean
+**Date:** 2026-06-28
+**Decision:** Continue validating stability through independent live windows, not only immediately after a restart or repair.
+
+Round 5 observed the unchanged D220 process across iterations 13–15. It issued 150 dashboard/API probes with zero failures and a maximum response time of 533ms. The final audit found:
+- Full ten-broker coverage and no disabled broker or loop error.
+- Zero error, critical, traceback, rate-limit, swallowed-error, or non-fatal-failure signatures during the round.
+- Healthy computed runtime invariants with zero fill/position mismatches, orphan filled orders, stale working orders, or recent unpriced outcomes.
+- 384 filled orders, 384 linked fill order IDs, 384 fills, and zero working orders.
+- No new fill, fee, duplicate venue expression, or cash-equivalent position.
+- Unrealised P&L changed from marks only; realised P&L remained unchanged.
+
+---
+
 ## D220 — Expected discovery misses are not application errors
 **Date:** 2026-06-28
 **Decision:** Broker-catalogue discovery may legitimately probe symbols that Yahoo does not cover. Empty history remains a zero-score exclusion, but Yahoo's known no-data/delisted diagnostic must not pollute the application error stream. Unexpected provider errors remain visible.
