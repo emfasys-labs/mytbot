@@ -412,6 +412,47 @@ def test_young_losing_position_held_on_flat_desire():
     assert res.diagnostics["protected_positions"] == 1
 
 
+def test_young_position_is_not_trimmed_for_target_weight_noise():
+    book = [
+        BookPosition(
+            "AUDUSD",
+            Decimal("200000"),
+            Decimal("0.69"),
+            Decimal("0.69"),
+            "forex",
+            "ibkr",
+            holding_sec=Decimal("300"),
+            unrealised_pnl=Decimal("0"),
+        )
+    ]
+    intents = [
+        StrategyIntent(
+            "AUDUSD",
+            "buy",
+            Decimal("0.8"),
+            "trend_following",
+            "forex",
+            "ibkr",
+        )
+    ]
+
+    res = orchestrate(
+        intents,
+        book,
+        nav=NAV,
+        mode="trader",
+        config=_cfg(
+            gross_target_pct={"trader": Decimal("0.10")},
+            max_position_pct_of_nav=Decimal("0.10"),
+            rebalance_band_pct_of_nav=Decimal("0.001"),
+            min_hold_sec_before_flip=Decimal("259200"),
+        ),
+    )
+
+    assert not any(order.symbol == "AUDUSD" for order in res.orders)
+    assert res.diagnostics["young_reductions_suppressed"] == 1
+
+
 def test_old_losing_position_still_closed_on_flat_desire():
     # Past the min-hold window, a losing position with no edge IS closed.
     book = [BookPosition("OLD", Decimal("100"), Decimal("50"), Decimal("49"),

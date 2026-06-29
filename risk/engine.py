@@ -161,6 +161,7 @@ class RiskEngine:
             self._check_intraday_symbol_adds,
             self._check_consecutive_losses,
             self._check_confidence_threshold,
+            self._check_portfolio_balance,
             self._check_theme_uniqueness,
             self._check_catalyst_present,
             self._check_trade_quality_score,
@@ -257,6 +258,7 @@ class RiskEngine:
             self._check_crypto_cluster_exposure,
             self._check_single_name_notional,
             self._check_intraday_symbol_adds,
+            self._check_portfolio_balance,
         ]
         if self._is_reduce_only_signal(probe):
             checks = []
@@ -1895,6 +1897,123 @@ class RiskEngine:
             if signal.side == "sell" and qty < 0:
                 return (False, "theme_uniqueness")
         return (True, "theme_uniqueness")
+
+    def _check_portfolio_balance(self, signal, portfolio) -> tuple[bool, str]:
+        """Final all-path veto for redundant or over-crowded factor exposure."""
+        cfg = self.config.get("portfolio_balance") or {}
+        if not isinstance(cfg, dict) or not bool(cfg.get("enabled", False)):
+            return (True, "portfolio_balance")
+        try:
+            from core.instrument_semantics import InstrumentRole, instrument_role
+            from portfolio.balance import economic_key
+            from portfolio.cluster_map import economic_factor_loadings
+
+            metadata = (
+                signal.metadata
+                if isinstance(getattr(signal, "metadata", None), dict)
+                else {}
+            )
+            role = instrument_role(
+                signal.symbol,
+                asset_class=getattr(signal, "asset_class", ""),
+                metadata=metadata,
+            )
+            if role in {
+                InstrumentRole.CASH_EQUIVALENT,
+                InstrumentRole.LIQUIDITY_RESERVE,
+            } and not bool(metadata.get("liquidity_management")):
+                return (False, "portfolio_balance")
+
+            positions = portfolio.get("positions", {}) if isinstance(portfolio, dict) else {}
+            candidate_key = economic_key(signal.symbol)
+            candidate_factors = economic_factor_loadings(
+                signal.symbol, getattr(signal, "asset_class", "")
+            )
+            factor_symbols: dict[str, set[str]] = {}
+            factor_notional: dict[str, Decimal] = {}
+            gross = Decimal("0")
+            for position_key, raw in positions.items():
+                row = raw if isinstance(raw, dict) else {}
+                symbol = str(
+                    row.get("symbol")
+                    or str(position_key or "").split(":", 1)[-1]
+                    or ""
+                )
+                quantity = Decimal(str(row.get("quantity", 0) or 0))
+                price = Decimal(
+                    str(
+                        row.get("current_price")
+                        or row.get("avg_entry_price")
+                        or 0
+                    )
+                )
+                notional = abs(quantity) * price
+                if quantity == 0 or notional <= 0:
+                    continue
+                gross += notional
+                factors = economic_factor_loadings(
+                    symbol, row.get("asset_class", "")
+                )
+                for factor, loading in factors.items():
+                    if factor.startswith("instrument:"):
+                        continue
+                    factor_symbols.setdefault(factor, set()).add(
+                        economic_key(symbol)
+                    )
+                    factor_notional[factor] = factor_notional.get(
+                        factor, Decimal("0")
+                    ) + notional * abs(loading)
+
+            nav = Decimal(
+                str(
+                    portfolio.get("portfolio_value")
+                    or portfolio.get("total_equity")
+                    or gross
+                    or 0
+                )
+            )
+            requested = self._requested_notional(signal)
+            max_factor_share = Decimal(
+                str(cfg.get("max_incremental_factor_share", "0.25"))
+            )
+            substitutable = {
+                str(value)
+                for value in (
+                    cfg.get("single_expression_factors")
+                    or ("core_bonds", "global_ex_us_equity")
+                )
+            }
+            max_expressions = max(
+                1, int(cfg.get("max_expressions_per_factor", 4) or 4)
+            )
+            for factor, loading in candidate_factors.items():
+                if factor.startswith("instrument:"):
+                    continue
+                existing_symbols = factor_symbols.get(factor, set())
+                if (
+                    candidate_key not in existing_symbols
+                    and factor in substitutable
+                    and existing_symbols
+                ):
+                    return (False, "portfolio_balance")
+                if (
+                    candidate_key not in existing_symbols
+                    and len(existing_symbols) >= max_expressions
+                ):
+                    return (False, "portfolio_balance")
+                projected = factor_notional.get(factor, Decimal("0")) + (
+                    requested * abs(loading)
+                )
+                if nav > 0 and projected / nav > max_factor_share:
+                    return (False, "portfolio_balance")
+            return (True, "portfolio_balance")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "portfolio balance risk gate failed closed | symbol=%s | %s",
+                getattr(signal, "symbol", ""),
+                exc,
+            )
+            return (False, "portfolio_balance")
 
     def _check_catalyst_present(self, signal, portfolio) -> tuple[bool, str]:
         """

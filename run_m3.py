@@ -394,6 +394,38 @@ async def _load_portfolio_state(
             )
         )
         rows = list(latest_rows_q.scalars().all())
+        # Reconstruct the current holding start from the immutable fills ledger.
+        # Position snapshots are marked every cycle, so their timestamp is not
+        # the position age.  Starting at each transition from flat -> non-flat
+        # gives the allocator a stable daily-horizon holding time and prevents
+        # both premature trims and positions being protected forever.
+        holding_started_at: dict[tuple[str, str], datetime] = {}
+        running_qty: dict[tuple[str, str], Decimal] = {}
+        fill_age_q = await session.execute(
+            select(
+                FillLog.broker,
+                FillLog.symbol,
+                FillLog.timestamp,
+                FillLog.signed_quantity,
+            ).order_by(FillLog.timestamp.asc(), FillLog.id.asc())
+        )
+        fill_age_rows = fill_age_q.all() if hasattr(fill_age_q, "all") else []
+        for broker, symbol, fill_ts, signed_quantity in fill_age_rows:
+            key = (
+                str(broker or "").strip().lower(),
+                str(symbol or "").strip(),
+            )
+            previous = running_qty.get(key, Decimal("0"))
+            current = previous + Decimal(str(signed_quantity or "0"))
+            if abs(previous) <= Decimal("0.000001") and abs(current) > Decimal(
+                "0.000001"
+            ):
+                holding_started_at[key] = fill_ts
+            elif abs(current) <= Decimal("0.000001"):
+                holding_started_at.pop(key, None)
+                current = Decimal("0")
+            running_qty[key] = current
+        load_now = datetime.now(timezone.utc)
         if rows:
             for row in rows:
                 qty = Decimal(str(row.quantity))
@@ -431,6 +463,21 @@ async def _load_portfolio_state(
                         "asset_class": (row.asset_class or "").strip().lower(),
                         "broker": broker_key,
                     }
+                    held_since = holding_started_at.get((broker_lc, symbol))
+                    if held_since is not None:
+                        if held_since.tzinfo is None:
+                            held_since = held_since.replace(tzinfo=timezone.utc)
+                        entry["holding_sec"] = Decimal(
+                            str(
+                                max(
+                                    0.0,
+                                    (
+                                        load_now
+                                        - held_since.astimezone(timezone.utc)
+                                    ).total_seconds(),
+                                )
+                            )
+                        )
                     im = getattr(row, "instrument_metadata", None)
                     if isinstance(im, dict):
                         entry["instrument_metadata"] = im

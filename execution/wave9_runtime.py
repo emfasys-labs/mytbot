@@ -284,6 +284,8 @@ def pre_flight_cost_gate(
     asset_class: str,
     quantity: float,
     signal_metadata: Optional[Mapping[str, Any]] = None,
+    fee_bps_override: float | None = None,
+    slippage_bps_override: float | None = None,
 ) -> CostGateDecision:
     """
     Compute the all-in expected cost and the urgency verdict.
@@ -302,11 +304,20 @@ def pre_flight_cost_gate(
     try:
         ac = (asset_class or "other").strip().lower()
         coef = config.impact_coefficients.get(ac, config.impact_coefficients.get("other", 0.10))
-        fee_bps = config.venue_priors.fee_for(broker, taker=True)
+        fee_bps = (
+            max(0.0, float(fee_bps_override))
+            if fee_bps_override is not None
+            else config.venue_priors.fee_for(broker, taker=True)
+        )
         spread_bps = config.venue_priors.spread_for(broker, ac)
         meta_in = _extract_signal_inputs(signal_metadata or {}, fee_bps=fee_bps)
         slip_est = config.slippage_model.estimate(
             broker=broker, symbol=symbol, asset_class=ac
+        )
+        slippage_bps = (
+            max(0.0, float(slippage_bps_override))
+            if slippage_bps_override is not None
+            else slip_est.bps
         )
         cost = total_execution_cost_bps(
             order_qty=float(quantity),
@@ -315,7 +326,7 @@ def pre_flight_cost_gate(
             asset_class=ac,
             fee_bps=fee_bps,
             spread_bps=spread_bps,
-            slippage_bps=slip_est.bps,
+            slippage_bps=slippage_bps,
             coefficient=coef,
         )
         unknown_liquidity_penalty = (
@@ -377,7 +388,11 @@ def pre_flight_cost_gate(
             "wave9_reason": verdict.reason,
             "wave9_expected_cost_bps": cost.total_bps,
             "wave9_edge_bps": meta_in["edge_bps"],
-            "wave9_slippage_source": slip_est.source,
+            "wave9_slippage_source": (
+                "paper_execution_model"
+                if slippage_bps_override is not None
+                else slip_est.source
+            ),
             "wave9_liquidity_known": meta_in["daily_volume"] > 0,
             "wave9_broker": broker,
             "wave9_asset_class": ac,

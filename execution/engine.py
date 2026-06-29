@@ -31,6 +31,7 @@ from control.runtime import get_risk_engine, set_execution_engine
 from brokers.base import AssetClass, Order, OrderBook, OrderResult, OrderSide, OrderStatus, OrderType, Position
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
 from core.instruments import futures_multiplier, parse_option_contract_from_metadata
+from core.instrument_semantics import canonical_economic_symbol
 from risk.engine import Signal, RiskDecision, RiskVerdict
 
 from execution.arbitrage_executor import ArbitrageExecutor
@@ -262,16 +263,25 @@ class ExecutionEngine:
             return best_partial[1]
         return None
 
-    async def _crypto_existing_symbol_expression(
+    async def _existing_symbol_expression(
         self,
         symbol: str,
         *,
         session_factory=None,
     ) -> tuple[str | None, list[str]]:
-        """Return the preferred already-held paper crypto venue for ``symbol``."""
+        """Return the largest already-held venue for an economic symbol."""
         sym = (symbol or "").strip().upper()
         if not sym:
             return None, []
+        economic = canonical_economic_symbol(sym).replace("=X", "")
+        aliases = {sym, economic, f"{economic}=X"}
+        if "-" in economic:
+            aliases.add(economic.replace("-", ""))
+        elif economic.endswith(("USD", "USDT", "USDC")):
+            for quote in ("USDT", "USDC", "USD"):
+                if economic.endswith(quote) and len(economic) > len(quote):
+                    aliases.add(f"{economic[:-len(quote)]}-{quote}")
+                    break
 
         candidates: dict[str, Decimal] = {}
         if self.paper_mode and session_factory is not None:
@@ -282,22 +292,28 @@ class ExecutionEngine:
                 async with session_factory() as session:
                     result = await session.execute(
                         select(PositionLog)
-                        .where(
-                            PositionLog.symbol == sym,
-                            PositionLog.broker.in_(("binance", "bybit", "kraken")),
-                        )
+                        .where(PositionLog.symbol.in_(sorted(aliases)))
                         .order_by(PositionLog.timestamp.desc())
                     )
-                    latest_by_broker: dict[str, Any] = {}
+                    latest_by_broker_symbol: dict[tuple[str, str], Any] = {}
                     for row in result.scalars().all():
                         broker_name = str(row.broker or "").strip().lower()
-                        if broker_name and broker_name not in latest_by_broker:
-                            latest_by_broker[broker_name] = row
-                    for broker_name, row in latest_by_broker.items():
+                        row_symbol = str(row.symbol or "").strip().upper()
+                        if (
+                            canonical_economic_symbol(row_symbol).replace("=X", "")
+                            != economic
+                        ):
+                            continue
+                        key = (broker_name, row_symbol)
+                        if broker_name and key not in latest_by_broker_symbol:
+                            latest_by_broker_symbol[key] = row
+                    for (broker_name, _row_symbol), row in latest_by_broker_symbol.items():
                         quantity = Decimal(str(row.quantity or "0"))
                         price = Decimal(str(row.current_price or row.avg_entry_price or "0"))
                         if quantity != 0:
-                            candidates[broker_name] = (
+                            candidates[broker_name] = candidates.get(
+                                broker_name, Decimal("0")
+                            ) + (
                                 abs(quantity) * price if price > 0 else abs(quantity)
                             )
             except Exception as exc:  # noqa: BLE001
@@ -317,7 +333,7 @@ class ExecutionEngine:
         if not isinstance(adapters, dict):
             adapters = self._brokers
 
-        for broker_name in ("binance", "bybit", "kraken"):
+        for broker_name in sorted(adapters):
             adapter = adapters.get(broker_name) if isinstance(adapters, dict) else None
             if adapter is None:
                 continue
@@ -332,7 +348,11 @@ class ExecutionEngine:
                     qty = Decimal(str(getattr(pos, "quantity", "0") or "0"))
                 except Exception:  # noqa: BLE001
                     continue
-                if pos_sym != sym or qty == 0:
+                if (
+                    canonical_economic_symbol(pos_sym).replace("=X", "")
+                    != economic
+                    or qty == 0
+                ):
                     continue
                 try:
                     px = Decimal(str(getattr(pos, "current_price", "0") or "0"))
@@ -346,6 +366,18 @@ class ExecutionEngine:
             return None, []
         preferred = max(candidates.items(), key=lambda item: item[1])[0]
         return preferred, sorted(candidates)
+
+    async def _crypto_existing_symbol_expression(
+        self,
+        symbol: str,
+        *,
+        session_factory=None,
+    ) -> tuple[str | None, list[str]]:
+        """Backward-compatible wrapper for the all-asset venue consolidator."""
+        return await self._existing_symbol_expression(
+            symbol,
+            session_factory=session_factory,
+        )
 
     def add_allowed_broker(self, name: str) -> None:
         """Register a venue that became available after engine construction (e.g. late IBKR connect)."""
@@ -411,6 +443,59 @@ class ExecutionEngine:
         # prevents the allocator from re-submitting the same opportunity each
         # loop iteration when a prior limit order is still sitting unfilled.
         sig_md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+        _consolidation_reduce = bool(
+            getattr(signal, "reduce_only", False)
+            or sig_md.get("reduce_only")
+            or sig_md.get("close_only")
+            or str(sig_md.get("coordinator_kind", "")).strip().lower()
+            in {"trim_symbol", "close_symbol", "flatten_symbol"}
+        )
+        if not _consolidation_reduce and session_factory is not None:
+            preferred, held_brokers = await self._existing_symbol_expression(
+                signal.symbol,
+                session_factory=session_factory,
+            )
+            current_broker = str(signal.broker or "").strip().lower()
+            attempted = {
+                str(value or "").strip().lower()
+                for value in (sig_md.get("venue_consolidation_attempted") or [])
+                if str(value or "").strip()
+            }
+            attempted.add(current_broker)
+            if preferred and preferred != current_broker:
+                if preferred in attempted:
+                    self.last_skip_reason = "same_symbol_venue_consolidation"
+                    self.last_skip_metadata = {
+                        "economic_symbol": canonical_economic_symbol(signal.symbol),
+                        "broker": current_broker,
+                        "preferred_broker": preferred,
+                        "existing_brokers": held_brokers,
+                    }
+                    logger.warning(
+                        "EXEC SKIP (all-asset consolidation) | %s broker=%s preferred=%s held=%s",
+                        signal.symbol,
+                        current_broker,
+                        preferred,
+                        held_brokers,
+                    )
+                    return None
+                new_md = dict(sig_md)
+                new_md["venue_consolidation_attempted"] = sorted(attempted)
+                new_md["same_symbol_consolidated_from"] = current_broker
+                new_md["same_symbol_consolidated_to"] = preferred
+                new_md["same_symbol_existing_brokers"] = held_brokers
+                logger.info(
+                    "EXEC REROUTE (all-asset consolidation) | %s %s -> %s held=%s",
+                    signal.symbol,
+                    current_broker,
+                    preferred,
+                    held_brokers,
+                )
+                return await self.execute(
+                    replace(signal, broker=preferred, metadata=new_md),
+                    risk_decision,
+                    session_factory=session_factory,
+                )
         if self.dedup_window_sec > 0:
             existing = await self._find_in_flight_order(session_factory, signal)
             if existing is not None:
@@ -503,6 +588,12 @@ class ExecutionEngine:
                 asset_class=ac_str,
                 quantity=qty_f,
                 signal_metadata=signal.metadata or {},
+                fee_bps_override=(
+                    float(self._paper_fee_bps()) if self.paper_mode else None
+                ),
+                slippage_bps_override=(
+                    float(self._paper_slippage_bps()) if self.paper_mode else None
+                ),
             )
             if gate.used:
                 wave9_metadata = dict(gate.metadata or {})

@@ -54,6 +54,7 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from core.instrument_semantics import canonical_economic_symbol
+from portfolio.balance import BalancePolicy, aggregate_book_positions, risk_balanced_weights
 from portfolio.cluster_map import theme_for, theme_sign_if_bought
 
 D0 = Decimal("0")
@@ -198,6 +199,10 @@ class OrchestratorConfig:
     # trust is capped at neutral (1.0) regardless of an optimistic backtest
     # prior — never amplify a proven-live loser.
     min_live_closes_for_posterior: int = 8
+    # Portfolio balance is a separate axis from conviction.  Conviction
+    # chooses what deserves capital; semantic HRP determines how much risk
+    # each correlated expression receives.
+    balance_policy: BalancePolicy = field(default_factory=BalancePolicy)
     # ── D158 Phase 2 — heterogeneous hunter army ──────────────────────────
     # Each weapon has a TEMPERAMENT (sniper / shotgun / knife) — an intrinsic
     # style independent of the market — and the global MODE (defender/trader/
@@ -265,6 +270,9 @@ class OrchestratorConfig:
             kwargs["cluster_consolidation"] = bool(raw.get("cluster_consolidation"))
         if raw.get("no_average_down") is not None:
             kwargs["no_average_down"] = bool(raw.get("no_average_down"))
+        kwargs["balance_policy"] = BalancePolicy.from_mapping(
+            raw.get("risk_balance") if isinstance(raw.get("risk_balance"), dict) else {}
+        )
         if gross is not None:
             kwargs["gross_target_pct"] = gross
         if trust:
@@ -480,22 +488,25 @@ def orchestrate(
     clusters_consolidated = 0
     if config.cluster_consolidation:
         intents, clusters_consolidated = consolidate_clusters(intents, config)
-    book_list = list(book)
+    raw_book_list = list(book)
+    book_list, book_diag = aggregate_book_positions(raw_book_list)
     book_by_sym: dict[str, BookPosition] = {}
     symbol_aliases_normalized = 0
     for p in book_list:
         key = _symbol_key(p.symbol)
         if key != str(p.symbol):
             symbol_aliases_normalized += 1
-        # If duplicate aliases ever appear, keep the first live row. The normal
-        # broker merge should already collapse them; this is only a netting key.
-        book_by_sym.setdefault(key, p)
+        book_by_sym[key] = p
 
     diag: dict[str, Any] = {
         "intent_count": len(intents),
         "raw_intent_count": raw_intent_count,
         "clusters_consolidated": clusters_consolidated,
         "book_positions": len(book_list),
+        "raw_book_rows": len(raw_book_list),
+        "duplicate_economic_positions": book_diag.get(
+            "duplicate_economic_positions", []
+        ),
         "netted_symbols": 0,
         "conflicts_resolved": 0,
         "protected_positions": 0,
@@ -623,6 +634,32 @@ def orchestrate(
             broker=str(slot.get("broker", "") or (book_by_sym.get(sym).broker if sym in book_by_sym else "")),
         )
 
+    # Risk-aware construction.  A large number of correlated tickers must not
+    # masquerade as diversification: semantic ETF/theme overlap supplies a
+    # stable covariance prior and HRP distributes the gross budget by marginal
+    # risk.  Conviction remains in the blend, so stronger alpha still receives
+    # more capital without allowing crypto/sector breadth to dominate risk.
+    active_target_items = [
+        (sym, target.asset_class, raw_w.get(sym, D0))
+        for sym, target in targets.items()
+        if target.target_notional != 0 and raw_w.get(sym, D0) > 0
+    ]
+    balanced_weights, balance_diag = risk_balanced_weights(
+        active_target_items,
+        policy=config.balance_policy,
+    )
+    if balance_diag.get("used"):
+        for sym, target in targets.items():
+            balanced_weight = balanced_weights.get(sym)
+            if balanced_weight is None or target.target_notional == 0:
+                continue
+            direction = D1 if target.target_notional > 0 else -D1
+            target.target_notional = direction * min(
+                per_name_cap,
+                gross_budget * balanced_weight,
+            )
+    diag["risk_balance"] = balance_diag
+
     # ── 2b. DELIBERATE NET MANAGEMENT — cap |net| at net_cap × gross ───────
     # Only meaningful when BOTH sides exist: trimming the heavier side reduces
     # |net| while the lighter side holds gross up, lowering the net/gross
@@ -729,6 +766,21 @@ def orchestrate(
             continue
 
         is_reduction = (cur_dir != 0 and des_dir == cur_dir and abs(desired) < abs(cur_notional)) or close_only
+        # A same-direction target wobble is not a new thesis. Do not pay an
+        # exit fee and then re-enter a young position when cross-sectional
+        # weights move between otherwise identical feature bars. Dedicated
+        # risk exits remain outside this pure allocator and are unaffected.
+        if (
+            is_reduction
+            and not close_only
+            and pos is not None
+            and pos.holding_sec < config.min_hold_sec_before_flip
+        ):
+            diag["protected_positions"] += 1
+            diag["young_reductions_suppressed"] = (
+                int(diag.get("young_reductions_suppressed", 0)) + 1
+            )
+            continue
         side = "buy" if delta_signed > 0 else "sell"
         orders.append(
             OrchestratedOrder(

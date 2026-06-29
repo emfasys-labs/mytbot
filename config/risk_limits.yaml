@@ -39,6 +39,16 @@ intraday_symbol_adds:
   max_pct_nav: 0.20             # D163 Phase 1 — cumulative same-day adds per name capped to the
                                 # 20% single-name cap (was 1.00 under D159, 0.10 pre-D159)
 
+# Portfolio-wide economic balance. Unlike per-ticker caps, this sees aliases,
+# ETF look-through, and correlated factors before every open on every path.
+portfolio_balance:
+  enabled: true
+  max_incremental_factor_share: 0.25
+  max_expressions_per_factor: 4
+  single_expression_factors:
+    - core_bonds
+    - global_ex_us_equity
+
 # ── D127 P2 — Connect Hub connector certification gate ───────────────────────
 # Only Certified-tier brokers (config/connectors.yaml :: certification:
 # certified) may place trades. Experimental connectors may inform but never

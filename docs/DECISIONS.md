@@ -18,6 +18,84 @@
 
 ---
 
+## D222 — Portfolio balance is defined by economic risk, not ticker count
+**Date:** 2026-06-29
+**Decision:** Every allocation path now shares one canonical economic book,
+one absolute target ledger, and one semantic factor model. Different tickers
+or venues no longer count as independent diversification merely because their
+symbols differ.
+
+**Incident evidence.** The first open-market audit after the clean weekend
+round found 85–86 paper positions, exact `AUDUSD` and `CME` venue duplicates,
+near-identical `SPY`/`IVV`, `AGG`/`BND`/`IUSB`, and `EFA`/`VXUS` stacks,
+`FIDD-USD` acting as a USD peg, and ETF/constituent overlays across
+semiconductors, staples, health care, utilities, and energy. A 125-day
+covariance audit estimated that crypto represented about 7.65% of NAV but
+nearly 49% of portfolio risk. Allocator target changes were also being undone
+by the reserve path, creating fee-bearing trim/re-entry cycles.
+
+**Implementation.**
+- `core/instrument_semantics.py` defines `alpha`, `hedge`,
+  `cash_equivalent`, and `liquidity_reserve` roles. `FIDD` is classified as a
+  USD cash equivalent; `BOXX`/`MINT` and other treasury-like ETFs are
+  liquidity reserves and cannot enter directional-alpha paths.
+- `portfolio/balance.py` provides canonical economic aggregation, semantic
+  covariance priors, HRP/conviction blended weights, factor-aware admission,
+  and costed legacy reconciliation plans.
+- `portfolio/cluster_map.py` adds core-bond, ex-US, index, regional, sector,
+  crypto, FX, and ETF look-through factors. True substitutes are expressed
+  once; broader themes carry configurable expression limits.
+- `portfolio/portfolio_orchestrator.py` sums duplicate venue/alias rows instead
+  of retaining the first row and applies semantic HRP after conviction
+  selection.
+- `portfolio/target_ledger.py` gives primary allocation, reserve deployment,
+  and natural targets one absolute owner. Same-feature-bar reduction
+  tombstones prevent another path from buying the position back.
+- Post-learning target reductions now retain daily-horizon young-position
+  protection. `run_m3._load_portfolio_state()` reconstructs real holding age
+  from fill-ledger flat-to-open transitions rather than fresh mark timestamps.
+- `execution/engine.py` generalises same-symbol venue consolidation from
+  synthetic crypto to every asset class. New adds route to the largest
+  existing expression; reduce-only exits remain broker-specific.
+- `risk/engine.py` adds a final all-path portfolio-balance veto for non-alpha
+  instruments, redundant factors, factor-expression breadth, and projected
+  factor share. The coordinator preflight also scores expected edge after
+  execution cost and overlap cost.
+- New symbols are routed toward a less-concentrated eligible broker when the
+  proposed venue exceeds the configured share; existing-symbol consolidation
+  remains stronger so one instrument is not fragmented to achieve broker
+  diversity.
+- `system/runtime_invariants.py` now treats economic duplicates, pegged alpha,
+  excessive factor overlap, broker concentration, and fee-inefficient dust as
+  health violations. It publishes a reduce-only legacy reconciliation plan.
+- Paper mode may execute at most one cost-justified reconciliation action per
+  cycle. Automatic live cleanup is disabled; live operators receive the plan
+  but retain explicit control.
+
+**Configuration.** `config/strategies.yaml::portfolio_orchestrator.risk_balance`
+owns HRP blending, volatility/correlation priors, factor breadth, broker
+concentration, costs, and reconciliation cadence.
+`config/risk_limits.yaml::portfolio_balance` owns the final risk veto.
+
+**Verification.**
+- Focused portfolio/risk/execution/runtime slices: 156 passed, 1 skipped.
+- Expanded integration slice: 131 passed, 1 skipped.
+- Full suite: **2,136 passed, 3 skipped**.
+- Restarted `python run.py` under the final policy as PID **73924** with ten of
+  ten brokers included, a completed first iteration, and no loop error.
+- Paper reconciliation removed the redundant IBKR `AUDUSD` expression
+  (approximately **+$7.54** realised, **$6.76** fee) and closed the
+  `FIDD-USD` cash-equivalent alpha position (approximately **+$0.02**
+  realised, **$4.02** fee).
+- The invariant is intentionally unhealthy until the remaining legacy
+  `CME` duplicate, true-substitute bond/ex-US stacks, broker concentration,
+  crypto breadth, and two tiny remnants are resolved. The final automatic
+  plan is restricted to exact duplicates, cash equivalents, strict
+  substitutes, and configured crypto breadth; sector/style overlaps remain
+  diagnostics rather than automatic liquidation instructions.
+
+---
+
 ## D221 — Fifth consecutive post-repair live audit is clean
 **Date:** 2026-06-28
 **Decision:** Continue validating stability through independent live windows, not only immediately after a restart or repair.

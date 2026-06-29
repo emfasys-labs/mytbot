@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from ai.regime import filter_by_allowed_strategies
-from core.instrument_semantics import is_cash_equivalent_pair
+from core.instrument_semantics import InstrumentRole, instrument_role
 from signals.engine import RawSignal
 from system.adaptive_regime_weights import (
     compute_multiplier as compute_regime_multiplier,
@@ -180,7 +180,11 @@ def collect_raw_signals_for_symbol(
     sc_rows: list[dict[str, Any]] = []
     raw_candidates: list[RawSignal] = []
 
-    if is_cash_equivalent_pair(symbol):
+    role = instrument_role(symbol, asset_class=sym_ac)
+    if role in {
+        InstrumentRole.CASH_EQUIVALENT,
+        InstrumentRole.LIQUIDITY_RESERVE,
+    }:
         for strategy in (
             momentum,
             mean_rev,
@@ -199,7 +203,7 @@ def collect_raw_signals_for_symbol(
                         symbol=symbol,
                         strategy=str(strategy.name),
                         status="ineligible_instrument_role",
-                        reason="cash_equivalent_not_directional_alpha",
+                        reason=f"{role.value}_not_directional_alpha",
                         loop_iteration=loop_iteration,
                     )
                 )

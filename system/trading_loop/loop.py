@@ -82,7 +82,12 @@ from portfolio.broker_budget import (
 from risk.m8_loader import merge_m8_into_risk_cfg
 from risk.options_env import merge_options_env_into_risk_cfg
 from core.broker_paper import NO_NATIVE_PAPER_POSITION_BROKERS
-from core.instrument_semantics import canonical_economic_symbol, is_cash_equivalent_pair
+from core.instrument_semantics import (
+    InstrumentRole,
+    canonical_economic_symbol,
+    instrument_role,
+    is_cash_equivalent_pair,
+)
 from core.pnl import unrealised_pnl_account_currency
 from run_m3 import (
     _apply_signal_to_portfolio_state,
@@ -137,6 +142,14 @@ from portfolio.portfolio_orchestrator import (
     build_intents_from_candidates,
     orchestrate,
 )
+from portfolio.balance import (
+    BalancePolicy,
+    aggregate_book_positions,
+    factor_exposure_from_portfolio_state,
+    legacy_reconciliation_plan,
+    portfolio_admission_efficiency,
+)
+from portfolio.target_ledger import PortfolioTargetLedger
 from backtest.edge_gate import EdgeGateRegistry, EdgeGateThresholds
 from signals.arb_bridge import CoordinatorAction, process_coordinator_action
 from signals.microstructure.liquidity_tracker import LiquidityTracker
@@ -560,6 +573,8 @@ class TradingLoop:
         self._swallow_counts: dict[str, int] = {}
         self._swallow_iter_total: int = 0
         self._last_invariant_report: dict[str, Any] | None = None
+        self._portfolio_targets = PortfolioTargetLedger()
+        self._balance_policy = BalancePolicy()
 
         self._global_edge_cfg: dict[str, Any] = {}
         self._enable_arbitrage: bool = False
@@ -3581,6 +3596,166 @@ class TradingLoop:
             out[name] = max(cfg.min_trust, min(cfg.max_trust, combined))
         return out
 
+    async def _run_balance_reconciliation(
+        self,
+        *,
+        portfolio_dict: dict[str, Any],
+        total_equity: Decimal,
+        tradable: Decimal,
+        session_factory: Any,
+        policy: BalancePolicy,
+        min_hold_sec: Decimal,
+        sc_log_buffer: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Execute at most the configured number of cost-justified cleanups."""
+        if (
+            not policy.enabled
+            or not policy.reconciliation_enabled
+            or self.sig_engine is None
+        ):
+            return 0
+        auto_execute = (
+            policy.reconciliation_auto_execute_paper
+            if self.paper_mode
+            else policy.reconciliation_auto_execute_live
+        )
+        if not auto_execute or policy.reconciliation_max_actions_per_cycle <= 0:
+            return 0
+        rows: list[dict[str, Any]] = []
+        for position_key, raw in (portfolio_dict.get("positions") or {}).items():
+            row = dict(raw) if isinstance(raw, dict) else {}
+            row.setdefault(
+                "symbol", str(position_key or "").split(":", 1)[-1]
+            )
+            rows.append(row)
+        plan = legacy_reconciliation_plan(
+            rows,
+            nav=total_equity,
+            policy=policy,
+        )
+        executed = 0
+        for item in plan:
+            if executed >= policy.reconciliation_max_actions_per_cycle:
+                break
+            try:
+                exit_cost = Decimal(str(item.get("estimated_exit_cost", 0) or 0))
+                avoided = Decimal(
+                    str(item.get("estimated_avoided_cost", 0) or 0)
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if avoided <= exit_cost:
+                continue
+            matching = next(
+                (
+                    row
+                    for row in rows
+                    if _reserve_symbol_key(row.get("symbol"))
+                    == _reserve_symbol_key(item.get("economic_symbol"))
+                    and str(row.get("broker", "") or "").strip().lower()
+                    == str(item.get("broker", "") or "").strip().lower()
+                ),
+                None,
+            )
+            if matching is None:
+                continue
+            try:
+                quantity = Decimal(str(matching.get("quantity", 0) or 0))
+                holding_sec = Decimal(
+                    str(matching.get("holding_sec", 0) or 0)
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if quantity == 0:
+                continue
+            if (
+                item.get("kind")
+                in {
+                    "reduce_redundant_factor",
+                    "reduce_excess_factor_expression",
+                }
+                and holding_sec < min_hold_sec
+            ):
+                continue
+            symbol = str(matching.get("symbol") or item["economic_symbol"])
+            broker = str(item.get("broker", "") or "")
+            metadata = {
+                "broker": broker,
+                "asset_class": str(
+                    matching.get("asset_class", "equity") or "equity"
+                ),
+                "close": str(
+                    matching.get("current_price")
+                    or matching.get("avg_entry_price")
+                    or "0"
+                ),
+                "side": "long" if quantity > 0 else "short",
+                "reduce_only": True,
+                "balance_reconciliation": True,
+                "balance_reconciliation_kind": str(item.get("kind", "")),
+                "balance_reconciliation_preferred": str(
+                    item.get("preferred_broker")
+                    or item.get("preferred_symbol")
+                    or ""
+                ),
+                "expected_avoided_cost": str(avoided),
+                "estimated_exit_cost": str(exit_cost),
+            }
+            action = CoordinatorAction(
+                kind="trim_symbol",
+                symbol=symbol,
+                strategy_name="portfolio_balance_reconciliation",
+                capital=Decimal(str(item.get("notional", 0) or 0)),
+                priority_score=Decimal("1"),
+                metadata=metadata,
+            )
+            signal = process_coordinator_action(
+                action,
+                self.sig_engine,
+                portfolio_value=tradable,
+                news_score=None,
+            )
+            if signal is None:
+                continue
+            block_reason, block_meta = await self._preflight_built_signal(
+                signal,
+                action,
+                portfolio_dict=portfolio_dict,
+                session_factory=session_factory,
+            )
+            if block_reason:
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=symbol,
+                            strategy="portfolio_balance_reconciliation",
+                            side=str(getattr(signal, "side", "") or ""),
+                            status="filtered_preflight_viability",
+                            reason=block_reason,
+                            loop_iteration=self.iterations,
+                            metadata=block_meta,
+                        )
+                    )
+                continue
+            if await self._process_signal_global(
+                signal,
+                session_factory,
+                portfolio_dict,
+                total_equity,
+                tradable,
+                sc_log_buffer=sc_log_buffer,
+            ):
+                logger.info(
+                    "portfolio balance | reconciliation executed | kind={} symbol={} broker={} preferred={}",
+                    item.get("kind"),
+                    symbol,
+                    broker,
+                    item.get("preferred_broker")
+                    or item.get("preferred_symbol"),
+                )
+                executed += 1
+        return executed
+
     async def _run_orchestrated_tick(
         self,
         *,
@@ -3611,10 +3786,19 @@ class TradingLoop:
         """
         if self.sig_engine is None or self.risk_engine is None or self.execution_engine is None:
             return 0
+        self._balance_policy = orch_cfg.balance_policy
         eligible_candidates: list[Any] = []
         for candidate in batch_candidates or []:
             symbol = str(getattr(candidate, "symbol", "") or "")
-            if is_cash_equivalent_pair(symbol):
+            role = instrument_role(
+                symbol,
+                asset_class=str(getattr(candidate, "asset_class", "") or ""),
+                metadata=getattr(candidate, "metadata", None),
+            )
+            if role in {
+                InstrumentRole.CASH_EQUIVALENT,
+                InstrumentRole.LIQUIDITY_RESERVE,
+            }:
                 if sc_log_buffer is not None:
                     sc_log_buffer.append(
                         strategy_candidate_row(
@@ -3626,13 +3810,24 @@ class TradingLoop:
                             side=str(getattr(candidate, "side", "") or ""),
                             confidence=float(getattr(candidate, "confidence", 0) or 0),
                             status="ineligible_instrument_role",
-                            reason="cash_equivalent_not_directional_alpha",
+                            reason=f"{role.value}_not_directional_alpha",
                             loop_iteration=self.iterations,
                         )
                     )
                 continue
             eligible_candidates.append(candidate)
         batch_candidates = eligible_candidates
+        self._portfolio_targets.begin_cycle(self.iterations)
+        feature_bar_by_symbol: dict[str, str] = {}
+        for candidate in batch_candidates:
+            candidate_md = dict(getattr(candidate, "metadata", None) or {})
+            feature_bar = str(
+                candidate_md.get("feature_bar_timestamp")
+                or candidate_md.get("bar_timestamp")
+                or ""
+            )
+            if feature_bar:
+                feature_bar_by_symbol[_reserve_symbol_key(candidate.symbol)] = feature_bar
         # Refresh the book with live broker positions so edge-protection and
         # netting diff against reality, not a stale snapshot.
         if self._broker_manager:
@@ -3680,6 +3875,8 @@ class TradingLoop:
             except Exception:  # noqa: BLE001
                 continue
 
+        book, book_balance_diag = aggregate_book_positions(book)
+
         # Inject the live per-strategy trust (edge-gate prior × recent P&L)
         # while preserving every other config field — including the D158
         # Phase 2 temperament/threat blocks. ``replace`` keeps this robust as
@@ -3691,7 +3888,19 @@ class TradingLoop:
                 strategy_pnl_recent, orch_cfg, edge_prior=edge_kelly_trust,
             ),
         )
+        reconciled = await self._run_balance_reconciliation(
+            portfolio_dict=portfolio_dict,
+            total_equity=total_equity,
+            tradable=tradable,
+            session_factory=session_factory,
+            policy=cfg.balance_policy,
+            min_hold_sec=cfg.min_hold_sec_before_flip,
+            sc_log_buffer=sc_log_buffer,
+        )
+        if reconciled:
+            return reconciled
         result = orchestrate(intents, book, nav=total_equity, mode=mode_raw, config=cfg)
+        result.diagnostics["economic_book"] = book_balance_diag
         book_notional_by_symbol = {
             _reserve_symbol_key(position.symbol): position.signed_notional
             for position in book
@@ -3741,6 +3950,30 @@ class TradingLoop:
                 and desired_direction == current_direction
                 and abs(desired) < abs(current)
             )
+            current_position = next(
+                (
+                    position
+                    for position in book
+                    if _reserve_symbol_key(position.symbol)
+                    == _reserve_symbol_key(order.symbol)
+                ),
+                None,
+            )
+            if (
+                reducing
+                and current_position is not None
+                and current_position.holding_sec < cfg.min_hold_sec_before_flip
+            ):
+                result.diagnostics["young_outcome_reductions_suppressed"] = (
+                    int(
+                        result.diagnostics.get(
+                            "young_outcome_reductions_suppressed", 0
+                        )
+                    )
+                    + 1
+                )
+                outcome_target_diag[order.symbol] = str(multiplier)
+                continue
             scaled_order = dataclass_replace(
                 order,
                 side="buy" if delta_signed > 0 else "sell",
@@ -3752,6 +3985,26 @@ class TradingLoop:
             outcome_scaled_orders.append(scaled_order)
             outcome_target_diag[order.symbol] = str(multiplier)
         result.orders[:] = outcome_scaled_orders
+        for target in result.targets:
+            self._portfolio_targets.claim(
+                target.symbol,
+                target.target_notional,
+                source="portfolio_orchestrator",
+                feature_bar=feature_bar_by_symbol.get(
+                    _reserve_symbol_key(target.symbol), ""
+                ),
+            )
+        for order in result.orders:
+            self._portfolio_targets.claim(
+                order.symbol,
+                order.target_notional,
+                source="portfolio_orchestrator_final",
+                feature_bar=feature_bar_by_symbol.get(
+                    _reserve_symbol_key(order.symbol), ""
+                ),
+                replace_existing=True,
+            )
+        result.diagnostics["target_ledger"] = self._portfolio_targets.snapshot()
         if outcome_target_diag:
             result.diagnostics["outcome_target_multipliers"] = outcome_target_diag
         logger.info(
@@ -4091,6 +4344,13 @@ class TradingLoop:
                     sc_log_buffer=sc_log_buffer,
                 )
                 if ok:
+                    if is_reduce:
+                        self._portfolio_targets.mark_reduction(
+                            od.symbol,
+                            feature_bar=feature_bar_by_symbol.get(
+                                _reserve_symbol_key(od.symbol), ""
+                            ),
+                        )
                     _record_orchestrator_context_event(
                         replacement_context,
                         symbol=od.symbol,
@@ -4189,7 +4449,15 @@ class TradingLoop:
             if not symbol or symbol in attempted_symbols:
                 continue
             attempted_symbols.add(symbol)
-            if is_cash_equivalent_pair(symbol):
+            role = instrument_role(
+                symbol,
+                asset_class=str(getattr(cand, "asset_class", "") or ""),
+                metadata=getattr(cand, "metadata", None),
+            )
+            if role in {
+                InstrumentRole.CASH_EQUIVALENT,
+                InstrumentRole.LIQUIDITY_RESERVE,
+            }:
                 if sc_log_buffer is not None:
                     sc_log_buffer.append(
                         strategy_candidate_row(
@@ -4201,7 +4469,7 @@ class TradingLoop:
                             side=str(getattr(cand, "side", "") or ""),
                             confidence=float(getattr(cand, "confidence", 0) or 0),
                             status="ineligible_instrument_role",
-                            reason="cash_equivalent_not_directional_alpha",
+                            reason=f"{role.value}_not_directional_alpha",
                             loop_iteration=self.iterations,
                         )
                     )
@@ -4261,6 +4529,18 @@ class TradingLoop:
             if px is None or Decimal(str(px)) <= 0:
                 continue
             md = dict(getattr(cand, "metadata", None) or {})
+            feature_bar = str(
+                md.get("feature_bar_timestamp") or md.get("bar_timestamp") or ""
+            )
+            if not self._portfolio_targets.increase_allowed(
+                symbol,
+                feature_bar=feature_bar,
+            ):
+                logger.info(
+                    "orchestrator | reserve blocked {} | reduced_on_same_feature_bar",
+                    symbol,
+                )
+                continue
             side = str(getattr(cand, "side", "long") or "long").strip().lower()
             md["close"] = str(px)
             md["side"] = "short" if side in {"short", "sell", "s"} else "long"
@@ -4314,13 +4594,27 @@ class TradingLoop:
                     symbol,
                 )
                 continue
-            remaining_target = admitted_target - existing_exposure
+            intended_sign = (
+                1
+                if str(getattr(sig, "side", side) or side).strip().lower()
+                in {"buy", "long", "b"}
+                else -1
+            )
+            remaining_target, target_claim = self._portfolio_targets.remaining_target(
+                symbol,
+                intended_sign=intended_sign,
+                existing_notional=existing_exposure,
+                fallback_target=admitted_target,
+                source="portfolio_orchestrator_reserve",
+                feature_bar=feature_bar,
+            )
             if remaining_target <= 0:
                 logger.info(
-                    "orchestrator | reserve target already met {} | admitted={} existing={}",
+                    "orchestrator | reserve target already met {} | admitted={} existing={} owner={}",
                     symbol,
                     admitted_target,
                     existing_exposure,
+                    target_claim.source,
                 )
                 continue
 
@@ -4336,6 +4630,10 @@ class TradingLoop:
             )
             signal_md["reserve_existing_notional"] = str(existing_exposure)
             signal_md["reserve_remaining_target_notional"] = str(remaining_target)
+            signal_md["portfolio_target_owner"] = target_claim.source
+            signal_md["portfolio_absolute_target_notional"] = str(
+                target_claim.signed_target
+            )
             signal_md["target_notional"] = str(remaining_target)
             signal_md["risk_notional_override"] = str(remaining_target)
             signal_md["sizing_final_capital_required"] = str(remaining_target)
@@ -5349,6 +5647,52 @@ class TradingLoop:
             routed = preferred_broker
         if routed is None:
             return "no_route", {"broker": ""}
+        if not is_reduce and self._balance_policy.enabled:
+            broker_exposure: dict[str, Decimal] = {}
+            gross_exposure = Decimal("0")
+            for raw in (portfolio_dict.get("positions") or {}).values():
+                row = raw if isinstance(raw, dict) else {}
+                try:
+                    notional = abs(
+                        Decimal(str(row.get("quantity", 0) or 0))
+                        * Decimal(
+                            str(
+                                row.get("current_price")
+                                or row.get("avg_entry_price")
+                                or 0
+                            )
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                broker_name = str(row.get("broker", "") or "").strip().lower()
+                gross_exposure += notional
+                broker_exposure[broker_name] = broker_exposure.get(
+                    broker_name, Decimal("0")
+                ) + notional
+            routed_share = (
+                broker_exposure.get(str(routed), Decimal("0")) / gross_exposure
+                if gross_exposure > 0
+                else Decimal("0")
+            )
+            if routed_share > self._balance_policy.broker_concentration_warn:
+                alternatives = self._alternate_brokers_for_signal(
+                    signal, routed, metadata=md
+                )
+                if alternatives:
+                    balanced_route = min(
+                        alternatives,
+                        key=lambda name: broker_exposure.get(
+                            str(name), Decimal("0")
+                        ),
+                    )
+                    signal.metadata = dict(md)
+                    signal.metadata["broker_balance_rerouted_from"] = str(routed)
+                    signal.metadata["broker_balance_original_share"] = str(
+                        routed_share
+                    )
+                    routed = balanced_route
+                    md = signal.metadata
         signal.broker = routed
         native = broker_symbol_for(signal.symbol, routed)
         if native and native != signal.symbol:
@@ -5397,6 +5741,72 @@ class TradingLoop:
             signal_for_execution_preflight,
             session_factory=session_factory,
         )
+        if not is_reduce and self._balance_policy.enabled:
+            role = instrument_role(
+                getattr(signal, "symbol", ""),
+                asset_class=getattr(signal, "asset_class", ""),
+                metadata=md,
+            )
+            if role in {
+                InstrumentRole.CASH_EQUIVALENT,
+                InstrumentRole.LIQUIDITY_RESERVE,
+            }:
+                return f"instrument_role:{role.value}", {
+                    "instrument_role": role.value
+                }
+            try:
+                quantity = abs(
+                    Decimal(str(getattr(signal, "suggested_quantity", 0) or 0))
+                )
+                price = abs(
+                    Decimal(str(getattr(signal, "suggested_price", 0) or 0))
+                )
+                proposed_notional = quantity * price
+                raw_edge = md.get("expected_edge_bps")
+                if raw_edge is None:
+                    raw_edge = (
+                        abs(Decimal(str(getattr(signal, "confidence", 0) or 0)))
+                        * Decimal("200")
+                    )
+                efficiency, balance_meta = portfolio_admission_efficiency(
+                    symbol=str(getattr(signal, "symbol", "") or ""),
+                    asset_class=str(getattr(signal, "asset_class", "") or ""),
+                    proposed_notional=proposed_notional,
+                    expected_edge_bps=Decimal(str(raw_edge or 0)),
+                    current_factor_exposure=factor_exposure_from_portfolio_state(
+                        portfolio_dict
+                    ),
+                    nav=Decimal(
+                        str(
+                            portfolio_dict.get("portfolio_value")
+                            or portfolio_dict.get("total_equity")
+                            or self.portfolio_value
+                            or 0
+                        )
+                    ),
+                    policy=self._balance_policy,
+                )
+                signal.metadata = dict(md)
+                signal.metadata["portfolio_admission_efficiency"] = str(efficiency)
+                signal.metadata.update(
+                    {
+                        f"portfolio_admission_{key}": value
+                        for key, value in balance_meta.items()
+                        if isinstance(value, (str, int, float, bool))
+                    }
+                )
+                md = signal.metadata
+                if not balance_meta.get("allow", False):
+                    return "portfolio_balance_admission", balance_meta
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "portfolio balance admission failed closed | symbol={} | {}",
+                    getattr(signal, "symbol", ""),
+                    exc,
+                )
+                return "portfolio_balance_admission_error", {
+                    "error": str(exc)[:160]
+                }
         if exec_block_reason:
             if exec_block_reason == "execution_precheck_rejected":
                 resized = self._signal_with_execution_liquidity_capacity(signal_for_execution_preflight, exec_meta)
@@ -5996,6 +6406,16 @@ class TradingLoop:
                 asset_class=str(getattr(signal, "asset_class", "") or "other"),
                 quantity=float(getattr(signal, "suggested_quantity", 0) or 0),
                 signal_metadata=md,
+                fee_bps_override=(
+                    float(self.execution_engine._paper_fee_bps())  # noqa: SLF001
+                    if self.paper_mode
+                    else None
+                ),
+                slippage_bps_override=(
+                    float(self.execution_engine._paper_slippage_bps())  # noqa: SLF001
+                    if self.paper_mode
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("global_edge | wave9 preflight failed open | {}", exc)

@@ -467,6 +467,18 @@ class SignalEngine:
             net = None
             news_veto = False
             adjusted_confidence = float(raw.confidence)
+            # Exits must always remain available. Allocator opens, however,
+            # still need the shared post-fill cooldown; otherwise a reserve
+            # path can buy back what the primary allocator trimmed minutes
+            # earlier and turn target noise into guaranteed fees.
+            if is_allocator_selected and not is_operator_close:
+                ac_block = self._anti_churn_check(
+                    raw,
+                    adjusted_confidence=adjusted_confidence,
+                    now=now,
+                )
+                if ac_block is not None:
+                    return None
         else:
             net, _ = self._apply_accumulator(raw, news_score=news_score, now=now)
 

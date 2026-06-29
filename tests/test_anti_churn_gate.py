@@ -481,6 +481,49 @@ def test_signal_engine_exempts_operator_close_from_anti_churn():
     assert s1 is not None and s2 is not None, "operator closes must never be dedupped"
 
 
+def test_signal_engine_applies_fill_cooldown_to_allocator_open():
+    from decimal import Decimal as D
+
+    from signals.engine import RawSignal, SignalEngine
+
+    cfg = {
+        "default_position_pct": 0.05,
+        "min_quantity": "0.0001",
+        "quantity_decimals": 8,
+        "volatility_sizing": {"enabled": False},
+        "anti_churn": {
+            "enabled": True,
+            "dedup_enabled": False,
+            "contradiction_enabled": False,
+            "post_fill_enabled": True,
+            "post_fill_cooldown_sec": {"hunter": 600},
+        },
+    }
+    eng = SignalEngine(cfg)
+    eng.record_fill(
+        broker="ibkr",
+        symbol="AUDUSD",
+        side="sell",
+        is_reduce_only=True,
+    )
+    allocator_open = RawSignal(
+        strategy="portfolio_orchestrator",
+        symbol="AUDUSD",
+        side="buy",
+        confidence=0.8,
+        broker="ibkr",
+        asset_class="forex",
+        metadata={
+            "coordinator_kind": "open_strategy",
+            "profile_mode": "hunter",
+            "close": "0.69",
+            "risk_notional_override": "10000",
+        },
+    )
+
+    assert eng.process(allocator_open, portfolio_value=D("1000000")) is None
+
+
 def test_signal_engine_record_fill_starts_cooldown():
     from decimal import Decimal as D
 

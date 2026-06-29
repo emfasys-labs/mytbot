@@ -131,6 +131,40 @@ portfolio_orchestrator:
   # prior — never amplify a proven-live loser.
   min_live_closes_for_posterior: 8
 
+  # Portfolio balance: conviction chooses candidates; semantic HRP allocates
+  # risk after recognising aliases, ETF look-through, and correlated themes.
+  # Values are policy/configuration, never code-baked trading thresholds.
+  risk_balance:
+    enabled: true
+    hrp_blend: 0.50
+    overlap_penalty: 0.60
+    max_incremental_factor_share: 0.25
+    min_efficiency: 0.05
+    broker_concentration_warn: 0.60
+    tiny_position_nav_pct: 0.001
+    estimated_round_trip_cost_bps: 15
+    reconciliation_enabled: true
+    reconciliation_auto_execute_paper: true
+    reconciliation_auto_execute_live: false
+    reconciliation_max_actions_per_cycle: 1
+    expected_avoided_round_trips: 4
+    max_legacy_expressions_by_factor:
+      crypto_beta: 5
+    volatility_by_asset:
+      crypto: 0.70
+      equity: 0.20
+      forex: 0.10
+      bond: 0.08
+      cash: 0.01
+      other: 0.25
+    base_correlation_by_asset:
+      crypto: 0.70
+      equity: 0.15
+      forex: 0.30
+      bond: 0.55
+      cash: 0.05
+      other: 0.10
+
   # ── D158 Phase 2 — heterogeneous hunter army ────────────────────────────
   # Two independent axes (see docs/DECISIONS.md D158 Phase 2):
   #   * TEMPERAMENT (per weapon, intrinsic): a weapon's natural style.
