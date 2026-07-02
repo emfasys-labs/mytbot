@@ -24,6 +24,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Intel Fortran / MKL runtime (loaded transitively via numpy/scipy — e.g. the
+# D222 portfolio HRP/covariance path in portfolio/hrp.py) installs its own
+# Windows console control handler. On any console CLOSE/Ctrl event it hard-
+# aborts the whole process with `forrtl: error (200): program aborting due to
+# window-CLOSE event`, bypassing our own graceful signal handling below. We own
+# shutdown ourselves, so disable that handler. This MUST be set before the first
+# numpy/scipy import (the runtime reads it once when the DLL loads), so it lives
+# at the very top of the entry point. `setdefault` lets an operator override it.
+os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
+
 from dotenv import load_dotenv
 from loguru import logger
 

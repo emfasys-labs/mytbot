@@ -140,11 +140,16 @@ def resolve_oanda_credentials(
         else str(account_id_paper).strip()
     )
     if use_paper:
-        token = practice_token or live_token
-        acct = practice_account or live_account
+        # OANDA live and practice credentials are not interchangeable.  Never
+        # send a live bearer token to the practice endpoint (or vice versa):
+        # besides producing noisy 401 retries, cross-environment fallback can
+        # make an operator believe a paper runtime is armed correctly when it
+        # only has live credentials.
+        token = practice_token
+        acct = practice_account
     else:
-        token = live_token or practice_token
-        acct = live_account or practice_account
+        token = live_token
+        acct = live_account
     return use_paper, token, acct
 
 
@@ -309,7 +314,7 @@ class OandaAdapter(BrokerAdapter):
         if not self.api_token:
             env = "practice" if self.paper_mode else "live"
             logger.error(
-                "oanda | missing token for {} (set OANDA_API_TOKEN_PAPER or OANDA_API_TOKEN)",
+                "oanda | missing token for {} (set the matching OANDA_API_TOKEN_PAPER or OANDA_API_TOKEN)",
                 env,
             )
             self._connected = False

@@ -18,6 +18,82 @@
 
 ---
 
+## D224 — An editor rollback removed five broker credential blocks
+**Date:** 2026-07-01
+**Decision:** Treat the five offline broker badges as a credential-file
+regression rather than venue downtime, recover only from local authoritative
+sources, and never print recovered values during diagnosis.
+
+**Incident evidence.** The active process reported Capital.com, Coinbase, IG,
+OANDA, and Trading 212 as `configured=false` with `Missing API keys in .env`.
+The `.env` file had been replaced by a shorter 4,834-byte revision at
+2026-06-29 23:37. Cursor local-history metadata records that revision with
+source `Undo Reject Diff`; it corresponds to an older file predating all five
+credential blocks. The API's `coverage.full=true` was technically relative to
+the five remaining configured brokers, not evidence that all ten expected
+venues were present.
+
+**Recovery.** Capital.com, IG, and Trading 212 were restored from the prior
+Cursor `.env` snapshot. Coinbase was restored from the original local
+`Downloads/cdp_api_key.json`. Secret values were read directly by the local
+credential-writing path and were never emitted to logs or the conversation.
+The OANDA practice token was not recoverable from `.env` history,
+Cursor/Codex/Claude history, editor backups, process/user/machine environment,
+filesystem token sources, Recycle Bin, File History, or accessible volume
+snapshots; regenerating or re-entering it requires operator access to OANDA.
+
+**Verification.** Restarted `python run.py` as PID **32792**. Nine brokers
+(Alpaca, Binance, Bybit, Capital.com, Coinbase, IBKR, IG, Kraken, and Trading
+212) are configured, connected, balance-ready, and included. The first
+post-repair trading iteration completed without a loop error. OANDA is the
+only remaining offline venue. A subsequently supplied OANDA token returned
+401 from the practice endpoint but authorized successfully against the live
+endpoint. It was therefore moved to the live-only `OANDA_API_TOKEN` slot,
+the paper slot was cleared, and live OANDA trading was not enabled. At that
+point a separate OANDA practice token was still required for the paper runtime.
+`resolve_oanda_credentials()` and broker discovery now fail closed per
+environment instead of falling back from a missing practice token to a live
+token (or vice versa), preventing repeated cross-environment 401 requests and
+accidental credential ambiguity. Focused OANDA/coverage verification:
+**37 passed**. The subsequently supplied practice token authorized only
+against the practice endpoint and was installed in the paper slot. Final
+process PID **59564** has all ten brokers authenticated, connected,
+balance-ready, and included; accounting coverage is full with zero exclusions
+and no loop error.
+
+---
+
+## D223 — Disable the Intel Fortran/MKL console handler at the entry point
+**Date:** 2026-06-30
+**Decision:** `run.py` sets `FOR_DISABLE_CONSOLE_CTRL_HANDLER=1` before any
+numpy/scipy import so the process owns its own shutdown and cannot be hard-
+aborted by a console control event.
+
+**Regression.** From the D222 deploy, cold starts began dying within ~2 minutes
+with `forrtl: error (200): program aborting due to window-CLOSE event`. Root
+cause: scipy is imported only inside `portfolio/hrp.py` (lazy, function-level).
+Before D222 nothing in a normal run ever executed that path, so scipy's
+Fortran/LAPACK runtime (Intel) was never loaded. D222's new
+`portfolio/balance.py::risk_balanced_weights` calls `hrp_weights()` in the live
+allocation path, loading the Intel runtime for the first time. That runtime
+installs a Windows console control handler which aborts the entire process on
+any console CLOSE/Ctrl event — bypassing our own `signal` handlers. Launches
+that previously "just worked" became fragile.
+
+**Fix.** `os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")` at the
+top of `run.py`, before the first MKL-backed import (the runtime reads the
+variable once at DLL load). `setdefault` preserves any explicit operator
+override. Graceful shutdown remains handled by the existing SIGINT/SIGTERM
+handlers and `Ctrl+C` (KeyboardInterrupt) path. No detached-process launch
+trick is required — a plain `python run.py` in any terminal is now stable.
+
+**Verification.** `python -m py_compile run.py` clean. Restarted as a normal
+`python run.py` window (PID 48000): survived well past the scipy-load point with
+zero `forrtl` records in `logs/mytbot.log`, `state=running`, paper mode,
+`capital_pct=1.0`, five brokers connected.
+
+---
+
 ## D222 — Portfolio balance is defined by economic risk, not ticker count
 **Date:** 2026-06-29
 **Decision:** Every allocation path now shares one canonical economic book,

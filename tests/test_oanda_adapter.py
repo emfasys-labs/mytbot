@@ -40,6 +40,22 @@ def test_resolve_oanda_credentials_picks_live_token(monkeypatch: pytest.MonkeyPa
     assert token == "live-token"
 
 
+def test_resolve_oanda_credentials_never_falls_back_across_environments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OANDA_API_TOKEN", "live-token")
+    monkeypatch.delenv("OANDA_API_TOKEN_PAPER", raising=False)
+    monkeypatch.setenv("OANDA_PAPER_MODE", "true")
+    paper, token, account = resolve_oanda_credentials(
+        paper_mode=True,
+        account_id="live-account",
+        account_id_paper="",
+    )
+    assert paper is True
+    assert token == ""
+    assert account == ""
+
+
 def test_resolve_oanda_paper_mode_follows_app_env_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -50,7 +66,7 @@ def test_resolve_oanda_paper_mode_follows_app_env_when_unset(
 
 @pytest.mark.asyncio
 async def test_connect_discovers_account() -> None:
-    adapter = OandaAdapter(api_token="token", paper_mode=True)
+    adapter = OandaAdapter(api_token_paper="token", paper_mode=True)
     adapter._client = SimpleNamespace()
 
     async def fake_request(method: str, path: str, **kwargs):  # noqa: ANN003
@@ -72,7 +88,10 @@ async def test_connect_discovers_account() -> None:
 
 @pytest.mark.asyncio
 async def test_place_market_order_units_sign() -> None:
-    adapter = OandaAdapter(api_token="t", account_id="101-001-1-001")
+    adapter = OandaAdapter(
+        api_token_paper="t",
+        account_id_paper="101-001-1-001",
+    )
     adapter._connected = True
     adapter._private_ok = True
     adapter._client = object()

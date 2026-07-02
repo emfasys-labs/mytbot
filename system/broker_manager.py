@@ -227,7 +227,12 @@ def _broker_configs_from_env() -> dict[str, dict[str, Any]]:
     }
 
 
-def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
+def _is_configured(
+    name: str,
+    cfg: dict[str, Any],
+    *,
+    paper_mode: bool = True,
+) -> bool:
     try:
         from system.connect_hub import find_connector_manifest
 
@@ -259,7 +264,9 @@ def _is_configured(name: str, cfg: dict[str, Any]) -> bool:
     if name == "coinbase":
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
     if name == "oanda":
-        return bool(cfg.get("api_token") or cfg.get("api_token_paper"))
+        return bool(
+            cfg.get("api_token_paper") if paper_mode else cfg.get("api_token")
+        )
     if name in {"kraken", "binance", "bybit", "alpaca", "trading212"}:
         return bool(cfg.get("api_key") and cfg.get("api_secret"))
     return True
@@ -480,7 +487,7 @@ class BrokerManager:
             self.report.brokers[name] = status
 
             if name not in BROKER_REGISTRY:
-                if _is_configured(name, cfg):
+                if _is_configured(name, cfg, paper_mode=self.paper_mode):
                     status.configured = True
                     status.connected = False
                     status.error = _MISSING_ADAPTER_HINT.get(
@@ -494,7 +501,7 @@ class BrokerManager:
                     logger.info("broker | {} | skipped (not configured)", name)
                 continue
 
-            if not _is_configured(name, cfg):
+            if not _is_configured(name, cfg, paper_mode=self.paper_mode):
                 status.configured = False
                 status.error = "Missing API keys in .env"
                 logger.info("broker | {} | skipped (not configured)", name)
