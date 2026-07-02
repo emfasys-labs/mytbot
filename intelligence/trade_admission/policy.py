@@ -158,6 +158,24 @@ def decide_admission(
             score=score,
         )
         if not ms.abstain:
+            if ms.expected_return is not None and ms.expected_return <= 0:
+                action, applied = _enforce(cfg, AdmissionAction.REJECT)
+                if not applied:
+                    action = AdmissionAction.DEFER
+                return AdmissionDecision(
+                    action=action,
+                    reason=(
+                        f"model_non_positive_expected_return|p={ms.probability:.3f}|"
+                        f"expected={ms.expected_return:.6f}|n={ms.samples}"
+                    ),
+                    score=score,
+                    uncertainty=uncertainty,
+                    active_applied=applied,
+                    size_multiplier=Decimal("0"),
+                    model_probability=ms.probability,
+                    model_samples=ms.samples,
+                    features=features,
+                )
             model_multiplier = ms.size_multiplier
             if (
                 model_multiplier is not None

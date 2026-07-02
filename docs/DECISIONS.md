@@ -18,6 +18,109 @@
 
 ---
 
+## D228 — Minimum hold cannot veto an explicit stop
+**Date:** 2026-07-02
+**Decision:** The three-day thesis-maturation window applies only to soft
+allocator/derisk noise. An explicit portfolio loss-budget stop or
+position-relative stop is thesis invalidation and always has authority to
+reduce risk.
+
+**Incident evidence.** After D227 stopped negative-expectancy reserve buying,
+unrealised loss continued from the already-open book and reached about
+**-$10,347**. MARA alone was about **-$4,992 / -10.3%**; SMH was about
+**-$2,639**, and many smaller equities were 10–19% below entry. The monitors
+were not blind: stop-loss identified the 6% position-stop breaches, MARA
+breached its NAV-relative portfolio loss budget, and intraday derisk fired
+tier 2 at roughly -2.08% of its runtime NAV. Every action was then logged as
+`held (anti-churn:within_min_hold)` because positions were roughly 48–55 hours
+old and the hold window was 72 hours. Profit harvest had no equivalent
+three-day veto for material winners. The result was a textbook asymmetric
+book: bank winners, retain breached losers.
+
+**Controls.** `ProtectiveExitConfig` now distinguishes explicit
+`portfolio_stop_breached` and `position_stop_breached` evidence from soft
+protective derisk. The live risk policy enables both exceptions for every
+asset class. The min-hold shield remains for ordinary intraday noise; existing
+structural ATR, catastrophic loss, crypto, and severe aggregate exceptions are
+unchanged.
+
+The first repaired paper run submitted and filled 26 reduce-only stop closes,
+including MARA and SMH. They realised about **-$11,464 gross** with about
+**$84.81 fees**, moving the already-existing economic loss from unrealised to
+realised and leaving about **+$928 unrealised**. This did not erase or create
+the loss; it removed further exposure.
+
+**Oversell follow-up.** That live proof exposed a stale-snapshot race in the
+D126 guard. AAOI closed to a zero authoritative fills-ledger quantity, but a
+later stop pass still saw an obsolete positive `PositionLog`. The execution
+guard's snapshot fallback resurrected the lot and sold it again, producing an
+accidental paper short. The fallback is removed: once any fills exist,
+`SUM(fills.signed_quantity)` is the sole quantity authority and a flat or
+opposite-signed ledger rejects a reduce-only order. AAOI was the only negative
+ledger position and was flattened locally; the final negative-position count
+is zero.
+
+**Verification.** Protective/stop suites: **64 passed**; execution/risk
+regression slice: **91 passed**. Final full suite: **2,149 passed, 3 skipped**.
+Restarted `python run.py` PID **76848** in paper mode. Nine brokers are
+included, the pipeline is active, there is no loop error, no negative fills
+ledger position, and no fill occurred after the clean restart. IBKR remains
+externally unavailable because Gateway/TWS is not listening on paper port
+7497.
+
+---
+
+## D227 — Deployment pressure cannot fund negative-expectancy averaging down
+**Date:** 2026-07-02
+**Decision:** Underdeployment is not trade evidence. A mature
+negative-expectancy bucket receives no incremental capital, and no reserve
+path may add to an underwater same-direction position.
+
+**Incident evidence.** After D226 removed strategy-less closes, the separate
+`portfolio_orchestrator_reserve` path continued buying. From 15:37–15:56 it
+executed 21 direct `trend_following` opens, including repeated additions to
+MARA, SMH, EEM, DAL, COPX, and AAPL. MARA grew from about 3,340 to 3,492
+shares while falling; SMH and EEM also grew while underwater. The book reached
+200 positions, about **-$6.7k unrealised**, and about **-$5.3k daily net**.
+The orders' own admission metadata was explicit: learned expected returns were
+negative (MARA about `-0.000457`, EEM about `-0.001740`) and the trained
+meta-label model was below threshold. Nevertheless, two exploration
+exceptions funded them: trade admission returned a shrinking `1/sqrt(n)`
+allocation for negative buckets, and meta-label deployment-pressure relief
+turned a model rejection into a 5% size haircut. Each provisional refresh of
+the same daily candle also received a new ingest timestamp, so the reserve
+path treated it as a new feature bar.
+
+**Controls.**
+
+- Mature non-positive expected return now produces a zero multiplier and an
+  actively enforced `model_non_positive_expected_return` rejection. Existing
+  positions can still mature and improve the learned bucket without paid
+  exploration churn.
+- `meta_label_pressure_relief` is disabled. Capital deployment pressure no
+  longer overrides a below-threshold trained model.
+- Reserve exposure inspection now detects same-side unrealised loss and
+  enforces `no_average_down` before calculating any remaining target.
+- Feature timestamps are canonicalised by timeframe (`1d:YYYY-MM-DD`,
+  hour/minute buckets, ISO week, or month), so refreshing a provisional candle
+  does not create a new market bar.
+- `PortfolioTargetLedger` records successful reserve increases and permits at
+  most one increase per economic symbol and actual feature bar.
+
+Reductions, stops, profit harvest, session exits, and explicit opposing
+signals are unchanged.
+
+**Verification.** Focused suites: **89 passed**. Full suite:
+**2,147 passed, 3 skipped**. Restarted `python run.py` PID **71676**. The first
+post-fix cycle evaluated 420 candidates: 32 below-threshold candidates were
+filtered at the signal engine and there were zero strategy opens or
+averaging-down fills. Nine independent profit-harvest reductions realised
+about **+$361 gross** with about **$18 fees**. The runtime has no loop error;
+nine brokers are included. IBKR alone is externally unavailable because
+Gateway/TWS is not listening on its paper API port 7497.
+
+---
+
 ## D226 — Signal silence is not exit evidence
 **Date:** 2026-07-02
 **Decision:** The portfolio allocator must hold an existing position when no

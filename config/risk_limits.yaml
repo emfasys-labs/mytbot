@@ -504,6 +504,10 @@ protective_exit_min_hold:
   catastrophic_loss_pct_position: 0.30 # or down >= 30% of its own cost basis.
   always_allow_structural_stop: true   # ATR structural stop = thesis invalidated.
   always_allow_most_severe_aggregate_tier: true  # -5% NAV tier always fires.
+  always_allow_portfolio_stop: true    # D228 — a breached loss budget is not
+                                       # allocator churn; never hold it for age.
+  always_allow_position_stop: true     # D228 — explicit 6% dynamic stop applies
+                                       # to every asset class, including equities.
   always_allow_asset_classes:
     - crypto                         # crypto spot is too jumpy for the
                                      # daily-thesis min-hold derisk shield.

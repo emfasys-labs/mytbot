@@ -60,6 +60,9 @@ class StopLossDecision:
     loss_absolute: Decimal
     structural_stop_price: Decimal | None
     structural_stop_breached: bool
+    # NAV-relative per-trade budget breach. Exposed separately so the
+    # protective min-hold gate cannot mistake it for a soft rebalance.
+    portfolio_stop_breached: bool = False
     # Position-relative stop: position is down more than a volatility-scaled
     # fraction of its OWN cost basis (independent of NAV size and of
     # "edge"). Default False keeps every existing caller valid.
@@ -194,5 +197,6 @@ def evaluate_stop_loss(
         loss_absolute=loss_abs,
         structural_stop_price=structural_stop_price,
         structural_stop_breached=structural_stop_breached,
+        portfolio_stop_breached=portfolio_stop_breached,
         position_stop_breached=position_stop_breached,
     )

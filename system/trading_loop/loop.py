@@ -342,18 +342,54 @@ def _reserve_symbol_key(symbol: Any) -> str:
     return value
 
 
+def _feature_bar_identity(metadata: dict[str, Any] | None) -> str:
+    """Return a stable market-bar identity instead of an ingest timestamp."""
+    md = metadata if isinstance(metadata, dict) else {}
+    raw = str(md.get("feature_bar_timestamp") or md.get("bar_timestamp") or "")
+    timeframe = str(md.get("timeframe") or "").strip().lower()
+    if not raw:
+        return ""
+    if not timeframe:
+        return raw
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return f"{timeframe}:{raw}"
+    if timeframe in {"1d", "d", "day", "daily"}:
+        return f"1d:{stamp.date().isoformat()}"
+    if timeframe in {"1wk", "1w", "wk", "week", "weekly"}:
+        iso = stamp.isocalendar()
+        return f"1w:{iso.year}-W{iso.week:02d}"
+    if timeframe in {"1mo", "1mth", "month", "monthly"}:
+        return f"1mo:{stamp.year:04d}-{stamp.month:02d}"
+    if timeframe.endswith("h") and timeframe[:-1].isdigit():
+        hours = max(1, int(timeframe[:-1]))
+        bucket_hour = (stamp.hour // hours) * hours
+        bucket = stamp.replace(
+            hour=bucket_hour, minute=0, second=0, microsecond=0
+        )
+        return f"{timeframe}:{bucket.isoformat()}"
+    if timeframe.endswith("m") and timeframe[:-1].isdigit():
+        minutes = max(1, int(timeframe[:-1]))
+        bucket_minute = (stamp.minute // minutes) * minutes
+        bucket = stamp.replace(minute=bucket_minute, second=0, microsecond=0)
+        return f"{timeframe}:{bucket.isoformat()}"
+    return f"{timeframe}:{raw}"
+
+
 def _reserve_existing_exposure(
     portfolio_state: dict[str, Any],
     *,
     symbol: str,
     side: str,
-) -> tuple[Decimal, bool]:
-    """Return same-direction exposure and whether an opposing position exists."""
+) -> tuple[Decimal, bool, bool]:
+    """Return exposure, opposing-position flag, and underwater-state flag."""
     symbol_key = _reserve_symbol_key(symbol)
     intended_sign = 1 if str(side or "").strip().lower() in {"buy", "long", "b"} else -1
     matched_rows: list[dict[str, Any]] = []
     opposing = False
     fallback_exposure = Decimal("0")
+    unrealised = Decimal("0")
 
     for position_key, raw_row in (portfolio_state.get("positions") or {}).items():
         row = raw_row if isinstance(raw_row, dict) else {}
@@ -377,9 +413,15 @@ def _reserve_existing_exposure(
             price = Decimal("0")
         if price > 0:
             fallback_exposure += abs(quantity) * price
+        try:
+            avg_price = Decimal(str(row.get("avg_entry_price", "0") or "0"))
+        except Exception:  # noqa: BLE001
+            avg_price = Decimal("0")
+        if price > 0 and avg_price > 0 and (quantity > 0) == (intended_sign > 0):
+            unrealised += (price - avg_price) * quantity
 
     if opposing:
-        return Decimal("0"), True
+        return Decimal("0"), True, False
 
     exposure = Decimal("0")
     for raw_symbol, raw_notional in (portfolio_state.get("symbol_exposure") or {}).items():
@@ -394,7 +436,7 @@ def _reserve_existing_exposure(
 
     if exposure <= 0 and matched_rows:
         exposure = fallback_exposure
-    return exposure, False
+    return exposure, False, bool(matched_rows and unrealised < 0)
 
 
 def _orchestrator_context_symbol(symbol: Any) -> str:
@@ -3821,11 +3863,7 @@ class TradingLoop:
         feature_bar_by_symbol: dict[str, str] = {}
         for candidate in batch_candidates:
             candidate_md = dict(getattr(candidate, "metadata", None) or {})
-            feature_bar = str(
-                candidate_md.get("feature_bar_timestamp")
-                or candidate_md.get("bar_timestamp")
-                or ""
-            )
+            feature_bar = _feature_bar_identity(candidate_md)
             if feature_bar:
                 feature_bar_by_symbol[_reserve_symbol_key(candidate.symbol)] = feature_bar
         # Refresh the book with live broker positions so edge-protection and
@@ -4529,9 +4567,7 @@ class TradingLoop:
             if px is None or Decimal(str(px)) <= 0:
                 continue
             md = dict(getattr(cand, "metadata", None) or {})
-            feature_bar = str(
-                md.get("feature_bar_timestamp") or md.get("bar_timestamp") or ""
-            )
+            feature_bar = _feature_bar_identity(md)
             if not self._portfolio_targets.increase_allowed(
                 symbol,
                 feature_bar=feature_bar,
@@ -4583,7 +4619,7 @@ class TradingLoop:
                 ),
             )
             admitted_target *= outcome_multiplier
-            existing_exposure, opposing_position = _reserve_existing_exposure(
+            existing_exposure, opposing_position, underwater_position = _reserve_existing_exposure(
                 portfolio_dict,
                 symbol=symbol,
                 side=str(getattr(sig, "side", side) or side),
@@ -4593,6 +4629,24 @@ class TradingLoop:
                     "orchestrator | reserve skipped {} | opposing position is allocator-owned",
                     symbol,
                 )
+                continue
+            if underwater_position:
+                logger.info(
+                    "orchestrator | reserve blocked {} | no_average_down",
+                    symbol,
+                )
+                if sc_log_buffer is not None:
+                    sc_log_buffer.append(
+                        strategy_candidate_row(
+                            symbol=symbol,
+                            strategy=str(getattr(cand, "strategy_name", "") or ""),
+                            side=str(getattr(sig, "side", side) or side),
+                            confidence=float(getattr(sig, "confidence", 0) or 0),
+                            status="filtered_portfolio_policy",
+                            reason="no_average_down",
+                            loop_iteration=self.iterations,
+                        )
+                    )
                 continue
             intended_sign = (
                 1
@@ -4682,6 +4736,10 @@ class TradingLoop:
             )
             if ok:
                 logger.info("orchestrator | reserve executed {} {}", sig.symbol, sig.side)
+                self._portfolio_targets.mark_increase(
+                    sig.symbol,
+                    feature_bar=feature_bar,
+                )
                 _record_orchestrator_context_event(
                     replacement_context,
                     symbol=sig.symbol,

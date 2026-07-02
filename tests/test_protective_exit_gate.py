@@ -31,6 +31,8 @@ def test_parse_full_block():
             "catastrophic_loss_pct_position": 0.30,
             "always_allow_structural_stop": True,
             "always_allow_most_severe_aggregate_tier": True,
+            "always_allow_portfolio_stop": True,
+            "always_allow_position_stop": True,
             "always_allow_asset_classes": ["crypto"],
             "always_allow_position_stop_asset_classes": ["crypto"],
         }
@@ -39,6 +41,8 @@ def test_parse_full_block():
     assert cfg.min_hold_sec == Decimal("259200")
     assert cfg.catastrophic_loss_pct_nav == Decimal("0.04")
     assert cfg.catastrophic_loss_pct_position == Decimal("0.30")
+    assert cfg.always_allow_portfolio_stop is True
+    assert cfg.always_allow_position_stop is True
     assert cfg.always_allow_asset_classes == frozenset({"crypto"})
     assert cfg.always_allow_position_stop_asset_classes == frozenset({"crypto"})
 
@@ -140,6 +144,32 @@ def test_non_crypto_position_stop_still_suppressed_when_young():
     )
     assert suppress is True
     assert why == "within_min_hold"
+
+
+def test_explicit_position_stop_always_fires_when_enabled():
+    suppress, why = should_suppress_protective_exit(
+        config=_cfg(always_allow_position_stop=True),
+        age_sec=Decimal("3600"),
+        loss_pct_nav=Decimal("0.003"),
+        loss_pct_position=Decimal("0.06"),
+        asset_class="equity",
+        position_stop_breached=True,
+    )
+    assert suppress is False
+    assert why == "position_stop"
+
+
+def test_explicit_portfolio_stop_always_fires_when_enabled():
+    suppress, why = should_suppress_protective_exit(
+        config=_cfg(always_allow_portfolio_stop=True),
+        age_sec=Decimal("3600"),
+        loss_pct_nav=Decimal("0.003"),
+        loss_pct_position=Decimal("0.03"),
+        asset_class="equity",
+        portfolio_stop_breached=True,
+    )
+    assert suppress is False
+    assert why == "portfolio_stop"
 
 
 def test_matured_position_not_suppressed():

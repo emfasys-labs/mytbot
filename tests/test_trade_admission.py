@@ -671,7 +671,7 @@ def test_admission_model_abstains_when_thin():
     assert ms.abstain is True
 
 
-def test_admission_model_flags_below_base_bucket():
+def test_admission_model_blocks_negative_expectancy_bucket():
     rows = []
     # Strong bucket: momentum/equity wins; weak bucket: meanrev/crypto loses.
     for _ in range(40):
@@ -696,9 +696,9 @@ def test_admission_model_flags_below_base_bucket():
         ),
         model,
     )
-    assert decision.action == AdmissionAction.ALLOW_SMALLER
-    assert decision.size_multiplier is not None
-    assert Decimal("0") < decision.size_multiplier < Decimal("1")
+    assert decision.action == AdmissionAction.REJECT
+    assert decision.reason.startswith("model_non_positive_expected_return")
+    assert decision.size_multiplier == Decimal("0")
     assert decision.model_probability is not None
 
 
@@ -734,12 +734,12 @@ def test_admission_model_uses_strategy_asset_pool_for_sparse_score_band():
     assert score.abstain is False
     assert score.bucket == "portfolio_orchestrator|crypto|all"
     assert score.samples == 30
-    assert score.size_multiplier is not None
-    assert Decimal("0") < score.size_multiplier < Decimal("1")
+    assert score.expected_return is not None and score.expected_return < 0
+    assert score.size_multiplier == Decimal("0")
 
 
 @pytest.mark.asyncio
-async def test_upstream_outcome_target_is_not_haircut_twice(sf):
+async def test_upstream_outcome_target_cannot_override_negative_expectancy(sf):
     svc = TradeAdmissionService(
         AdmissionConfig(
             enabled=True,
@@ -779,6 +779,7 @@ async def test_upstream_outcome_target_is_not_haircut_twice(sf):
         source_path="test",
     )
 
-    assert decision.action == AdmissionAction.ALLOW_SMALLER
+    assert decision.action == AdmissionAction.REJECT
+    assert decision.reason.startswith("model_non_positive_expected_return")
     assert sig.suggested_quantity == original_quantity
-    assert sig.metadata["trade_admission_size_applied_upstream"] is True
+    assert decision.size_multiplier == Decimal("0")

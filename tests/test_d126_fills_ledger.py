@@ -253,12 +253,11 @@ async def test_oversell_guard_skips_wrong_direction(sf):
 
 
 @pytest.mark.asyncio
-async def test_oversell_guard_uses_position_snapshot_for_protective_exit(sf):
+async def test_oversell_guard_never_resurrects_flat_ledger_from_stale_snapshot(sf):
     from execution.engine import ExecutionEngine
 
-    # Ledger says flat/opposite after stale rows, but the latest marked
-    # position snapshot still contains the open lot the stop-loss is trying
-    # to reduce. This mirrors the crypto paper derisk failure mode.
+    # Ledger is flat but a stale marked snapshot still contains the old lot.
+    # The append-only ledger must win or the protective exit becomes a short.
     await record_fill(sf, broker="kraken", symbol="AAVE-USD", side="buy",
                       quantity=Decimal("100"), fill_price=Decimal("100"))
     await record_fill(sf, broker="kraken", symbol="AAVE-USD", side="sell",
@@ -284,6 +283,5 @@ async def test_oversell_guard_uses_position_snapshot_for_protective_exit(sf):
     sig.asset_class = "crypto"
     ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
 
-    assert ok is True
-    assert sig.suggested_quantity == Decimal("42")
-    assert sig.metadata["oversell_guard_snapshot_fallback"] is True
+    assert ok is False
+    assert sig.suggested_quantity == Decimal("50")

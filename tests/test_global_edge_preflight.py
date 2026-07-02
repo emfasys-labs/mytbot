@@ -9,12 +9,47 @@ import pytest
 from risk.engine import RiskPreflightDecision
 from portfolio.global_edge_coordinator import CoordinatorAction
 from portfolio.d015_replacement_context import ReplacementContext
-from system.trading_loop.loop import TradingLoop
+from system.trading_loop.loop import (
+    TradingLoop,
+    _feature_bar_identity,
+    _reserve_existing_exposure,
+)
 
 
 class _Router:
     def route(self, asset_class, symbol, metadata=None):
         return "ibkr"
+
+
+def test_daily_feature_bar_identity_ignores_intraday_refresh_timestamp():
+    first = _feature_bar_identity(
+        {"timeframe": "1d", "feature_bar_timestamp": "2026-07-02T14:41:00+00:00"}
+    )
+    later = _feature_bar_identity(
+        {"timeframe": "1d", "feature_bar_timestamp": "2026-07-02T14:56:00+00:00"}
+    )
+    assert first == later == "1d:2026-07-02"
+
+
+def test_reserve_existing_exposure_reports_underwater_same_side_position():
+    exposure, opposing, underwater = _reserve_existing_exposure(
+        {
+            "positions": {
+                "alpaca:MARA": {
+                    "symbol": "MARA",
+                    "quantity": Decimal("100"),
+                    "avg_entry_price": Decimal("14"),
+                    "current_price": Decimal("13"),
+                }
+            },
+            "symbol_exposure": {"MARA": Decimal("1300")},
+        },
+        symbol="MARA",
+        side="buy",
+    )
+    assert exposure == Decimal("1300")
+    assert opposing is False
+    assert underwater is True
 
 
 class _Risk:

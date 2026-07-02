@@ -102,6 +102,14 @@ def test_target_ledger_prevents_trim_reopen_on_same_feature_bar() -> None:
     assert claim.source == "primary"
 
 
+def test_target_ledger_allows_only_one_reserve_increase_per_feature_bar() -> None:
+    ledger = PortfolioTargetLedger()
+    assert ledger.increase_allowed("MARA", feature_bar="1d:2026-07-02") is True
+    ledger.mark_increase("MARA", feature_bar="1d:2026-07-02")
+    assert ledger.increase_allowed("MARA", feature_bar="1d:2026-07-02") is False
+    assert ledger.increase_allowed("MARA", feature_bar="1d:2026-07-03") is True
+
+
 def test_legacy_reconciliation_plans_duplicates_cash_and_true_substitutes() -> None:
     rows = [
         {"symbol": "CME", "broker": "alpaca", "quantity": 10, "current_price": 200, "asset_class": "equity"},

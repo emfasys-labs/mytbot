@@ -18,13 +18,11 @@ signal_engine:
   # only stamping advisory metadata.
   use_trained_meta_labeler: true
   trained_meta_labeler_shadow: false
-  # D208 — when the book is materially under target, the trained meta-labeler
-  # should not create a zero-deployment dead zone. Below-threshold candidates
-  # remain fully tagged as model-below-threshold, but deployment pressure can
-  # convert the drop into a continuous size haircut so the system gathers live
-  # evidence instead of freezing.
+  # D208 previously converted below-threshold candidates into small exploration
+  # orders. D227 disables that exception: deployment pressure is not evidence,
+  # and mature negative-expectancy buckets must not be funded.
   meta_label_pressure_relief:
-    enabled: true
+    enabled: false
     pressure_weight: 1.0
     probability_exponent: 2.0
     min_size_multiplier: 0.05

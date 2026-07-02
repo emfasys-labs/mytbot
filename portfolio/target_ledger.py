@@ -39,6 +39,7 @@ class PortfolioTargetLedger:
         self.cycle: int | None = None
         self._claims: dict[str, TargetClaim] = {}
         self._reduced_feature_bar: dict[str, str] = {}
+        self._increased_feature_bar: dict[str, str] = {}
 
     def begin_cycle(self, cycle: int) -> None:
         if self.cycle == int(cycle):
@@ -76,11 +77,21 @@ class PortfolioTargetLedger:
         if bar:
             self._reduced_feature_bar[economic_key(symbol)] = bar
 
+    def mark_increase(self, symbol: Any, *, feature_bar: Any = "") -> None:
+        """Remember that reserve capital was already added on this bar."""
+        bar = str(feature_bar or "")
+        if bar:
+            self._increased_feature_bar[economic_key(symbol)] = bar
+
     def increase_allowed(self, symbol: Any, *, feature_bar: Any = "") -> bool:
         bar = str(feature_bar or "")
         if not bar:
             return True
-        return self._reduced_feature_bar.get(economic_key(symbol)) != bar
+        key = economic_key(symbol)
+        return (
+            self._reduced_feature_bar.get(key) != bar
+            and self._increased_feature_bar.get(key) != bar
+        )
 
     def remaining_target(
         self,
@@ -120,4 +131,5 @@ class PortfolioTargetLedger:
                 for key, claim in self._claims.items()
             },
             "reduction_tombstones": dict(self._reduced_feature_bar),
+            "increase_tombstones": dict(self._increased_feature_bar),
         }

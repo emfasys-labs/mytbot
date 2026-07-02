@@ -1793,6 +1793,7 @@ class Orchestrator:
                             loss_pct_position=loss_pct_position,
                             structural_breach=decision.structural_stop_breached,
                             asset_class=asset_class_for_gate,
+                            portfolio_stop_breached=decision.portfolio_stop_breached,
                             position_stop_breached=decision.position_stop_breached,
                         )
                         if suppress:

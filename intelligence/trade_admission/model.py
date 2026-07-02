@@ -69,12 +69,11 @@ class _Bucket:
         )
         gross_reward = probability * average_win
         if expected <= 0 or gross_reward <= 0:
-            # Keep a shrinking exploration allocation so an impaired bucket can
-            # prove recovery instead of being permanently frozen. Standard
-            # error scaling makes this decay naturally as contrary evidence
-            # accumulates; there is no fixed market threshold.
-            exploration = Decimal(str(Decimal(self.n).sqrt() ** Decimal("-1")))
-            return expected, min(Decimal("1"), exploration)
+            # Matured negative expectancy is evidence to stop allocating new
+            # capital, not a reason to manufacture a stream of ever-smaller
+            # "exploration" orders. Existing positions continue to mature and
+            # can improve the bucket naturally; no paid churn is required.
+            return expected, Decimal("0")
         return expected, min(Decimal("1"), expected / gross_reward)
 
 
