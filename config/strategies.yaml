@@ -118,6 +118,8 @@ portfolio_orchestrator:
   min_hold_sec_before_flip: 259200    # D158 Phase 3.1 — 3 days. Daily-appropriate hold so
                                       # fresh entries (esp. monthly snipers) ride through early
                                       # noise; was 1800s (30 min), an intraday-era value.
+  close_on_signal_silence: false      # D226 — a missing candidate is not exit evidence.
+                                      # Explicit reversals and all safety exits remain active.
   close_edge_floor: 0.0               # only close/flip a position whose remaining edge <= this
   strategy_trust:
     use_recent_pnl: true              # down-weight strategies bleeding recently (resolved by the loop)

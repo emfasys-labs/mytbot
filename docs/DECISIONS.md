@@ -18,6 +18,55 @@
 
 ---
 
+## D226 — Signal silence is not exit evidence
+**Date:** 2026-07-02
+**Decision:** The portfolio allocator must hold an existing position when no
+current-cycle strategy candidate exists. Only affirmative exit evidence may
+create an allocator close.
+
+**Incident evidence.** The current paper book was about **+$4.4k unrealised**
+for the day, but repeated allocator exits had crystallised losses and fees.
+Today `portfolio_orchestrator` produced 21 fills with about **-$1.29k gross
+realised P&L** and **$207 fees**. The largest losing closes included XLU,
+QCOM, COP, VCSH, KO, IYR, HYG, and XLP. Their signal metadata showed
+`orchestrator_reason=close`, `net_conviction=0`, and no contributing strategy.
+HYG and XLP were opened and then closed roughly four minutes later. The
+allocator had converted a symbol absent from the current candidate set into a
+zero target; after edge/age protection expired, that silence became a
+close-only order.
+
+**Control.** `OrchestratorConfig.close_on_signal_silence` defaults to false
+and `config/strategies.yaml` explicitly sets it false. A flat target caused
+only by candidate absence now increments `silence_closes_suppressed` and
+holds the position. An explicit opposing signal still uses the normal
+conviction/flip rules. Stop-loss, intraday derisk, session exits, portfolio
+reconciliation, profit harvest, and evidence-backed idle-loss recycling are
+separate paths and remain fully active. The old silence-close behavior is
+available only through an explicit legacy opt-in and remains covered by a
+test.
+
+The profit-harvest monitor was not the loss source—it realised about **+$1,015
+gross** against **$77 fees** in the inspected window—but 41 fills in under an
+hour were inappropriate for the daily-horizon book. Its per-symbol repeat
+cooldown is now one hour rather than 90 seconds.
+
+**Verification.** Focused orchestrator/profit-harvest suites:
+**57 passed**. Full suite: **2,144 passed, 3 skipped**. Restarted
+`python run.py` as PID **71792** in paper mode. All ten brokers reached full
+accounting coverage with no loop error. After restart there were zero
+zero-conviction or strategy-less allocator reductions. The only allocator
+reduction carried explicit `trend_following` evidence and realised about
+**+$85.94**; eight initial profit-harvest actions banked about **+$1,867
+gross** with about **$33 fees**. The first complete iteration finished with no
+loop error. Subsequent live marks moved the day's net result to about
+**-$1,949** without another fill, led by MARA (about -$1,672), SMH (about
+-$1,224), and EEM (about -$717). Their refreshed Yahoo and executable broker
+prices agree, and each still has affirmative long trend evidence. That
+mark-to-market movement is genuine market risk, not another silent close or
+accounting mutation.
+
+---
+
 ## D225 — Full startup-health repair and final legacy balance reconciliation
 **Date:** 2026-07-02
 **Decision:** Separate hard runtime invariants from portfolio advisories,

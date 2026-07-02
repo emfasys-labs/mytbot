@@ -166,6 +166,11 @@ class OrchestratorConfig:
     net_cap_pct_of_gross: Decimal = Decimal("0.60")
     rebalance_band_pct_of_nav: Decimal = Decimal("0.01")
     min_hold_sec_before_flip: Decimal = Decimal("1800")
+    # A strategy not emitting on the current bar is not evidence that its
+    # thesis reversed.  Keep silence distinct from an explicit opposing
+    # signal; dedicated stop/risk/session/reconciliation paths remain able to
+    # reduce or close positions independently of this allocator.
+    close_on_signal_silence: bool = False
     # D160 — cluster-aware construction. When true, correlated same-direction
     # signals (forex by USD direction, equity-index by beta, crypto by
     # crypto-beta) are recognised as ONE theme and expressed as a single big
@@ -270,6 +275,8 @@ class OrchestratorConfig:
             kwargs["cluster_consolidation"] = bool(raw.get("cluster_consolidation"))
         if raw.get("no_average_down") is not None:
             kwargs["no_average_down"] = bool(raw.get("no_average_down"))
+        if raw.get("close_on_signal_silence") is not None:
+            kwargs["close_on_signal_silence"] = bool(raw.get("close_on_signal_silence"))
         kwargs["balance_policy"] = BalancePolicy.from_mapping(
             raw.get("risk_balance") if isinstance(raw.get("risk_balance"), dict) else {}
         )
@@ -713,13 +720,20 @@ def orchestrate(
                 if opposing and conv_against < flip_bar:
                     diag["protected_positions"] += 1
                     continue
-                # Flat-desire (the weapon went quiet — e.g. a breakout sniper
-                # that only fires on the entry bar): hold the position if it
-                # still has edge OR is younger than the min-hold window, so a
-                # fresh entry is not closed on early noise before its move
-                # develops. (D158 Phase 3.1 — gives live snipers a backtest-
-                # like hold without the whipsaw of an always-on continuation
-                # signal.)
+                # No target means the weapon is silent, not that it supplied
+                # exit evidence.  By default, never manufacture a close from
+                # that absence. Explicit opposing signals still use the flip
+                # rules above, while stops, risk derisk, session exits,
+                # reconciliation and evidence-backed recycling are separate
+                # paths and retain full authority.
+                if wants_flat and not config.close_on_signal_silence:
+                    diag["protected_positions"] += 1
+                    diag["silence_closes_suppressed"] = (
+                        int(diag.get("silence_closes_suppressed", 0)) + 1
+                    )
+                    continue
+                # Legacy opt-in: when silence-close is explicitly enabled,
+                # retain the existing edge and minimum-hold protections.
                 if wants_flat and (has_edge or young):
                     diag["protected_positions"] += 1
                     continue

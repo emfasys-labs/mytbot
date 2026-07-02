@@ -125,7 +125,8 @@ profit_harvest:
   v2:
     active: true                 # V2 controls profit-taking; still reduce-only + risk-gated.
   monitor_interval_sec: 20      # Fallback cadence; overridden by mode_interval_sec.
-  close_cooldown_sec: 90
+  close_cooldown_sec: 3600      # D226 — daily-horizon winners must not be fee-scalped
+                                # every monitor cycle; one trim per symbol/hour at most.
 
   # Phase 5: mode-keyed cadence collapsed. Hunter's 8s is canonical —
   # stop-loss / profit-harvest fire every 8s regardless of derived mode.

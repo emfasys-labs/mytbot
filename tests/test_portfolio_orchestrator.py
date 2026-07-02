@@ -199,11 +199,25 @@ def test_flat_desire_keeps_profitable_position():
     assert res.diagnostics["protected_positions"] == 1
 
 
-def test_flat_desire_closes_losing_position_with_no_edge():
-    # No fresh signal, position underwater (no edge) → allowed to close.
+def test_flat_desire_keeps_losing_position_without_exit_evidence():
+    # No fresh signal is silence, not evidence to crystallise a loss.
     book = [BookPosition("LOS", Decimal("100"), Decimal("50"), Decimal("40"),
                          "equity", holding_sec=Decimal("99999"), unrealised_pnl=Decimal("-1000"))]
     res = orchestrate([], book, nav=NAV, mode="trader", config=_cfg())
+    assert not any(o.symbol == "LOS" for o in res.orders)
+    assert res.diagnostics["silence_closes_suppressed"] == 1
+
+
+def test_flat_desire_close_remains_available_as_explicit_legacy_opt_in():
+    book = [BookPosition("LOS", Decimal("100"), Decimal("50"), Decimal("40"),
+                         "equity", holding_sec=Decimal("99999"), unrealised_pnl=Decimal("-1000"))]
+    res = orchestrate(
+        [],
+        book,
+        nav=NAV,
+        mode="trader",
+        config=_cfg(close_on_signal_silence=True),
+    )
     los = [o for o in res.orders if o.symbol == "LOS"]
     assert len(los) == 1
     assert los[0].close_only is True
@@ -303,11 +317,13 @@ def test_from_yaml_parses_block():
         "entry_conviction_threshold": 0.2,
         "gross_target_pct": {"trader": 1.0, "hunter": 1.5},
         "net_cap_pct_of_gross": 0.5,
+        "close_on_signal_silence": True,
     })
     assert cfg.enabled is True
     assert cfg.entry_conviction_threshold == Decimal("0.2")
     assert cfg.gross_target_for("hunter") == Decimal("1.5")
     assert cfg.net_cap_pct_of_gross == Decimal("0.5")
+    assert cfg.close_on_signal_silence is True
 
 
 # ── D158 Phase 2 — temperament × threat (heterogeneous army) ─────────────────
@@ -453,14 +469,14 @@ def test_young_position_is_not_trimmed_for_target_weight_noise():
     assert res.diagnostics["young_reductions_suppressed"] == 1
 
 
-def test_old_losing_position_still_closed_on_flat_desire():
-    # Past the min-hold window, a losing position with no edge IS closed.
+def test_old_losing_position_still_held_without_exit_evidence():
+    # Age does not turn silence into evidence to crystallise a loss.
     book = [BookPosition("OLD", Decimal("100"), Decimal("50"), Decimal("49"),
                          "equity", holding_sec=Decimal("999999"), unrealised_pnl=Decimal("-100"))]
     res = orchestrate([], book, nav=NAV, mode="trader",
                       config=_cfg(min_hold_sec_before_flip=Decimal("259200")))
-    old = [o for o in res.orders if o.symbol == "OLD"]
-    assert len(old) == 1 and old[0].close_only is True
+    assert not any(o.symbol == "OLD" for o in res.orders)
+    assert res.diagnostics["silence_closes_suppressed"] == 1
 
 
 # ── D163 — dynamic per-name cap from live opportunity breadth ─────────────────
