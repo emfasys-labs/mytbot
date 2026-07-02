@@ -147,6 +147,7 @@ portfolio_orchestrator:
     reconciliation_auto_execute_paper: true
     reconciliation_auto_execute_live: false
     reconciliation_max_actions_per_cycle: 1
+    reconciliation_min_hold_sec: 86400
     expected_avoided_round_trips: 4
     max_legacy_expressions_by_factor:
       crypto_beta: 5

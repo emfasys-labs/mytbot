@@ -76,7 +76,25 @@ def _cmd(*parts: str) -> list[str]:
 def _run_command(name: str, command: list[str], *, dry_run: bool) -> CommandResult:
     if dry_run:
         return CommandResult(name=name, command=command, returncode=None)
-    proc = subprocess.run(command, cwd=ROOT, check=False)
+    proc = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
+    if output:
+        print(output[-4000:])
+    if int(proc.returncode) == 2:
+        reason = (output.splitlines()[-1] if output else "insufficient_training_data")[:500]
+        return CommandResult(
+            name=name,
+            command=command,
+            returncode=2,
+            skipped=True,
+            reason=reason,
+        )
     return CommandResult(name=name, command=command, returncode=int(proc.returncode))
 
 
@@ -172,7 +190,8 @@ async def _forecast_commands(cfg: dict[str, Any], run_id: str) -> list[CommandRe
     output_root = Path(str(cfg.get("output_root", "artifacts/models")))
     timeframe = str(job.get("timeframe", "1h"))
     min_rows = int(job.get("min_rows", 300))
-    estimator = str((job.get("estimator_candidates") or ["ridge"])[0])
+    regression_estimator = str((job.get("estimator_candidates") or ["ridge"])[0])
+    classifier = str((job.get("classifier_candidates") or ["logreg"])[0])
     calibration = str(job.get("calibration", "none"))
     out: list[CommandResult | tuple[str, list[str]]] = []
     for target in job.get("targets") or []:
@@ -189,13 +208,23 @@ async def _forecast_commands(cfg: dict[str, Any], run_id: str) -> list[CommandRe
             out.append(CommandResult(name=f"{model_name}.train", command=[], returncode=None, skipped=True, reason=reason))
             continue
         artefact = output_root / "forecasts" / f"{model_name}-{run_id}.pkl"
+        target_kind = str(target["target_kind"])
+        estimator = (
+            classifier
+            if target_kind in {
+                "breakout_continuation",
+                "mean_reversion_success",
+                "drawdown_probability",
+            }
+            else regression_estimator
+        )
         out.append((
             f"{model_name}.train",
             _cmd(
                 "scripts/train_forecasts.py",
                 "--close", str(close_csv),
                 "--features", str(feats_csv),
-                "--target", str(target["target_kind"]),
+                "--target", target_kind,
                 "--horizon", str(target["horizon"]),
                 "--estimator", estimator,
                 "--calibration", calibration,
@@ -273,17 +302,34 @@ async def _run(args: argparse.Namespace) -> int:
     plan.extend(_microstructure_commands(cfg, run_id))
 
     results: list[CommandResult] = []
+    unavailable_dependencies: set[str] = set()
     for item in plan:
         if isinstance(item, CommandResult):
             results.append(item)
             print(f"SKIP {item.name}: {item.reason}")
             continue
         name, command = item
+        if name == "meta_labeler.train" and "meta_labeler.build_dataset" in unavailable_dependencies:
+            result = CommandResult(
+                name=name,
+                command=command,
+                returncode=None,
+                skipped=True,
+                reason="dependency_not_ready:meta_labeler.build_dataset",
+            )
+            results.append(result)
+            print(f"SKIP {name}: {result.reason}")
+            continue
         print(f"RUN  {name}: {' '.join(command)}")
         if args.plan_only:
             results.append(CommandResult(name=name, command=command, returncode=None))
         else:
-            results.append(_run_command(name, command, dry_run=dry_run))
+            result = _run_command(name, command, dry_run=dry_run)
+            results.append(result)
+            if name == "meta_labeler.build_dataset" and (
+                result.skipped or result.returncode not in (None, 0)
+            ):
+                unavailable_dependencies.add(name)
 
     report = _write_report(cfg, run_id, results, dry_run=dry_run or args.plan_only)
     print(f"auto_training report: {report}")

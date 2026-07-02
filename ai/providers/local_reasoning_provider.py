@@ -109,6 +109,22 @@ class LocalReasoningProvider(AIProvider):
                         f"{self._base_url}/models", headers=self._auth_headers()
                     )
                 if resp.status_code != 200:
+                    # Some hosted OpenAI-compatible chat gateways deliberately
+                    # omit the optional model-list endpoint (Gemini returns
+                    # 404 here while /chat/completions remains supported).
+                    # A configured keyed model is therefore usable on 404 and
+                    # will still fail closed on the first real chat request.
+                    if self._trust_configured_model and resp.status_code == 404:
+                        self._active_model = self._model
+                        self._available = True
+                        self._disabled_until = 0.0
+                        logger.info(
+                            "local_reasoning | model listing unavailable; "
+                            "trusting configured hosted model | model={} url={}",
+                            self._model,
+                            self._base_url,
+                        )
+                        return True
                     logger.warning("local_reasoning | endpoint returned {} — disabled", resp.status_code)
                     return False
 

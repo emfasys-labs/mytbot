@@ -124,6 +124,22 @@ async def test_hosted_startup_trusts_configured_model_and_sends_auth():
 
 
 @pytest.mark.asyncio
+async def test_hosted_startup_accepts_missing_optional_models_endpoint(monkeypatch):
+    async def missing_models(self, url, headers=None, **kwargs):
+        return _FakeResponse(404, {})
+
+    monkeypatch.setattr(_FakeAsyncClient, "get", missing_models)
+    prov = LocalReasoningProvider({
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model_name": "gemini-2.5-flash",
+        "api_key": "k",
+    })
+
+    assert await prov.startup_check() is True
+    assert prov._available is True
+
+
+@pytest.mark.asyncio
 async def test_hosted_score_headline_posts_with_auth_and_parses_json():
     prov = LocalReasoningProvider({
         "base_url": "https://x/v1",

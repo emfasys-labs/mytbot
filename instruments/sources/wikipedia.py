@@ -84,7 +84,11 @@ def _normalise_ticker(raw: object, entry: WikipediaIndexEntry) -> Optional[str]:
 
 
 def _select_table(tables: list[pd.DataFrame], entry: WikipediaIndexEntry) -> pd.DataFrame:
-    candidates: Iterable[int] = (entry.table_index, *entry.fallback_table_indices)
+    configured = (entry.table_index, *entry.fallback_table_indices)
+    candidates: Iterable[int] = (
+        *configured,
+        *(idx for idx in range(len(tables)) if idx not in configured),
+    )
     last_exc: Optional[Exception] = None
     for idx in candidates:
         if 0 <= idx < len(tables):

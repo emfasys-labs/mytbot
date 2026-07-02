@@ -52,6 +52,7 @@ auto_training:
     forecasts:
       enabled: true
       estimator_candidates: [ridge]
+      classifier_candidates: [logreg]
       calibration: none
       timeframe: 1h
       min_rows: 300

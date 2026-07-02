@@ -56,6 +56,7 @@ class BalancePolicy:
     reconciliation_auto_execute_paper: bool = True
     reconciliation_auto_execute_live: bool = False
     reconciliation_max_actions_per_cycle: int = 1
+    reconciliation_min_hold_sec: Decimal = Decimal("86400")
     expected_avoided_round_trips: Decimal = Decimal("4")
     max_legacy_expressions_by_factor: dict[str, int] = field(
         default_factory=lambda: {"crypto_beta": 5}
@@ -94,6 +95,7 @@ class BalancePolicy:
             "tiny_position_nav_pct",
             "estimated_round_trip_cost_bps",
             "expected_avoided_round_trips",
+            "reconciliation_min_hold_sec",
         ):
             if cfg.get(name) is not None:
                 kwargs[name] = _dec(cfg[name])

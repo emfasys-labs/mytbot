@@ -128,8 +128,8 @@ async def _to_thread_with_retry(
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if _is_non_retryable_provider_error(exc):
-                logger.warning(
-                    "data | retry | {} | non_retryable=true | error={}",
+                logger.info(
+                    "data | provider quota | {} | retry_suppressed=true | error={}",
                     op_name,
                     _safe_provider_error(exc),
                 )
@@ -392,7 +392,14 @@ async def ingest_news(session_factory: async_sessionmaker[AsyncSession], cfg: di
     ):
         if isinstance(result, Exception):
             safe_error = _safe_provider_error(result)
-            logger.warning("data | news | source failed | source={} | {}", source, safe_error)
+            if _is_non_retryable_provider_error(result):
+                logger.info(
+                    "data | news | source quota unavailable | source={} | {}",
+                    source,
+                    safe_error,
+                )
+            else:
+                logger.warning("data | news | source failed | source={} | {}", source, safe_error)
             try:
                 await record_provider_ingest(
                     session_factory, source, ok=False, error=safe_error[:2000]

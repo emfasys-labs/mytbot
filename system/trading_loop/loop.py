@@ -3894,7 +3894,7 @@ class TradingLoop:
             tradable=tradable,
             session_factory=session_factory,
             policy=cfg.balance_policy,
-            min_hold_sec=cfg.min_hold_sec_before_flip,
+            min_hold_sec=cfg.balance_policy.reconciliation_min_hold_sec,
             sc_log_buffer=sc_log_buffer,
         )
         if reconciled:

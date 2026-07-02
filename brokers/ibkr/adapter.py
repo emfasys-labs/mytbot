@@ -1254,7 +1254,8 @@ class IBKRAdapter(BrokerAdapter):
             if acct:
                 connect_kw["account"] = acct
             def _on_error(reqId: int, errorCode: int, errorString: str, contract: str) -> None:  # noqa: N803
-                logger.warning(
+                log = logger.info if errorCode in {2104, 2106, 2107, 2108, 2158} else logger.warning
+                log(
                     "connect | IBKR | IB error | reqId={} code={} msg={} contract={}",
                     reqId, errorCode, errorString, contract,
                 )

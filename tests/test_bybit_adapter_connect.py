@@ -64,6 +64,10 @@ class _StubHTTP:
             return result  # type: ignore[return-value]
         return {"retCode": 0, "result": {"list": []}}
 
+    def get_open_orders(self, **params: object) -> dict:
+        self.calls.append(("open_orders", params))
+        return {"retCode": 0, "result": {"list": []}}
+
 
 class _AccountType400Error(Exception):
     """Mimic pybit's FailedRequestError string shape for a 400 accountType rejection."""
@@ -233,3 +237,21 @@ async def test_timestamp_error_refreshes_offset_and_retries_positions(
     assert [name for name, _params in stub.calls].count("positions") == 2
     # Initial connect sample + retry-time refresh after ErrCode 10002.
     assert [name for name, _params in stub.calls].count("server_time") >= 2
+
+
+@pytest.mark.asyncio
+async def test_linear_open_orders_are_scoped_by_settlement_coin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub, _factory_kwargs = _install_stub(
+        monkeypatch,
+        wallet_results={"UNIFIED": {"retCode": 0, "result": {"list": []}}},
+    )
+    adapter = BybitAdapter(api_key="k", api_secret="s", paper_mode=True)
+    await adapter.connect()
+
+    assert await adapter.get_open_orders() == []
+
+    call = next(params for name, params in stub.calls if name == "open_orders")
+    assert call["category"] == "linear"
+    assert call["settleCoin"] == "USDT"

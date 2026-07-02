@@ -66,3 +66,37 @@ def test_auto_training_plan_only_writes_json_report(tmp_path, monkeypatch) -> No
     assert payload["run_id"] == "test_run"
     assert payload["dry_run"] is True
     assert payload["results"] == []
+
+
+def test_forecast_plan_uses_classifier_for_probability_target(tmp_path, monkeypatch) -> None:
+    import asyncio
+    import scripts.auto_train_models as atm
+
+    async def fake_export(**_kwargs):
+        return tmp_path / "close.csv", tmp_path / "features.csv", None
+
+    monkeypatch.setattr(atm, "_export_forecast_csvs", fake_export)
+    cfg = {
+        "research_root": str(tmp_path / "research"),
+        "output_root": str(tmp_path / "models"),
+        "jobs": {
+            "forecasts": {
+                "enabled": True,
+                "timeframe": "1h",
+                "estimator_candidates": ["ridge"],
+                "classifier_candidates": ["logreg"],
+                "targets": [
+                    {
+                        "model_name": "drawdown",
+                        "target_kind": "drawdown_probability",
+                        "horizon": 24,
+                        "symbol": "SPY",
+                    }
+                ],
+            }
+        },
+    }
+
+    plan = asyncio.run(atm._forecast_commands(cfg, "run"))
+
+    assert plan[0][1][plan[0][1].index("--estimator") + 1] == "logreg"

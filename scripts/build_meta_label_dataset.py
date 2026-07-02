@@ -256,9 +256,17 @@ async def _main() -> int:
         }
     )
     if len(X) < args.min_rows:
-        raise RuntimeError(
-            f"only {len(X)} leakage-safe rows built; need at least {args.min_rows}"
+        manifest["status"] = "insufficient_training_data"
+        manifest["required_rows"] = int(args.min_rows)
+        (out_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True),
+            encoding="utf-8",
         )
+        print(
+            f"insufficient_training_data: only {len(X)} leakage-safe rows built; "
+            f"need at least {args.min_rows}"
+        )
+        return 2
     X.to_csv(out_dir / "features.csv")
     y.to_frame().to_csv(out_dir / "labels.csv")
     (out_dir / "manifest.json").write_text(

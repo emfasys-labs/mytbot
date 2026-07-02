@@ -755,6 +755,14 @@ class Orchestrator:
             interval = max(1.0, float(os.getenv("COVERAGE_SYNC_INTERVAL_SEC", "5")))
         except (TypeError, ValueError):
             interval = 5.0
+        try:
+            startup_grace = max(
+                0.0,
+                float(os.getenv("COVERAGE_SYNC_STARTUP_GRACE_SEC", "15")),
+            )
+        except (TypeError, ValueError):
+            startup_grace = 15.0
+        loop_started = asyncio.get_running_loop().time()
         from control.runtime import get_risk_engine
 
         last_disabled: set[str] = set()
@@ -773,6 +781,19 @@ class Orchestrator:
                 excluded.discard("")
                 included = {str(n or "").strip().lower() for n in cov.get("included", [])}
                 included.discard("")
+
+                # Discovery returns connected adapters before every slow
+                # balance probe has necessarily settled. The broker manager
+                # already excludes genuinely unavailable adapters from routing,
+                # so avoid manufacturing CRITICAL disable/re-enable flaps during
+                # this short readiness window.
+                in_startup_grace = (
+                    asyncio.get_running_loop().time() - loop_started
+                    < startup_grace
+                )
+                if excluded and in_startup_grace and not last_disabled:
+                    await self._sleep_cancellable(interval)
+                    continue
 
                 coverage_disabled = last_disabled | {
                     name

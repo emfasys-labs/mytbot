@@ -774,7 +774,19 @@ class BybitAdapter(BrokerAdapter):
 
         def _go() -> dict[str, Any]:
             assert self._client is not None
-            return self._client.get_open_orders(category=self.category, limit=50)
+            params: dict[str, Any] = {
+                "category": self.category,
+                "limit": 50,
+            }
+            # V5 derivatives reject account-wide queries unless a settlement
+            # asset (or symbol/baseCoin) scopes the request.
+            if self.category in {"linear", "inverse", "option"}:
+                default_settle = "USDC" if self.category == "option" else "USDT"
+                params["settleCoin"] = (
+                    os.getenv("BYBIT_SETTLE_COIN", default_settle).strip().upper()
+                    or default_settle
+                )
+            return self._client.get_open_orders(**params)
 
         try:
             raw = await self._run_sync(_go)

@@ -18,6 +18,63 @@
 
 ---
 
+## D225 — Full startup-health repair and final legacy balance reconciliation
+**Date:** 2026-07-02
+**Decision:** Separate hard runtime invariants from portfolio advisories,
+finish the existing cost-justified paper reconciliation, and treat expected
+external-provider limitations as explicit degraded/skip states rather than
+false defects.
+
+**Runtime and portfolio.** The invariant used to mark every shared sector
+factor, small position, reserve holding, and broker-concentration warning as
+an execution failure even though allocation policy explicitly permits small
+positions and uses semantic HRP to manage correlated factors. Those findings
+remain visible as advisories; hard health now covers accounting/execution
+defects and actionable economic-balance defects. Paper reconciliation has its
+own one-day minimum hold rather than inheriting the three-day strategy-flip
+hold. The existing one-action-per-cycle, reduce-only, live-disabled policy
+then removed AGG, BND, and VXUS while retaining IUSB/EFA. The three closes
+realised about **-$214.27** and paid about **$20.30** in simulated fees. The
+fresh post-reconciliation `runtime.invariants` record is
+`healthy=true`, `balance_healthy=true`, with no fill/position mismatch,
+filled order without fill, stale working order, recent unpriced outcome,
+duplicate economic position, cash-equivalent alpha position, or remaining
+legacy reconciliation action.
+
+**Logging and providers.** The stdlib-to-Loguru bridge now redacts API
+credentials in query strings and authorization headers before either sink
+sees them. Yahoo quote-not-found and IBKR contract-definition misses are
+filtered narrowly as expected discovery misses; genuine provider failures
+remain visible. Startup broker coverage receives a short readiness grace so
+slow balance probes cannot manufacture critical disable/re-enable flaps.
+Expected IBKR farm-status codes are informational. Alpha Vantage free-tier
+quota exhaustion is recorded as non-retryable quota telemetry. Broken optional
+Wikipedia recipes were removed from the enabled set, the twelve verified
+recipes remain, iShares' consistently blocked overlay is disabled, and broker
+catalogues remain the authoritative breadth source. Historical logs predating
+this change still contain exposed feed keys and cannot be made safe by code;
+those provider keys must be rotated externally.
+
+**AI, UI, training, and adapters.** The configured Gemini reasoning stage had
+no matching credential and disabled itself every startup. The system now uses
+the installed local `qwen2.5:7b` Ollama model; both startup and a real JSON
+sentiment request passed. The dashboard rebuilt successfully with Node/npm.
+Auto-training now treats insufficient leakage-safe meta-label history as an
+audited skip, suppresses dependent training, and chooses logistic regression
+for drawdown-probability classification rather than passing the regression-only
+`ridge` name. An end-to-end verification run returned zero: all four valid
+forecast jobs trained and the unavailable meta/regime/microstructure datasets
+skipped explicitly. Bybit account-wide derivatives open-order reads now pass
+the required settlement coin.
+
+**Verification.** Focused suites passed throughout; final full suite:
+**2,143 passed, 3 skipped**. Final `python run.py` PID **59464** is in paper
+mode with ten of ten brokers connected and included, full coverage, healthy
+Postgres/Redis/pipeline, all four AI stages active, no loop error, and a fresh
+healthy runtime invariant.
+
+---
+
 ## D224 — An editor rollback removed five broker credential blocks
 **Date:** 2026-07-01
 **Decision:** Treat the five offline broker badges as a credential-file

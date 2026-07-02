@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -36,6 +37,23 @@ os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
 
 from dotenv import load_dotenv
 from loguru import logger
+
+
+_SECRET_QUERY_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|apikey|api[_-]?token|access[_-]?token|token|key)=)"
+    r"([^&\s\"']+)"
+)
+_SECRET_HEADER_RE = re.compile(
+    r"(?i)\b(authorization|x-api-key|api-key)\s*[:=]\s*"
+    r"(?:bearer\s+)?([^\s,;]+)"
+)
+
+
+def _redact_log_message(message: object) -> str:
+    """Remove credentials from third-party log messages before any sink sees them."""
+    text = str(message)
+    text = _SECRET_QUERY_RE.sub(r"\1[REDACTED]", text)
+    return _SECRET_HEADER_RE.sub(r"\1=[REDACTED]", text)
 
 
 class _LoguruInterceptHandler(logging.Handler):
@@ -65,7 +83,7 @@ class _LoguruInterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
         logger.opt(depth=depth, exception=record.exc_info).log(
-            level, record.getMessage()
+            level, _redact_log_message(record.getMessage())
         )
 
 

@@ -108,3 +108,55 @@ async def test_runtime_invariants_detects_economic_duplicates_and_cash_alpha() -
     assert report["cash_equivalent_alpha_positions"][0]["symbol"] == "FIDD-USD"
     assert report["legacy_reconciliation_plan"]
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_invariants_keep_balance_advisories_out_of_hard_health() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    rows = [
+        ("alpaca", "KO", Decimal("1"), Decimal("60")),
+        ("alpaca", "XLP", Decimal("1"), Decimal("80")),
+    ]
+    async with sf() as session:
+        for broker, symbol, quantity, price in rows:
+            session.add(
+                FillLog(
+                    timestamp=now,
+                    broker=broker,
+                    symbol=symbol,
+                    asset_class="equity",
+                    side="buy",
+                    order_type="market",
+                    quantity=quantity,
+                    signed_quantity=quantity,
+                    fill_price=price,
+                    notional=quantity * price,
+                    fee=Decimal("0"),
+                    realised_pnl=Decimal("0"),
+                    position_qty_after=quantity,
+                )
+            )
+            session.add(
+                PositionLog(
+                    timestamp=now,
+                    broker=broker,
+                    symbol=symbol,
+                    quantity=quantity,
+                    avg_entry_price=price,
+                    current_price=price,
+                    unrealised_pnl=Decimal("0"),
+                    asset_class="equity",
+                )
+            )
+        await session.commit()
+
+    report = await audit_runtime_invariants(sf, stale_order_seconds=1200)
+
+    assert report["overlapping_factor_groups"]
+    assert report["healthy"] is True
+    assert report["balance_healthy"] is True
+    await engine.dispose()

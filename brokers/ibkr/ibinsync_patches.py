@@ -34,6 +34,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PATCH_FLAG = "_mytbot_d128_mktdepth_patch"
+_EXPECTED_DISCOVERY_FILTER_FLAG = "_mytbot_expected_discovery_filter"
+
+
+class _ExpectedIbkrDiscoveryFilter(logging.Filter):
+    """Suppress only IBKR's normal contract-qualification miss diagnostics."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage().lower()
+        return not (
+            "error 200" in message
+            and "no security definition has been found for the request" in message
+        )
+
+
+def _install_expected_discovery_filter() -> None:
+    wrapper_logger = logging.getLogger("ib_insync.wrapper")
+    if getattr(wrapper_logger, _EXPECTED_DISCOVERY_FILTER_FLAG, False):
+        return
+    wrapper_logger.addFilter(_ExpectedIbkrDiscoveryFilter())
+    setattr(wrapper_logger, _EXPECTED_DISCOVERY_FILTER_FLAG, True)
 
 
 def _safe_update_mkt_depth_l2(
@@ -94,6 +114,7 @@ def apply_ibinsync_patches() -> bool:
     Returns True when the patch was applied (or already present), False
     when ib_insync could not be patched (logged, non-fatal).
     """
+    _install_expected_discovery_filter()
     try:
         from ib_insync.wrapper import Wrapper
     except Exception as exc:  # noqa: BLE001

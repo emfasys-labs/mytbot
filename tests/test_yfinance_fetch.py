@@ -26,6 +26,12 @@ def test_expected_discovery_miss_is_filtered() -> None:
     assert not log_filter.filter(
         _record("$UNKNOWN: no timezone found, symbol may be delisted")
     )
+    assert not log_filter.filter(
+        _record(
+            'HTTP Error 404: {"error":{"description":'
+            '"Quote not found for symbol: UNKNOWN"}}'
+        )
+    )
 
 
 def test_unexpected_provider_error_remains_visible() -> None:

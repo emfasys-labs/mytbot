@@ -146,7 +146,13 @@ class TestCoverageSync:
     """Orchestrator keeps the risk engine's disabled_brokers set in sync."""
 
     @pytest.mark.asyncio
-    async def test_excluded_broker_is_disabled_at_risk_engine(self) -> None:
+    async def test_excluded_broker_is_disabled_at_risk_engine(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("COVERAGE_SYNC_STARTUP_GRACE_SEC", "0")
+        await self._assert_excluded_broker_is_disabled()
+
+    async def _assert_excluded_broker_is_disabled(self) -> None:
         orch = Orchestrator()
         orch.state = SystemState.RUNNING
         orch._broker_report = _mk_report(
@@ -180,6 +186,7 @@ class TestCoverageSync:
         # Tight tick so both the disable + enable transitions happen inside a
         # bounded asyncio.sleep() window without slowing the suite.
         monkeypatch.setenv("COVERAGE_SYNC_INTERVAL_SEC", "1")
+        monkeypatch.setenv("COVERAGE_SYNC_STARTUP_GRACE_SEC", "0")
         monkeypatch.setattr(
             "system.orchestrator.Orchestrator._sleep_cancellable",
             staticmethod(lambda total_sec, **_: asyncio.sleep(0.01)),

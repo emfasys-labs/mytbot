@@ -252,19 +252,24 @@ async def audit_runtime_invariants(
             policy=policy,
         )
 
-    healthy = not (
+    # Shared sector factors, broker concentration warnings, reserve holdings,
+    # and small positions are portfolio advisories, not accounting failures.
+    # In particular, allocation.yaml explicitly permits many small positions.
+    # Only actionable economic-balance defects belong in the hard health bit.
+    balance_healthy = not (
+        duplicate_economic_positions
+        or cash_equivalent_alpha_positions
+        or reconciliation_plan
+    )
+    healthy = balance_healthy and not (
         mismatches
         or filled_without_fill
         or stale_working_orders
         or recent_unpriced_outcomes
-        or duplicate_economic_positions
-        or cash_equivalent_alpha_positions
-        or overlapping_factor_groups
-        or broker_concentration
-        or tiny_positions
     )
     return {
         "healthy": healthy,
+        "balance_healthy": balance_healthy,
         "checked_at": now.isoformat(),
         "fill_position_mismatches": mismatches[:20],
         "filled_orders_without_fills": filled_without_fill,

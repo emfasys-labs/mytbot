@@ -266,7 +266,15 @@ async def _run_one_source(
         result: SourceFetchResult = await source.fetch(ctx)
     except SourceFetchError as exc:
         finished_at = datetime.now(timezone.utc)
-        logger.warning("instruments.builder | source={} failed: {}", source.source_id, exc)
+        message = str(exc)
+        if "iShares returned HTML instead of CSV (anti-bot fallback)" in message:
+            logger.info(
+                "instruments.builder | source={} unavailable (upstream anti-bot); "
+                "continuing with other sources",
+                source.source_id,
+            )
+        else:
+            logger.warning("instruments.builder | source={} failed: {}", source.source_id, exc)
         if not dry_run:
             try:
                 await record_source_run(

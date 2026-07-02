@@ -14,6 +14,7 @@ import yfinance as yf
 _EXPECTED_NO_DATA_MESSAGES = (
     "possibly delisted; no price data found",
     "no timezone found, symbol may be delisted",
+    '"description":"quote not found for symbol:',
 )
 
 
@@ -26,7 +27,11 @@ class _ExpectedNoDataFilter(logging.Filter):
 
 
 def _install_expected_no_data_filter() -> None:
-    for logger_name in ("yfinance", "yfinance.scrapers.history"):
+    for logger_name in (
+        "yfinance",
+        "yfinance.scrapers.history",
+        "yfinance.scrapers.quote",
+    ):
         yf_logger = logging.getLogger(logger_name)
         if not any(isinstance(item, _ExpectedNoDataFilter) for item in yf_logger.filters):
             yf_logger.addFilter(_ExpectedNoDataFilter())

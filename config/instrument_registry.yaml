@@ -46,10 +46,27 @@ sources:
     cadence_sec: 86400        # daily
     # If you only want a subset, list ``source_id`` here; empty/missing
     # means every entry in WIKIPEDIA_INDEX_REGISTRY is enabled.
-    enabled_ids: []
+    # Recipes with upstream 404/schema drift are excluded until recertified;
+    # broker catalogues remain the authoritative breadth source.
+    enabled_ids:
+      - wikipedia.sp500
+      - wikipedia.sp400
+      - wikipedia.nasdaq100
+      - wikipedia.dow30
+      - wikipedia.tsx60
+      - wikipedia.ftse100
+      - wikipedia.ftse250
+      - wikipedia.dax40
+      - wikipedia.mdax
+      - wikipedia.cac40
+      - wikipedia.ibex35
+      - wikipedia.asx200
 
   ishares:
-    enabled: true
+    # BlackRock currently serves HTML anti-bot pages to every configured CSV
+    # recipe. Disable the redundant overlay instead of producing daily failed
+    # source runs; Wikipedia + broker catalogues continue to supply breadth.
+    enabled: false
     cadence_sec: 86400        # daily
     enabled_ids: []
 
