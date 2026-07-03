@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-06-18T23:18:49.895469+00:00",
+  "benchmark_size": 15,
+  "providers": {
+    "gemini(gemini-2.5-flash)": {
+      "json_ok_rate": 0.9333333333333333,
+      "n_ok": 14,
+      "n_total": 15,
+      "latency_ms_mean": 2891.8571428571427,
+      "latency_ms_median": 2910.0,
+      "bias_vs_expected": 1.0
+    }
+  },
+  "comparisons": {}
+}

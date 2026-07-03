@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-06-19T00:01:02.109404+00:00",
+  "benchmark_size": 15,
+  "providers": {
+    "local": {
+      "json_ok_rate": 0.13333333333333333,
+      "n_ok": 2,
+      "n_total": 15,
+      "latency_ms_mean": 101320.0,
+      "latency_ms_median": 101320.0,
+      "bias_vs_expected": 1.0
+    }
+  },
+  "comparisons": {}
+}

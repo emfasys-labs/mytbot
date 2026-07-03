@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-06-19T10:07:11.153169+00:00",
+  "benchmark_size": 15,
+  "providers": {
+    "ollama(gpt-oss:20b)": {
+      "json_ok_rate": 1.0,
+      "n_ok": 15,
+      "n_total": 15,
+      "latency_ms_mean": 5093.733333333334,
+      "latency_ms_median": 4254,
+      "bias_vs_expected": 0.9333333333333333
+    },
+    "gemini(gemini-2.5-flash)": {
+      "json_ok_rate": 1.0,
+      "n_ok": 15,
+      "n_total": 15,
+      "latency_ms_mean": 4509.066666666667,
+      "latency_ms_median": 3472,
+      "bias_vs_expected": 0.9333333333333333
+    }
+  },
+  "comparisons": {
+    "gemini(gemini-2.5-flash)": {
+      "paired": 15,
+      "bias_agreement": 0.8666666666666667,
+      "event_agreement": 0.8,
+      "sentiment_mae": 0.2866666666666667,
+      "confidence_mae": 0.06066666666666663,
+      "symbol_jaccard": 0.6544444444444444,
+      "verdict": "DIVERGENCE \u2014 review before switching",
+      "reasons": [
+        "sentiment MAE 0.29 > 0.25"
+      ]
+    }
+  }
+}

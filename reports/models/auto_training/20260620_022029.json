@@ -1,0 +1,155 @@
+{
+  "dry_run": false,
+  "generated_at": "2026-06-20T02:21:31.930435+00:00",
+  "results": [
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/build_meta_label_dataset.py",
+        "--out-dir",
+        "data\\research\\meta_label\\20260620_022029",
+        "--timeframe",
+        "1h",
+        "--horizon-bars",
+        "10",
+        "--min-rows",
+        "200"
+      ],
+      "name": "meta_labeler.build_dataset",
+      "reason": null,
+      "returncode": 1,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_meta_labeler.py",
+        "--features",
+        "data\\research\\meta_label\\20260620_022029\\features.csv",
+        "--labels",
+        "data\\research\\meta_label\\20260620_022029\\labels.csv",
+        "--out",
+        "artifacts\\models\\meta_label\\mytbot_meta_labeler-20260620_022029.pkl",
+        "--classifier",
+        "logreg",
+        "--calibration",
+        "platt"
+      ],
+      "name": "meta_labeler.train",
+      "reason": null,
+      "returncode": 1,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_forecasts.py",
+        "--close",
+        "data\\research\\forecasts\\20260620_022029\\forecast_return_1h\\SPY_1h_close.csv",
+        "--features",
+        "data\\research\\forecasts\\20260620_022029\\forecast_return_1h\\SPY_1h_features.csv",
+        "--target",
+        "forward_return",
+        "--horizon",
+        "1",
+        "--estimator",
+        "ridge",
+        "--calibration",
+        "none",
+        "--out",
+        "artifacts\\models\\forecasts\\forecast_return_1h-20260620_022029.pkl"
+      ],
+      "name": "forecast_return_1h.train",
+      "reason": null,
+      "returncode": 0,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_forecasts.py",
+        "--close",
+        "data\\research\\forecasts\\20260620_022029\\forecast_return_4h\\SPY_1h_close.csv",
+        "--features",
+        "data\\research\\forecasts\\20260620_022029\\forecast_return_4h\\SPY_1h_features.csv",
+        "--target",
+        "forward_return",
+        "--horizon",
+        "4",
+        "--estimator",
+        "ridge",
+        "--calibration",
+        "none",
+        "--out",
+        "artifacts\\models\\forecasts\\forecast_return_4h-20260620_022029.pkl"
+      ],
+      "name": "forecast_return_4h.train",
+      "reason": null,
+      "returncode": 0,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_forecasts.py",
+        "--close",
+        "data\\research\\forecasts\\20260620_022029\\forecast_vol_1d\\SPY_1h_close.csv",
+        "--features",
+        "data\\research\\forecasts\\20260620_022029\\forecast_vol_1d\\SPY_1h_features.csv",
+        "--target",
+        "realised_vol_forward",
+        "--horizon",
+        "24",
+        "--estimator",
+        "ridge",
+        "--calibration",
+        "none",
+        "--out",
+        "artifacts\\models\\forecasts\\forecast_vol_1d-20260620_022029.pkl"
+      ],
+      "name": "forecast_vol_1d.train",
+      "reason": null,
+      "returncode": 0,
+      "skipped": false
+    },
+    {
+      "command": [
+        "C:\\Users\\kniko\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "scripts/train_forecasts.py",
+        "--close",
+        "data\\research\\forecasts\\20260620_022029\\forecast_drawdown_1d\\SPY_1h_close.csv",
+        "--features",
+        "data\\research\\forecasts\\20260620_022029\\forecast_drawdown_1d\\SPY_1h_features.csv",
+        "--target",
+        "drawdown_probability",
+        "--horizon",
+        "24",
+        "--estimator",
+        "ridge",
+        "--calibration",
+        "none",
+        "--out",
+        "artifacts\\models\\forecasts\\forecast_drawdown_1d-20260620_022029.pkl"
+      ],
+      "name": "forecast_drawdown_1d.train",
+      "reason": null,
+      "returncode": 1,
+      "skipped": false
+    },
+    {
+      "command": [],
+      "name": "regime_classifier.train",
+      "reason": "features_csv_missing",
+      "returncode": null,
+      "skipped": true
+    },
+    {
+      "command": [],
+      "name": "microstructure.train",
+      "reason": "input_csv_missing",
+      "returncode": null,
+      "skipped": true
+    }
+  ],
+  "run_id": "20260620_022029"
+}
