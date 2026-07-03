@@ -569,6 +569,123 @@ def test_idle_loss_recycle_respects_symbol_cooldown() -> None:
     ) == []
 
 
+# ── D231 — idle_loss_recycle min-hold gating ────────────────────────────────
+def _idle_loss_coord() -> GlobalEdgeCoordinator:
+    return GlobalEdgeCoordinator(
+        {
+            "capital_recycle": {
+                "enabled": True,
+                "idle_loss_recycle_enabled": True,
+                "idle_loss_max_actions_per_tick": 1,
+                "symbol_cooldown_sec": 900,
+            },
+        }
+    )
+
+
+def _idle_loss_held(unrealised_return: str = "-0.01") -> list[HeldPositionEdge]:
+    return [
+        HeldPositionEdge(
+            symbol="YOUNG_LOSER",
+            notional=Decimal("10000"),
+            expected_remaining_edge=Decimal("0.00"),
+            broker="ibkr",
+            metadata={"asset_class": "equity", "unrealised_return": unrealised_return},
+        )
+    ]
+
+
+_IDLE_LOSS_REPLACEMENT = {
+    "symbol": "SUCCESSOR",
+    "strategy": "trend_following",
+    "asset_class": "equity",
+    "expected_return": "0.05",
+}
+
+
+def test_idle_loss_recycle_blocks_position_younger_than_min_hold() -> None:
+    from risk.protective_exit_gate import ProtectiveExitConfig
+
+    coord = _idle_loss_coord()
+    pe_cfg = ProtectiveExitConfig(enabled=True, min_hold_sec=Decimal("259200"))
+
+    actions = coord.propose_idle_loss_recycle_actions(
+        _idle_loss_held(),
+        replacement_evidence=_IDLE_LOSS_REPLACEMENT,
+        position_ages={"ibkr:YOUNG_LOSER": Decimal("1500")},  # 25 minutes old
+        protective_exit_config=pe_cfg,
+    )
+
+    assert actions == []
+
+
+def test_idle_loss_recycle_allows_position_past_min_hold() -> None:
+    from risk.protective_exit_gate import ProtectiveExitConfig
+
+    coord = _idle_loss_coord()
+    pe_cfg = ProtectiveExitConfig(enabled=True, min_hold_sec=Decimal("259200"))
+
+    actions = coord.propose_idle_loss_recycle_actions(
+        _idle_loss_held(),
+        replacement_evidence=_IDLE_LOSS_REPLACEMENT,
+        position_ages={"ibkr:YOUNG_LOSER": Decimal("300000")},  # > 3 days
+        protective_exit_config=pe_cfg,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].symbol == "YOUNG_LOSER"
+
+
+def test_idle_loss_recycle_allows_unknown_age_when_gate_enabled() -> None:
+    """Missing evidence never suppresses (matches protective_exit_gate's own rule)."""
+    from risk.protective_exit_gate import ProtectiveExitConfig
+
+    coord = _idle_loss_coord()
+    pe_cfg = ProtectiveExitConfig(enabled=True, min_hold_sec=Decimal("259200"))
+
+    actions = coord.propose_idle_loss_recycle_actions(
+        _idle_loss_held(),
+        replacement_evidence=_IDLE_LOSS_REPLACEMENT,
+        position_ages={},  # no fills-derived age known for this key
+        protective_exit_config=pe_cfg,
+    )
+
+    assert len(actions) == 1
+
+
+def test_idle_loss_recycle_catastrophic_loss_bypasses_young_gate() -> None:
+    """A position down >= catastrophic_loss_pct_position can still be shed young."""
+    from risk.protective_exit_gate import ProtectiveExitConfig
+
+    coord = _idle_loss_coord()
+    pe_cfg = ProtectiveExitConfig(
+        enabled=True,
+        min_hold_sec=Decimal("259200"),
+        catastrophic_loss_pct_position=Decimal("0.30"),
+    )
+
+    actions = coord.propose_idle_loss_recycle_actions(
+        _idle_loss_held(unrealised_return="-0.35"),
+        replacement_evidence=_IDLE_LOSS_REPLACEMENT,
+        position_ages={"ibkr:YOUNG_LOSER": Decimal("1500")},
+        protective_exit_config=pe_cfg,
+    )
+
+    assert len(actions) == 1
+
+
+def test_idle_loss_recycle_omitted_gate_args_preserve_pre_d231_behaviour() -> None:
+    """Callers that don't pass the new kwargs get the old (unprotected) behaviour."""
+    coord = _idle_loss_coord()
+
+    actions = coord.propose_idle_loss_recycle_actions(
+        _idle_loss_held(),
+        replacement_evidence=_IDLE_LOSS_REPLACEMENT,
+    )
+
+    assert len(actions) == 1
+
+
 def test_shed_respects_symbol_cooldown() -> None:
     coord = GlobalEdgeCoordinator({"shed": {"symbol_cooldown_sec": 900}})
     held = [

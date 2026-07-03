@@ -78,6 +78,10 @@ class EdgeGateThresholds:
     reduced_multiplier: Decimal = Decimal("0.50")
     # What to do with a strategy that has too few trades to judge.
     unproven_policy: str = "reduce"  # "reduce" | "block"
+    # D231 (P3.8) — a verdicts file this old wasn't proven against current
+    # market conditions (or the current cost model, D233) and shouldn't
+    # silently keep governing live sizing forever. 0 disables the check.
+    max_verdict_age_days: int = 14
 
     @classmethod
     def from_yaml(cls, raw: dict[str, Any] | None) -> "EdgeGateThresholds":
@@ -95,7 +99,34 @@ class EdgeGateThresholds:
                 kwargs[key] = _dec(raw[key])
         up = str(raw.get("unproven_policy", "reduce")).strip().lower()
         kwargs["unproven_policy"] = up if up in ("reduce", "block") else "reduce"
+        if raw.get("max_verdict_age_days") is not None:
+            try:
+                kwargs["max_verdict_age_days"] = int(raw["max_verdict_age_days"])
+            except (TypeError, ValueError):
+                pass
         return cls(**kwargs)
+
+
+def verdicts_age_days(mtime: float, *, now: float | None = None) -> float:
+    """Age in days of a verdicts file given its mtime (epoch seconds)."""
+    import time as _time
+
+    now_ts = _time.time() if now is None else now
+    if mtime <= 0:
+        return float("inf")
+    return max(0.0, (now_ts - mtime) / 86400.0)
+
+
+def is_verdicts_stale(mtime: float, max_age_days: int, *, now: float | None = None) -> bool:
+    """True when the verdicts file is older than ``max_age_days``.
+
+    ``max_age_days <= 0`` disables the check (never stale). ``mtime <= 0``
+    (file missing / stat failed) is always considered stale when the check
+    is enabled — no evidence is not the same as fresh evidence.
+    """
+    if max_age_days <= 0:
+        return False
+    return verdicts_age_days(mtime, now=now) > max_age_days
 
 
 @dataclass

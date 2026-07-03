@@ -17,19 +17,78 @@ def _cfg(min_closes: int = 8) -> OrchestratorConfig:
     )
 
 
-def test_prior_only_when_no_live_data():
+def test_prior_alone_cannot_amplify_with_no_live_data():
+    # D231 (P2) — an optimistic backtest prior with ZERO live evidence must
+    # not push trust above neutral; it still trades (edge gate governs
+    # allow/block), just not amplified.
     out = trust(None, _cfg(), edge_prior={"trend_breakout": Decimal("1.50")})
+    assert out["trend_breakout"] == Decimal("1.0")
+
+
+def test_prior_below_neutral_unaffected_by_no_live_data():
+    # The amplification gate only blocks combined > 1.0 — a below-neutral
+    # prior (e.g. a weak/blocked weapon) passes through untouched.
+    out = trust(None, _cfg(), edge_prior={"volatility_regime": Decimal("0.40")})
+    assert out["volatility_regime"] == Decimal("0.40")
+
+
+def test_amplification_allowed_with_verified_positive_evidence():
+    # Enough closes, net-positive, PF > 1 → amplification is earned.
+    out = trust(
+        {
+            "trend_breakout": {
+                "net_pnl": Decimal("1000"), "fills": 10, "profit_factor": 2.5,
+            }
+        },
+        _cfg(min_closes=8),
+        edge_prior={"trend_breakout": Decimal("1.50")},
+    )
+    # per_fill = 100 → tilt = 1 + min(0.5, 1.0) = 1.5 → combined = 1.5*1.5=2.25,
+    # clamped to max_trust 1.50.
     assert out["trend_breakout"] == Decimal("1.50")
 
 
+def test_amplification_blocked_when_pf_not_above_one():
+    # Net-positive and enough closes, but PF <= 1 (small net win on a mostly
+    # losing book) — still not verified as a real winner.
+    out = trust(
+        {
+            "trend_breakout": {
+                "net_pnl": Decimal("10"), "fills": 10, "profit_factor": 0.95,
+            }
+        },
+        _cfg(min_closes=8),
+        edge_prior={"trend_breakout": Decimal("1.50")},
+    )
+    assert out["trend_breakout"] == Decimal("1.0")
+
+
+def test_amplification_blocked_below_min_closes_even_if_positive():
+    # Positive net but too few closes to trust — amplification withheld.
+    out = trust(
+        {
+            "trend_breakout": {
+                "net_pnl": Decimal("500"), "fills": 3, "profit_factor": 3.0,
+            }
+        },
+        _cfg(min_closes=8),
+        edge_prior={"trend_breakout": Decimal("1.50")},
+    )
+    assert out["trend_breakout"] == Decimal("1.0")
+
+
 def test_posterior_ignored_below_min_closes():
-    # Strong backtest prior, but only 3 live closes (< 8) → posterior ignored.
+    # Strong backtest prior, but only 3 live closes (< 8) → the too-few-closes
+    # posterior itself is ignored (doesn't pull trust down). D231 (P2): the
+    # prior alone still can't amplify without enough VERIFIED closes, so the
+    # net effect is neutral (1.0), not the raw 1.50 prior — a strengthening
+    # of the original "posterior ignored" guarantee, not a contradiction of it.
     out = trust(
         {"trend_breakout": {"net_pnl": Decimal("-1000"), "fills": 3}},
         _cfg(min_closes=8),
         edge_prior={"trend_breakout": Decimal("1.50")},
     )
-    assert out["trend_breakout"] == Decimal("1.50")
+    assert out["trend_breakout"] == Decimal("1.0")
 
 
 def test_positive_live_tilts_up():

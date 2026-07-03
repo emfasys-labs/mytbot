@@ -171,6 +171,81 @@ async def test_realised_pnl_sum_matches_round_trip(sf):
     assert await available_quantity(sf, "ibkr", "NVDA") == Decimal("0")
 
 
+# ── D231 (P1.5) — opening_strategy / opening_signal_id attribution ─────────
+
+
+@pytest.mark.asyncio
+async def test_opening_strategy_stamped_on_fresh_open(sf):
+    row = await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                            quantity=Decimal("100"), fill_price=Decimal("100"),
+                            strategy="mean_reversion", signal_id="sig-1")
+    assert row.opening_strategy == "mean_reversion"
+    assert row.opening_signal_id == "sig-1"
+
+
+@pytest.mark.asyncio
+async def test_opening_strategy_propagates_across_adds(sf):
+    # Opened by mean_reversion; a later add is nominally attributed to
+    # trend_following at the strategy layer but the STREAK still belongs
+    # to whoever opened it.
+    await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("100"),
+                      strategy="mean_reversion", signal_id="sig-1")
+    add = await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                            quantity=Decimal("50"), fill_price=Decimal("105"),
+                            strategy="trend_following", signal_id="sig-2")
+    assert add.opening_strategy == "mean_reversion"
+    assert add.opening_signal_id == "sig-1"
+    assert add.strategy == "trend_following"        # own-fill attribution unchanged
+
+
+@pytest.mark.asyncio
+async def test_opening_strategy_survives_onto_exit_mechanism_close(sf):
+    # This is the exact gap the review found: a close tagged with the EXIT
+    # mechanism's name (stop_loss_monitor) can now still be traced back to
+    # the strategy that opened the lot (mean_reversion).
+    await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("100"),
+                      strategy="mean_reversion", signal_id="sig-1")
+    close = await record_fill(sf, broker="ibkr", symbol="MSFT", side="sell",
+                              quantity=Decimal("100"), fill_price=Decimal("90"),
+                              strategy="stop_loss_monitor", signal_id="stoploss-1")
+    assert close.strategy == "stop_loss_monitor"     # exit mechanism, unchanged
+    assert close.opening_strategy == "mean_reversion"  # true origin, new
+    assert close.opening_signal_id == "sig-1"
+    assert close.realised_pnl == Decimal("-1000")
+
+
+@pytest.mark.asyncio
+async def test_opening_strategy_resets_after_flat_reopen(sf):
+    await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("100"),
+                      strategy="mean_reversion", signal_id="sig-1")
+    await record_fill(sf, broker="ibkr", symbol="MSFT", side="sell",
+                      quantity=Decimal("100"), fill_price=Decimal("110"),
+                      strategy="profit_harvest_monitor", signal_id="pf-1")
+    reopen = await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                               quantity=Decimal("40"), fill_price=Decimal("108"),
+                               strategy="trend_following", signal_id="sig-3")
+    assert reopen.opening_strategy == "trend_following"   # new streak, new owner
+    assert reopen.opening_signal_id == "sig-3"
+
+
+@pytest.mark.asyncio
+async def test_opening_strategy_resets_on_flip(sf):
+    # Long 100 opened by mean_reversion; sell 150 flips to short 50 —
+    # the flip fill becomes the new streak's opener.
+    await record_fill(sf, broker="ibkr", symbol="MSFT", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("100"),
+                      strategy="mean_reversion", signal_id="sig-1")
+    flip = await record_fill(sf, broker="ibkr", symbol="MSFT", side="sell",
+                             quantity=Decimal("150"), fill_price=Decimal("95"),
+                             strategy="trend_breakout", signal_id="sig-flip")
+    assert flip.position_qty_after == Decimal("-50")
+    assert flip.opening_strategy == "trend_breakout"
+    assert flip.opening_signal_id == "sig-flip"
+
+
 # ── oversell guard ────────────────────────────────────────────────────────────
 
 
@@ -285,3 +360,78 @@ async def test_oversell_guard_never_resurrects_flat_ledger_from_stale_snapshot(s
 
     assert ok is False
     assert sig.suggested_quantity == Decimal("50")
+
+
+# ── D231 (P1.3) — dust-floor close upgrade ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dust_floor_upgrades_partial_trim_to_full_close(sf):
+    """A partial trim that would leave a sub-minimum-order-size remainder
+    closes the whole position instead of stranding un-tradeable dust."""
+    from execution.engine import ExecutionEngine
+
+    # Held 100 @ $25 = $2,500. Equity floor is $65 -> 2.6 shares.
+    await record_fill(sf, broker="ibkr", symbol="AAPL", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("25"))
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    # Trim 98 -> would leave 2 shares (~$50), under the $65 equity floor.
+    sig = _reduce_only_signal("AAPL", "sell", Decimal("98"))
+    ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
+
+    assert ok is True
+    assert sig.suggested_quantity == Decimal("100")     # upgraded to full close
+    assert sig.metadata["dust_floor_close_upgrade"] is True
+    assert sig.metadata["close_only"] is True
+    assert eng.dust_floor_close_upgrades == 1
+
+
+@pytest.mark.asyncio
+async def test_dust_floor_leaves_normal_trim_untouched(sf):
+    """A trim whose remainder clears the minimum order size is left alone."""
+    from execution.engine import ExecutionEngine
+
+    # Held 100 @ $25 = $2,500. Trim 50 -> leaves 50 (~$1,250), well above $65.
+    await record_fill(sf, broker="ibkr", symbol="AAPL", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("25"))
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    sig = _reduce_only_signal("AAPL", "sell", Decimal("50"))
+    ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
+
+    assert ok is True
+    assert sig.suggested_quantity == Decimal("50")      # untouched
+    assert "dust_floor_close_upgrade" not in sig.metadata
+    assert eng.dust_floor_close_upgrades == 0
+
+
+@pytest.mark.asyncio
+async def test_dust_floor_skipped_when_price_missing(sf):
+    """No price to value the remainder with -> skip the check, don't crash."""
+    from execution.engine import ExecutionEngine
+
+    await record_fill(sf, broker="ibkr", symbol="AAPL", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("25"))
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    sig = _reduce_only_signal("AAPL", "sell", Decimal("98"))
+    sig.suggested_price = None
+    ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
+
+    assert ok is True
+    assert sig.suggested_quantity == Decimal("98")      # not upgraded
+    assert eng.dust_floor_close_upgrades == 0
+
+
+@pytest.mark.asyncio
+async def test_dust_floor_does_not_affect_full_close(sf):
+    """A trim that already closes the full position is a no-op for this check."""
+    from execution.engine import ExecutionEngine
+
+    await record_fill(sf, broker="ibkr", symbol="AAPL", side="buy",
+                      quantity=Decimal("100"), fill_price=Decimal("25"))
+    eng = ExecutionEngine(broker_configs={}, paper_mode=True)
+    sig = _reduce_only_signal("AAPL", "sell", Decimal("100"))
+    ok = await eng._clamp_reduce_only_to_holdings(sf, sig)
+
+    assert ok is True
+    assert sig.suggested_quantity == Decimal("100")
+    assert eng.dust_floor_close_upgrades == 0

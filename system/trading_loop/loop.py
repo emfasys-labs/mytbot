@@ -3434,7 +3434,7 @@ class TradingLoop:
         thr = EdgeGateThresholds.from_yaml(strategies_cfg.get("edge_gate"))
         if not thr.enabled:
             return thr, None
-        from backtest.edge_gate import DEFAULT_REGISTRY_PATH
+        from backtest.edge_gate import DEFAULT_REGISTRY_PATH, is_verdicts_stale, verdicts_age_days
         eg_cfg = strategies_cfg.get("edge_gate") or {}
         path = Path(str(eg_cfg.get("state_path") or DEFAULT_REGISTRY_PATH))
         try:
@@ -3446,6 +3446,16 @@ class TradingLoop:
             return thr, cached[1]
         reg = EdgeGateRegistry(path).load()
         self._edge_gate_cache = (mtime, reg)
+        # D231 (P3.8) — only fires when the file's mtime actually changes
+        # (i.e. once per process start / once per real refresh), not every
+        # tick, since this branch is mtime-cache-gated above.
+        if is_verdicts_stale(mtime, thr.max_verdict_age_days):
+            logger.warning(
+                "edge_gate | verdicts file is STALE | age={:.1f}d > max={}d | path={} | "
+                "re-run `python scripts/run_edge_gate.py` — an 'allowed' verdict this old "
+                "was not proven against current market conditions or cost model",
+                verdicts_age_days(mtime), thr.max_verdict_age_days, path,
+            )
         return thr, reg
 
     def _filter_edge_gate_blocked_raws(
@@ -3594,15 +3604,27 @@ class TradingLoop:
         edge prior the prior defaults to neutral 1.0 (pure posterior behaviour,
         backward compatible). Neutral (1.0) when neither signal has a sample.
 
-        D166 (Phase 2) — the scoreboard gates size increases:
+        D166 (Phase 2) / D231 (P2) — the scoreboard gates size increases in
+        both directions:
           * The posterior is only trusted once a weapon has at least
             ``cfg.min_live_closes_for_posterior`` live CLOSES — one noisy fill
             cannot flip trust (below the floor → prior only).
+          * AMPLIFICATION above neutral (``combined > 1.0``) requires VERIFIED
+            positive live evidence: enough closes, net-positive live P&L, and
+            (when computable) live profit-factor > 1. An optimistic backtest
+            prior alone — including an as-yet-UNTESTED strategy with zero live
+            closes — can never push trust above neutral by itself; it can
+            still trade at neutral (the edge gate / risk layer own the
+            allow/block decision, this layer only governs amplification).
+            Pulling trust DOWN toward/below neutral on negative or absent
+            evidence is unaffected.
           * Once enough live closes exist AND live net P&L is negative, trust
-            is capped at neutral (1.0): live evidence overrides an optimistic
-            backtest prior, so a proven-live LOSER is never AMPLIFIED above
-            neutral (it can still trade; the edge gate / risk layer own
-            blocking — this layer only governs amplification).
+            is capped at neutral (1.0) — a proven-live LOSER is never
+            amplified above neutral. This is now a special case of the rule
+            above (no positive evidence → no amplification), kept as an
+            explicit comment for clarity.
+          * ``min_live_closes_for_posterior <= 0`` is the escape hatch back to
+            pre-D166 behaviour (feature disabled): neither gate applies.
         """
         one = Decimal("1")
         edge_prior = edge_prior or {}
@@ -3616,6 +3638,7 @@ class TradingLoop:
             tilt = one
             live_net = Decimal("0")
             live_closes = 0
+            live_pf: float | None = None
             stats = (strategy_pnl_recent or {}).get(name)
             if isinstance(stats, dict):
                 try:
@@ -3623,6 +3646,12 @@ class TradingLoop:
                     live_closes = int(stats.get("fills", 0) or 0)
                 except Exception:  # noqa: BLE001
                     live_net, live_closes = Decimal("0"), 0
+                pf_raw = stats.get("profit_factor")
+                if pf_raw is not None:
+                    try:
+                        live_pf = float(pf_raw)
+                    except (TypeError, ValueError):
+                        live_pf = None
                 # Only trust the posterior with enough live evidence.
                 if live_closes >= max(1, min_closes):
                     # Bounded tilt: scale net P&L per fill into a modest factor.
@@ -3632,9 +3661,15 @@ class TradingLoop:
                     else:
                         tilt = one + max(cfg.min_trust - one, per_fill / Decimal("100"))
             combined = base * tilt
-            # Scoreboard cap: a weapon proven to LOSE live is never amplified.
-            if min_closes > 0 and live_closes >= min_closes and live_net < 0 and combined > one:
-                combined = one
+            if min_closes > 0 and combined > one:
+                # Amplification requires proof, not just an optimistic prior.
+                verified_winner = (
+                    live_closes >= min_closes
+                    and live_net > 0
+                    and (live_pf is None or live_pf > 1.0)
+                )
+                if not verified_winner:
+                    combined = one
             out[name] = max(cfg.min_trust, min(cfg.max_trust, combined))
         return out
 
@@ -4128,6 +4163,24 @@ class TradingLoop:
         executed = 0
         if not any(bool(od.reduce_only or od.close_only) for od in result.orders):
             try:
+                from risk.protective_exit_gate import parse_protective_exit_config
+                from storage.fills_ledger import fills_age_seconds_by_symbol
+
+                pe_cfg = parse_protective_exit_config(
+                    (getattr(self.risk_engine, "config", {}) or {}).get(
+                        "protective_exit_min_hold"
+                    )
+                )
+                # D231 — idle_loss_recycle used to have no min-hold protection
+                # at all (only a 15-min same-symbol touch cooldown), so it
+                # could force-realise a loss on a position minutes after it
+                # opened. Share the same horizon-aware gate the stop-loss/
+                # derisk monitors use; only queries fills when the gate is on.
+                recycle_position_ages = (
+                    await fills_age_seconds_by_symbol(session_factory)
+                    if pe_cfg.enabled
+                    else {}
+                )
                 ge_coord = GlobalEdgeCoordinator(self._global_edge_cfg or {}, logger=logger)
                 held_edges = held_positions_from_portfolio(
                     portfolio_dict,
@@ -4138,6 +4191,8 @@ class TradingLoop:
                     active_mode=mode_raw,
                     replacement_context=replacement_context,
                     replacement_evidence=replacement_evidence,
+                    position_ages=recycle_position_ages,
+                    protective_exit_config=pe_cfg,
                 )
                 idle_loss_actions = self._suppress_reducing_actions_during_warmup(idle_loss_actions)
             except Exception as exc:  # noqa: BLE001
@@ -5374,11 +5429,28 @@ class TradingLoop:
                     replacement_evidence = self._best_learned_replacement_evidence(
                         list(new_opps_dedup)
                     )
+                    from risk.protective_exit_gate import parse_protective_exit_config
+                    from storage.fills_ledger import fills_age_seconds_by_symbol
+
+                    pe_cfg = parse_protective_exit_config(
+                        (getattr(self.risk_engine, "config", {}) or {}).get(
+                            "protective_exit_min_hold"
+                        )
+                    )
+                    # D231 — same horizon-aware min-hold gate as the
+                    # orchestrated-tick path (see _run_orchestrated_tick).
+                    recycle_position_ages = (
+                        await fills_age_seconds_by_symbol(session_factory)
+                        if pe_cfg.enabled
+                        else {}
+                    )
                     idle_loss_actions = coord.propose_idle_loss_recycle_actions(
                         held,
                         active_mode=mode_for_coord,
                         replacement_context=repl_ctx,
                         replacement_evidence=replacement_evidence,
+                        position_ages=recycle_position_ages,
+                        protective_exit_config=pe_cfg,
                     )
                 else:
                     idle_loss_actions = []

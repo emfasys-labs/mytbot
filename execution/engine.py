@@ -137,6 +137,8 @@ class ExecutionEngine:
         self._run_session_id = uuid.uuid4().hex[:16]
         # D126 — oversell guard counter (ops visibility).
         self.oversell_guard_clamped = 0
+        # D231 — dust-floor close-upgrade counter (ops visibility).
+        self.dust_floor_close_upgrades = 0
         # D125.2 — no-native-paper crypto venues expose deploy room through
         # a heartbeat snapshot. Several orders in one trading cycle can see
         # the same snapshot, so reserve room in-process until the snapshot
@@ -1722,6 +1724,49 @@ class ExecutionEngine:
             )
             signal.suggested_quantity = reducible
             self.oversell_guard_clamped += 1
+
+        # D231 (P1.3) — dust-floor cleanup. A partial trim (profit harvest,
+        # capital-recycle winner-trim, tier-1 intraday derisk) is sized off
+        # the position at decision time and has no idea whether the SLICE
+        # IT LEAVES BEHIND is still a viable position. Live evidence: the
+        # book accumulated 210 open positions with a median size of $942
+        # (0.07% NAV) — 28x under the orchestrator's own
+        # ``min_position_pct_of_nav`` floor — because trims kept shaving
+        # positions down to sub-minimum-order-size dust instead of closing
+        # them. If what would remain after this trim is smaller than the
+        # asset class's own minimum tradeable order size, finish the job:
+        # close the position fully instead of leaving an un-tradeable
+        # remainder that still pays spread/fees on every future touch.
+        final_requested = min(requested, reducible)
+        remaining = reducible - final_requested
+        if remaining > 0:
+            try:
+                price = Decimal(str(getattr(signal, "suggested_price", None) or "0"))
+            except Exception:  # noqa: BLE001
+                price = Decimal("0")
+            if price > 0:
+                try:
+                    from portfolio.global_edge_coordinator import _min_order_notional
+
+                    floor_usd = _min_order_notional(
+                        getattr(signal, "asset_class", None),
+                        symbol=str(signal.symbol or ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    floor_usd = None
+                if floor_usd is not None and remaining * price < floor_usd:
+                    logger.info(
+                        "oversell guard | dust-floor close | %s %s broker=%s | "
+                        "trim %s would leave %s (~$%s < floor $%s) — closing fully to %s",
+                        signal.symbol, side, signal.broker, final_requested, remaining,
+                        (remaining * price).quantize(Decimal("0.01")), floor_usd, reducible,
+                    )
+                    signal.suggested_quantity = reducible
+                    md = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else None
+                    if md is not None:
+                        md["dust_floor_close_upgrade"] = True
+                        md["close_only"] = True
+                    self.dust_floor_close_upgrades += 1
         return True
 
     async def _persist_result(

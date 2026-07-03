@@ -1739,6 +1739,8 @@ class GlobalEdgeCoordinator:
         active_mode: str = DEFAULT_MODE,
         replacement_context: ReplacementContext | None = None,
         replacement_evidence: dict[str, Any] | None = None,
+        position_ages: dict[str, Decimal] | None = None,
+        protective_exit_config: Any | None = None,
     ) -> list[CoordinatorAction]:
         """Replace a weak losing holding only when learned evidence supports it.
 
@@ -1746,6 +1748,22 @@ class GlobalEdgeCoordinator:
         The caller must provide a concrete successor with positive learned
         expected return. Its edge must exceed the holding's remaining edge plus
         switching cost, and it must consume the same asset-class capital sleeve.
+
+        D231 — this path has no reduce-cooldown-based min-hold protection of
+        its own (only a same-symbol touch cooldown), so a position could be
+        opened and idle-loss-recycled minutes later purely because it was
+        the worst-ranked loser that tick — realising a loss on pure noise
+        before the thesis had any chance to mature. When ``protective_exit_config``
+        (a ``risk.protective_exit_gate.ProtectiveExitConfig``) and
+        ``position_ages`` (``{"broker:SYMBOL": age_seconds}``, e.g. from
+        ``storage.fills_ledger.fills_age_seconds_by_symbol``) are supplied, a
+        losing holding younger than ``min_hold_sec`` is excluded from
+        candidacy unless it independently clears the shared catastrophic-loss
+        threshold (``catastrophic_loss_pct_position``) — the same rule the
+        stop-loss/derisk monitors use, so every exit layer shares one
+        horizon. Omitting either argument preserves the pre-D231 behaviour
+        exactly (no age gating) — this is opt-in, not a default change to a
+        caller that hasn't been updated yet.
         """
         if not held:
             return []
@@ -1830,6 +1848,30 @@ class GlobalEdgeCoordinator:
             except (TypeError, ValueError):
                 return Decimal("0")
 
+        def _min_hold_blocks(h: HeldPositionEdge) -> bool:
+            """D231 — True if ``h`` is too young to idle-loss-recycle."""
+            if protective_exit_config is None or not getattr(
+                protective_exit_config, "enabled", False
+            ):
+                return False
+            if position_ages is None:
+                return False
+            key = f"{str(h.broker or '').strip().lower()}:{str(h.symbol or '').strip().upper()}"
+            age_sec = position_ages.get(key)
+            if age_sec is None:
+                return False
+            from risk.protective_exit_gate import should_suppress_protective_exit
+
+            asset_class = str((h.metadata or {}).get("asset_class") or "").strip().lower()
+            suppress, _why = should_suppress_protective_exit(
+                config=protective_exit_config,
+                age_sec=age_sec,
+                loss_pct_nav=Decimal("0"),
+                loss_pct_position=abs(_unrl(h)),
+                asset_class=asset_class,
+            )
+            return suppress
+
         losers = [
             h
             for h in held
@@ -1844,6 +1886,7 @@ class GlobalEdgeCoordinator:
                 == replacement_asset_class
             )
             and not _recently_touched(h.symbol)
+            and not _min_hold_blocks(h)
         ]
         losers.sort(key=lambda h: (h.expected_remaining_edge, _unrl(h), -h.notional))
 

@@ -115,6 +115,30 @@ def cost_reconciliation(row: dict, bt_cost: dict) -> dict:
     }
 
 
+def verdicts_staleness() -> tuple[float, int] | None:
+    """(age_days, max_verdict_age_days) for ``VERDICTS_PATH``, or ``None`` if
+    not stale / check disabled / file missing (nothing to warn about)."""
+    from backtest.edge_gate import is_verdicts_stale, verdicts_age_days
+
+    max_age_days = 14
+    try:
+        import yaml  # type: ignore
+
+        raw = yaml.safe_load(STRATEGIES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        eg = raw.get("edge_gate") or {}
+        if eg.get("max_verdict_age_days") is not None:
+            max_age_days = int(eg["max_verdict_age_days"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        mtime = VERDICTS_PATH.stat().st_mtime
+    except OSError:
+        return None
+    if not is_verdicts_stale(mtime, max_age_days):
+        return None
+    return (verdicts_age_days(mtime), max_age_days)
+
+
 def load_verdicts() -> dict:
     """Return ``{canonical_strategy: {long: {...}, short: {...}}}``."""
     if not VERDICTS_PATH.exists():
@@ -154,8 +178,8 @@ async def collect_live(since_hours: float | None) -> dict:
     if since_hours and since_hours > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
 
-    per: dict[str, dict] = defaultdict(
-        lambda: {
+    def _new_bucket() -> dict:
+        return {
             "closes": 0,
             "realised_gross": 0.0,
             "win_sum": 0.0,
@@ -168,11 +192,22 @@ async def collect_live(since_hours: float | None) -> dict:
             "notional_all": 0.0,
             "slippage_bps": [],
         }
-    )
+
+    per: dict[str, dict] = defaultdict(_new_bucket)
+    # D231 (P1.5) — ``strategy`` on a closing fill names the EXIT mechanism
+    # (stop_loss_monitor / capital_recycle / ...), not the strategy that
+    # opened the lot. ``opening_strategy`` (added by the D231 migration,
+    # NULL on pre-migration fills) is the true entry attribution. This
+    # second bucket, keyed by opening_strategy and populated from CLOSING
+    # fills only, is what should be joined against the edge-gate verdicts
+    # (which are keyed by entry-strategy name) to answer "did trend_following
+    # actually make money live" — the exit-mechanism view above cannot.
+    per_entry: dict[str, dict] = defaultdict(_new_bucket)
     try:
         async with sf() as s:
             stmt = select(
                 FillLog.strategy,
+                FillLog.opening_strategy,
                 FillLog.realised_pnl,
                 FillLog.fee,
                 FillLog.notional,
@@ -186,7 +221,7 @@ async def collect_live(since_hours: float | None) -> dict:
         if engine is not None:
             await engine.dispose()
 
-    for strat, rpnl, fee, notional, hold, slip in rows:
+    for strat, opening_strat, rpnl, fee, notional, hold, slip in rows:
         k = str(strat or "?")
         p = per[k]
         p["all_fills"] += 1
@@ -195,7 +230,8 @@ async def collect_live(since_hours: float | None) -> dict:
         if slip is not None:
             p["slippage_bps"].append(_f(slip))
         v = _f(rpnl)
-        if abs(v) > 1e-9:  # closing fill
+        is_close = abs(v) > 1e-9
+        if is_close:
             p["closes"] += 1
             p["realised_gross"] += v
             if v >= 0:
@@ -206,7 +242,108 @@ async def collect_live(since_hours: float | None) -> dict:
                 p["loss_sum"] += v
             if hold is not None:
                 p["hold"].append(_f(hold))
-    return dict(per)
+            if opening_strat:  # None on pre-D231 fills — can't attribute those
+                pe = per_entry[str(opening_strat)]
+                pe["closes"] += 1
+                pe["realised_gross"] += v
+                pe["fees_all"] += _f(fee)          # approximation: this fill's own fee only
+                pe["notional_all"] += abs(_f(notional))
+                if v >= 0:
+                    pe["wins"] += 1
+                    pe["win_sum"] += v
+                else:
+                    pe["losses"] += 1
+                    pe["loss_sum"] += v
+                if hold is not None:
+                    pe["hold"].append(_f(hold))
+    out = dict(per)
+    out["_by_entry_strategy"] = dict(per_entry)
+    return out
+
+
+# D231 (P3.7) — a daily-horizon book (3-day min hold, D166) round-tripping
+# a single symbol more than a handful of times inside 24h is churn, not
+# strategy activity, almost by definition. The loss-attribution review found
+# this by hand (AAPL 30 fills/8d, AUDUSD 29/8d, ETH-USD 55/8d, XRP-USD
+# 35-49/8d — several of them net LOSERS purely on fee drag despite
+# near-flat/positive raw price moves). This makes that check routine instead
+# of requiring manual SQL each time.
+CHURN_FILLS_PER_DAY_THRESHOLD = 5
+
+
+async def collect_symbol_churn(since_hours: float | None) -> list[dict]:
+    """Flag ``(broker, symbol, day)`` buckets with more than
+    ``CHURN_FILLS_PER_DAY_THRESHOLD`` fills — a day-bucketed proxy for "more
+    than N fills in a rolling 24h window" (exact sliding-window churn needs
+    per-fill gap analysis; day-bucketing catches the same pattern with one
+    query and no false negatives on the cases this review found).
+    """
+    from sqlalchemy import func, select
+    from storage.db import init_async_database
+    from storage.models import FillLog
+
+    engine, sf = await init_async_database()
+    if sf is None:
+        return []
+
+    cutoff = None
+    if since_hours and since_hours > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+
+    try:
+        async with sf() as s:
+            day_col = func.date_trunc("day", FillLog.timestamp).label("day")
+            stmt = (
+                select(
+                    FillLog.broker,
+                    FillLog.symbol,
+                    day_col,
+                    func.count(FillLog.id).label("fill_count"),
+                    func.sum(FillLog.realised_pnl).label("realised"),
+                    func.sum(FillLog.fee).label("fees"),
+                )
+                .group_by(FillLog.broker, FillLog.symbol, day_col)
+                .having(func.count(FillLog.id) > CHURN_FILLS_PER_DAY_THRESHOLD)
+                .order_by(func.count(FillLog.id).desc())
+            )
+            if cutoff is not None:
+                stmt = stmt.where(FillLog.timestamp >= cutoff)
+            rows = list((await s.execute(stmt)).all())
+    finally:
+        if engine is not None:
+            await engine.dispose()
+
+    return [
+        {
+            "broker": broker,
+            "symbol": symbol,
+            "day": day.date().isoformat() if day is not None else "?",
+            "fill_count": int(fill_count),
+            "realised": _f(realised),
+            "fees": _f(fees),
+            "net": _f(realised) - _f(fees),
+        }
+        for broker, symbol, day, fill_count, realised, fees in rows
+    ]
+
+
+def print_symbol_churn(rows: list[dict]) -> None:
+    print("\n" + "=" * 116)
+    print(
+        f"SYMBOL CHURN (D231) - (broker,symbol) days with > {CHURN_FILLS_PER_DAY_THRESHOLD} fills "
+        "(daily-horizon book should rarely touch one name this often)"
+    )
+    print("=" * 116)
+    if not rows:
+        print("  (none — no symbol exceeded the threshold on any day)")
+        return
+    print(f"{'broker':<12}{'symbol':<12}{'day':<12}{'fills':>7}{'realised':>14}{'fees':>12}{'net':>14}")
+    print("-" * 116)
+    for r in rows:
+        print(
+            f"{r['broker']:<12}{r['symbol']:<12}{r['day']:<12}{r['fill_count']:>7}"
+            f"{r['realised']:>14,.2f}{r['fees']:>12,.2f}{r['net']:>14,.2f}"
+        )
 
 
 def build_report(verdicts: dict, live: dict) -> dict:
@@ -262,7 +399,34 @@ def build_report(verdicts: dict, live: dict) -> dict:
         "live_closes": sum(r["live_closes"] for r in rows),
     }
     totals["fee_drag"] = (totals["fees_all"] / totals["notional_all"]) if totals["notional_all"] else 0.0
-    return {"rows": rows, "totals": totals, "backtest_cost": bt_cost}
+
+    # D231 (P1.5) — entry-strategy attribution (opening_strategy), separate
+    # from the exit-mechanism rows above. Only entry strategies actually
+    # named in the verdicts file are shown (matches what the gate governs).
+    by_entry = live.get("_by_entry_strategy", {}) if isinstance(live, dict) else {}
+    entry_rows = []
+    for name in sorted(verdicts):
+        bt = (verdicts.get(name) or {}).get("long") or {}
+        bt_m = bt.get("metrics") or {}
+        lv = by_entry.get(name) or {}
+        closes = lv.get("closes", 0)
+        win_rate = (lv.get("wins", 0) / closes) if closes else 0.0
+        expectancy = (lv.get("realised_gross", 0.0) / closes) if closes else 0.0
+        pf = _live_pf(lv.get("win_sum", 0.0), lv.get("loss_sum", 0.0))
+        net = lv.get("realised_gross", 0.0) - lv.get("fees_all", 0.0)
+        entry_rows.append(
+            {
+                "strategy": name,
+                "verdict": bt.get("verdict", "-"),
+                "bt_pf": _f(bt_m.get("profit_factor", 0)),
+                "live_closes": closes,
+                "live_expectancy": expectancy,
+                "live_pf": pf,
+                "live_win": win_rate,
+                "net": net,
+            }
+        )
+    return {"rows": rows, "totals": totals, "backtest_cost": bt_cost, "entry_rows": entry_rows}
 
 
 def print_report(report: dict, verdicts_age: str) -> None:
@@ -272,6 +436,13 @@ def print_report(report: dict, verdicts_age: str) -> None:
     print("\n" + "=" * 116)
     print("EDGE SCORECARD - backtest (edge gate) vs live (fills ledger)")
     print(f"verdicts file: {VERDICTS_PATH}  (updated {verdicts_age})")
+    stale_days = report.get("verdicts_stale_days")
+    if stale_days is not None:
+        print(
+            f"  ! STALE: {stale_days:.1f} days old (> {report.get('verdicts_max_age_days')}d) — "
+            "an 'allowed' verdict this old was not proven against current market conditions "
+            "or cost model. Re-run: python scripts/run_edge_gate.py"
+        )
     print("=" * 116)
     print(
         f"{'strategy':<20}{'verdict':>12}{'mult':>6}"
@@ -288,6 +459,36 @@ def print_report(report: dict, verdicts_age: str) -> None:
             f"{'|':>3}{r['live_closes']:>8}{r['live_expectancy']:>11.2f}{live_pf_s:>9}"
             f"{r['live_win']*100:>8.0f}%"
         )
+
+    entry_rows = report.get("entry_rows") or []
+    print("\n" + "=" * 116)
+    print(
+        "ENTRY-STRATEGY LIVE EXPECTANCY (D231, opening_strategy attribution — "
+        "the actual answer to 'did this strategy make money live')"
+    )
+    print("=" * 116)
+    if not any(r["live_closes"] for r in entry_rows):
+        print(
+            "  (no closes with a known opening_strategy yet — this needs closing fills recorded\n"
+            "   AFTER the D231 migration; pre-migration fills have opening_strategy=NULL)"
+        )
+    else:
+        print(
+            f"{'strategy':<20}{'verdict':>12}{'bt_pf':>7}"
+            f"{'|':>3}{'closes':>8}{'live_exp':>11}{'live_pf':>9}{'live_win':>9}{'net':>12}"
+        )
+        print("-" * 116)
+        for r in entry_rows:
+            live_pf = r["live_pf"]
+            live_pf_s = "inf" if live_pf == float("inf") else f"{live_pf:.2f}"
+            flag = ""
+            if r["verdict"] == "allowed" and r["live_closes"] > 0 and r["net"] < 0:
+                flag = "  ! allowed but net<0 live"
+            print(
+                f"{r['strategy']:<20}{r['verdict']:>12}{r['bt_pf']:>7.2f}"
+                f"{'|':>3}{r['live_closes']:>8}{r['live_expectancy']:>11.2f}{live_pf_s:>9}"
+                f"{r['live_win']*100:>8.0f}%{r['net']:>12,.2f}{flag}"
+            )
 
     print("\n" + "=" * 116)
     print("COST LEDGER - net = realised_gross minus ALL fees (open + close); fee_drag = fees / traded notional")
@@ -390,10 +591,16 @@ async def main() -> int:
         return 1
 
     report = build_report(verdicts, live)
+    symbol_churn = await collect_symbol_churn(args.since_hours)
+    report["symbol_churn"] = symbol_churn
+    stale = verdicts_staleness()
+    if stale is not None:
+        report["verdicts_stale_days"], report["verdicts_max_age_days"] = stale
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
         print_report(report, verdicts_age)
+        print_symbol_churn(symbol_churn)
     return 0
 
 

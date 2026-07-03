@@ -25,6 +25,8 @@ from backtest.edge_gate import (
     VERDICT_REDUCED,
     aggregate_walk_forward,
     decide_verdict,
+    is_verdicts_stale,
+    verdicts_age_days,
 )
 
 
@@ -286,3 +288,53 @@ def test_edge_kelly_trust_empty_when_nothing_proven():
     )
     # No positive edge → only the floored denied weapon, no proven mapping.
     assert trust == {"a": Decimal("0.25")}
+
+
+# ── D231 (P3.8) — verdicts-file staleness ───────────────────────────────────
+
+
+def test_verdicts_age_days_computes_from_mtime():
+    import time
+
+    now = time.time()
+    age = verdicts_age_days(now - 10 * 86400, now=now)
+    assert abs(age - 10.0) < 1e-6
+
+
+def test_verdicts_age_days_missing_mtime_is_infinite():
+    assert verdicts_age_days(0.0) == float("inf")
+
+
+def test_is_verdicts_stale_true_when_older_than_max():
+    import time
+
+    now = time.time()
+    assert is_verdicts_stale(now - 20 * 86400, 14, now=now) is True
+
+
+def test_is_verdicts_stale_false_when_fresh():
+    import time
+
+    now = time.time()
+    assert is_verdicts_stale(now - 1 * 86400, 14, now=now) is False
+
+
+def test_is_verdicts_stale_disabled_when_max_age_zero():
+    import time
+
+    now = time.time()
+    assert is_verdicts_stale(now - 999 * 86400, 0, now=now) is False
+
+
+def test_is_verdicts_stale_missing_file_is_stale_when_enabled():
+    assert is_verdicts_stale(0.0, 14) is True
+
+
+def test_thresholds_from_yaml_max_verdict_age_days():
+    thr = EdgeGateThresholds.from_yaml({"enabled": True, "max_verdict_age_days": 7})
+    assert thr.max_verdict_age_days == 7
+
+
+def test_thresholds_default_max_verdict_age_days():
+    thr = EdgeGateThresholds.from_yaml({"enabled": True})
+    assert thr.max_verdict_age_days == 14

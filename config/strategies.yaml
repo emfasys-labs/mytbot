@@ -225,11 +225,29 @@ edge_gate:
   allow_profit_factor: 1.10
   reduced_multiplier: 0.50            # capital multiplier for a "reduced" strategy
   unproven_policy: reduce             # reduce | block
+  # D231 (P3.8) — the loss-attribution review found data/state/edge_gate_verdicts.json
+  # 3+ weeks stale (governing live sizing on out-of-date backtest evidence,
+  # predating both the D233 cost-model fix and 3 weeks of feature history).
+  # A verdicts file older than this logs a runtime warning and flags the
+  # scorecard header; 0 disables the check.
+  max_verdict_age_days: 14
 
 backtest:
   starting_cash: 100000
-  fee_bps: 10
-  slippage_bps: 5
+  # D231 (P1.4) — the loss-attribution review's edge scorecard
+  # (scripts/report_edge_scorecard.py) measured live round-trip cost against
+  # this exact 2*(fee_bps+slippage_bps) formula and found the old 10/5
+  # (30bps round-trip) assumption was flagged BACKTEST_TOO_KIND for
+  # portfolio_orchestrator (51.3bps live), profit_harvest_monitor (32.6bps),
+  # and stop_loss_monitor (32.5bps) — live cost exceeded the harness
+  # assumption by up to 71%. fee_bps=8 matches the ~7.5bps blended live fee
+  # drag measured across all exit paths; slippage_bps=18 matches the worst
+  # observed live slippage (portfolio_orchestrator, 18.1bps) so the backtest
+  # is conservative for every strategy, not just the average case. New
+  # round-trip: 2*(8+18) = 52bps (was 30bps). Re-run
+  # `python scripts/run_edge_gate.py` after changing these.
+  fee_bps: 8
+  slippage_bps: 18
   max_hold_bars: 60          # D158 Phase 3 — daily-appropriate hold (was 20, an
                              # intraday-era cap that truncated long-horizon trends)
   walk_forward_train_bars: 252

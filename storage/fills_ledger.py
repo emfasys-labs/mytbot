@@ -134,12 +134,18 @@ async def position_state(session_factory, broker: str, symbol: str) -> tuple[Dec
         return (qty, int(cnt_q.scalar() or 0))
 
 
-async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Decimal, Optional[datetime]]:
-    """Return (prior_signed_qty, prior_avg_cost, position_opened_at).
+async def _prior_state(
+    session, broker: str, symbol: str
+) -> tuple[Decimal, Decimal, Optional[datetime], Optional[str], Optional[str]]:
+    """Return (prior_signed_qty, prior_avg_cost, position_opened_at,
+    opening_strategy, opening_signal_id).
 
     ``position_opened_at`` is the timestamp of the fill that started the
     current open run (the first fill after the last time the position
-    was flat). ``None`` when the position is currently flat.
+    was flat); ``opening_strategy``/``opening_signal_id`` are that same
+    fill's strategy/signal_id (D231 — re-derived from the true origin fill
+    every call, not propagated, so one bad row can't corrupt the chain).
+    All ``None`` when the position is currently flat.
     """
     last_q = await session.execute(
         select(FillLog)
@@ -149,11 +155,11 @@ async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Deci
     )
     last = last_q.scalars().first()
     if last is None:
-        return (_ZERO, _ZERO, None)
+        return (_ZERO, _ZERO, None, None, None)
     prior_qty = _dec(last.position_qty_after)
     prior_avg = _dec(last.avg_cost_basis)
     if prior_qty == 0:
-        return (_ZERO, _ZERO, None)
+        return (_ZERO, _ZERO, None, None, None)
     # Opening fill = earliest fill with id greater than the last id at
     # which the position was flat (position_qty_after == 0).
     last_flat_id_q = await session.execute(
@@ -165,7 +171,7 @@ async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Deci
     )
     last_flat_id = int(last_flat_id_q.scalar() or 0)
     open_q = await session.execute(
-        select(FillLog.timestamp)
+        select(FillLog.timestamp, FillLog.strategy, FillLog.signal_id)
         .where(
             FillLog.broker == broker,
             FillLog.symbol == symbol,
@@ -174,8 +180,11 @@ async def _prior_state(session, broker: str, symbol: str) -> tuple[Decimal, Deci
         .order_by(FillLog.id.asc())
         .limit(1)
     )
-    opened_at = open_q.scalar()
-    return (prior_qty, prior_avg, opened_at)
+    open_row = open_q.first()
+    if open_row is None:
+        return (prior_qty, prior_avg, None, None, None)
+    opened_at, opening_strategy, opening_signal_id = open_row
+    return (prior_qty, prior_avg, opened_at, opening_strategy, opening_signal_id)
 
 
 def _slippage_bps(
@@ -306,7 +315,13 @@ async def record_fill(
 
     async with _FILLS_LOCK:
         async with session_factory() as session:
-            prior_qty, prior_avg, opened_at = await _prior_state(session, b, s)
+            (
+                prior_qty,
+                prior_avg,
+                opened_at,
+                prior_opening_strategy,
+                prior_opening_signal_id,
+            ) = await _prior_state(session, b, s)
             new_qty, new_avg, realised, is_closing = _compute_wac(
                 prior_qty, prior_avg, signed_delta, px
             )
@@ -314,6 +329,19 @@ async def record_fill(
             if is_closing and opened_at is not None:
                 opened = opened_at if opened_at.tzinfo else opened_at.replace(tzinfo=timezone.utc)
                 holding_sec = Decimal(str(round((ts - opened).total_seconds(), 2)))
+
+            # D231 (P1.5) — a fresh open (prior_qty == 0) or a flip (the
+            # position crosses zero and re-opens in the opposite direction)
+            # both start a NEW streak owned by THIS fill's own strategy;
+            # every other case (add / reduce / exact close) belongs to the
+            # streak already in progress.
+            is_flip = prior_qty != 0 and new_qty != 0 and (new_qty > 0) != (prior_qty > 0)
+            if prior_qty == 0 or is_flip:
+                opening_strategy = (strategy or None)
+                opening_signal_id = (signal_id or None)
+            else:
+                opening_strategy = prior_opening_strategy
+                opening_signal_id = prior_opening_signal_id
 
             conf_d = _dec(signal_confidence, default=None) if signal_confidence is not None else None
 
@@ -338,6 +366,8 @@ async def record_fill(
                 holding_period_sec=holding_sec,
                 strategy=(strategy or None),
                 signal_id=(signal_id or None),
+                opening_strategy=(opening_strategy[:64] if opening_strategy else None),
+                opening_signal_id=(opening_signal_id or None),
                 signal_confidence=conf_d,
                 mode=(mode or None),
                 is_paper=bool(is_paper),
@@ -351,3 +381,57 @@ async def record_fill(
             await session.commit()
             await session.refresh(row)
             return row
+
+
+async def fills_age_seconds_by_symbol(
+    session_factory: Any,
+    *,
+    limit: int = 8000,
+) -> dict[str, Decimal]:
+    """D166/D231 — age (seconds) of each currently-open position's streak.
+
+    Returns ``{f"{broker}:{symbol}": age_sec}`` (broker lowercased, symbol
+    uppercased — matching ``FillLog`` storage case) computed from the clean
+    ``fills`` ledger: the open streak starts right after the position was
+    last flat. Shared by every exit-path monitor that needs horizon-aware
+    anti-churn protection (stop-loss, intraday/aggregate derisk, capital
+    recycle) so they all read position age the same way. Best-effort: any
+    failure returns ``{}`` (callers then treat every age as unknown, which
+    is always the non-suppressing / pre-existing-behaviour default).
+    """
+    out: dict[str, Decimal] = {}
+    try:
+        from risk.protective_exit_gate import position_age_seconds_from_fills
+
+        async with session_factory() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(
+                            FillLog.broker,
+                            FillLog.symbol,
+                            FillLog.timestamp,
+                            FillLog.position_qty_after,
+                        )
+                        .order_by(FillLog.timestamp.desc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        grouped: dict[str, list] = {}
+        for broker, symbol, ts, qty_after in rows:
+            b = str(broker or "").strip().lower()
+            s = str(symbol or "").strip().upper()
+            if not b or not s:
+                continue
+            grouped.setdefault(f"{b}:{s}", []).append(
+                {"timestamp": ts, "position_qty_after": qty_after}
+            )
+        now = datetime.now(timezone.utc)
+        for key, fills in grouped.items():
+            age = position_age_seconds_from_fills(fills, now=now)
+            if age is not None:
+                out[key] = age
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("fills_ledger | fills-age query failed: %s", exc)
+    return out

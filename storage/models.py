@@ -132,6 +132,19 @@ class FillLog(Base):
     signal_id           = Column(String, nullable=True, index=True)
     signal_confidence   = Column(DecimalSafe(10, 6), nullable=True)
     mode                = Column(String(16), nullable=True)            # hunter / trader / defender
+    # D231 (P1.5) — ``strategy`` on a CLOSING fill names the exit mechanism
+    # (stop_loss_monitor / capital_recycle / portfolio_orchestrator /
+    # profit_harvest_monitor), not the strategy that opened the lot being
+    # closed — so per-entry-strategy round-trip expectancy couldn't be
+    # computed from this table alone. These two columns are stamped on
+    # EVERY fill (opening, adding, reducing, closing) with the strategy/
+    # signal that started the position's CURRENT open streak (propagated
+    # forward by ``storage.fills_ledger.record_fill``; re-derived from the
+    # true origin fill each time, not chained, so any one row being wrong
+    # can't corrupt everything after it). NULL on fills recorded before
+    # this migration — cannot be backfilled onto fills that already closed.
+    opening_strategy     = Column(String(64), nullable=True, index=True)
+    opening_signal_id    = Column(String, nullable=True, index=True)
     # Audit / reconciliation
     is_paper            = Column(Boolean, nullable=False, default=True)
     run_session_id      = Column(String(40), nullable=True, index=True)

@@ -1948,61 +1948,29 @@ class Orchestrator:
         return out
 
     async def _fills_age_seconds_by_symbol(self, sf) -> dict[str, "Decimal"]:
-        """D166 — age (seconds) of each currently-open position's streak.
+        """D166/D231 — age (seconds) of each currently-open position's streak.
 
         Returns ``{f"{broker}:{symbol}": age_sec}`` computed from the clean
         ``fills`` ledger (the open streak starts after the position was last
         flat). Used by the protective-exit anti-churn gate so the stop-loss /
-        intraday-derisk / aggregate-derisk monitors don't cut a fresh
-        daily-horizon thesis on intraday noise. Best-effort: any failure
-        returns ``{}`` (gate then treats every age as unknown → never
-        suppresses → pre-D166 behaviour).
+        intraday-derisk / aggregate-derisk / capital-recycle monitors don't
+        cut a fresh daily-horizon thesis on intraday noise. Best-effort: any
+        failure returns ``{}`` (gate then treats every age as unknown → never
+        suppresses → pre-D166 behaviour). Thin wrapper — the actual query
+        lives in ``storage.fills_ledger.fills_age_seconds_by_symbol`` so
+        every caller (orchestrator monitors, the trading-loop capital-recycle
+        path) shares one implementation.
         """
-        out: dict[str, Decimal] = {}
-        try:
-            from sqlalchemy import select
-            from storage.models import FillLog
-            from risk.protective_exit_gate import position_age_seconds_from_fills
+        from storage.fills_ledger import fills_age_seconds_by_symbol
 
-            # Generous recent slice; if a streak is older than this window the
-            # oldest seen fill becomes the assumed start → age underestimated →
-            # conservative (less suppression). Clean post-reset ledger is small.
-            try:
-                limit = int(os.getenv("PROTECTIVE_EXIT_FILLS_SCAN_LIMIT", "8000"))
-            except (TypeError, ValueError):
-                limit = 8000
-            async with sf() as session:
-                rows = list(
-                    (
-                        await session.execute(
-                            select(
-                                FillLog.broker,
-                                FillLog.symbol,
-                                FillLog.timestamp,
-                                FillLog.position_qty_after,
-                            )
-                            .order_by(FillLog.timestamp.desc())
-                            .limit(limit)
-                        )
-                    ).all()
-                )
-            grouped: dict[str, list] = {}
-            for broker, symbol, ts, qty_after in rows:
-                b = str(broker or "").strip().lower()
-                s = str(symbol or "").strip().upper()
-                if not b or not s:
-                    continue
-                grouped.setdefault(f"{b}:{s}", []).append(
-                    {"timestamp": ts, "position_qty_after": qty_after}
-                )
-            now = datetime.now(timezone.utc)
-            for key, fills in grouped.items():
-                age = position_age_seconds_from_fills(fills, now=now)
-                if age is not None:
-                    out[key] = age
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("orchestrator | fills-age query failed: {}", exc)
-        return out
+        # Generous recent slice; if a streak is older than this window the
+        # oldest seen fill becomes the assumed start → age underestimated →
+        # conservative (less suppression). Clean post-reset ledger is small.
+        try:
+            limit = int(os.getenv("PROTECTIVE_EXIT_FILLS_SCAN_LIMIT", "8000"))
+        except (TypeError, ValueError):
+            limit = 8000
+        return await fills_age_seconds_by_symbol(sf, limit=limit)
 
     def _protective_exit_config(self, risk_engine):
         """Parse the D166 anti-churn gate config from the risk engine config."""

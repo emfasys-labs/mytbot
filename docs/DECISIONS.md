@@ -18,6 +18,359 @@
 
 ---
 
+## D237 — Stale edge-gate verdicts now warn instead of silently governing sizing
+**Date:** 2026-07-03
+**Decision:** The loss-attribution review found `data/state/edge_gate_verdicts.json`
+was **3+ weeks stale** (last written 2026-06-09) while it continued to govern
+live capital sizing (candidate filtering in `_filter_edge_gate_blocked_raws`/
+`_apply_edge_gate_filter`, Kelly trust in `edge_kelly_trust`, D235) with no
+mechanism to notice. D233 refreshed it once; nothing stopped it going stale
+again silently.
+
+**Fix.** `backtest/edge_gate.py` gained `EdgeGateThresholds.max_verdict_age_days`
+(config `config/strategies.yaml::edge_gate.max_verdict_age_days`, default 14,
+0 disables) plus two pure helpers: `verdicts_age_days(mtime)` and
+`is_verdicts_stale(mtime, max_age_days)`. Wired into
+`TradingLoop._load_edge_gate` (`system/trading_loop/loop.py`) — logs a
+warning exactly when the file's mtime actually changes (the existing
+mtime-cache gate already rate-limits this to once per process start / once
+per real refresh, not every tick). Also wired into
+`scripts/report_edge_scorecard.py::verdicts_staleness()`, printed as a `!
+STALE` line directly under the EDGE SCORECARD header and included in
+`--json` output (`verdicts_stale_days`/`verdicts_max_age_days`) — the same
+report used throughout this remediation now self-reports the exact defect
+that let it mislead in the first place.
+
+**Verification.** New tests: `tests/test_edge_gate.py` (7 — age computation,
+staleness threshold logic including the `max_age_days<=0` disable escape
+hatch and missing-file-is-stale case, YAML parsing) and
+`tests/test_edge_scorecard_cost.py` (3 — fresh/stale/missing-file via
+monkeypatched paths + controlled mtime). Ran live against the real
+(D233-refreshed, therefore fresh) verdicts file: no false-positive warning.
+Full suite: **2,187 passed, 3 skipped**. See the loss-attribution review, P3
+item 8 — **this completes the full P0-P3 remediation plan (D231-D237)**.
+
+---
+
+## D236 — Routine per-symbol churn detection in the edge scorecard
+**Date:** 2026-07-03
+**Decision:** The loss-attribution review found several symbols churning far
+beyond what a 3-day-min-hold, daily-horizon book should ever produce — AAPL
+30 fills/8 days, AUDUSD 29/8d, ETH-USD 55/8d, XRP-USD 35-49/8d — several of
+them net LOSERS purely on fee drag despite a flat/positive raw price move
+(ETH-USD: realised +$118.72, fees $680.85, net -$562.13). This was found by
+hand-written SQL; nothing in the codebase flagged it automatically.
+
+**Fix.** `scripts/report_edge_scorecard.py::collect_symbol_churn()` — a new
+read-only query grouping `fills` by `(broker, symbol, day)` and flagging any
+bucket with more than `CHURN_FILLS_PER_DAY_THRESHOLD` (5) fills, with
+realised/fees/net for that bucket. Day-bucketing is a deliberate
+simplification of "more than N fills in a rolling 24h window" — it catches
+the same pattern the review found with one query and no false negatives on
+the evidence in hand, versus a true sliding-window computation. Printed as a
+new **SYMBOL CHURN** section (`print_symbol_churn`) after the existing
+per-strategy tables, and included in `--json` output under `symbol_churn`.
+Confirmed live against the review's own findings: AAPL/AUDUSD/MARA/ETH-USD
+all surface correctly, ordered by fill count.
+
+**Verification.** New tests in `tests/test_edge_scorecard_cost.py`: threshold
+constant, empty-case output, populated-case output. `collect_symbol_churn`
+itself (the DB-querying half) is integration-verified by running the script
+live, matching the existing convention for this script's other DB-querying
+functions (`collect_live` also has no unit-level DB fixture test). Full
+suite: **2,176 passed, 3 skipped**. See the loss-attribution review, P3
+item 7.
+
+---
+
+## D235 — Kelly trust can no longer amplify capital on an unproven backtest prior
+**Date:** 2026-07-03
+**Decision:** `backtest/edge_gate.py::EdgeGateRegistry.edge_kelly_trust()` maps a
+strategy's backtest Kelly fraction into an orchestrator trust multiplier that
+can go up to `max_trust` (1.50) purely from the (now re-fee-modeled, D233)
+backtest verdict — with **zero requirement that live paper trading has ever
+confirmed the edge**. `TradingLoop._orchestrator_strategy_trust`'s existing
+D166 "scoreboard cap" only capped a weapon *proven* to be a live LOSER; it did
+nothing for a weapon with no live evidence at all (the exact state every
+"proven" strategy is in right now per D234 — 0 attributable live closes), so
+the prior passed through unclamped and could size a completely untested
+strategy up to 1.5x.
+
+**Compounding bug found while fixing this:** `system/strategy_pnl_health.py::fetch_strategy_pnl_recent`
+(the posterior input) grouped by `FillLog.strategy` — the exit-mechanism name
+— while `edge_kelly_trust`'s prior is keyed by entry-strategy name. The two
+dicts could only ever coincidentally share a key, so the posterior tilt had
+likely never engaged correctly for `mean_reversion`/`trend_following`/etc. in
+production at all.
+
+**Fix.** `fetch_strategy_pnl_recent` now groups by `opening_strategy` (the
+D234 column) and also computes `profit_factor` per strategy. `_orchestrator_strategy_trust`'s
+gate generalizes: **amplification above neutral (`combined > 1.0`) now always
+requires verified positive live evidence** — `live_closes >= min_closes AND
+live_net > 0 AND (live_pf is None or live_pf > 1)` — not just a losing weapon
+being capped. An untested strategy, or one with too few closes, or one with
+net-positive-but-PF<=1 (a fragile win), all clamp to neutral instead of
+inheriting the raw prior. Pulling trust DOWN on negative/absent evidence, and
+the `min_live_closes_for_posterior <= 0` escape hatch (feature fully
+disabled), are both unaffected.
+
+**Verification.** `tests/test_orchestrator_strategy_trust.py`: 2 pre-existing
+tests updated (their old assertions encoded exactly the loophole being
+closed — an untested/under-sampled prior passing through unamplified — now
+correctly expect neutral); 4 new tests (amplification earned with full
+verified evidence; blocked when PF<=1; blocked below min-closes even if
+net-positive; a below-neutral prior is never touched by this gate). New
+`tests/test_strategy_pnl_health.py` (4 tests): groups by `opening_strategy`
+not the exit mechanism; excludes pre-D231-migration NULL rows; computes PF
+correctly; infinite PF when there are only wins. Full suite: **2,173 passed,
+3 skipped**. Practical effect: none of the four edge-gate-proven strategies
+can be sized above neutral trust until they accumulate real, attributable,
+net-positive live closes — exactly the P2 requirement. See the
+loss-attribution review, P2.
+
+---
+
+## D234 — Trace closing fills back to the strategy that opened the lot
+**Date:** 2026-07-03
+**Decision:** `fills.strategy` on a CLOSING fill names the EXIT mechanism
+(`stop_loss_monitor`/`capital_recycle`/`portfolio_orchestrator`/`profit_harvest_monitor`),
+not the strategy that opened the position. `scripts/report_edge_scorecard.py`
+exposed this concretely: all 620 opening fills from the four edge-gate-proven
+strategies (`mean_reversion` 187, `trend_following` 428, `trend_breakout` 3,
+`momentum_breakout` 2) showed `live_exp=0.00`/`live_pf=0.00` because none of
+their closes carry their name — production data could not confirm or refute
+whether any of them actually made money live.
+
+**Fix.** New nullable `fills.opening_strategy` / `fills.opening_signal_id`
+columns (migration `alembic/versions/d231a1b2c3d4_fill_opening_strategy.py`,
+applied), stamped on **every** fill by `storage/fills_ledger.py::record_fill`:
+a fresh open (`prior_qty == 0`) or a flip (position crosses zero) stamps
+itself as the new streak's owner; an add/reduce/close inherits the streak's
+existing opener. `_prior_state()` re-derives the opener from the true origin
+fill (the first fill after the position was last flat) on every call rather
+than trusting propagation, so one bad/pre-migration row can't corrupt
+everything downstream of it. NULL on fills recorded before this migration —
+not backfillable (the true origin of an already-closed pre-migration streak
+is ambiguous).
+
+`scripts/report_edge_scorecard.py::collect_live` now also aggregates closing
+fills by `opening_strategy` into `_by_entry_strategy`; `build_report` joins
+this against the edge-gate verdicts (which are keyed by entry-strategy name)
+into a new `entry_rows` output, printed as a distinct
+**ENTRY-STRATEGY LIVE EXPECTANCY** table — separate from the existing
+exit-mechanism cost/churn tables, which are untouched and still answer their
+own legitimate question ("how much does stop-loss/capital-recycle cost").
+Flags `verdict=allowed but net<0 live` inline.
+
+**Verification.** New tests: `tests/test_d126_fills_ledger.py` (open stamps
+self; add propagates the true opener, not its own strategy; a
+`stop_loss_monitor` close still carries `opening_strategy=mean_reversion`;
+a flat reopen resets the owner; a flip resets the owner) and
+`tests/test_edge_scorecard_cost.py` (entry_rows correctly separates from the
+exit-mechanism rows; empty when no attributable closes exist yet). Ran the
+script live against the production DB: correctly reports "no closes with a
+known opening_strategy yet" (every existing fill predates the migration) —
+it will populate as new fills are recorded. Full suite: **2,165 passed, 3
+skipped**. Migration applied to the live paper DB (additive, nullable
+columns + indexes only — no data touched, no running-process interruption).
+See the loss-attribution review, P1 item 5.
+
+---
+
+## D233 — Re-fee-model the edge gate to live-measured costs and refresh verdicts
+**Date:** 2026-07-03
+**Decision:** `scripts/report_edge_scorecard.py`'s cost reconciliation
+(`live_round_trip_bps = 2*(live_fee_bps + live_slip_bps)`) flagged
+`portfolio_orchestrator` (51.3bps live vs 30bps assumed), `profit_harvest_monitor`
+(32.6bps), and `stop_loss_monitor` (32.5bps) as `BACKTEST_TOO_KIND` — the edge
+gate's cost model (`config/strategies.yaml::backtest.fee_bps: 10`,
+`slippage_bps: 5`) was materially cheaper than reality, so an `allowed`
+verdict wasn't proven to survive live costs. Separately, `data/state/edge_gate_verdicts.json`
+was stale (last written 2026-06-09, over three weeks before the trading
+window the review covered).
+
+**Fix.** Raised `fee_bps: 10 -> 8` (matches the ~7.5bps blended live fee drag
+measured across every exit path) and `slippage_bps: 5 -> 18` (matches the
+worst live-observed slippage, `portfolio_orchestrator`'s 18.1bps — a single
+global assumption, so it needs to be conservative enough to cover every
+strategy, not just the average one). New backtest round-trip: 52bps (was
+30bps). Re-ran `python scripts/run_edge_gate.py` (dry-run comparison first,
+then the real write) — 23 symbols, 1d timeframe.
+
+**Result: the four proven weapons survive the harsher cost model, with
+compressed but still-positive margins** — `trend_breakout` PF 2.89 -> **2.76**
+(still `allowed`), `mean_reversion` PF 1.69 -> **1.52** (`allowed`),
+`trend_following` PF 1.64 -> **1.52** (`allowed`), `momentum_breakout` PF 1.07
+-> **1.04** (`reduced`, unchanged multiplier 0.5). All short sides remain
+`blocked`/`insufficient_data`, unchanged. Note the underlying PFs also moved
+independent of the fee change (more feature history has accumulated since
+2026-06-09 — e.g. `mean_reversion` was PF 1.93 in the stale file vs 1.69 on
+today's data even at the OLD cost assumption) — staleness alone was already
+producing a materially different picture before the cost fix was applied.
+
+**Verification.** Full suite unaffected by the YAML change:
+**2,158 passed, 3 skipped** (existing harness tests pass explicit
+`fee_bps`/`slippage_bps` values into pure functions rather than reading the
+YAML default, so none needed updating). `edge_gate.enabled` was left exactly
+as configured — this only refreshes the data the gate reads, it does not
+toggle enforcement. See the loss-attribution review, P1 item 4. **P3.8
+(staleness check) is the follow-up so this can't silently go stale again.**
+
+---
+
+## D232 — Partial trims that would leave un-tradeable dust close fully instead
+**Date:** 2026-07-03
+**Decision:** The loss-attribution review found 210 open paper positions with
+a **median size of $942 (0.07% of NAV)** — 28x under the orchestrator's own
+`min_position_pct_of_nav: 0.02` floor (~$26,800 at the reviewed $1.34M NAV).
+Partial reductions (profit-harvest trims, capital-recycle winner-trims,
+tier-1 intraday-derisk trims) size themselves off the position at decision
+time with no awareness of whether the slice left behind is still a viable,
+tradeable position — so positions get shaved down to sub-minimum-order-size
+remnants that still pay spread/fees on every future touch instead of being
+closed outright.
+
+**Fix.** `execution/engine.py::_clamp_reduce_only_to_holdings` — the single
+chokepoint every reduce-only order already passes through for the D126
+oversell guard — now also checks, after any oversell clamp, whether the
+resulting remainder (`held - final_requested`) values below the asset
+class's own `_min_order_notional` (reused from
+`portfolio/global_edge_coordinator.py`, matching `config/global_edge.yaml::minimum_order_sizes_usd`).
+If so, the trim is upgraded to a full close (`signal.suggested_quantity =
+reducible`, metadata stamped `dust_floor_close_upgrade=True`,
+`close_only=True`). This is a single-chokepoint fix (same pattern as D165/
+D167.2's futures whole-contract enforcement) so it catches all three trim
+sources at once without touching their individual sizing logic. A full
+close, a missing/zero price, or a remainder that already clears the floor
+are all no-ops. New counter `ExecutionEngine.dust_floor_close_upgrades` for
+ops visibility.
+
+**Verification.** New tests in `tests/test_d126_fills_ledger.py`: a trim that
+would leave dust is upgraded to a full close; a trim leaving a viable
+remainder is untouched; a missing price skips the check without crashing; an
+already-full close is a no-op. Full suite: **2,158 passed, 3 skipped**. Not
+yet soaked live — expect the position count to trend down from 210 over a
+subsequent paper window as existing dust gets swept on its next scheduled
+trim (this does not proactively hunt down and close *existing* dust; it only
+prevents new dust from being created by copying — see the "next" item below
+for a one-time sweep if you want the existing 210 cleaned up immediately).
+See the loss-attribution review, P1 item 3.
+
+---
+
+## D231 — capital_recycle's idle-loss path gets the same min-hold gate as every other exit
+**Date:** 2026-07-03
+**Decision:** A loss-attribution forensic review of the -£17,510.02 closed P&L
+found that `portfolio/global_edge_coordinator.py::propose_idle_loss_recycle_actions`
+had no minimum-holding-period protection at all — only a 900-second (15-min)
+same-symbol touch cooldown. Its candidate filter requires `unrealised_return < 0`
+by construction, so every idle-loss-recycle close is realised at a loss by
+definition; live evidence: 55 closes, **0% win rate, -$4,963.77 net, 25-minute
+median holding period**. This is structurally independent of D227/D228 — those
+fixed the reserve-buying averaging-down path and the stop-loss/derisk min-hold
+veto respectively; this function was never wired to either.
+
+**Root cause.** `risk/protective_exit_gate.py::should_suppress_protective_exit`
+was only ever called from `system/orchestrator.py` (stop-loss monitor,
+intraday/aggregate derisk, profit-harvest horizon check). It is invoked from
+inside the *orchestrated* tick itself (`system/trading_loop/loop.py`,
+`_run_orchestrated_tick`), contradicting the D156 design note that claimed the
+orchestrator "skips the global-edge rotation/recycle tick" — `propose_idle_loss_recycle_actions`
+runs there unconditionally whenever the orchestrator didn't already emit a
+reduce/close order that tick.
+
+**Fix.** `propose_idle_loss_recycle_actions` gained two optional kwargs —
+`position_ages: dict[str, Decimal]` (`"broker:SYMBOL" -> age_seconds`) and
+`protective_exit_config: ProtectiveExitConfig` — and a new `_min_hold_blocks()`
+predicate that reuses `should_suppress_protective_exit` (same catastrophic-loss
+override, same shared 3-day horizon as every other exit layer). Both call sites
+(`_run_orchestrated_tick` and the legacy `_run_global_edge_tick`) now compute
+`pe_cfg` from `risk_limits.yaml::protective_exit_min_hold` and, when enabled,
+fetch position ages via a new shared helper
+`storage/fills_ledger.py::fills_age_seconds_by_symbol()` (factored out of
+`system/orchestrator.py::_fills_age_seconds_by_symbol`, which now delegates to
+it — one implementation, not two). Omitting either kwarg preserves the exact
+pre-D231 behaviour (backward compatible for any other caller).
+
+**Verification.** New tests in `tests/test_global_edge_coordinator.py`: a
+25-minute-old loser is blocked; a >3-day-old loser still recycles; unknown age
+never suppresses (matches the gate's existing "no evidence, no suppression"
+rule); a catastrophic loss (>= `catastrophic_loss_pct_position`) bypasses the
+young-position gate; omitting the new kwargs reproduces the old behaviour
+exactly. Full suite: **2,154 passed, 3 skipped** (was 2,149 before this change).
+Not yet soaked live — the effect on capital_recycle's median hold/win-rate
+needs a fresh paper window to confirm. See the loss-attribution review for the
+full root-cause table this fix addresses (P0 item 1 of the remediation plan).
+
+---
+
+## D230 — Keep the paper runtime active during performance remediation
+**Date:** 2026-07-03
+**Decision:** Supersede D229's mandatory shutdown and restart prohibition.
+The operator explicitly requires the system to remain active because it is a
+paper environment. Paper execution is the observation and remediation
+environment; poor simulated performance is evidence to diagnose, not by
+itself authority to stop the system.
+
+Called `/system/start` and verified `state=running`, `paper_mode=true`,
+`trading.running=true`, pipeline running, all ten configured brokers connected
+and included, full accounting coverage, and no loop error. No mass liquidation
+was performed. D229's accounting and architecture findings remain valid, but
+the runtime stays on unless the operator directs otherwise.
+
+---
+
+## D229 — Performance quarantine after complete closed-P&L attribution
+**Date:** 2026-07-03
+**Decision (superseded operationally by D230):** The current
+portfolio/strategy stack failed cost-inclusive validation. The initial
+precautionary response was to stop it pending clean-ledger validation; the
+operator subsequently directed that the paper runtime remain active.
+
+**Where the closed loss went.** The dashboard's **-£17,510.02** historical
+closed P&L reconciles exactly to the authoritative fills ledger:
+**-£10,912.51 gross realised P&L minus £6,597.51 fees**, across 1,175 fills.
+Net attribution by execution path:
+
+- stop-loss monitor: **-£12,820.49** (primarily D228 converting the existing
+  breached legacy losses from unrealised to realised);
+- capital recycle: **-£4,963.77**;
+- portfolio orchestrator: **-£4,449.45**;
+- local paper-book repairs: **-£2,653.88**;
+- mean-reversion entry fees: **-£1,421.56**;
+- trend-following entry fees: **-£1,155.64**;
+- reconciliation and other entries: about **-£476**;
+- profit harvest offset those losses by **+£10,430.92 net**.
+
+The largest symbol-level net damage was MARA **-£5,093**, SMH **-£2,743**,
+AAPL **-£2,515**, AUDUSD **-£2,022**, ETH **-£1,126**, and BTC **-£949**.
+The worst days were 26 June (**-£4,516**) and 2 July (**-£8,981**).
+
+**Residual risk.** The fills ledger still has 210 open economic positions:
+109 at Alpaca, 99 at IBKR, one at Kraken, and one at Capital.com. Their latest
+marks total about **£1.025m gross exposure** and **-£3,093 unrealised P&L**.
+The UI returns only 200 rows, masking ten authoritative positions. This breadth
+is incompatible with the orchestrator's 2% minimum funded-name policy, which
+mathematically implies no more than roughly 50 fully funded names at 100%
+gross. The disabled `position_count.hard_limit_enabled` policy allowed a
+large dust/legacy book to accumulate.
+
+On 3 July the ledger recorded 15 fills between 00:09 and 00:49 London, mainly
+the repaired stop monitor closing previously breached IBKR positions. They
+netted about **-£874**. No fill occurred afterward despite 308 loop iterations;
+the D227 entry controls were blocking new churn. Nevertheless, leaving 210
+positions under an unvalidated allocation policy exposes the book to continued
+mark-to-market loss.
+
+**Operational action.** The system was briefly stopped via `/system/stop`;
+D230 restored it following explicit operator direction. The remaining paper
+book was not mass-liquidated. Validation should still target fees/slippage,
+bounded position count, cost-positive turnover, symmetric winner/loser
+treatment, and out-of-sample positive expectancy while paper trading remains
+active.
+
+---
+
 ## D228 — Minimum hold cannot veto an explicit stop
 **Date:** 2026-07-02
 **Decision:** The three-day thesis-maturation window applies only to soft
